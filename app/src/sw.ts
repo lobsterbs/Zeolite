@@ -586,7 +586,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         const headers = stripHostile(resp.headers);
         /* webRequest.onHeadersReceived: blocking listeners may replace
            the response header set the page will see. */
-        const rHeaders = WEBREQ.headersReceived({ ...wrDetails, statusCode: resp.status }, headers);
+        const rHeaders = WEBREQ.headersReceived({ ...wrDetails, statusCode: resp.status }, resp.status, headers);
         const outHeaders = rHeaders ?? headers;
         outHeaders.set("x-zl-proxy", "1");
         void applyOnResponse(plugins, target, resp.status, outHeaders);
@@ -653,7 +653,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           technicalReason: String(err),
           url: target,
         });
-        WEBREQ.errorOccurred(wrDetails, String(err));
+        WEBREQ.errorOccurred({ ...wrDetails, error: String(err) });
         transitRecord(traceId, target, decision);
         netLogPush({
           method: e.request.method, traceId,

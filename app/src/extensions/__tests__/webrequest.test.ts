@@ -1,7 +1,14 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
 import { WEBREQ, wrType, headersToPairs, pairsToHeaders } from "../webrequest";
-import type { WrDetails, WrHeaderPair } from "../webrequest";
+import type {
+  WrCompletedDetails,
+  WrDetails,
+  WrErrorDetails,
+  WrHeaderPair,
+  WrReceiveDetails,
+  WrSendDetails,
+} from "../webrequest";
 import { ExtensionManager } from "../manager";
 import { buildApi } from "../runtime";
 import { ExtensionMessenger } from "../messaging";
@@ -69,7 +76,7 @@ describe("WebRequestRegistry", () => {
   it("gates delivery on host permissions and listener url filters", () => {
     WEBREQ.resetForTests();
     const seen: string[] = [];
-    const off = WEBREQ.register("ext-host", "beforeRequest", (d) => { seen.push(d.url); }, {
+    const off = WEBREQ.register("ext-host", "beforeRequest", (d: WrDetails) => { seen.push(d.url); }, {
       hostPatterns: ["https://allowed.example/*"],
       canBlock: true,
       urls: ["*://allowed.example/*"],
@@ -83,7 +90,7 @@ describe("WebRequestRegistry", () => {
 
   it("beforeSendHeaders replaces headers with validated pairs", () => {
     WEBREQ.resetForTests();
-    const off = WEBREQ.register("ext-h", "beforeSendHeaders", (d) => {
+    const off = WEBREQ.register("ext-h", "beforeSendHeaders", (d: WrSendDetails) => {
       expect(d.requestHeaders.length).toBeGreaterThan(0);
       return { requestHeaders: [{ name: "x-zl-test", value: "1" } as WrHeaderPair] };
     }, { hostPatterns: ["<all_urls>"], canBlock: true, urls: [] });
@@ -99,7 +106,7 @@ describe("WebRequestRegistry", () => {
 
   it("headersReceived can modify response headers", () => {
     WEBREQ.resetForTests();
-    const off = WEBREQ.register("ext-r", "headersReceived", (d) => {
+    const off = WEBREQ.register("ext-r", "headersReceived", (d: WrReceiveDetails) => {
       expect(d.statusCode).toBe(200);
       const pairs = d.responseHeaders.filter((p) => p.name !== "x-drop-me");
       return { responseHeaders: pairs };
@@ -145,10 +152,10 @@ describe("WebRequestRegistry", () => {
     WEBREQ.resetForTests();
     const done: number[] = [];
     const errs: string[] = [];
-    const offC = WEBREQ.register("ext-c", "completed", (d) => { done.push(d.statusCode); }, {
+    const offC = WEBREQ.register("ext-c", "completed", (d: WrCompletedDetails) => { done.push(d.statusCode); }, {
       hostPatterns: ["<all_urls>"], canBlock: false, urls: [],
     });
-    const offE = WEBREQ.register("ext-c", "errorOccurred", (d) => { errs.push(d.error); }, {
+    const offE = WEBREQ.register("ext-c", "errorOccurred", (d: WrErrorDetails) => { errs.push(d.error); }, {
       hostPatterns: ["<all_urls>"], canBlock: false, urls: [],
     });
     WEBREQ.completed({ ...details(), statusCode: 200 });

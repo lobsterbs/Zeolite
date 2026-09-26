@@ -119,6 +119,7 @@ export class TabRegistry {
     if (!this.messageDispatch) {
       return Promise.reject(new Error("zeolite: no tab host attached to this engine"));
     }
+    const dispatch = this.messageDispatch;
     const nonce = "zl-m" + ++this.nonceSeq;
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -136,7 +137,7 @@ export class TabRegistry {
           reject(e);
         },
       });
-      this.messageDispatch(tabId, tab.url, ext.id, { nonce, msg });
+      dispatch(tabId, tab.url, ext.id, { nonce, msg });
     });
   }
 
