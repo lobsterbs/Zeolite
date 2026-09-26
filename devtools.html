@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zeolite DevTools</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font: 13px/1.45 system-ui, sans-serif; margin: 0; }
+      h1 { font-size: 14px; margin: 8px 12px; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { text-align: left; padding: 3px 8px; border-bottom: 1px solid #8884; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
+      th { position: sticky; top: 0; background: #8882; cursor: pointer; }
+      .err { color: #c33; }
+      .status-2 { color: #080; }
+      .status-3, .status-4 { color: #c80; }
+      .status-5 { color: #c33; }
+      #paused { color: #888; margin-left: 8px; }
+      #stats { color: #888; margin-left: 8px; }
+      .fb { color: #c80; }
+    </style>
+    <script type="module" crossorigin src="/devtools.js"></script>
+    <link rel="modulepreload" crossorigin href="/modulepreload-polyfill.js">
+  </head>
+  <body>
+    <h1>Zeolite network inspector <span id="stats"></span><span id="paused">loading...</span></h1>
+    <table>
+      <thead>
+        <tr>
+          <th data-sort="ts">time</th>
+          <th data-sort="method">method</th>
+          <th data-sort="dest">destination</th>
+          <th data-sort="status">status</th>
+          <th data-sort="ms">ms</th>
+          <th data-sort="bytes">size</th>
+          <th data-sort="verdict">plugins</th>
+          <th data-sort="transport">transport</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </body>
+</html>

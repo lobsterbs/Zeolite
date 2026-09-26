@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zeolite</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #fff; }
+    #zl-status {
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      font: 14px/1.5 system-ui, sans-serif; color: #555; text-align: center;
+    }
+    #zl-frame {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      border: 0; display: none; background: #fff;
+    }
+  </style>
+  <script type="module" crossorigin src="/main.js"></script>
+  <link rel="modulepreload" crossorigin href="/modulepreload-polyfill.js">
+  <link rel="modulepreload" crossorigin href="/preload-helper.js">
+  <link rel="modulepreload" crossorigin href="/codec.js">
+</head>
+<body>
+  <div id="zl-status">Zeolite engine</div>
+  <iframe id="zl-frame" title="Zeolite"></iframe>
+</body>
+</html>
