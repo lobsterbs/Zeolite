@@ -116,7 +116,7 @@ function parseBackground(
   const persistent = v.persistent !== false;
   if (mv === 3 && sw && scripts.length === 0) {
     diags.warnings.push(
-      "background: MV3 service_worker declared; Firefox-style Zeolite executes background scripts, a service worker background is recorded but not executed yet"
+      "background: MV3 service_worker declared; Zeolite records it and boots it on demand with an idle-terminated lifecycle (see ./compat)"
     );
   }
   if (scripts.length === 0 && !page && !sw) return null;

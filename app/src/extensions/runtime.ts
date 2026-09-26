@@ -16,7 +16,9 @@ import type { TabsEvent } from "./tabs";
 import { SCRIPTING } from "./scripting";
 import type { ScriptingInjection } from "./scripting";
 import { WEBNAV } from "./webnavigation";
-import type { NavigationCommitted } from "./webnavigation";
+import type { NavigationCommitted, NavigationKind } from "./webnavigation";
+import { WEBREQ } from "./webrequest";
+import type { WrKind } from "./webrequest";
 import { MENUS } from "./contextmenus";
 import { DOWNLOADS } from "./downloads";
 import { PERMS } from "./advanced-permissions";
@@ -102,17 +104,18 @@ function makeTabsEvent(
   };
 }
 
-/* webNavigation.onCommitted gated by the webNavigation permission,
-   exactly as Firefox delivers the event. Listener url filters are
-   accepted but not applied (documented in ./compat). */
+/* webNavigation events gated by the webNavigation permission, exactly
+   as Firefox delivers them. Listener url filters are accepted but
+   not applied (documented in ./compat). */
 function makeWebNavEvent(
   ext: ExtensionRecord,
+  kind: NavigationKind,
 ): EventNamespace<(info: NavigationCommitted) => void> {
   const offs = new Map<unknown, () => void>();
   return {
     addListener: (l: (info: NavigationCommitted) => void) => {
       if (offs.has(l)) return;
-      offs.set(l, WEBNAV.subscribe((info) => {
+      offs.set(l, WEBNAV.subscribeKind(kind, (info) => {
         if (!ext.permissions.includes("webNavigation")) return;
         try {
           l(info);
@@ -218,6 +221,7 @@ export function buildApi(
     update: (id: number | undefined, props: Record<string, unknown> = {}) =>
       TABS.update(id ?? null, props as { active?: boolean; url?: string }),
     remove: (ids: number | number[]) => TABS.remove(Array.isArray(ids) ? ids : [ids]),
+    sendMessage: (tabId: number, msg: unknown) => TABS.sendMessage(ext, tabId, msg),
     onCreated: makeTabsEvent(ext, "created"),
     onUpdated: makeTabsEvent(ext, "updated"),
     onActivated: makeTabsEvent(ext, "activated"),
@@ -251,8 +255,16 @@ export function buildApi(
     executeScript: (inj: ScriptingInjection) => SCRIPTING.executeScript(ext, inj),
     insertCSS: (inj: ScriptingInjection) => SCRIPTING.insertCSS(ext, inj),
   };
-  /* webNavigation: events derived from the proxy fetch path. */
-  const webNavigationNs = { onCommitted: makeWebNavEvent(ext) };
+  /* webNavigation: events derived from the real interception
+     lifecycle. beforeNavigate fires at navigation interception,
+     committed when the document response is known (cache hits
+     included), completed at document stream end. onDOMContentLoaded
+     is honestly absent (see ./compat). */
+  const webNavigationNs = {
+    onBeforeNavigate: makeWebNavEvent(ext, "beforeNavigate"),
+    onCommitted: makeWebNavEvent(ext, "committed"),
+    onCompleted: makeWebNavEvent(ext, "completed"),
+  };
   /* contextMenus + Firefox's menus alias over one registry. */
   const contextMenusNs = {
     create: (props: Record<string, unknown> = {}) => MENUS.create(ext, props),
@@ -276,6 +288,50 @@ export function buildApi(
     onAdded: bridged<PermListener>((l) => PERMS.subscribeAdded(l)),
     onRemoved: bridged<PermListener>((l) => PERMS.subscribeRemoved(l)),
   };
+  /* webRequest: mounted only when the extension holds the
+     permission, so feature detection ("if (browser.webRequest)")
+     answers honestly. Header-modifying kinds additionally require
+     webRequestBlocking; listener url filters are honored at delivery
+     time by the registry. */
+  const webRequestNs = ext.permissions.includes("webRequest")
+    ? (() => {
+        const reg = (kind: WrKind) => {
+          const offs = new Map<unknown, () => void>();
+          return {
+            addListener: (l: unknown, filter?: { urls?: unknown }) => {
+              if (
+                (kind === "beforeSendHeaders" || kind === "headersReceived") &&
+                !ext.permissions.includes("webRequestBlocking")
+              ) {
+                throw new Error("zeolite: " + kind + " requires the 'webRequestBlocking' permission");
+              }
+              if (offs.has(l)) return;
+              offs.set(
+                l,
+                WEBREQ.register(ext.id, kind, l as never, {
+                  hostPatterns: [...ext.hostPermissions],
+                  canBlock: ext.permissions.includes("webRequestBlocking"),
+                  urls: (Array.isArray(filter?.urls) ? filter!.urls : []).map(String),
+                }),
+              );
+            },
+            removeListener: (l: unknown) => {
+              offs.get(l)?.();
+              offs.delete(l);
+            },
+            hasListener: (l: unknown) => offs.has(l),
+          };
+        };
+        return {
+          onBeforeRequest: reg("beforeRequest"),
+          onBeforeSendHeaders: reg("beforeSendHeaders"),
+          onHeadersReceived: reg("headersReceived"),
+          onCompleted: reg("completed"),
+          onErrorOccurred: reg("errorOccurred"),
+        };
+      })()
+    : undefined;
+
   const browser: Record<string, unknown> = {
     runtime,
     storage: storageNs,
@@ -287,7 +343,9 @@ export function buildApi(
     menus: contextMenusNs,
     downloads: downloadsNs,
     permissions: permissionsNs,
+    ...(webRequestNs ? { webRequest: webRequestNs } : {}),
   };
   /* Firefox-style chrome.* alias over the same implementations. */
   return { browser, chrome: browser };
 }
+

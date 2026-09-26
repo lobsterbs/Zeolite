@@ -36,6 +36,9 @@ import {
   TABS,
   SCRIPTING,
   WEBNAV,
+  WEBREQ,
+  wrType,
+  wakeExtension,
   MENUS,
   DOWNLOADS,
   PERMS,
@@ -131,6 +134,7 @@ function rewriteStream(
   base: string,
   rule: { inject?: string[]; block?: string[] },
   csInject: string[],
+  onDone?: () => void,
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
@@ -152,6 +156,7 @@ function rewriteStream(
             const tail = rw.finish();
             if (tail) controller.enqueue(encoder.encode(tail));
             controller.close();
+            onDone?.();
             return;
           }
           const out = rw.process(decoder.decode(value, { stream: true }));
@@ -359,6 +364,24 @@ self.addEventListener("activate", (e) => {
           for (const c of cs) c.postMessage({ type: "zl:tabsOp", op });
         });
       });
+      /* tabs.sendMessage: each page verifies it is the addressee by
+         destination, so the payload carries the target tab's url. */
+      TABS.setMessageDispatch((_tabId, tabUrl, extId, payload) => {
+        void self.clients.matchAll({ type: "window" }).then((cs) => {
+          for (const c of cs) {
+            let cdest = "";
+            try {
+              const cu = new URL(c.url, self.location.origin);
+              cdest = decodePath(cu.pathname) + cu.search;
+            } catch {
+              continue;
+            }
+            if (cdest === tabUrl) {
+              c.postMessage({ type: "zl:tabMessage", extId, dest: tabUrl, payload });
+            }
+          }
+        });
+      });
       /* Scripting: the payload carries the exact page destination; the
          page listener drops anything not addressed to itself. */
       SCRIPTING.setDispatch((msg) => {
@@ -459,12 +482,63 @@ self.addEventListener("fetch", (e: FetchEvent) => {
          destination scheme + sec-fetch-dest; refined with the actual
          content type once the response arrives. */
       const decision = decideTransport(target, e.request.headers.get("sec-fetch-dest") ?? "");
+      /* webNavigation.onBeforeNavigate: navigation-mode requests
+         report the interception itself, before any cache or upstream
+         work. */
+      if (e.request.mode === "navigate") WEBNAV.beforeNavigate(target);
+      /* Shared webRequest details for every hook below. */
+      const wrDetails = {
+        requestId: traceId,
+        url: target,
+        method: e.request.method,
+        type: wrType(e.request.headers.get("sec-fetch-dest") ?? ""),
+        timeStamp: Date.now(),
+      };
+      /* webRequest.onBeforeRequest: a blocking listener can cancel the
+         request before cache or transport. */
+      if (WEBREQ.beforeRequest(wrDetails)) {
+        DIAG.emit({
+          category: "BLOCKED",
+          cause: "blocked",
+          severity: "info",
+          message: "request cancelled by extension webRequest",
+          stage: "REQUEST_INTERCEPTED",
+          url: target,
+          traceId,
+          requestId: traceId,
+        });
+        transitRecord(traceId, target, decision);
+        netLogPush({
+          method: e.request.method, traceId,
+          path: url.pathname + url.search,
+          dest: target,
+          status: 403,
+          rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
+          ms: Date.now() - t0,
+          bytes: -1,
+          verdict: "blocked",
+          transport: decision.mode,
+          fallbackReason: decision.fallbackReason,
+        });
+        return new Response("zeolite: request blocked by extension", {
+          status: 403,
+          headers: { "content-type": "text/plain" },
+        });
+      }
       /* Cache-first for proxied GETs. */
       if (e.request.method === "GET") {
         const hit = await pageCacheMatch(e.request);
         if (hit) {
           const dec = refineWithContent(decision, hit.headers.get("content-type") ?? "");
           transitRecord(traceId, target, dec);
+          /* Bug-scout fix: cache-hit navigations used to skip the
+             webNavigation lifecycle entirely. */
+          if (
+            e.request.mode === "navigate" &&
+            (hit.headers.get("content-type") ?? "").includes("text/html")
+          ) {
+            WEBNAV.committed(target);
+          }
           netLogPush({
             method: e.request.method, traceId,
             path: url.pathname + url.search,
@@ -480,6 +554,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             transport: dec.mode,
             fallbackReason: dec.fallbackReason,
           });
+          WEBREQ.completed({ ...wrDetails, statusCode: hit.status });
           return hit;
         }
       }
@@ -489,10 +564,14 @@ self.addEventListener("fetch", (e: FetchEvent) => {
       try {
         DIAG.stage(traceId, "UPSTREAM_REQUEST", { url: target });
         const fwd = forwardedHeaders(e.request);
-        await applyOnRequest(plugins, target, fwd);
+        /* webRequest.onBeforeSendHeaders: blocking listeners may
+           replace the outgoing header set (validated pairs only). */
+        const replaced = WEBREQ.beforeSendHeaders(wrDetails, fwd);
+        const sendHeaders = replaced ?? fwd;
+        await applyOnRequest(plugins, target, sendHeaders);
         const resp = await wispFetch(target, {
           method: e.request.method,
-          headers: fwd,
+          headers: sendHeaders,
           body: ["GET", "HEAD"].includes(e.request.method) ? undefined : e.request.body,
           redirect: "follow",
         });
@@ -505,8 +584,12 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           DIAG.stage(traceId, "REDIRECTED", { url: target, message: "final destination " + finalDest });
         }
         const headers = stripHostile(resp.headers);
-        headers.set("x-zl-proxy", "1");
-        void applyOnResponse(plugins, target, resp.status, headers);
+        /* webRequest.onHeadersReceived: blocking listeners may replace
+           the response header set the page will see. */
+        const rHeaders = WEBREQ.headersReceived({ ...wrDetails, statusCode: resp.status }, headers);
+        const outHeaders = rHeaders ?? headers;
+        outHeaders.set("x-zl-proxy", "1");
+        void applyOnResponse(plugins, target, resp.status, outHeaders);
         const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "");
         transitRecord(traceId, target, dec);
         netLogPush({
@@ -533,10 +616,19 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              subresource fetches do not arrive in navigate mode. */
           if (e.request.mode === "navigate") WEBNAV.committed(target);
           const csInject = csInjectUrls(target, e.request);
-          return new Response(rewriteStream(resp.body, target, rule, csInject), {
-            status: resp.status,
-            headers,
-          });
+          return new Response(
+            rewriteStream(resp.body, target, rule, csInject, () => {
+              /* webNavigation.onCompleted + webRequest.onCompleted:
+                 the document stream (and with it the navigation) is
+                 done. */
+              WEBNAV.completed(target);
+              WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            }),
+            {
+              status: resp.status,
+              headers: outHeaders,
+            },
+          );
         }
         if (isCss(resp) && resp.body) {
           // Standalone stylesheets: one-shot url() pass through the
@@ -546,9 +638,11 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           const css = await resp.text();
           const out = mod.rewriteCss(css, self.location.origin, target, currentPrefix());
           DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
-          return new Response(out, { status: resp.status, headers });
+          WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+          return new Response(out, { status: resp.status, headers: outHeaders });
         }
-        return new Response(resp.body, { status: resp.status, headers });
+        WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+        return new Response(resp.body, { status: resp.status, headers: outHeaders });
       } catch (err) {
         DIAG.failure({
           traceId,
@@ -559,6 +653,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           technicalReason: String(err),
           url: target,
         });
+        WEBREQ.errorOccurred(wrDetails, String(err));
         transitRecord(traceId, target, decision);
         netLogPush({
           method: e.request.method, traceId,
@@ -844,10 +939,16 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
         break;
       }
       const tab = TABS.list().find((t) => t.url === info.pageUrl) ?? null;
-      MENUS.click(
-        rec.id,
-        { menuItemId: info.menuItemId, pageUrl: info.pageUrl },
-        tab ? tabView(rec, tab) : null,
+      /* Menu clicks wake an idle MV3 service-worker background; the
+         click delivery itself must outlive this message handler. */
+      e.waitUntil(
+        wakeExtension(rec.id).then(() => {
+          MENUS.click(
+            rec.id,
+            { menuItemId: info.menuItemId, pageUrl: info.pageUrl },
+            tab ? tabView(rec, tab) : null,
+          );
+        }),
       );
       reply({ ok: true });
       break;
@@ -879,6 +980,19 @@ async function handleExtMessage(
     return { ok: false, error: "extension content scripts do not match this page" };
   }
   const msg = m.msg as Record<string, unknown> | null;
+  if (msg && typeof msg === "object" && typeof msg.__zlTabReply === "string") {
+    /* Content-script reply to a tabs.sendMessage: route it back to
+       the pending promise (unknown nonces are ignored). */
+    TABS.resolveTabMessage(String(msg.__zlTabReply), msg.response);
+    return { ok: true };
+  }
+  if (msg && typeof msg === "object" && typeof msg.__zlTabError === "string") {
+    TABS.rejectTabMessage(
+      String(msg.__zlTabError),
+      String(msg.error ?? "zeolite: content-script message failed"),
+    );
+    return { ok: true };
+  }
   if (msg && typeof msg === "object" && typeof msg.__zlStorage === "string") {
     if (!rec.permissions.includes("storage")) {
       return { ok: false, error: "storage permission not granted" };
@@ -897,6 +1011,10 @@ async function handleExtMessage(
     else return { ok: false, error: "bad storage op" };
     return { ok: true, response: await r };
   }
+  /* Wake an idle-terminated MV3 service-worker background so it can
+     receive this message (persistent backgrounds are already live,
+     and a crashed worker is never restarted). */
+  await wakeExtension(rec.id);
   const response = await MESSENGER.sendMessage(rec.id, {
     extensionId: rec.id,
     context: "content",
@@ -904,3 +1022,4 @@ async function handleExtMessage(
   }, m.msg);
   return { ok: true, response };
 }
+

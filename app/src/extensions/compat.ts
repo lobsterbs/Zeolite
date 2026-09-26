@@ -2,7 +2,7 @@
 
    Machine-readable, per API. "partial" means the surface exists with
    real behavior but known gaps; "no" entries carry the reason. This is
-   the honest compatibility contract — nothing is listed as supported
+   the honest compatibility contract â nothing is listed as supported
    without an implementation behind it. */
 
 export type CompatLevel = "yes" | "partial" | "no";
@@ -30,17 +30,18 @@ export const COMPAT: Record<string, CompatEntry> = {
   "storage.session": { supported: "partial", reason: "in-memory as in Firefox, but per-context isolation pending the background runtime" },
   "content_scripts (manifest)": { supported: "partial", reason: "injection works via a bridge script in the page world; true isolated worlds need a renderer-level primitive a SW engine lacks" },
   "content-script runtime.sendMessage": { supported: "yes", reason: "MessageChannel to the SW with sender-page host verification" },
-  "content-script runtime.onMessage": { supported: "no", reason: "needs SW-to-page push; scheduled with the popup phase" },
+  "content-script runtime.onMessage": { supported: "partial", reason: "listeners register in the page-world bridge and background pushes via the zl:tabMessage channel with destination verification; no isolated world, so a listener cannot be hidden from page scripts" },
   "content-script storage access": { supported: "partial", reason: "local area via the verified bridge channel; sync/session pending" },
   "browser.scripting": { supported: "partial", reason: "executeScript/insertCSS read files from the package and run them in the page world via the SW->page channel; scripting + host permissions enforced; func injection and result capture not implemented" },
   "tabs.*": { supported: "partial", reason: "query/get/events mirror the real UI tab model via the UI->SW sync channel; create/update/remove dispatch to the UI and resolve on observed change; url/title visibility gated by the tabs/host permissions as in Firefox" },
-  "tabs.sendMessage": { supported: "no", reason: "needs the SW->page push channel (content-script onMessage phase)" },
+  "tabs.sendMessage": { supported: "partial", reason: "background->content-script delivery with host-permission checks and a 30s response window; frame targeting is not supported, and a tab whose page never answers rejects on timeout" },
   "tabs.getCurrent": { supported: "no", reason: "no tab context exists in this engine; rejects honestly" },
   "windows.*": { supported: "partial", reason: "single-window engine: get/getCurrent/getLastFocused/getAll with optional tab population; focus events never fire" },
   "cookies.*": { supported: "no", reason: "requires the Zeolite virtual cookie jar bridge" },
-  "webRequest.*": { supported: "no", reason: "requires the Zeolite request decision engine bridge" },
+  "webRequest.*": { supported: "partial", reason: "onBeforeRequest (cancel honored with webRequestBlocking), onBeforeSendHeaders/onHeadersReceived header modification, onCompleted/onErrorOccurred observation, all wired into the engine fetch pipeline with host-permission and url-filter gating; MV3 declarativeNetRequest is absent" },
   "webNavigation.onCommitted": { supported: "partial", reason: "fires for main-frame document loads observed by the engine's fetch pipeline; tab ids resolved from the UI tab model by exact destination match; listener url filters are not applied" },
-  "webNavigation.* (other events)": { supported: "no", reason: "the fetch pipeline exposes no onBeforeNavigate/onDOMContentLoaded/onCompleted lifecycle" },
+  "webNavigation.onBeforeNavigate/onCompleted": { supported: "partial", reason: "beforeNavigate fires at navigation interception, completed when the document stream ends; tab ids resolved from the UI tab model by exact destination match; listener url filters are not applied" },
+  "webNavigation.onDOMContentLoaded": { supported: "no", reason: "the fetch pipeline sees response bytes, not the page's DOM readiness" },
   "contextMenus.*": { supported: "partial", reason: "item registry + onClicked delivery via the zl:menuClick channel with tabs-bridge tab resolution; the visible menu surface ships with the LobsterBrowse integration" },
   "notifications.*": { supported: "no", reason: "requires the LobsterBrowse notification surface" },
   "downloads.*": { supported: "partial", reason: "download() hands off to the UI host via zl:downloadOp with permission checks; download-state queries and events absent until the UI reports state back" },
@@ -50,7 +51,7 @@ export const COMPAT: Record<string, CompatEntry> = {
   "permissions.remove": { supported: "yes" },
   "permissions.onAdded/onRemoved": { supported: "partial", reason: "fires with the requested set; not deduplicated against already-granted entries" },
   "management.*": { supported: "no", reason: "not started" },
-  "background.service_worker (MV3)": { supported: "no", reason: "Firefox-style background scripts are the execution model; SW backgrounds recorded but not run" },
+  "background.service_worker (MV3)": { supported: "partial", reason: "executed on demand (extension messages, menu clicks) via wakeExtension with a 30s idle termination; re-wakes fire no lifecycle events, and shared-context event listeners survive termination (documented limitation)" },
   "sidebar_action": { supported: "no", reason: "parsed and recorded; no sidebar host yet" },
   "popup pages": { supported: "no", reason: "extension-origin page hosting lands with the toolbar/popup phase" },
   "options pages": { supported: "no", reason: "extension-origin page hosting lands with the toolbar/popup phase" },
@@ -66,3 +67,4 @@ export function compatReport(): { api: string; supported: CompatLevel; reason?: 
     ...(e.reason ? { reason: e.reason } : {}),
   }));
 }
+

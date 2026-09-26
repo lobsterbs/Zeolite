@@ -99,6 +99,15 @@ export class ExtensionMessenger {
     return () => set?.delete(l);
   }
 
+  /** Drop every listener for one extension. Used by the background
+      runtime when an idle-terminated MV3 service worker is torn down,
+      so its next wake re-executes instead of silently answering with
+      dead closures. */
+  clear(id: ExtensionId): void {
+    this.listeners.delete(id);
+    this.connectListeners.delete(id);
+  }
+
   /* Fire-and-response messaging within one extension. Returns a
      promise with the responder's reply, or rejects when no listener
      answered. */
@@ -163,3 +172,4 @@ export class ExtensionMessenger {
     return caller;
   }
 }
+

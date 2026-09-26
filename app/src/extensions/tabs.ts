@@ -6,7 +6,7 @@
    through the same channel in the opposite direction: create/update/
    remove are dispatched to the engine UI clients as zl:tabsOp
    postMessages, and their promises resolve when the requested change
-   shows up in a later sync — the UI never needs a direct reply.
+   shows up in a later sync â the UI never needs a direct reply.
 
    Permission semantics follow Firefox: url/title visibility in Tab
    objects and changeInfo requires the "tabs" permission or a matching
@@ -50,6 +50,13 @@ export interface TabsOp {
   props?: Record<string, unknown>;
 }
 
+/** One background -> content-script message envelope
+    (tabs.sendMessage). */
+export interface TabMessage {
+  nonce: string;
+  msg: unknown;
+}
+
 type CreateProps = { url?: string; active?: boolean; index?: number };
 type UpdateProps = { active?: boolean; url?: string };
 
@@ -73,10 +80,82 @@ export class TabRegistry {
   private readonly pendingRemove = new Map<number, (() => void)[]>();
   private readonly pendingUpdate = new Map<number, { want: UpdateProps; resolve: () => void }[]>();
   private dispatch: ((op: TabsOp) => void) | null = null;
+  private messageDispatch:
+    | ((tabId: number, tabUrl: string, extId: string, payload: TabMessage) => void)
+    | null = null;
+  private readonly pendingMessages = new Map<
+    string,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void }
+  >();
   private nonceSeq = 0;
 
   setDispatch(fn: ((op: TabsOp) => void) | null): void {
     this.dispatch = fn;
+  }
+
+  /** Engine hook: where background -> content-script messages go. The
+      host (SW) addresses pages by destination, so the target tab's
+      url travels with every delivery. */
+  setMessageDispatch(
+    fn: ((tabId: number, tabUrl: string, extId: string, payload: TabMessage) => void) | null,
+  ): void {
+    this.messageDispatch = fn;
+  }
+
+  /** tabs.sendMessage: deliver to a tab's content scripts and resolve
+      with the first listener reply. Firefox semantics: a matching
+      host permission is required; a missing tab or a missing dispatch
+      host rejects honestly. Frame targeting is not supported (see
+      ./compat), and a tab whose page never answers rejects on the 30s
+      timeout. */
+  sendMessage(ext: ExtensionRecord, tabId: number, msg: unknown): Promise<unknown> {
+    const tab = this.tabs.get(tabId);
+    if (!tab) return Promise.reject(new Error("Invalid tab ID: " + tabId));
+    if (!hostPatternsMatch(ext.hostPermissions, tab.url)) {
+      return Promise.reject(
+        new Error("zeolite: tabs.sendMessage requires a host permission for " + tab.url),
+      );
+    }
+    if (!this.messageDispatch) {
+      return Promise.reject(new Error("zeolite: no tab host attached to this engine"));
+    }
+    const nonce = "zl-m" + ++this.nonceSeq;
+    return new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pendingMessages.delete(nonce)) {
+          reject(new Error("zeolite: tabs.sendMessage timed out; no content-script listener replied"));
+        }
+      }, 30000);
+      this.pendingMessages.set(nonce, {
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
+      this.messageDispatch(tabId, tab.url, ext.id, { nonce, msg });
+    });
+  }
+
+  /** Content-script reply routed back through the SW (zl:ext
+      __zlTabReply). Only the first reply to a nonce resolves. */
+  resolveTabMessage(nonce: string, response: unknown): void {
+    const p = this.pendingMessages.get(nonce);
+    if (!p) return;
+    this.pendingMessages.delete(nonce);
+    p.resolve(response);
+  }
+
+  /** Content-script error report (zl:ext __zlTabError): the bridge
+      answers honestly when no listener is registered. */
+  rejectTabMessage(nonce: string, error: string): void {
+    const p = this.pendingMessages.get(nonce);
+    if (!p) return;
+    this.pendingMessages.delete(nonce);
+    p.reject(new Error(error));
   }
 
   subscribe(l: TabsListener): () => void {
@@ -277,3 +356,4 @@ export function changeView(ext: ExtensionRecord, change: TabChangeInfo): Record<
   }
   return out;
 }
+

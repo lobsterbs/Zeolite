@@ -4,11 +4,15 @@
    ahead of this source. The bridge:
 
    - builds the browser.* API object for the content-script context
-     (runtime.id/getURL/sendMessage, storage.local) backed by a
-     MessageChannel to the service worker, which verifies the sender
+     (runtime.id/getURL/sendMessage/onMessage, storage.local) backed by
+     a MessageChannel to the service worker, which verifies the sender
      page actually matches the extension's declared content_scripts;
+   - receives background -> content-script messages (tabs.sendMessage):
+     the SW addresses the page by destination, only the controlling
+     service worker is trusted, and replies travel back as
+     zl:ext __zlTabReply/__zlTabError control messages;
    - loads the declared js files and executes each in a Function scope
-     with only (browser, chrome) exposed — the page cannot reach the
+     with only (browser, chrome) exposed - the page cannot reach the
      API object, and the scripts cannot reach the engine global scope
      (documented limitation: this is isolation-in-one-world, not a
      real Firefox isolated world, which needs renderer support);
@@ -22,10 +26,14 @@ export const BRIDGE_SOURCE = `(function () {
   "use strict";
   var cfg = ZL_CS_CFG;
   var origin = location.origin;
+  var csListeners = [];
+  function ctl() {
+    return navigator.serviceWorker && navigator.serviceWorker.controller;
+  }
   function chan(req) {
     return new Promise(function (resolve, reject) {
-      var ctl = navigator.serviceWorker && navigator.serviceWorker.controller;
-      if (!ctl) {
+      var c = ctl();
+      if (!c) {
         reject(new Error("zeolite: page not controlled by the engine service worker"));
         return;
       }
@@ -39,7 +47,7 @@ export const BRIDGE_SOURCE = `(function () {
         if (d.ok) resolve(d.response);
         else reject(new Error(d.error || "zeolite: extension messaging failed"));
       };
-      ctl.postMessage({ type: "zl:ext", extId: cfg.ext, msg: req }, [mc.port2]);
+      c.postMessage({ type: "zl:ext", extId: cfg.ext, msg: req }, [mc.port2]);
     });
   }
   function storageArea(name) {
@@ -48,6 +56,17 @@ export const BRIDGE_SOURCE = `(function () {
       set: function (items) { return chan({ __zlStorage: name, op: "set", items: items }); },
       remove: function (keys) { return chan({ __zlStorage: name, op: "remove", keys: keys }); },
       clear: function () { return chan({ __zlStorage: name, op: "clear" }); },
+    };
+  }
+  /* First reply wins: later sendResponse calls are dropped, matching
+     the engine-side resolveTabMessage semantics. */
+  function replyOnce(nonce) {
+    var done = false;
+    return function (response) {
+      if (done) return;
+      done = true;
+      var c = ctl();
+      if (c) c.postMessage({ type: "zl:ext", extId: cfg.ext, msg: { __zlTabReply: nonce, response: response } });
     };
   }
   function apiObject() {
@@ -59,11 +78,17 @@ export const BRIDGE_SOURCE = `(function () {
         },
         sendMessage: function (m) { return chan(m); },
         onMessage: {
-          addListener: function () {
-            throw new Error("zeolite: runtime.onMessage in content scripts is not supported yet");
+          addListener: function (l) {
+            if (csListeners.length >= 32) {
+              throw new Error("zeolite: too many content-script message listeners");
+            }
+            csListeners.push(l);
           },
-          removeListener: function () {},
-          hasListener: function () { return false; },
+          removeListener: function (l) {
+            var i = csListeners.indexOf(l);
+            if (i !== -1) csListeners.splice(i, 1);
+          },
+          hasListener: function (l) { return csListeners.indexOf(l) !== -1; },
         },
         connect: function () {
           throw new Error("zeolite: runtime.connect from content scripts is not supported yet");
@@ -71,6 +96,37 @@ export const BRIDGE_SOURCE = `(function () {
       },
       storage: { local: storageArea("local") },
     };
+  }
+  /* tabs.sendMessage delivery: verify the message is from the
+     controlling service worker, addressed to this extension, and
+     addressed to THIS page (destination match), then hand it to the
+     content-script listeners. No listener answers honestly with
+     __zlTabError instead of a silent drop. */
+  if (navigator.serviceWorker) {
+    navigator.serviceWorker.addEventListener("message", function (ev) {
+      var c = ctl();
+      if (!c || ev.source !== c) return;
+      var m = ev.data;
+      if (!m || m.type !== "zl:tabMessage" || m.extId !== cfg.ext || !m.payload) return;
+      var dest = (window.__ZL && window.__ZL.dest) || document.baseURI;
+      if (m.dest !== dest) return;
+      var nonce = m.payload.nonce;
+      if (csListeners.length === 0) {
+        c.postMessage({ type: "zl:ext", extId: cfg.ext, msg: { __zlTabError: nonce, error: "zeolite: could not establish connection. Receiving end does not exist" } });
+        return;
+      }
+      var send = replyOnce(nonce);
+      for (var i = 0; i < csListeners.length; i++) {
+        var keepOpen;
+        try {
+          keepOpen = csListeners[i](m.payload.msg, { id: cfg.ext, url: dest }, send);
+        } catch (e) {
+          console.error("[zeolite cs " + cfg.ext + "]", e);
+          continue;
+        }
+        if (keepOpen !== true) send(undefined);
+      }
+    });
   }
   function loadCss(href) {
     var l = document.createElement("link");

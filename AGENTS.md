@@ -1,4 +1,4 @@
-# AGENTS.md — Zeolite
+# AGENTS.md â Zeolite
 
 Guidance for AI agents and human contributors. Read this before changing code, architecture, CI, or public documentation.
 
@@ -21,20 +21,22 @@ NativeTransit does not bypass browser security boundaries such as same-origin po
 
 Status: the transport-mode decision layer is **Implemented (Alpha)** in `app/src/transit.ts`. Non-document resources are classified NativeTransit and transported without rewriting; document and stylesheet loads are deterministic RewriteFallback (reasons DOCUMENT_REWRITE_REQUIRED / CSS_URL_REWRITE_REQUIRED / UNSUPPORTED_PROTOCOL) recorded in diagnostics via TRANSPORT_FALLBACK events, with counters in the zl:getNetLog reply. Redirect final destinations are recorded when the transport exposes them (REDIRECTED).
 
+Extension pipeline status: webRequest is wired into the engine fetch path (onBeforeRequest cancellation honored with webRequestBlocking, onBeforeSendHeaders/onHeadersReceived header modification via validated pairs, onCompleted/onErrorOccurred observation; delivery gated by host permissions and listener url filters), webNavigation now exposes beforeNavigate/committed/completed from the real interception lifecycle (cache-hit navigations included), MV3 service-worker backgrounds execute on demand via wakeExtension with a 30s idle termination, and tabs.sendMessage delivers background-to-content-script messages through the zl:tabMessage channel with destination verification and honest no-listener errors.
+
 **Do not implement Gecko-specific architecture, dependencies, WASM, or adapters as part of NativeTransit.**
 
 ## Repository layout
-- `crates/rewriter/` — streaming Rust/WASM rewriter.
-- `crates/wisp-core/` — Wisp v2.1 protocol.
-- `crates/wisp-extensions/` — auth/lifecycle/server extensions.
-- `crates/zeolite-server/` — standalone Wisp/static server and destination protection.
-- `crates/wisp-wasm/` — WASM Wisp bindings.
-- `app/src/sw.ts` — service-worker/interception entrypoint.
-- `app/src/extensions/` — WebExtension compatibility runtime.
-- `app/src/diag.ts` — bounded diagnostics.
-- `app/src/transit.ts` — NativeTransit transport-mode decision layer + fallback record.
-- `suite/` — compatibility probes.
-- `docs/` — architecture, roadmap, versioning and adapter docs.
+- `crates/rewriter/` â streaming Rust/WASM rewriter.
+- `crates/wisp-core/` â Wisp v2.1 protocol.
+- `crates/wisp-extensions/` â auth/lifecycle/server extensions.
+- `crates/zeolite-server/` â standalone Wisp/static server and destination protection.
+- `crates/wisp-wasm/` â WASM Wisp bindings.
+- `app/src/sw.ts` â service-worker/interception entrypoint.
+- `app/src/extensions/` â WebExtension compatibility runtime.
+- `app/src/diag.ts` â bounded diagnostics.
+- `app/src/transit.ts` â NativeTransit transport-mode decision layer + fallback record.
+- `suite/` â compatibility probes.
+- `docs/` â architecture, roadmap, versioning and adapter docs.
 
 ## Hard invariants
 - Rewriting stays streaming; never buffer whole documents for convenience.
