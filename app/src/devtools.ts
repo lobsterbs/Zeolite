@@ -16,10 +16,14 @@ interface NetEntry {
   bytes: number;
   verdict?: string;
   err?: string;
+  transport?: string;
+  fallbackReason?: string;
+  finalDest?: string;
 }
 
 const rows = document.getElementById("rows")!;
 const paused = document.getElementById("paused")!;
+const statsEl = document.getElementById("stats")!;
 
 let entries: NetEntry[] = [];
 let lastSeq = 0;
@@ -58,6 +62,7 @@ function render(): void {
         String(e.ms),
         fmtBytes(e.bytes ?? -1),
         e.verdict ?? "",
+        e.transport ?? "",
       ];
       cells.forEach((c, i) => {
         const td = document.createElement("td");
@@ -66,6 +71,11 @@ function render(): void {
           td.className = "err";
           td.title = e.err;
           td.textContent = e.dest + " (error)";
+        } else if (i === 2 && e.finalDest) {
+          td.title = "final destination: " + e.finalDest;
+        } else if (i === 7 && e.transport === "RewriteFallback") {
+          td.className = "fb";
+          if (e.fallbackReason) td.title = e.fallbackReason;
         } else if (i === 3 && e.status >= 200) {
           td.className = `status-${Math.floor(e.status / 100)}`;
         }
@@ -98,11 +108,13 @@ function tick(): void {
   paused.textContent = "";
   const ch = new MessageChannel();
   ch.port1.onmessage = (ev) => {
-    const { entries: fresh, lastSeq: seq, generation } = (ev.data ?? { entries: [] }) as {
+    const { entries: fresh, lastSeq: seq, generation, stats } = (ev.data ?? { entries: [] }) as {
       entries: NetEntry[];
       lastSeq: number;
       generation?: number;
+      stats?: { native: number; fallback: number };
     };
+    statsEl.textContent = stats ? "native " + stats.native + " / fallback " + stats.fallback : "";
     // A restarted SW restarts the seq counter: reset the cursor (and
     // drop pre-restart rows) instead of silently dropping new ones.
     if (generation !== lastGeneration) {

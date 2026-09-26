@@ -19,6 +19,8 @@ NativeTransit should preserve original website URLs/content where browser securi
 
 NativeTransit does not bypass browser security boundaries such as same-origin policy, service-worker scope, CSP, CORS, iframe rules, or browser-owned APIs.
 
+Status: the transport-mode decision layer is **Implemented (Alpha)** in `app/src/transit.ts`. Non-document resources are classified NativeTransit and transported without rewriting; document and stylesheet loads are deterministic RewriteFallback (reasons DOCUMENT_REWRITE_REQUIRED / CSS_URL_REWRITE_REQUIRED / UNSUPPORTED_PROTOCOL) recorded in diagnostics via TRANSPORT_FALLBACK events, with counters in the zl:getNetLog reply. Redirect final destinations are recorded when the transport exposes them (REDIRECTED).
+
 **Do not implement Gecko-specific architecture, dependencies, WASM, or adapters as part of NativeTransit.**
 
 ## Repository layout
@@ -30,6 +32,7 @@ NativeTransit does not bypass browser security boundaries such as same-origin po
 - `app/src/sw.ts` — service-worker/interception entrypoint.
 - `app/src/extensions/` — WebExtension compatibility runtime.
 - `app/src/diag.ts` — bounded diagnostics.
+- `app/src/transit.ts` — NativeTransit transport-mode decision layer + fallback record.
 - `suite/` — compatibility probes.
 - `docs/` — architecture, roadmap, versioning and adapter docs.
 

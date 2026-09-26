@@ -55,7 +55,9 @@ export type DiagStage =
   | "REWRITE_FAILED"
   | "RUNTIME_INJECTION"
   | "SCRIPT_EXECUTION"
-  | "DOWNSTREAM_REQUEST";
+  | "DOWNSTREAM_REQUEST"
+  | "TRANSPORT_FALLBACK"
+  | "REDIRECTED";
 
 export interface DiagEvent {
   seq: number;

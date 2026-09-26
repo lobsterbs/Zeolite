@@ -24,6 +24,7 @@
 
 /// <reference lib="webworker" />
 import { decodePath, isEnginePath, setScheme, currentPrefix } from "./codec";
+import { decideTransport, refineWithContent, transitRecord, transitStats } from "./transit";
 import { ZL_WISP_URL } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
@@ -192,6 +193,12 @@ export interface NetEntry {
   err?: string;
   /** Diagnostics trace identifier, joinable with zl:getDiag events. */
   traceId?: string;
+  /** Transport mode decision (NativeTransit Alpha / RewriteFallback). */
+  transport?: "NativeTransit" | "RewriteFallback";
+  /** Machine-readable reason when the decision was RewriteFallback. */
+  fallbackReason?: string;
+  /** Final destination after redirects, when the transport exposed it. */
+  finalDest?: string;
 }
 
 const NET_LIMIT = 256;
@@ -448,10 +455,16 @@ self.addEventListener("fetch", (e: FetchEvent) => {
       const t0 = Date.now();
       const traceId = DIAG.trace();
       DIAG.stage(traceId, "REQUEST_INTERCEPTED", { url: target });
+      /* NativeTransit decision: pre-fetch classification from the
+         destination scheme + sec-fetch-dest; refined with the actual
+         content type once the response arrives. */
+      const decision = decideTransport(target, e.request.headers.get("sec-fetch-dest") ?? "");
       /* Cache-first for proxied GETs. */
       if (e.request.method === "GET") {
         const hit = await pageCacheMatch(e.request);
         if (hit) {
+          const dec = refineWithContent(decision, hit.headers.get("content-type") ?? "");
+          transitRecord(traceId, target, dec);
           netLogPush({
             method: e.request.method, traceId,
             path: url.pathname + url.search,
@@ -464,6 +477,8 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             ms: Date.now() - t0,
             bytes: Number(hit.headers.get("content-length") ?? -1),
             verdict: "cache",
+            transport: dec.mode,
+            fallbackReason: dec.fallbackReason,
           });
           return hit;
         }
@@ -482,9 +497,18 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           redirect: "follow",
         });
         DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: target, message: "upstream status " + resp.status });
+        /* Stage E: when the transport exposes the final URL, record the
+           logical destination after the redirect chain. */
+        const finalUrl = typeof resp.url === "string" ? resp.url : "";
+        const finalDest = finalUrl && finalUrl !== target ? finalUrl : undefined;
+        if (finalDest) {
+          DIAG.stage(traceId, "REDIRECTED", { url: target, message: "final destination " + finalDest });
+        }
         const headers = stripHostile(resp.headers);
         headers.set("x-zl-proxy", "1");
         void applyOnResponse(plugins, target, resp.status, headers);
+        const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "");
+        transitRecord(traceId, target, dec);
         netLogPush({
           method: e.request.method, traceId,
           path: url.pathname + url.search,
@@ -498,6 +522,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             resp.headers.get("content-type") ?? "",
           ),
           rewritten: isHtml(resp) ? "html" : isCss(resp) ? "css" : undefined,
+          transport: dec.mode,
+          fallbackReason: dec.fallbackReason,
+          finalDest,
         });
         if (e.request.method === "GET") void pageCacheStore(e.request, resp.clone());
         if (isHtml(resp) && resp.body) {
@@ -532,6 +559,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           technicalReason: String(err),
           url: target,
         });
+        transitRecord(traceId, target, decision);
         netLogPush({
           method: e.request.method, traceId,
           path: url.pathname + url.search,
@@ -541,6 +569,8 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           ms: Date.now() - t0,
           bytes: -1,
           err: String(err),
+          transport: decision.mode,
+          fallbackReason: decision.fallbackReason,
         });
         return new Response(`zeolite: upstream fetch failed: ${String(err)}`, {
           status: 502,
@@ -642,7 +672,7 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
       // gets only newer entries, so polling stays cheap at any ring size.
       const since = (msg as { since?: number }).since ?? 0;
       reply({ entries: netLog.filter((x) => x.seq > since), lastSeq: netSeq, generation: netGeneration,
-          version: ZEOLITE_VERSION, });
+          version: ZEOLITE_VERSION, stats: transitStats() });
       break;
     }
     case "zl:getDiag": {

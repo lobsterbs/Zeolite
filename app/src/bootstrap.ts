@@ -211,7 +211,15 @@ function siteKeys(store: Storage): string[] {
           else if (opcode === 0x2) msgs.push(payload.slice().buffer);
           else if (opcode === 0x8) {
             wsState = WebSocket.CLOSED;
-            es.dispatchEvent(new CloseEvent("close", { code: 1000 }));
+            // Real server close code when the frame carries one
+            // (RFC 6455: 2-byte code + UTF-8 reason); 1005 when empty.
+            const code = payload.length >= 2 ? (payload[0] << 8) | payload[1] : 1005;
+            es.dispatchEvent(
+              new CloseEvent("close", {
+                code,
+                reason: new TextDecoder().decode(payload.subarray(2)),
+              }),
+            );
           }
           i = off + len;
         }
