@@ -1,1 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160"><rect width="160" height="160" rx="48" fill="#111113"/><text x="25" y="108" fill="#fff" font-family="Google Sans Flex,Google Sans,Inter,system-ui,sans-serif" font-size="110" font-weight="750">Z</text><text x="99" y="78" fill="#fff" font-family="Google Sans Flex,Google Sans,Inter,system-ui,sans-serif" font-size="54" font-weight="600">l</text></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160">
+  <rect width="150" height="150" rx="48" fill="#111113"/>
+  <text x="35" y="108" fill="#fff" font-family="Google Sans Flex,Google Sans,Inter,system-ui,sans-serif" font-size="110" font-weight="750">Z</text>
+  <text x="100" y="108" fill="#fff" font-family="Google Sans Flex,Google Sans,Inter,system-ui,sans-serif" font-size="54" font-weight="720">l</text>
+</svg>
