@@ -586,7 +586,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         const headers = stripHostile(resp.headers);
         /* webRequest.onHeadersReceived: blocking listeners may replace
            the response header set the page will see. */
-        const rHeaders = WEBREQ.headersReceived({ ...wrDetails, statusCode: resp.status }, resp.status, headers);
+        const rHeaders = WEBREQ.headersReceived(wrDetails, resp.status, headers);
         const outHeaders = rHeaders ?? headers;
         outHeaders.set("x-zl-proxy", "1");
         void applyOnResponse(plugins, target, resp.status, outHeaders);
@@ -945,7 +945,7 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
         wakeExtension(rec.id).then(() => {
           MENUS.click(
             rec.id,
-            { menuItemId: info.menuItemId, pageUrl: info.pageUrl },
+            { menuItemId: String(info.menuItemId), pageUrl: String(info.pageUrl) },
             tab ? tabView(rec, tab) : null,
           );
         }),
