@@ -117,12 +117,11 @@ function siteKeys(store: Storage): string[] {
  const KEYS = CA.keys.bind(CA);
  const pre = (n: unknown) => SITE + ":" + String(n);
  const own = (n: string) => n.startsWith(SITE + ":");
- const strip = (n: string) => n.slice(SITE.length + 1);
  const shim: Record<string, unknown> = {
  open: (n: unknown) => OPEN(pre(n)),
  delete: (n: unknown) => DEL(pre(n)),
  has: (n: unknown) => HAS(pre(n)),
- keys: () => KEYS().then((ks) => ks.filter(own).map(strip)),
+ keys: () => KEYS().then((ks) => ks.filter(own).map((n) => n.slice(SITE.length + 1))),
  match: async (rq: Request | string, o?: CacheQueryOptions) => {
  for (const n of await KEYS()) {
  if (!own(n)) continue;
@@ -233,7 +232,7 @@ addEventListener("message", (e: MessageEvent) => {
         throw new DOMException(String(url), "SyntaxError");
       }
       if (u.protocol !== "ws:" && u.protocol !== "wss:") {
-        return protocols === undefined ? new OWS(url) : new OWS(url, protocols);
+        return new OWS(url, protocols);
       }
       const es = new EventTarget() as unknown as WebSocket;
       let wsState = 0;
@@ -301,7 +300,6 @@ addEventListener("message", (e: MessageEvent) => {
             if (v === "blob" || v === "arraybuffer") binType = v;
           },
         },
-        bufferedAmount: { value: 0 },
         close: {
           value: (code?: number, reason?: string) => {
             if (wsState === 3) return;
@@ -318,10 +316,7 @@ addEventListener("message", (e: MessageEvent) => {
       });
       return es;
     } as unknown as new (u: string, p?: string | string[]) => WebSocket;
-    (LJWS as unknown as { CONNECTING: number }).CONNECTING = 0;
-    (LJWS as unknown as { OPEN: number }).OPEN = 1;
-    (LJWS as unknown as { CLOSING: number }).CLOSING = 2;
-    (LJWS as unknown as { CLOSED: number }).CLOSED = 3;
+    Object.assign(LJWS as unknown as Record<string, unknown>, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
     (LJWS as unknown as { prototype: object }).prototype = OWS.prototype;
     (w as { WebSocket?: unknown }).WebSocket = LJWS;
   }
