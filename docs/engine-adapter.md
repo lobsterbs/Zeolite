@@ -34,9 +34,6 @@ export interface ZeoliteEngine {
   /** Enable/disable interception for one site (per-site toggle),
    *  acknowledged by the SW and persisted across SW restarts. */
   setSiteRoute(site: string, enabled: boolean): Promise<void>;
-  /** Export session blob: per-profile cookie jar + scoped storage. */
-  exportSession(): Blob;
-  importSession(b: Blob): Promise<void>;
   /** Uninstall the SW, drop its caches, clear adapter state. Called
    *  when the user switches engines so nothing leaks. */
   teardown(): Promise<void>;
@@ -65,29 +62,25 @@ acknowledged, never fire-and-forget:
 ## Isolation guarantees (Phase 2 acceptance)
 
 - Storage: proxied site data is namespaced `zl:<sitehash>:` per site;
-  engine-origin storage is never exposed to page code. The reverse
-  origin index (`zl:origins`) is what session export enumerates.
+  engine-origin storage is never exposed to page code.
 - SW state: `teardown()` unregisters `/sw.js` and deletes every cache
   it owned, so switching engines leaves no interception active.
-- Session blobs are tagged `format: "zeolite-session"`; a blob from
-  any other engine is rejected on import.
-- Per-site cookie jars: `EngineConfig.profile` selects the jar
-  (`zl:jar:<profile>:<origin>`), enabling multiple accounts per site.
-  The live jar syncs through the transport seam (`getCookies`/
-  `setCookies` on the vendored transport) when available and is
-  restored from storage otherwise.
+- Session export/import is NOT implemented. The 1.7 `zl:exportSession`
+  control-plane message (encrypted, SW-side) is the live session
+  transfer path; this adapter never shipped its own plaintext blob.
 
 ## Keepalive / reconnect
 
-`app/src/wisp.ts` sends a stream-0 CONTINUE heartbeat every 15 s so
-idle sessions are not reclaimed; dropped sockets transparently reopen
-on the next stream operation, and open streams receive `onClose` so
-pages re-request rather than hang.
+There is no client-side heartbeat. The vendored libcurl transport
+multiplexes every stream over one WebSocket; when the socket drops the
+transport reconnects on the next request, and page fetches fail loudly
+rather than hang. (The old `wisp.ts` heartbeat client was dead code
+from the pre-vendoring era and has been removed.)
 
 ## Status
 
 - Phase 2 adapter surface: implemented (engine.ts + sw.ts control plane
-  + wisp.ts heartbeat/reconnect + codec rotation + session blobs).
+  + codec rotation).
 - Pending before "done": runtime validation of the full switch path
   (Scramjet -> Zeolite -> teardown -> Scramjet) on a real deployment,
   which also requires the Phase 1 transport vendoring to land first.

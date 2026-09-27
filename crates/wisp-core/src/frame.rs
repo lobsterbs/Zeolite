@@ -91,6 +91,36 @@ impl Frame {
             PacketType::Info => parse_info(self.stream_id, p),
         }
     }
+
+    /// Decode this frame payload using the wisp v1 wire layout.
+    ///
+    /// v1 differs from v2 in exactly one packet: CONNECT carries the
+    /// hostname without a length prefix (see `parse_hostname_v1`). All
+    /// other packet types are byte-identical between v1 and v2, so they
+    /// delegate to `parse_packet`. The server picks the parser once from
+    /// the negotiated version; a v1 client must never be fed v2 parsing
+    /// (its CONNECT host byte would be misread as the length prefix).
+    pub fn parse_packet_v1(&self) -> Result<Packet> {
+        if self.packet_type != PacketType::Connect {
+            return self.parse_packet();
+        }
+        let p = &self.payload;
+        if p.len() < 3 {
+            return Err(WispError::BufferTooShort {
+                need: 3,
+                have: p.len(),
+            });
+        }
+        let kind = StreamKind::from_u8(p[0])?;
+        let port = u16::from_le_bytes([p[1], p[2]]);
+        let hostname = parse_hostname_v1(p)?;
+        Ok(Packet::Connect {
+            stream_id: self.stream_id,
+            kind,
+            port,
+            hostname,
+        })
+    }
 }
 
 /// CONNECT hostname: layout is [kind u8][port u16][hostlen u8][host].
@@ -109,6 +139,18 @@ fn parse_hostname(p: &[u8]) -> Result<String> {
         });
     }
     Ok(std::str::from_utf8(&p[4..4 + hostlen])?.to_string())
+}
+
+/// CONNECT hostname, wisp v1 layout: [kind u8][port u16][host to end of
+/// payload]. No length prefix; the frame header already bounds the host.
+fn parse_hostname_v1(p: &[u8]) -> Result<String> {
+    if p.len() < 3 {
+        return Err(WispError::BufferTooShort {
+            need: 3,
+            have: p.len(),
+        });
+    }
+    Ok(std::str::from_utf8(&p[3..])?.to_string())
 }
 
 /// INFO payload: [major u8][minor u8] + extension entries,
@@ -258,5 +300,47 @@ mod tests {
     fn reject_invalid_type() {
         let mut buf = BytesMut::from(&[0x09u8, 0, 0, 0, 0][..]);
         assert!(Frame::decode(&mut buf).is_err());
+    }
+
+    #[test]
+    fn v1_connect_parses_without_length_prefix() {
+        // Hand-built v1 frame: CONNECT, stream 1, TCP, port 443 LE,
+        // hostname "example.com" running to the end of the payload.
+        let host = b"example.com";
+        let mut raw = vec![0x01u8, 0x01, 0x00, 0x00, 0x00, 0x01, 0xBB, 0x01];
+        raw.extend_from_slice(host);
+        let mut buf = BytesMut::from(&raw[..]);
+        let frame = Frame::decode(&mut buf).unwrap().unwrap();
+        match frame.parse_packet_v1().unwrap() {
+            Packet::Connect {
+                stream_id,
+                kind,
+                port,
+                hostname,
+            } => {
+                assert_eq!(stream_id, 1);
+                assert_eq!(kind, StreamKind::Tcp);
+                assert_eq!(port, 443);
+                assert_eq!(hostname, "example.com");
+            }
+            other => panic!("expected CONNECT, got {other:?}"),
+        }
+        // The same bytes must NOT decode via the v2 parser: the first
+        // hostname byte ('e' = 101) would be read as a length prefix.
+        assert!(frame.parse_packet().is_err());
+    }
+
+    #[test]
+    fn v1_non_connect_delegates() {
+        // DATA and CLOSE are identical in v1 and v2.
+        let mut buf = BytesMut::from(&[0x02u8, 0x07, 0x00, 0x00, 0x00, b'h', b'i'][..]);
+        let frame = Frame::decode(&mut buf).unwrap().unwrap();
+        match frame.parse_packet_v1().unwrap() {
+            Packet::Data { stream_id, payload } => {
+                assert_eq!(stream_id, 7);
+                assert_eq!(payload, b"hi".to_vec());
+            }
+            other => panic!("expected DATA, got {other:?}"),
+        }
     }
 }

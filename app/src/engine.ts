@@ -8,10 +8,6 @@
    - navigate(): pure function over the codec; returns the engine-local
      route for a destination.
    - setSiteRoute(): per-site interception toggle, acknowledged by the SW.
-   - exportSession()/importSession(): a versioned JSON blob holding the
-     per-site cookie jar (via the transport seam) plus all scoped
-     storage entries (keys prefixed "zl:<sitehash>:"). Blob is
-     engine-tagged so a Scramjet blob can never import.
    - teardown(): SW unregisters and caches drop; nothing survives an
      engine switch. */
 
@@ -26,35 +22,6 @@ export interface EngineConfig {
   pathPrefix?: string;
   /** Cookie jar profile: multiple accounts per site. Default "default". */
   profile?: string;
-}
-
-interface CookieEntry {
-  name: string;
-  value: string;
-}
-
-interface SessionBlob {
-  format: "zeolite-session";
-  version: 1;
-  profile: string;
-  exported: string;
-  cookies: Record<string, CookieEntry[]>; // site origin -> jar
-  storage: Record<string, Record<string, string>>; // site origin -> k/v
-}
-
-/** Which origins a session covers. Default: every proxied site. */
-function scopedOrigins(): string[] {
-  // Derived from storage keys: zl:<sitehash>:<key>. The hash is FNV1a
-  // of the origin, but we keep a reverse index in storage for exact
-  // export (the hash is not invertible).
-  const idx = JSON.parse(localStorage.getItem("zl:origins") ?? "{}") as Record<string, string>;
-  return Object.keys(idx);
-}
-
-function rememberOrigin(origin: string): void {
-  const idx = JSON.parse(localStorage.getItem("zl:origins") ?? "{}") as Record<string, string>;
-  idx[origin] = "1";
-  localStorage.setItem("zl:origins", JSON.stringify(idx));
 }
 
 export class ZeoliteEngine {
@@ -101,76 +68,6 @@ export class ZeoliteEngine {
     localStorage.setItem(key, JSON.stringify([...cur]));
   }
 
-  /** Session blob: scoped storage + per-profile cookie jar. */
-  async exportSession(): Promise<Blob> {
-    const cookies: Record<string, CookieEntry[]> = {};
-    const storage: Record<string, Record<string, string>> = {};
-    const mod = await import("./libcurl-transport-vendored");
-
-    for (const origin of scopedOrigins()) {
-      // Cookie jar for this profile (multiple accounts per site).
-      try {
-        const jarKey = `zl:jar:${this.config.profile}:${origin}`;
-        if (typeof mod.getCookies === "function") {
-          const live = await mod.getCookies(origin);
-          localStorage.setItem(jarKey, JSON.stringify(live));
-          cookies[origin] = live;
-        } else {
-          cookies[origin] = JSON.parse(localStorage.getItem(jarKey) ?? "[]");
-        }
-      } catch {
-        cookies[origin] = [];
-      }
-      // Scoped storage: enumerate zl:<hash>: keys for this origin.
-      const siteHash = await this.hashOrigin(origin);
-      const kv: Record<string, string> = {};
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i)!;
-        if (k.startsWith(`zl:${siteHash}:`)) kv[k] = localStorage.getItem(k)!;
-      }
-      storage[origin] = kv;
-    }
-
-    const blob: SessionBlob = {
-      format: "zeolite-session",
-      version: 1,
-      profile: this.config.profile,
-      exported: new Date().toISOString(),
-      cookies,
-      storage,
-    };
-    return new Blob([JSON.stringify(blob)], { type: "application/json" });
-  }
-
-  async importSession(b: Blob): Promise<void> {
-    const text = await b.text();
-    let blob: SessionBlob;
-    try {
-      blob = JSON.parse(text);
-    } catch {
-      throw new Error("not a session blob");
-    }
-    if (blob.format !== "zeolite-session") {
-      throw new Error("engine mismatch: not a Zeolite session");
-    }
-    const mod = await import("./libcurl-transport-vendored");
-    for (const [origin, jar] of Object.entries(blob.cookies ?? {})) {
-      rememberOrigin(origin);
-      localStorage.setItem(`zl:jar:${blob.profile}:${origin}`, JSON.stringify(jar));
-      if (typeof mod.setCookies === "function") {
-        try {
-          await mod.setCookies(origin, jar);
-        } catch {
-          // Transport not ready: jar restored to storage, replayed on init.
-        }
-      }
-    }
-    for (const [origin, kv] of Object.entries(blob.storage ?? {})) {
-      rememberOrigin(origin);
-      for (const [k, v] of Object.entries(kv)) localStorage.setItem(k, v);
-    }
-  }
-
   /** Uninstall: SW unregisters, caches drop, no state survives. */
   async teardown(): Promise<void> {
     const ctl = navigator.serviceWorker.controller;
@@ -198,16 +95,7 @@ export class ZeoliteEngine {
       setTimeout(() => resolve({ ok: false, error: "timeout" }), 5000);
     });
   }
-
-  /** FNV1a(origin) as the bootstrap computes it (36-radix). */
-  private async hashOrigin(origin: string): Promise<string> {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < origin.length; i++) {
-      h ^= origin.charCodeAt(i);
-      h = (h * 0x01000193) >>> 0;
-    }
-    return h.toString(36);
-  }
 }
 
 export type { ZeoliteEngine as default };
+

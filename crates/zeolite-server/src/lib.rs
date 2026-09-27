@@ -640,7 +640,16 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                 break;
             }
         };
-        let pkt = match frame.parse_packet() {
+        // Wire layout is version-dependent: v1 CONNECT carries the
+        // hostname without a length prefix. Parsing a v1 client with
+        // the v2 parser misreads the first hostname byte as the
+        // length prefix and drops the connection, so pick once here.
+        let parsed = if v2 {
+            frame.parse_packet()
+        } else {
+            frame.parse_packet_v1()
+        };
+        let pkt = match parsed {
             Ok(p) => p,
             Err(e) => {
                 if !handshake_done {
@@ -745,7 +754,9 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                     continue;
                 }
                 match kind {
-                    StreamKind::Tcp => spawn_tcp_relay(&mut sess, stream_id, port, hostname).await,
+                    StreamKind::Tcp => {
+                        spawn_tcp_relay(&mut sess, stream_id, port, hostname, v2).await
+                    }
                     StreamKind::Udp => spawn_udp_relay(&mut sess, stream_id, port, hostname).await,
                 }
             }
@@ -805,7 +816,13 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
     }
 }
 
-async fn spawn_tcp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname: String) {
+async fn spawn_tcp_relay(
+    sess: &mut Session,
+    stream_id: u32,
+    port: u16,
+    hostname: String,
+    client_flow: bool,
+) {
     let shared = sess.shared.clone();
     let ws_tx = sess.ws_tx.clone();
     let window = Arc::new(Window::default());
@@ -840,7 +857,11 @@ async fn spawn_tcp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname
         loop {
             // Out of credits: stop reading the socket until the client
             // grants a new window with CONTINUE (real backpressure).
-            w.wait().await;
+            // v1 clients never send CONTINUE grants, so their window
+            // stays closed forever; relay unthrottled instead.
+            if client_flow {
+                w.wait().await;
+            }
             tokio::select! {
                 r = rd.read(&mut buf) => match r {
                     Ok(0) | Err(_) => break,
@@ -855,7 +876,9 @@ async fn spawn_tcp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname
                         // Spend one credit; when the window is empty the
                         // next loop iteration waits for the client's
                         // CONTINUE (real backpressure, not a fake 128).
-                        w.take();
+                        if client_flow {
+                            w.take();
+                        }
                         if let Ok(mut t) = la.lock() {
                             *t = Instant::now();
                         }

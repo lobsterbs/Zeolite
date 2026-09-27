@@ -55,3 +55,10 @@ Drop the built module at `app/dist/plugins/<name>.js`. Nothing in the
 engine source needs to change: loading is fully data-driven from
 siteconfig.json, which is how a third party can ship a plugin without
 touching engine source (the Phase 4 done-when).
+
+Known gap: `app/src/plugins.ts` loads plugin modules with dynamic
+`import()`, which Chromium does not support on
+`ServiceWorkerGlobalScope`. A plugin listed in siteconfig therefore
+fails to load (honestly, logged) inside the service worker until the
+loader gains a SW-safe path (fetch + evaluate, as the libcurl transport
+seam does). No site currently ships plugins, so nothing regresses.

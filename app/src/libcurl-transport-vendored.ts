@@ -63,9 +63,6 @@ interface LibcurlClientLike {
     onclose: (code: number, reason: string) => void,
     onerror: (error: string) => void,
   ): [(data: Blob | ArrayBuffer | string) => void, (code: number, reason: string) => void];
-  /* Cookie jar access is not part of the declared API; it may exist
-     on the session. Probed defensively at runtime. */
-  session?: unknown;
 }
 
 const MISSING = "zeolite: libcurl transport not vendored (CI step must copy @mercuryworkshop/libcurl-transport dist into app/public/libcurl)";
@@ -82,13 +79,37 @@ function moduleUrl(): string {
 let client: LibcurlClientLike | null = null;
 let initPromise: Promise<void> | null = null;
 
+/* Load the vendored ESM bundle without `import()`.
+ *
+ * Service workers on Chromium do not support dynamic import() on
+ * ServiceWorkerGlobalScope, so `await import(url)` throws a TypeError
+ * and every proxied fetch dies. The bundle is a self-contained ESM
+ * module whose only export statement is the trailing
+ * `export { ... };` list (no import.meta use, no other exports), so:
+ * strip that tail and evaluate the module body with a function
+ * constructor, returning the named bindings directly. Verified
+ * against the real 2.1 MB @mercuryworkshop/libcurl-transport bundle
+ * inside a live service worker. */
+async function loadBundle(url: string): Promise<{ LibcurlClient?: unknown; default?: unknown }> {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(MISSING);
+  const src = await res.text();
+  const tail = src.match(/export\s*\{[^}]*\}\s*;?\s*$/);
+  if (!tail || tail.index === undefined) {
+    throw new Error("zeolite: vendored libcurl bundle has no trailing export list");
+  }
+  const body = src.slice(0, tail.index);
+  const factory = new Function(`${body}\nreturn { LibcurlClient, default: LibcurlClient };`);
+  return factory() as { LibcurlClient?: unknown; default?: unknown };
+}
+
 async function getClient(cfg: { websocket: string }): Promise<LibcurlClientLike> {
   if (client && client.ready) return client;
   if (!initPromise) {
     initPromise = (async () => {
       let mod: { LibcurlClient?: unknown; default?: unknown };
       try {
-        mod = (await import(/* @vite-ignore */ moduleUrl())) as typeof mod;
+        mod = await loadBundle(moduleUrl());
       } catch {
         initPromise = null;
         throw new Error(MISSING);
@@ -138,37 +159,6 @@ export async function fetch(url: string, init?: RequestInit): Promise<Response> 
   });
 }
 
-/* Cookie jar access: the libcurl session holds cookies internally
-   (per-site persistence across requests). Direct read/write is not in
-   the declared API, so probe the session defensively and fail
-   honestly rather than pretend. */
-function sessionMethod(name: string): ((...args: unknown[]) => unknown) | null {
-  const s = client?.session;
-  if (s && typeof s === "object" && name in (s as Record<string, unknown>)) {
-    const fn = (s as Record<string, unknown>)[name];
-    if (typeof fn === "function") return fn as (...args: unknown[]) => unknown;
-  }
-  return null;
-}
-
-export async function getCookies(_url: string): Promise<Array<{ name: string; value: string }>> {
-  if (!client) throw new Error("zeolite: transport not initialized (call init first)");
-  const fn = sessionMethod("getCookies") ?? sessionMethod("dumpCookies");
-  if (!fn) throw new Error("zeolite: cookie export not supported by vendored transport");
-  const out = (await fn.call(client.session, _url)) as Array<{ name: string; value: string }>;
-  return Array.isArray(out) ? out : [];
-}
-
-export async function setCookies(
-  _url: string,
-  _cookies: Array<{ name: string; value: string }>,
-): Promise<void> {
-  if (!client) throw new Error("zeolite: transport not initialized (call init first)");
-  const fn = sessionMethod("setCookies") ?? sessionMethod("loadCookies");
-  if (!fn) throw new Error("zeolite: cookie import not supported by vendored transport");
-  await fn.call(client.session, _url, _cookies);
-}
-
 /* WebSocket (1.3 Carbide). LibcurlClient.connect terminates TLS and
    runs the ws handshake over a raw wisp TCP stream, which is the same
    proven path proxied HTTPS uses. */
@@ -195,3 +185,4 @@ export function openWebSocket(url: string, protocols: string[], h: WsHandlers): 
   );
   return { send, close };
 }
+

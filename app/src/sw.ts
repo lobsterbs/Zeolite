@@ -39,7 +39,8 @@ import { runRequestInterception, runResponseInterception, BODY_LIMIT, type Inter
 import { DIAG, redactSecrets } from "./diag";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
 import { beginRecording, finishRecording, type RecordingState } from "./recording";
-import { openWebSocket } from "./libcurl-transport-vendored";
+import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket } from "./libcurl-transport-vendored";
+import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
 import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarLoad, jarReplace, jarSnapshot } from "./cookies";
 import { DownloadTracker } from "./downloads";
@@ -75,25 +76,25 @@ declare const self: ServiceWorkerGlobalScope;
 
 /* ---- HTTP over wisp ----------------------------------------------- */
 /* Phase 1: libcurl wasm transport (BareMux-compatible), the same proven
-   TLS-termination path Scramjet uses. Vendored build replaces
-   src/libcurl-transport-vendored.ts; until then calls throw and the
-   suite records transport-missing. */
+   TLS-termination path ScramJet uses. The vendored bundle is loaded by
+   src/libcurl-transport-vendored.ts. Both this module and the loader use
+   STATIC imports only: dynamic import() is not available on
+   ServiceWorkerGlobalScope in Chromium, and a dynamic import here used
+   to kill every proxied fetch with a ReferenceError from vite's
+   preload helper. Until the CI vendoring step runs, calls throw and
+   the suite records transport-missing. */
 
 let curlReady: Promise<void> | null = null;
 async function ensureCurl(): Promise<void> {
   if (!curlReady) {
-    curlReady = (async () => {
-      const mod = await import("./libcurl-transport-vendored");
-      await mod.init({ websocket: ZL_WISP_URL });
-    })();
+    curlReady = zlCurlInit({ websocket: ZL_WISP_URL });
   }
   return curlReady;
 }
 
 async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
   await ensureCurl();
-  const mod = await import("./libcurl-transport-vendored");
-  return mod.fetch(dest, init);
+  return zlCurlFetch(dest, init);
 }
 
 /* ---- Header surgery ------------------------------------------------ */
@@ -130,10 +131,20 @@ interface JsRewriter {
 interface RewriterMod {
   JsRewriter: new (origin: string, base: string, prefix: string) => JsRewriter;
   rewriteCss(css: string, origin: string, base: string, prefix: string): string;
+  /* wasm-pack --target web output: `default` is the async init that
+     fetches and instantiates the .wasm binary. Without it every
+     JsRewriter call dies on an unbound wasm table. */
+  default(path?: unknown): Promise<unknown>;
 }
 let rewriterMod: Promise<RewriterMod> | null = null;
 function rewriter(): Promise<RewriterMod> {
-  if (!rewriterMod) rewriterMod = import("./rewriter_wasm/rewriter_wasm.js");
+  if (!rewriterMod) {
+    rewriterMod = (async () => {
+      const mod = rewriterWasm as unknown as RewriterMod;
+      if (typeof mod.default === "function") await mod.default();
+      return mod;
+    })();
+  }
   return rewriterMod;
 }
 
