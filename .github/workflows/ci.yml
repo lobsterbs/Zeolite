@@ -186,14 +186,21 @@ jobs:
         run: |
           cargo build -p zeolite-server --release
           cd app && npm install && npm run build && cd ..
-          ./target/release/zeolite-server --port 6002 &
+          # ZL_TEST_ALLOW_PRIVATE_DESTS=1: test-only policy escape hatch
+          # so the engine may reach the local fixture origin. The
+          # default policy stays fully locked down.
+          ZL_TEST_ALLOW_PRIVATE_DESTS=1 ./target/release/zeolite-server --port 6002 &
           sleep 2
           node suite/probe.mjs --base http://localhost:6002
+          node suite/capabilities.mjs --base http://localhost:6002
+          node suite/replay.mjs --base http://localhost:6002
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: zeolite-scoreboard
-          path: suite/scoreboard.*
+          path: |
+            suite/scoreboard.*
+            suite/capabilities.*
       # Publish the scoreboard as a public page (Phase 4): the latest
       # JSON + Markdown land on the "scoreboard" branch, force-updated
       # so the branch always reflects the newest nightly run.

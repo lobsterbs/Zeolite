@@ -1,0 +1,28 @@
+{
+  "format": "zlRecord",
+  "version": 1,
+  "engine": "1.9 Fullerene",
+  "id": "fixture-session",
+  "startedAt": 0,
+  "stoppedAt": 1,
+  "requests": [
+    { "seq": 1, "method": "GET", "dest": "http://%FIXTURE%/page.html", "status": 200, "rtype": "DOCUMENT", "bytes": -1, "rewritten": "html" },
+    { "seq": 2, "method": "GET", "dest": "http://%FIXTURE%/page2", "status": 200, "rtype": "DOCUMENT", "bytes": 62 },
+    { "seq": 3, "method": "GET", "dest": "http://%FIXTURE%/app.js", "status": 200, "rtype": "SCRIPT", "bytes": 60 },
+    { "seq": 4, "method": "GET", "dest": "http://%FIXTURE%/style.css", "status": 200, "rtype": "STYLE", "bytes": 80 },
+    { "seq": 5, "method": "GET", "dest": "http://%FIXTURE%/redirect301", "status": 200, "rtype": "DOCUMENT", "bytes": 62 },
+    { "seq": 6, "method": "GET", "dest": "http://%FIXTURE%/media.bin", "status": 200, "rtype": "MEDIA", "bytes": 14 },
+    { "seq": 7, "method": "GET", "dest": "http://%FIXTURE%/download", "status": 200, "rtype": "OTHER", "bytes": 14 },
+    { "seq": 8, "method": "GET", "dest": "http://%FIXTURE%/missing", "status": 404, "rtype": "FETCH", "bytes": 16 },
+    { "seq": 9, "method": "GET", "dest": "http://%FIXTURE%/boom", "status": 500, "rtype": "FETCH", "bytes": 18 }
+  ],
+  "decisions": [
+    { "seq": 1, "subsystem": "rewriter", "rule": "html", "original": "http://%FIXTURE%/page.html", "result": "streaming" }
+  ],
+  "websockets": [
+    { "seq": 2, "kind": "open", "url": "wss://%FIXTURE%/ws" }
+  ],
+  "cookies": [
+    { "origin": "fixture", "name": "fx", "domain": "127.0.0.1", "path": "/" }
+  ]
+}

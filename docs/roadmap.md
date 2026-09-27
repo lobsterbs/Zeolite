@@ -173,7 +173,7 @@ the host's job (no tz database in the engine), and the default
 profile is deliberately a shared fixed fingerprint, not per-session
 randomness.
 
-## Phase 9 — 1.9 Fullerene: compat suite + scoreboard + recording/replay (next)
+## Phase 9 — 1.9 Fullerene: compat suite + scoreboard + recording/replay (shipped)
 
 Prompts items 15, 16, 17. Expand the probe suite to real browser
 behavior (HTML/CSS/JS, fetch, XHR, WebSocket, workers, storage, cookies,
@@ -184,7 +184,33 @@ navigations, requests, responses, rewrite decisions, cookies and
 WebSocket messages, with a replay harness for regression testing engine
 changes against recorded sessions.
 
-## Phase 10 — 2.0 Graphene: documentation + final hardening
+Shipped as: a per-capability scoreboard (suite/capabilities.mjs) that
+runs against a deterministic local fixture origin (suite/fixtures.mjs)
+through the real engine path, writing structured JSON + Markdown
+(suite/capabilities.json/.md). Only proven-safe capabilities are gated
+(html-links, opaque-urls, js-serve, fetch-get, fetch-post); everything
+else is report-only so the scoreboard surfaces reality instead of
+pretending. Client-runtime rows (WebSocket bridge, workers, storage,
+Cache API, client cookies, SPA routing) are honestly marked
+client-runtime: a plain HTTP probe cannot execute page JavaScript, so
+they stay covered by the app unit suite. Deterministic session
+recording (app/src/recording.ts, zl:recordStart/zl:recordStop control
+messages) builds zlRecord artifacts: requests from the network ring,
+rewrite decisions from the tracing ring (tracing is force-enabled
+while recording), WebSocket lifecycle events (direction only, never
+payloads) and the cookie jar shape (names/scopes only, never values;
+URLs are secret-redacted). The replay harness (suite/replay.mjs)
+re-issues recorded destination URLs through the engine and compares
+the stable facts only: reachability, status class and unrewritten-URL
+absence. Bodies, headers and timings were never recorded and are
+honestly not compared. The checked-in fixture session
+(suite/sessions/fixture.session.json) uses a %FIXTURE% token so replay
+stays port-independent. The nightly compat job runs the scoreboard and
+replay; reaching the loopback fixture origin requires the explicit
+test-only ZL_TEST_ALLOW_PRIVATE_DESTS=1 policy escape hatch, and the
+default SSRF policy stays fully locked down.
+
+## Phase 10 — 2.0 Graphene: documentation + final hardening (next)
 
 Prompts items 22, 23. Docs rewritten to describe actual behavior with
 a per-feature support/limitation matrix (no claims beyond reality), full

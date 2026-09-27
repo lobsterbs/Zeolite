@@ -30,9 +30,15 @@ pub struct DestinationPolicy {
 
 impl Default for DestinationPolicy {
     fn default() -> Self {
+        // Test escape hatch ONLY: the nightly compat suite runs the
+        // engine against a fixture origin on 127.0.0.1. Production
+        // must never set this; the default stays fully locked down.
+        let test_private = std::env::var("ZL_TEST_ALLOW_PRIVATE_DESTS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         Self {
             block_local_names: true,
-            block_private_ips: true,
+            block_private_ips: !test_private,
         }
     }
 }

@@ -19,6 +19,8 @@
      { type: "zl:wsOpen", url, protocols }   page WebSocket bridge (1.3)
      { type: "zl:docCookie", origin, set }  per-origin document.cookie (1.5)
      { type: "zl:fingerprint", profile }   document surface spoofing (1.8)
+     { type: "zl:recordStart", recId }     deterministic session recording (1.9)
+     { type: "zl:recordStop" }             build the zlRecord artifact
    Replies are posted back on the given MessageChannel port, so the
    adapter (and the devtools page) get real acknowledgements.
 
@@ -36,6 +38,7 @@ import { applyRules, loadRules, setRulesEnabled, type ResourceType } from "./rul
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
 import { DIAG, redactSecrets } from "./diag";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
+import { beginRecording, finishRecording, type RecordingState } from "./recording";
 import { openWebSocket } from "./libcurl-transport-vendored";
 import { WsBridge, type PortLike } from "./wsbridge";
 import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarLoad, jarReplace, jarSnapshot } from "./cookies";
@@ -361,7 +364,7 @@ const wsBridge = new WsBridge(
    entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
-export const ZEOLITE_VERSION = "1.8 Telluride";
+export const ZEOLITE_VERSION = "1.9 Fullerene";
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
 /* 1.7 Sulfide: download registry. Attachment responses pass through a
@@ -375,6 +378,8 @@ const DL = new DownloadTracker();
    surfaces, the honest default. Resets on SW restart, like the other
    host toggles; a rejected profile never changes active state. */
 let fpProfile: FingerprintProfile | null = null;
+/* 1.9 Fullerene: active session recording, when any. */
+let rec: RecordingState | null = null;
 let fpScript: string | null = null;
 function setFingerprint(profile: unknown): { ok: true; profile?: FingerprintProfile } | { ok: false; error: string } {
   if (profile === null || profile === undefined) {
@@ -1097,7 +1102,9 @@ interface ControlMessage {
     | "zl:cancelDownload"
     | "zl:exportSession"
     | "zl:importSession"
-    | "zl:fingerprint";
+    | "zl:fingerprint"
+    | "zl:recordStart"
+    | "zl:recordStop";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -1124,6 +1131,8 @@ interface ControlMessage {
   extra?: unknown;
   /** zl:fingerprint: profile object, or null to return to native. */
   profile?: unknown;
+  /** zl:recordStart: caller-supplied recording id. */
+  recId?: string;
   /** zl:installExt: packaged (.xpi/.zip) bytes. */
   bytes?: Uint8Array;
   /** zl:installExtFiles: unpacked directory listing, path -> bytes. */
@@ -1208,6 +1217,44 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
          fully native surfaces. */
       reply(setFingerprint(msg.profile ?? null));
       break;
+    case "zl:recordStart": {
+      /* 1.9 Fullerene: deterministic session recording. Forcing the
+         tracing ring on is a recording side effect, not a silent
+         surveillance default: recording is always explicit. */
+      if (rec) {
+        reply({ ok: false, error: "recording already active: " + rec.id });
+        break;
+      }
+      const snap = tracingSnapshot(0);
+      rec = beginRecording({
+        id: msg.recId,
+        now: Date.now(),
+        netCursor: netSeq,
+        traceCursor: snap.lastSeq,
+        tracingWasEnabled: snap.enabled,
+      });
+      setTracing(true);
+      reply({ ok: true, record: { id: rec.id, startedAt: rec.startedAt } });
+      break;
+    }
+    case "zl:recordStop": {
+      if (!rec) {
+        reply({ ok: false, error: "no recording active" });
+        break;
+      }
+      const r = rec;
+      rec = null;
+      const record = finishRecording(r, {
+        now: Date.now(),
+        engine: ZEOLITE_VERSION,
+        netEntries: netLog.filter((x) => x.seq > r.netCursor),
+        traceEntries: tracingSnapshot(r.traceCursor).entries,
+        cookieJar: [...jarSnapshot()],
+      });
+      setTracing(r.tracingWasEnabled);
+      reply({ ok: true, record });
+      break;
+    }
     case "zl:downloads":
       /* 1.7 Sulfide: registry snapshot, newest first. */
       reply({ ok: true, downloads: DL.snapshot() });
