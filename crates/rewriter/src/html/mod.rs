@@ -19,7 +19,7 @@ pub mod css;
 pub mod url_attrs;
 
 use crate::config::RewriteConfig;
-use crate::encode::{b64u_decode, resolve};
+use crate::encode::resolve;
 
 /// Tokenizer state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -558,14 +558,8 @@ mod tests {
             .split("href=\"")
             .nth(1)
             .and_then(|s| s.split('#').next())
-            .map(|route| {
-                route
-                    .rsplit('/')
-                    .next()
-                    .map(|seg| b64u_decode(seg))
-                    .flatten()
-            })
-            .flatten()
+            .and_then(|route| route.rsplit('/').next())
+            .and_then(crate::encode::b64u_decode)
             .and_then(|b| String::from_utf8(b).ok())
             .unwrap_or_default();
         assert_eq!(decoded, "https://cdn.example.net/sprites.svg");
