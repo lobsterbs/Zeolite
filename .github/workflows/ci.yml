@@ -127,8 +127,8 @@ jobs:
         run: |
           cd app
           rm -f vitest.out
-          timeout 300 npx vitest run --reporter=default > vitest.out 2>&1
-          code=$?
+          code=0
+          timeout 300 npx vitest run --reporter=default > vitest.out 2>&1 || code=$?
           if [ "$code" -ne 0 ]; then
             if [ "$code" -eq 124 ]; then
               echo "::error::VITEST still running after 300s and was killed; last output below"
