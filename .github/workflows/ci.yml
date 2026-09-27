@@ -121,9 +121,18 @@ jobs:
           if grep -q "error TS" tsc.out; then exit 1; fi
           npm run build
       - name: Extension subsystem unit tests
+        # Wall-clock guard: a wedged vitest (open handles keep the
+        # process alive past the per-test timeouts) must fail the run
+        # in minutes with its last output, not hang the job for 6h.
         run: |
           cd app
-          if ! npx vitest run --reporter=default > vitest.out 2>&1; then
+          rm -f vitest.out
+          timeout 300 npx vitest run --reporter=default > vitest.out 2>&1
+          code=$?
+          if [ "$code" -ne 0 ]; then
+            if [ "$code" -eq 124 ]; then
+              echo "::error::VITEST still running after 300s and was killed; last output below"
+            fi
             grep -E "FAIL|AssertionError|Error:" vitest.out | head -9 | while IFS= read -r l; do echo "::error::VITEST $l"; done
             tail -40 vitest.out
             exit 1

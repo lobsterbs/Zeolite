@@ -66,10 +66,8 @@ describe("DownloadTracker", () => {
 
   it("cancel severs an in-flight download", async () => {
     const t = new DownloadTracker();
-    let pullCount = 0;
     const body = new ReadableStream<Uint8Array>({
       pull(ctrl) {
-        pullCount++;
         ctrl.enqueue(new Uint8Array(4));
       },
     });
@@ -78,13 +76,18 @@ describe("DownloadTracker", () => {
     const reader = wrapped.getReader();
     await reader.read();
     expect(t.cancel(id)).toBe(true);
-    /* queued chunks may still resolve first; the severed stream must
-       reject once they run out */
-    await expect(
-      (async () => {
-        for (;;) await reader.read();
-      })(),
-    ).rejects.toThrow();
+    /* queued chunks may still resolve first; a bounded number of reads
+       must reach the rejection. No unbounded read loops: a stream that
+       merely stalls fails the test instead of hanging it. */
+    let severed = false;
+    for (let i = 0; i < 4 && !severed; i++) {
+      try {
+        if ((await reader.read()).done) break;
+      } catch {
+        severed = true;
+      }
+    }
+    expect(severed).toBe(true);
     const snap = t.snapshot();
     expect(snap[0].status).toBe("cancelled");
   });
