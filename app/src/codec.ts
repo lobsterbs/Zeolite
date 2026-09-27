@@ -92,3 +92,11 @@ export function decodePath(path: string): string | null {
   if (!bytes) return null;
   return DEC.decode(bytes);
 }
+
+/** Schemes the engine never routes: the browser owns blob:, data: and
+    about: natively (createObjectURL media, blob workers, generated
+    downloads, data: documents). The SW fetch handler passes these
+    through before any route decoding (1.5 Silicide regression anchor). */
+export function isOpaqueUrl(u: URL): boolean {
+  return u.protocol !== "http:" && u.protocol !== "https:";
+}

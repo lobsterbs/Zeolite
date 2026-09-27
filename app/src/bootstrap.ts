@@ -2,7 +2,8 @@
  rewriter ( right after opens).
 
  Budget: under 5 KB minified (CI enforces). It only patches behavior:
- storage scoping, history, Worker constructors, WebSocket routing.
+ storage scoping, storage/cookie virtualization, Worker constructors,
+ WebSocket routing.
  URL-level fetch/XHR need no patch: pages navigate within engine-local
  paths that the service worker intercepts natively.
 
@@ -53,9 +54,10 @@ function siteKeys(store: Storage): string[] {
 }
 
 {
- const LS = w.localStorage;
- if (LS && typeof LS === "object") {
- const store = LS as Storage;
+ for (const name of ["localStorage", "sessionStorage"] as const) {
+ const LS = w[name] as Storage | undefined;
+ if (!LS || typeof LS !== "object") continue;
+ const store = LS;
  const api = {
  getItem: (k: string) => store.getItem(KEY(k)),
  setItem: (k: string, v: string) => store.setItem(KEY(k), v),
@@ -70,25 +72,132 @@ function siteKeys(store: Storage): string[] {
  };
  const scoped = Object.assign(Object.create(Storage.prototype), api) as Storage;
  try {
- Object.defineProperty(w, "localStorage", { value: scoped, configurable: true });
+ Object.defineProperty(w, name, { value: scoped, configurable: true });
  } catch { /* read-only context: storage then stays unscoped */ }
  }
 }
 
-/* ---- history ------------------------------------------------------- */
-/* Same-origin engine paths mean pushState works natively; this patch
- only normalizes URL arguments so the address bar never leaks a raw
- destination string outside the engine path scheme. */
+/* ---- IndexedDB + Cache API names ---------------------------------- */
+/* 1.5 Silicide: DB and cache names get the same site prefix, so two
+ proxied sites never share a database or a cache, and neither ever
+ touches an engine-own one (the engine's IndexedDB and Cache usage
+ lives in the service worker, not the page). */
 
 {
- const push = History.prototype.pushState;
- const replace = History.prototype.replaceState;
- History.prototype.pushState = function (s: unknown, t: string, u?: string | URL) {
- return push.call(this, s, t, u === undefined ? undefined : String(u));
+ const IDB = w.indexedDB as
+ | (IDBFactory & { databases?: () => Promise<Array<{ name: string }>> })
+ | undefined;
+ if (IDB) {
+ const OPEN = IDB.open.bind(IDB);
+ const DEL = IDB.deleteDatabase.bind(IDB);
+ const DBS = IDB.databases?.bind(IDB);
+ const pre = (n: unknown) => SITE + ":" + String(n);
+ const shim: Record<string, unknown> = {
+ open: (n: unknown, v?: number) => OPEN(pre(n), v),
+ deleteDatabase: (n: unknown) => DEL(pre(n)),
  };
- History.prototype.replaceState = function (s: unknown, t: string, u?: string | URL) {
- return replace.call(this, s, t, u === undefined ? undefined : String(u));
+ if (DBS) {
+ shim.databases = () =>
+ DBS().then((rs) =>
+ rs
+ .filter((r) => r.name.startsWith(SITE + ":"))
+ .map((r) => ({ ...r, name: r.name.slice(SITE.length + 1) })),
+ );
+ }
+ try {
+ (w as Record<string, unknown>).indexedDB = shim;
+ } catch { /* read-only: stays unscoped */ }
+ }
+}
+
+{
+ const CA = w.caches as CacheStorage | undefined;
+ if (CA) {
+ const OPEN = CA.open.bind(CA);
+ const DEL = CA.delete.bind(CA);
+ const HAS = CA.has.bind(CA);
+ const KEYS = CA.keys.bind(CA);
+ const pre = (n: unknown) => SITE + ":" + String(n);
+ const own = (n: string) => n.startsWith(SITE + ":");
+ const strip = (n: string) => n.slice(SITE.length + 1);
+ const shim: Record<string, unknown> = {
+ open: (n: unknown) => OPEN(pre(n)),
+ delete: (n: unknown) => DEL(pre(n)),
+ has: (n: unknown) => HAS(pre(n)),
+ keys: () => KEYS().then((ks) => ks.filter(own).map(strip)),
+ match: async (rq: Request | string, o?: CacheQueryOptions) => {
+ const { cacheName: _cn, ...q } = o ?? {};
+ for (const n of await KEYS()) {
+ if (!own(n)) continue;
+ const hit = await (await CA.open(n)).match(rq, q);
+ if (hit) return hit;
+ }
+ return undefined;
+ },
  };
+ try {
+ (w as Record<string, unknown>).caches = shim;
+ } catch { /* read-only: stays unscoped */ }
+ }
+}
+
+/* ---- document.cookie (virtual, per-origin) ------------------------ */
+/* The getter must be synchronous, the authoritative jar lives in the
+ service worker: the page keeps an optimistic local copy, every read
+ refreshes it asynchronously from the jar, every write applies locally
+ first (read-after-write works) and is forwarded for RFC 6265
+ admission. Eventually consistent across windows; exact at the jar.
+ Expires-based deletion is not detected optimistically; the jar reply
+ corrects it. */
+
+{
+ const ctl =
+ (navigator as { serviceWorker?: { controller?: ServiceWorker } })
+ .serviceWorker?.controller;
+ const ORIGIN = (() => {
+ try {
+ return new URL(ZL.dest).origin;
+ } catch {
+ return "";
+ }
+ })();
+ const desc = Object.getOwnPropertyDescriptor(Document.prototype, "cookie");
+ if (desc && ctl && /^https?:/.test(ORIGIN)) {
+ let cur = "";
+ const sync = (set?: string) => {
+ const ch = new MessageChannel();
+ ch.port1.onmessage = (ev) => {
+ const d = ev.data as { cookie?: string };
+ if (typeof d.cookie === "string") cur = d.cookie;
+ };
+ ctl.postMessage({ type: "zl:docCookie", origin: ORIGIN, set }, [ch.port2]);
+ };
+ Object.defineProperty(document, "cookie", {
+ configurable: true,
+ get: () => {
+ sync();
+ return cur;
+ },
+ set: (v: string) => {
+ const s = String(v);
+ const semi = s.indexOf(";");
+ const pair = semi < 0 ? s : s.slice(0, semi);
+ const eq = pair.indexOf("=");
+ const name = (eq > 0 ? pair.slice(0, eq) : pair).trim();
+ if (!name) return;
+ const val = eq > 0 ? pair.slice(eq + 1).trim() : "";
+ const m = /;\s*max-age\s*=\s*(-?\d+)/i.exec(s);
+ const del = m !== null && Number(m[1]) <= 0;
+ const keep = (cur === "" ? [] : cur.split("; ")).filter(
+ (p) => p.slice(0, p.indexOf("=")) !== name,
+ );
+ if (!del) keep.push(name + "=" + val);
+ cur = keep.join("; ");
+ sync(s);
+ },
+ });
+ sync();
+ }
 }
 
 /* ---- Worker constructor ------------------------------------------- */

@@ -17,6 +17,7 @@
      { type: "zl:getNetLog" }                snapshot of the request log
      { type: "zl:tracing", enabled }          opt-in rewrite tracing ring (1.2)
      { type: "zl:wsOpen", url, protocols }   page WebSocket bridge (1.3)
+     { type: "zl:docCookie", origin, set }  per-origin document.cookie (1.5)
    Replies are posted back on the given MessageChannel port, so the
    adapter (and the devtools page) get real acknowledgements.
 
@@ -25,7 +26,7 @@
    wasm-pack build --target web -> copy into app/src/rewriter_wasm). */
 
 /// <reference lib="webworker" />
-import { decodePath, isEnginePath, setScheme, currentPrefix } from "./codec";
+import { decodePath, isEnginePath, isOpaqueUrl, setScheme, currentPrefix } from "./codec";
 import { decideTransport, refineWithContent, transitRecord, transitStats } from "./transit";
 import { ZL_WISP_URL } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
@@ -36,7 +37,7 @@ import { DIAG, redactSecrets } from "./diag";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
 import { openWebSocket } from "./libcurl-transport-vendored";
 import { WsBridge, type PortLike } from "./wsbridge";
-import { applySetCookie, cookieHeaderFor, jarLoad, jarClear } from "./cookies";
+import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarLoad } from "./cookies";
 import {
   CS_ROUTE,
   EXT_ROUTE,
@@ -341,7 +342,7 @@ const wsBridge = new WsBridge(
    entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
-export const ZEOLITE_VERSION = "1.4 Boride";
+export const ZEOLITE_VERSION = "1.5 Silicide";
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
 const ZL_PAGES = "zeolite-pages-v1";
@@ -573,6 +574,10 @@ function csInjectUrls(target: string, req: Request): string[] {
 self.addEventListener("fetch", (e: FetchEvent) => {
   const url = new URL(e.request.url);
   if (url.origin !== self.location.origin) return; // not ours: browser handles it
+  /* 1.5 Silicide: opaque schemes (blob:, data:, about:) are browser-native
+     and never engine routes: createObjectURL media, blob workers and
+     generated downloads pass through untouched. */
+  if (isOpaqueUrl(url)) return;
   if (url.pathname.startsWith("/wisp/")) return; // transport endpoint: passthrough
   /* Extension routes: web-accessible resources (/zl-ext/) and the
      content-script bridge + declared script files (/zl-cs/). */
@@ -998,7 +1003,8 @@ interface ControlMessage {
     | "zl:adblock"
     | "zl:tracing"
     | "zl:getTracing"
-    | "zl:wsOpen";
+    | "zl:wsOpen"
+    | "zl:docCookie";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -1012,6 +1018,9 @@ interface ControlMessage {
   /** zl:wsOpen: page WebSocket bridge destination + protocols. */
   url?: string;
   protocols?: string[];
+  /** zl:docCookie: page origin + optional document.cookie write. */
+  origin?: string;
+  set?: string;
   /** zl:installExt: packaged (.xpi/.zip) bytes. */
   bytes?: Uint8Array;
   /** zl:installExtFiles: unpacked directory listing, path -> bytes. */
@@ -1070,6 +1079,20 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
         break;
       }
       wsBridge.open(port as unknown as PortLike, msg.url, Array.isArray(msg.protocols) ? msg.protocols : []);
+      break;
+    }
+    case "zl:docCookie": {
+      /* 1.5 Silicide: document.cookie virtualization. Writes are
+         admitted RFC 6265 against the page origin (HttpOnly is
+         stripped: a script cannot mint an HttpOnly cookie); every
+         message is answered with the authoritative jar view so the
+         page-side cache stays eventually consistent. */
+      if (!port || typeof msg.origin !== "string" || !/^https?:/i.test(msg.origin)) {
+        reply({ ok: false, error: "bad zl:docCookie" });
+        break;
+      }
+      if (typeof msg.set === "string") documentCookieWrite(msg.origin, msg.set);
+      reply({ ok: true, cookie: documentCookieRead(msg.origin) });
       break;
     }
     case "zl:teardown":

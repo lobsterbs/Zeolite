@@ -315,6 +315,34 @@ export function cookieHeaderFor(requestUrl: string): string | null {
   return matched.length ? matched.map((c) => c.name + "=" + c.value).join("; ") : null;
 }
 
+/** document.cookie read (RFC 6265 5.4): every cookie that
+    domain-and-scope matches the document origin, regardless of path,
+    never the HttpOnly ones. Expired cookies are filtered out here.
+    The page keeps an eventually-consistent cache because the getter
+    is synchronous while this jar lives in the SW. */
+export function documentCookieRead(pageUrl: string): string {
+  const u = parseUrl(pageUrl);
+  if (!u) return "";
+  const now = Date.now();
+  const matched: Cookie[] = [];
+  for (const list of jars.values()) {
+    for (const c of list) {
+      if (c.httpOnly || (c.expires !== 0 && c.expires <= now)) continue;
+      const domainOk = c.hostOnly ? u.host === c.domain : domainMatch(u.host, c.domain);
+      if (domainOk && (!c.secure || u.secure)) matched.push(c);
+    }
+  }
+  matched.sort((a, b) => a.created - b.created);
+  return matched.map((c) => c.name + "=" + c.value).join("; ");
+}
+
+/** document.cookie write (RFC 6265 5.6): admission against the page
+    URL. A script cannot mint an HttpOnly cookie, so the attribute is
+    stripped before admission (spec: ignore it). */
+export function documentCookieWrite(pageUrl: string, cookie: string): SetCookieResult {
+  return admitCookie(pageUrl, cookie.replace(/;\s*httponly\b/gi, ""));
+}
+
 /** Jar contents per virtual-origin id, for tests and inspection. */
 export function jarSnapshot(): Map<string, Cookie[]> {
   const out = new Map<string, Cookie[]>();

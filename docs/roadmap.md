@@ -71,7 +71,7 @@ are), SameSite is parsed but not enforced (engine-initiated requests
 have no site context), and document.cookie virtualization is Phase 5
 scope.
 
-## Phase 5 — 1.5 Silicide: storage virtualization + blob/data URLs (next)
+## Phase 5 — 1.5 Silicide: storage virtualization + blob/data URLs (shipped)
 
 Prompts items 3, 8. Per-origin localStorage/sessionStorage/IndexedDB
 partitioning (extending the existing `zl:<sitehash>:` scheme), Cache API
@@ -79,7 +79,20 @@ partitioning where practical, and correct blob:/data:/about: handling
 (createObjectURL, blob workers, blob media, generated downloads) with
 regression tests.
 
-## Phase 6 — 1.6 Hydride: worker + service worker virtualization
+Shipped as the 1.5 release: localStorage/sessionStorage are scoped by
+the existing `zl:<sitehash>:` key prefix in the bootstrap; IndexedDB
+names and Cache API names are prefixed the same way (open, delete,
+databases, has, keys, match are wrapped, so a proxied site only ever
+sees its own databases and caches); document.cookie is virtualized
+through the `zl:docCookie` control message against the 1.4 jar (the
+page keeps an eventually-consistent cache because the getter is
+synchronous); blob:/data:/about: pass through the fetch handler
+untouched (see docs/storage.md). Honest limits: document.cookie reads
+are eventually consistent (the local cache is corrected by the
+authoritative jar reply), Expires-based deletion is not detected
+optimistically in the page, and IDBFactory.cmp is not wrapped.
+
+## Phase 6 — 1.6 Hydride: worker + service worker virtualization (next)
 
 Prompts items 6, 7. Classic and module workers wrapped with the runtime
 (importScripts, module imports, fetch, WebSocket keep working through
