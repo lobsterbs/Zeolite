@@ -13,6 +13,7 @@ export default defineConfig({
         devtools: "devtools.html",
         sw: "src/sw.ts",
         bootstrap: "src/bootstrap.ts",
+        prelude: "src/worker-prelude.ts",
       },
       output: {
         entryFileNames: "[name].js",

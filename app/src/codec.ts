@@ -100,3 +100,10 @@ export function decodePath(path: string): string | null {
 export function isOpaqueUrl(u: URL): boolean {
   return u.protocol !== "http:" && u.protocol !== "https:";
 }
+
+/** Request destinations whose script responses get the worker
+    prelude prepended (classic + shared workers; service-worker
+    scripts are never intercepted by another SW, by browser rules). */
+export function isWorkerDestination(d: string): boolean {
+  return d === "worker" || d === "sharedworker";
+}

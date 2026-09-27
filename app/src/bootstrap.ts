@@ -3,13 +3,16 @@
 
  Budget: under 5 KB minified (CI enforces). It only patches behavior:
  storage scoping, storage/cookie virtualization, Worker constructors,
- WebSocket routing.
+ WebSocket routing, the worker WebSocket relay and the
+ navigator.serviceWorker shim.
  URL-level fetch/XHR need no patch: pages navigate within engine-local
  paths that the service worker intercepts natively.
 
  Page-global contract (set by the rewriter at injection time):
  window.__ZL = { dest: "https://real.site/page" }
  falls back to document.baseURI when absent. */
+
+import { swShimApply } from "./swshim";
 
 const w = window as unknown as Record<string, unknown>;
 const ZL = ((w.__ZL as { dest: string } | undefined) ??
@@ -196,6 +199,34 @@ function siteKeys(store: Storage): string[] {
  },
  });
  sync();
+ }
+}
+
+/* ---- worker WebSocket relay + serviceWorker shim ------------------- */
+/* 1.6 Hydride: workers have no direct channel to the service worker.
+ The worker prelude posts its zl:wsOpen to the parent page; this relay
+ forwards it (with the transferred port) to the engine controller. */
+
+addEventListener("message", (e: MessageEvent) => {
+ const d = e.data as { zl?: string; msg?: unknown };
+ if (d && d.zl === "ws")
+  (navigator as { serviceWorker?: { controller?: { postMessage: (m: unknown, p?: MessagePort[]) => void } } })
+   .serviceWorker?.controller?.postMessage(d.msg, e.ports as unknown as MessagePort[]);
+});
+
+/* navigator.serviceWorker shim: per-origin virtual registrations in
+ the site-scoped localStorage. No script ever runs - the engine owns
+ the only real scope (browser security, documented not hacked). */
+
+{
+ const NS = (navigator as { serviceWorker?: unknown }).serviceWorker;
+ if (NS && /^https?:/.test(siteKey())) {
+  const LS = w.localStorage as unknown as Storage;
+  swShimApply(NS as object, {
+   get: () => LS.getItem("swreg"),
+   set: (v: string) => void LS.setItem("swreg", v),
+   clear: () => void LS.removeItem("swreg"),
+  }, ZL.dest);
  }
 }
 

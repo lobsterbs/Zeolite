@@ -26,7 +26,7 @@
    wasm-pack build --target web -> copy into app/src/rewriter_wasm). */
 
 /// <reference lib="webworker" />
-import { decodePath, isEnginePath, isOpaqueUrl, setScheme, currentPrefix } from "./codec";
+import { decodePath, isEnginePath, isOpaqueUrl, isWorkerDestination, setScheme, currentPrefix } from "./codec";
 import { decideTransport, refineWithContent, transitRecord, transitStats } from "./transit";
 import { ZL_WISP_URL } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
@@ -128,6 +128,18 @@ let rewriterMod: Promise<RewriterMod> | null = null;
 function rewriter(): Promise<RewriterMod> {
   if (!rewriterMod) rewriterMod = import("./rewriter_wasm/rewriter_wasm.js");
   return rewriterMod;
+}
+
+/* 1.6 Hydride: the worker prelude asset is fetched once and cached in
+   memory; the live route prefix and the upstream worker URL are baked
+   into the injected first line at serve time. */
+let preludeCache: string | null = null;
+async function workerPrelude(): Promise<string> {
+  if (preludeCache === null) {
+    const r = await fetch(new URL("worker-prelude.js", self.registration.scope).href);
+    preludeCache = await r.text();
+  }
+  return preludeCache;
 }
 
 function isHtml(resp: Response): boolean {
@@ -342,7 +354,7 @@ const wsBridge = new WsBridge(
    entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
-export const ZEOLITE_VERSION = "1.5 Silicide";
+export const ZEOLITE_VERSION = "1.6 Hydride";
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
 const ZL_PAGES = "zeolite-pages-v1";
@@ -929,6 +941,32 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
           WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
           return new Response(out, { status: resp.status, headers: outHeaders });
+        }
+        if (isWorkerDestination(e.request.destination) && resp.body) {
+          /* 1.6 Hydride: classic/shared worker scripts get the prelude
+             prepended (importScripts routing, dedicated-worker
+             WebSocket bridge); module workers keep their rewritten
+             specifiers and the prelude is inert there. Streaming is
+             preserved: the prelude is one extra first chunk. */
+          DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude" });
+          const prelude =
+            "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) +
+            ";self.__ZL_WORKER_URL__=" + JSON.stringify(target) + ";\n" +
+            (await workerPrelude());
+          const body = new ReadableStream<Uint8Array>({
+            async start(c) {
+              c.enqueue(new TextEncoder().encode(prelude));
+              const rd = resp.body!.getReader();
+              for (;;) {
+                const { done, value } = await rd.read();
+                if (done) break;
+                c.enqueue(value);
+              }
+              c.close();
+            },
+          });
+          WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+          return new Response(body, { status: resp.status, headers: outHeaders });
         }
         WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
         return new Response(resp.body, { status: resp.status, headers: outHeaders });

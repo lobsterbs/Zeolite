@@ -92,7 +92,7 @@ are eventually consistent (the local cache is corrected by the
 authoritative jar reply), Expires-based deletion is not detected
 optimistically in the page, and IDBFactory.cmp is not wrapped.
 
-## Phase 6 — 1.6 Hydride: worker + service worker virtualization (next)
+## Phase 6 — 1.6 Hydride: worker + service worker virtualization (shipped)
 
 Prompts items 6, 7. Classic and module workers wrapped with the runtime
 (importScripts, module imports, fetch, WebSocket keep working through
@@ -102,7 +102,24 @@ waiting/active/controller states) with per-origin isolation. Browser
 security limits (the engine origin owns the real SW scope) are
 documented, not hacked around.
 
-## Phase 7 — 1.7 Sulfide: downloads + session export
+Shipped as the 1.6 release: classic worker scripts served by the engine
+get a prelude (app/src/worker-prelude.ts) prepended by the SW, with the
+live route prefix and upstream worker URL baked into the injected first
+line: importScripts() arguments are routed through the engine codec,
+and dedicated-worker WebSocket is bridged over postMessage to the
+parent page, which relays to the existing zl:wsOpen seam (streaming
+preserved: the prelude is one extra first chunk). navigator.serviceWorker
+is virtualized per origin (app/src/swshim.ts + bootstrap wiring):
+registrations are records in the site-scoped storage with an
+installing -> activated state machine, and register/getRegistration(s)/
+unregister/update/ready are shape-compatible. Honest limits: no virtual
+SW script is ever fetched or executed (the engine owns the only real
+scope - browser security, documented not hacked), controller stays the
+engine's real worker, SharedWorker WebSocket stays native (no single
+parent page), and module workers rely on the rewriter's specifier
+passes instead of the prelude.
+
+## Phase 7 — 1.7 Sulfide: downloads + session export (next)
 
 Prompts items 12, 13. Download manager fed by engine network info:
 filename, MIME, size, progress, speed, source, status, errors,
