@@ -34,9 +34,14 @@ Extension pipeline status: webRequest is wired into the engine fetch path (onBef
 - `app/src/sw.ts` Ã¢ÂÂ service-worker/interception entrypoint.
 - `app/src/extensions/` Ã¢ÂÂ WebExtension compatibility runtime.
 - `app/src/diag.ts` Ã¢ÂÂ bounded diagnostics.
+- `app/src/rules.ts` - interception rules engine (block/allow/rewrite/modify, compiled from /rules.json).
+- `app/src/intercept.ts` - public interception API (Phase 1).
 - `app/src/transit.ts` Ã¢ÂÂ NativeTransit transport-mode decision layer + fallback record.
 - `suite/` Ã¢ÂÂ compatibility probes.
 - `docs/` Ã¢ÂÂ architecture, roadmap, versioning and adapter docs.
+
+## Interception API + rules engine (Phase 1, 1.1 Oxide)
+**Implemented** in `app/src/intercept.ts` (public `intercept(kind, handler)`: request/response plus navigation/worker/websocket/fetch filtered dispatch; block, URL rewrite, header merge; opt-in response body transforms behind the 512 KiB BODY_LIMIT gate, never for documents/stylesheets) and `app/src/rules.ts` (block/allow/rewrite/modify lists with resource-type filters, compiled once from `app/public/rules.json`, which ships the ad/tracker host lists migrated from the browser app's server-side engine plus the captcha-host allowlist). The host toggles rules via the `zl:adblock` control message; the flag resets to enabled on SW restart. Contract: docs/interception.md. Honest limits: rules.json is global (per-site compatibility stays in siteconfig.json); the host's per-site adblock overrides apply only to the server-side engine; transformed responses are not page-cached.
 
 ## Hard invariants
 - Rewriting stays streaming; never buffer whole documents for convenience.
@@ -78,4 +83,4 @@ Reusable integrations must have stable boundaries, documented inputs/outputs, ex
 Use **Implemented**, **Partial**, **Experimental**, or **Planned**. Never describe NativeTransit as implemented until code and tests prove it.
 
 ## Versioning
-Current release: **1.0 Nitride** (`1.0.0`). See `docs/versioning.md` before changing version identifiers.
+Current release: **1.1 Oxide** (`1.1.0`). See `docs/versioning.md` before changing version identifiers.

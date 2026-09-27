@@ -28,6 +28,8 @@ import { decideTransport, refineWithContent, transitRecord, transitStats } from 
 import { ZL_WISP_URL } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
+import { applyRules, loadRules, setRulesEnabled, type ResourceType } from "./rules";
+import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
 import { DIAG } from "./diag";
 import {
   CS_ROUTE,
@@ -223,7 +225,7 @@ function netLogPush(entry: Omit<NetEntry, "seq" | "ts">): void {
    entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
-export const ZEOLITE_VERSION = "1.0 Nitride";
+export const ZEOLITE_VERSION = "1.1 Oxide";
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
 const ZL_PAGES = "zeolite-pages-v1";
@@ -474,7 +476,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
     ? dest0.split("#", 1)[0] || dest0
     : dest0;
   // Query string travels outside the encoded destination.
-  const target = url.search ? bareDest + url.search : bareDest;
+  let target = url.search ? bareDest + url.search : bareDest;
 
   if (siteDisabled(target)) {
     e.respondWith(
@@ -538,6 +540,67 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           headers: { "content-type": "text/plain" },
         });
       }
+      /* Phase 1 (1.1 Oxide): rules engine + interception API. Data
+         rules first, then programmatic handlers; a block from either
+         wins, before cache and transport. See docs/interception.md. */
+      const engineRules = await loadRules();
+      const rtype = classifyRtype(
+        e.request.headers.get("sec-fetch-dest") ?? "",
+        "",
+      ).toLowerCase() as ResourceType;
+      const ruleDec = applyRules(engineRules, target, rtype);
+      const kinds: InterceptKind[] = ["request"];
+      if (e.request.mode === "navigate") kinds.push("navigation");
+      if (rtype === "worker") kinds.push("worker");
+      if (rtype === "websocket") kinds.push("websocket");
+      if (rtype === "fetch") kinds.push("fetch");
+      const flatReq: Record<string, string> = {};
+      e.request.headers.forEach((v, k) => (flatReq[k] = v));
+      const ic = runRequestInterception(kinds, {
+        url: ruleDec.url ?? target,
+        method: e.request.method,
+        rtype,
+        headers: flatReq,
+      });
+      const extraHeaders: Record<string, string> = {
+        ...(ruleDec.headers ?? {}),
+        ...(ic.headers ?? {}),
+      };
+      if (ruleDec.action === "block" || ic.block) {
+        DIAG.emit({
+          category: "BLOCKED",
+          cause: "blocked",
+          severity: "info",
+          message:
+            "request blocked by " +
+            (ruleDec.action === "block"
+              ? "rules (" + (ruleDec.matched ?? "") + ")"
+              : "intercept handler"),
+          stage: "REQUEST_INTERCEPTED",
+          url: target,
+          traceId,
+          requestId: traceId,
+        });
+        transitRecord(traceId, target, decision);
+        netLogPush({
+          method: e.request.method, traceId,
+          path: url.pathname + url.search,
+          dest: target,
+          status: 403,
+          rtype: rtype.toUpperCase(),
+          ms: Date.now() - t0,
+          bytes: -1,
+          verdict: ruleDec.action === "block" ? "blocked:rules" : "blocked:intercept",
+          transport: decision.mode,
+          fallbackReason: decision.fallbackReason,
+        });
+        return new Response("zeolite: request blocked", {
+          status: 403,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      if (ruleDec.url || ic.url) target = ic.url ?? ruleDec.url ?? target;
+
       /* Cache-first for proxied GETs. */
       if (e.request.method === "GET") {
         const hit = await pageCacheMatch(e.request);
@@ -582,6 +645,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         const replaced = WEBREQ.beforeSendHeaders(wrDetails, fwd);
         const sendHeaders = replaced ?? fwd;
         await applyOnRequest(plugins, target, sendHeaders);
+        for (const [k, v] of Object.entries(extraHeaders)) sendHeaders.set(k, v);
         const resp = await wispFetch(target, {
           method: e.request.method,
           headers: sendHeaders,
@@ -622,6 +686,31 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           fallbackReason: dec.fallbackReason,
           finalDest,
         });
+        /* Opt-in response body transform (1.1): only when an intercept
+           handler declared one AND the size gate passes. Documents and
+           stylesheets are excluded (the streaming rewriter owns
+           those); transformed responses are never page-cached. */
+        const flatOut: Record<string, string> = {};
+        outHeaders.forEach((v, k) => (flatOut[k] = v));
+        const rIc = runResponseInterception({
+          url: target,
+          status: resp.status,
+          rtype,
+          headers: flatOut,
+        });
+        if (rIc.headers) {
+          for (const [k, v] of Object.entries(rIc.headers)) outHeaders.set(k, v);
+        }
+        if (rIc.body && !isHtml(resp) && !isCss(resp)) {
+          const clen = Number(resp.headers.get("content-length") ?? -1);
+          if (clen >= 0 && clen <= BODY_LIMIT) {
+            WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            return new Response(rIc.body(await resp.text()), {
+              status: resp.status,
+              headers: outHeaders,
+            });
+          }
+        }
         if (e.request.method === "GET") void pageCacheStore(e.request, resp.clone());
         if (isHtml(resp) && resp.body) {
           DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
@@ -722,7 +811,8 @@ interface ControlMessage {
     | "zl:installExt"
     | "zl:installExtFiles"
     | "zl:extEnable"
-    | "zl:extInfo";
+    | "zl:extInfo"
+    | "zl:adblock";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -751,6 +841,13 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
     case "zl:config":
       // Rotate the URL shape at runtime.
       setScheme(msg.prefix ?? "/j/", msg.scheme ?? "b64u");
+      reply({ ok: true });
+      break;
+    case "zl:adblock":
+      /* Host toggle for the compiled rules (the migrated ad/tracker
+         lists in /rules.json). Data stays loaded; decisions become
+         no-ops while disabled. Resets to enabled on SW restart. */
+      setRulesEnabled(msg.enabled !== false);
       reply({ ok: true });
       break;
     case "zl:siteRoute":

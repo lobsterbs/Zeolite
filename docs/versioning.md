@@ -16,4 +16,4 @@ or **1.1 Oxide**.
   exported by the service worker as `ZEOLITE_VERSION`, and returned in the
   `zl:getNetLog` reply so tooling can pin and display it.
 
-Current release: **1.0 Nitride** (cargo `1.0.0`).
+Current release: **1.1 Oxide** (cargo `1.1.0`).

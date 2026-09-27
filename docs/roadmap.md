@@ -5,7 +5,7 @@ one version milestone (see docs/versioning.md) and lands through CI
 (cargo fmt/clippy/test, wasm build, tsc, vite build, compat probes) before
 the next phase starts. No phase starts while the previous one is red.
 
-## Phase 0 — 1.0 Nitride (this release)
+## Phase 0 — 1.0 Nitride (shipped)
 
 Rename LobsterJet to Zeolite across crates, workspace, CI, app and docs;
 introduce the version system (docs/versioning.md) with the version
@@ -17,7 +17,7 @@ renamed to `Zeolite` in the org settings (GitHub redirects keep old URLs
 working); LobsterBrowse-side references to the old engine name are
 updated in the 1.1 adapter pass.
 
-## Phase 1 — 1.1 Oxide: interception API + rules engine + modification
+## Phase 1 — 1.1 Oxide: interception API + rules engine + modification (this release)
 
 Prompts items 9, 10, 11.
 
