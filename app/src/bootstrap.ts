@@ -161,11 +161,11 @@ function siteKeys(store: Storage): string[] {
  if (typeof d.cookie === "string") cur = d.cookie;
  };
  ctl.postMessage({ type: "zl:docCookie", origin: ORIGIN }, [ch.port2]);
- const sync = (set?: string) => ch.port1.postMessage({ set });
+ const sy = (set?: string) => ch.port1.postMessage({ set });
  Object.defineProperty(document, "cookie", {
  configurable: true,
  get: () => {
- sync();
+ sy();
  return cur;
  },
  set: (v: string) => {
@@ -181,10 +181,10 @@ function siteKeys(store: Storage): string[] {
  );
  keep.push(name + "=" + val);
  cur = keep.join("; ");
- sync(s);
+ sy(s);
  },
  });
- sync();
+ sy();
  }
 }
 
