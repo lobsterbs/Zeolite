@@ -91,7 +91,10 @@ let initPromise: Promise<void> | null = null;
  * against the real 2.1 MB @mercuryworkshop/libcurl-transport bundle
  * inside a live service worker. */
 async function loadBundle(url: string): Promise<{ LibcurlClient?: unknown; default?: unknown }> {
-  const res = await fetch(url, { cache: "no-store" });
+  /* Module-scope shadowing: this module exports its own fetch(),
+   * so a bare fetch() here would recurse into the uninitialized
+   * transport and misreport as MISSING. Always pin globalThis. */
+  const res = await globalThis.fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(MISSING);
   const src = await res.text();
   const tail = src.match(/export\s*\{[^}]*\}\s*;?\s*$/);
