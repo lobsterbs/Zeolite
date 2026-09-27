@@ -96,7 +96,7 @@ describe("navigator.serviceWorker shim (1.6)", () => {
     expect(got).toBeTruthy();
     const list = await (c.getRegistrations as () => Promise<unknown[]>)();
     expect(list.length).toBe(1);
-    const ready = await (c.ready as Promise<{ active: unknown }>)();
+    const ready = await (c.ready as Promise<{ active: unknown }>);
     expect(ready.active).toBeTruthy();
   });
 });
