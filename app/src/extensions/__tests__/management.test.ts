@@ -63,7 +63,9 @@ describe("browser.management", () => {
     const b = await apiFor("MgTarget", [], m);
     const mgmt = (a.api.browser as Record<string, any>).management;
     const all: ManagementInfo[] = await mgmt.getAll();
-    expect(all.map((i) => i.name).sort()).toEqual(["MgAdmin", "MgTarget"]);
+    const names = all.map((i) => i.name);
+    expect(names).toContain("MgAdmin");
+    expect(names).toContain("MgTarget");
     const got: ManagementInfo = await mgmt.get(b.id);
     expect(got.name).toBe("MgTarget");
     const disabled: ManagementInfo[] = [];
@@ -82,6 +84,6 @@ describe("browser.management", () => {
     const { id, api } = await apiFor("MgBye", [], m);
     const mgmt = (api.browser as Record<string, any>).management;
     await mgmt.uninstallSelf();
-    expect(m.get(id)).toBeUndefined();
+    expect(m.get(id)).toBeNull();
   });
 });

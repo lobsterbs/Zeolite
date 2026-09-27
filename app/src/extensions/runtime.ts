@@ -398,26 +398,30 @@ export function buildApi(
     }
   };
   const managementNs = {
-    getSelf: () => Promise.resolve(infoOf(mgr?.get(ext.id) ?? ext)),
-    get: (id: string) => {
+    getSelf: async () => infoOf(mgr?.get(ext.id) ?? ext),
+    get: async (id: string) => {
       mgmtPerm();
       const rec = mgr?.get(id);
-      return rec ? Promise.resolve(infoOf(rec)) : Promise.reject(new Error("no such extension: " + id));
+      return rec ? infoOf(rec) : Promise.reject(new Error("no such extension: " + id));
     },
-    getAll: () => {
+    getAll: async () => {
       mgmtPerm();
-      return Promise.resolve((mgr?.list() ?? []).map((r) => infoOf(r)));
+      return (mgr?.list() ?? []).map((r) => infoOf(r));
     },
-    setEnabled: (id: string, enabled: boolean) => {
+    setEnabled: async (id: string, enabled: boolean) => {
       mgmtPerm();
-      return (mgr?.setEnabled(id, enabled) ?? Promise.resolve()).then(() => bootEnabled());
+      await (mgr?.setEnabled(id, enabled) ?? Promise.resolve());
+      await bootEnabled();
     },
-    uninstall: (id: string) => {
+    uninstall: async (id: string) => {
       mgmtPerm();
-      return mgr?.uninstall(id) ?? Promise.reject(new Error("zeolite: no manager attached to this engine"));
+      if (!mgr) throw new Error("zeolite: no manager attached to this engine");
+      await mgr.uninstall(id);
     },
-    uninstallSelf: () =>
-      mgr?.uninstall(ext.id) ?? Promise.reject(new Error("zeolite: no manager attached to this engine")),
+    uninstallSelf: async () => {
+      if (!mgr) throw new Error("zeolite: no manager attached to this engine");
+      await mgr.uninstall(ext.id);
+    },
     onInstalled: bridged<MgmtListener>((l) => MGMT.on("installed", l)),
     onUninstalled: bridged<MgmtListener>((l) => MGMT.on("uninstalled", l)),
     onEnabled: bridged<MgmtListener>((l) => MGMT.on("enabled", l)),

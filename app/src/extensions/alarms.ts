@@ -59,6 +59,7 @@ export class AlarmRegistry {
     let when: number;
     if (typeof info.when === "number") when = info.when;
     else if (typeof info.delayInMinutes === "number") when = Date.now() + info.delayInMinutes * 60_000;
+    else if (period !== undefined) when = Date.now() + period * 60_000;
     else when = Date.now() + 60_000;
     const prev = r.alarms.get(name);
     if (prev) clearTimeout(prev.timer);

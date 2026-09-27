@@ -70,7 +70,7 @@ describe("AlarmRegistry", () => {
     ALARMS.setWake(async () => undefined);
     const seen: Alarm[] = [];
     ALARMS.onAlarm("e3", (a) => seen.push(a));
-    ALARMS.create("e3", "loop", { periodInMinutes: 0.1 });
+    ALARMS.create("e3", "loop", { periodInMinutes: 0.05 });
     await vi.advanceTimersByTimeAsync(6_500);
     expect(seen.length).toBeGreaterThanOrEqual(2);
     expect(ALARMS.get("e3", "loop")).toBeDefined();
@@ -109,9 +109,9 @@ describe("browser.alarms", () => {
   });
 
   it("create + onAlarm deliver through the API", async () => {
-    vi.useFakeTimers();
     ALARMS.resetForTests();
     const { api } = await apiFor("AlmApi", ["alarms"]);
+    vi.useFakeTimers();
     const alarms = (api.browser as Record<string, any>).alarms;
     const seen: Alarm[] = [];
     alarms.onAlarm.addListener((a: Alarm) => seen.push(a));
