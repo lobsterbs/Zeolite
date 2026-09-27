@@ -390,6 +390,19 @@ export async function jarLoad(): Promise<void> {
   }
 }
 
+/** Session import seam (1.7 Sulfide): replace the whole jar with the
+    given records after shape checks. Malformed records are dropped,
+    never admitted. The jar is persisted right away. */
+export function jarReplace(entries: Array<[string, unknown[]]>): void {
+  jars.clear();
+  for (const entry of entries) {
+    if (Array.isArray(entry) && typeof entry[0] === "string" && Array.isArray(entry[1])) {
+      jars.set(entry[0], entry[1] as Cookie[]);
+    }
+  }
+  jarPersist().catch(() => undefined);
+}
+
 /** Teardown: cookies do not survive an engine switch. */
 export function jarClear(): void {
   jars.clear();

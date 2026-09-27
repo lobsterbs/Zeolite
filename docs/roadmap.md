@@ -119,7 +119,7 @@ engine's real worker, SharedWorker WebSocket stays native (no single
 parent page), and module workers rely on the rewriter's specifier
 passes instead of the prelude.
 
-## Phase 7 — 1.7 Sulfide: downloads + session export (next)
+## Phase 7 — 1.7 Sulfide: downloads + session export (shipped)
 
 Prompts items 12, 13. Download manager fed by engine network info:
 filename, MIME, size, progress, speed, source, status, errors,
@@ -127,7 +127,26 @@ cancellation; streamed to disk, never fully buffered. Encrypted session
 export/import (cookies, storage, IndexedDB, tabs) in a format clearly
 separate from engine configuration; no plaintext secrets.
 
-## Phase 8 — 1.8 Telluride: fingerprinting resistance
+Shipped as the 1.7 release: attachment responses (Content-Disposition:
+attachment) are tracked by a download registry (app/src/downloads.ts):
+the body stays a stream through a counting passthrough, so the browser
+writes the file to disk exactly as the native flow would and nothing is
+buffered whole; entries carry filename (RFC 6266/URL fallback), MIME,
+size, received bytes, whole-lifetime speed, source, status and error,
+and are cancellable by id (zl:downloads / zl:cancelDownload). Session
+export is one encrypted envelope (app/src/session.ts):
+AES-256-GCM with a PBKDF2-SHA256-derived key (120k iterations, fresh
+salt/iv per export, GCM tag detects tampering); the payload is cookies
+(jars) + tabs + caller-supplied extras, and exists only as ciphertext
+in the blob (zl:exportSession / zl:importSession). Honest limits: only
+Content-Disposition: attachment responses are classified as downloads,
+the registry is in memory (bounded ring, no restart survival, no
+resume), speed is a lifetime average, localStorage/sessionStorage and
+site-scoped IndexedDB are invisible to the service worker (the host
+supplies them in the export `extra` if it wants them to travel), and
+import replaces cookie jars wholesale without merging.
+
+## Phase 8 — 1.8 Telluride: fingerprinting resistance (next)
 
 Prompt item 14. One internally-consistent config object drives
 userAgent, platform, screen, timezone, language, hardwareConcurrency,

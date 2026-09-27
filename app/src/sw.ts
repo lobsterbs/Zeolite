@@ -37,7 +37,9 @@ import { DIAG, redactSecrets } from "./diag";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
 import { openWebSocket } from "./libcurl-transport-vendored";
 import { WsBridge, type PortLike } from "./wsbridge";
-import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarLoad } from "./cookies";
+import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarLoad, jarReplace, jarSnapshot } from "./cookies";
+import { DownloadTracker } from "./downloads";
+import { decryptSession, encryptSession } from "./session";
 import {
   CS_ROUTE,
   EXT_ROUTE,
@@ -354,8 +356,13 @@ const wsBridge = new WsBridge(
    entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
-export const ZEOLITE_VERSION = "1.6 Hydride";
+export const ZEOLITE_VERSION = "1.7 Sulfide";
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
+
+/* 1.7 Sulfide: download registry. Attachment responses pass through a
+   counting stream (nothing is ever buffered whole); entries carry the
+   engine-known network facts and are cancellable by id. */
+const DL = new DownloadTracker();
 
 const ZL_PAGES = "zeolite-pages-v1";
 const ZL_CACHED_AT = "x-zl-cached-at";
@@ -969,6 +976,14 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           return new Response(body, { status: resp.status, headers: outHeaders });
         }
         WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+        /* 1.7 Sulfide: attachment responses join the download
+           registry. The body stays a stream - a counting passthrough
+           forwards every chunk untouched, so the browser keeps
+           writing the file to disk and nothing is buffered whole. */
+        if (resp.body && (outHeaders.get("content-disposition") ?? "").toLowerCase().includes("attachment")) {
+          const id = DL.begin(target, resp.headers, outHeaders.get("content-type") ?? "application/octet-stream", Number(resp.headers.get("content-length") ?? -1));
+          return new Response(DL.wrap(id, resp.body), { status: resp.status, headers: outHeaders });
+        }
         return new Response(resp.body, { status: resp.status, headers: outHeaders });
       } catch (err) {
         DIAG.failure({
@@ -1042,7 +1057,11 @@ interface ControlMessage {
     | "zl:tracing"
     | "zl:getTracing"
     | "zl:wsOpen"
-    | "zl:docCookie";
+    | "zl:docCookie"
+    | "zl:downloads"
+    | "zl:cancelDownload"
+    | "zl:exportSession"
+    | "zl:importSession";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -1059,6 +1078,14 @@ interface ControlMessage {
   /** zl:docCookie: page origin + optional document.cookie write. */
   origin?: string;
   set?: string;
+  /** zl:cancelDownload: registry entry id. */
+  id?: string;
+  /** zl:exportSession / zl:importSession: blob passphrase. */
+  passphrase?: string;
+  /** zl:importSession: the encrypted session blob. */
+  blob?: unknown;
+  /** zl:exportSession: caller-supplied payload, encrypted whole. */
+  extra?: unknown;
   /** zl:installExt: packaged (.xpi/.zip) bytes. */
   bytes?: Uint8Array;
   /** zl:installExtFiles: unpacked directory listing, path -> bytes. */
@@ -1136,6 +1163,71 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
       };
       handle(msg.set);
       port.onmessage = (ev) => handle((ev.data as { set?: unknown }).set);
+      break;
+    }
+    case "zl:downloads":
+      /* 1.7 Sulfide: registry snapshot, newest first. */
+      reply({ ok: true, downloads: DL.snapshot() });
+      break;
+    case "zl:cancelDownload": {
+      const id = msg.id;
+      if (typeof id !== "string") {
+        reply({ ok: false, error: "missing id" });
+        break;
+      }
+      reply({ ok: DL.cancel(id) });
+      break;
+    }
+    case "zl:exportSession": {
+      /* 1.7 Sulfide: encrypted session export (cookies + tabs +
+         caller extras). The passphrase only ever lives in this
+         message; the blob carries ciphertext. */
+      const pass = msg.passphrase;
+      if (typeof pass !== "string" || pass.length < 8) {
+        reply({ ok: false, error: "passphrase must be at least 8 characters" });
+        break;
+      }
+      e.waitUntil(
+        (async () => {
+          try {
+            reply({
+              ok: true,
+              blob: await encryptSession(pass, {
+                version: ZEOLITE_VERSION,
+                created: Date.now(),
+                cookies: [...jarSnapshot()],
+                tabs: TABS.list(),
+                extra: msg.extra ?? null,
+              }),
+            });
+          } catch (err) {
+            reply({ ok: false, error: String(err) });
+          }
+        })(),
+      );
+      break;
+    }
+    case "zl:importSession": {
+      const pass = msg.passphrase;
+      if (typeof pass !== "string" || msg.blob === null || typeof msg.blob !== "object") {
+        reply({ ok: false, error: "missing passphrase or blob" });
+        break;
+      }
+      e.waitUntil(
+        (async () => {
+          try {
+            const data = (await decryptSession(pass, msg.blob)) as {
+              cookies?: Array<[string, unknown[]]>;
+              extra?: unknown;
+            };
+            if (!Array.isArray(data.cookies)) throw new Error("no cookies in session blob");
+            jarReplace(data.cookies);
+            reply({ ok: true, extra: data.extra ?? null });
+          } catch (err) {
+            reply({ ok: false, error: String(err) });
+          }
+        })(),
+      );
       break;
     }
     case "zl:teardown":
