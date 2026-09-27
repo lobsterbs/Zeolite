@@ -217,7 +217,13 @@ impl Rewriter {
                         if self.cur_tag == "style" && self.cfg.rewrite_css {
                             out.push_str(&css::rewrite_stylesheet(&raw, &|u| self.enc(u)));
                         } else if self.cur_tag == "script" && self.cfg.rewrite_js_literals {
-                            out.push_str(&crate::js::rewrite_script(&raw, &|u| self.enc(u)));
+                            // Frame-buster neutralization runs AFTER the
+                            // URL-literal pass (same order as the server
+                            // engine's pipeline) so folded guards and
+                            // navigation sinks apply to the final body.
+                            let rewritten =
+                                crate::js::rewrite_script(&raw, &|u| self.enc(u));
+                            out.push_str(&crate::js::antiframe(&rewritten));
                         } else {
                             out.push_str(&raw);
                         }
@@ -313,7 +319,10 @@ impl Rewriter {
                     } else if url_attrs::is_url_attr(&name, &lower) {
                         Some(self.enc(&v))
                     } else if is_event_attr(&lower) && self.cfg.rewrite_js_literals {
-                        Some(crate::js::rewrite_inline(&v, &|u| self.enc(u)))
+                        Some(crate::js::antiframe(&crate::js::rewrite_inline(
+                            &v,
+                            &|u| self.enc(u),
+                        )))
                     } else {
                         None
                     };

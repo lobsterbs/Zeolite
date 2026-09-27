@@ -52,6 +52,9 @@ Extension pipeline status: webRequest is wired into the engine fetch path (onBef
 - Keep credentials, cookies and bearer tokens out of diagnostics.
 - A normal WebSocket close is not a failure. `CloseEvent.wasClean` defaults to false, so the bootstrap must set it explicitly: server close frame received or client-initiated close is clean; a wisp stream dying without a close frame (1006/1002) or a failed handshake is not.
 
+## Frame-buster neutralization (rewriter js::antiframe)
+Proxied pages render inside the app's UI frame, so `top` is cross-origin from the page's perspective; classic frame-buster code (`if (top != self) top.location = location`) throws a SecurityError at the top level and kills the rest of the script. `crates/rewriter/src/js/antiframe.rs` (ported for parity with the server engine's pass, previously a documented gap) runs on every script body and inline event handler AFTER the URL-literal pass: framed-detection guards fold to their "not framed" values, `top.location` navigation writes sink into `self.zl_antiframe`, reads map to `self.location`. Method-call sinks (`replace`/`reload`/`assign`) are emitted optional-chained (`self.zl_antiframe?.replace?.(x)`) so they are silent no-ops with NO runtime definitions: the rewriter cannot inject definitions into every script context, and a bare call would throw ReferenceError. Plain assignments are safe without definitions (assigning an undeclared property creates it). Do NOT rename the sinks to reference the sibling browser project (naming rule); do not "fix" the optional chaining into direct calls.
+
 ## Diagnostics
 Diagnostics are part of the engine contract. Current bounded storage is 512 diagnostic events and 256 trace entries, with a trace ID per request.
 NativeTransit diagnostics must distinguish NativeTransit, RewriteFallback, fallback reason, upstream failure, runtime limitation, policy block, and extension/runtime interference. Never invent a cause.
