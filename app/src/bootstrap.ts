@@ -43,6 +43,9 @@ function fnv1a(s: string): string {
 }
 
 const SITE = "zl:" + fnv1a(siteKey());
+/* The page origin ("" when unparseable): shared by the cookie shim and
+ the serviceWorker shim. */
+const ORIGIN = siteKey() === "unknown" ? "" : siteKey();
 const KEY = (k: string) => SITE + ":" + k;
 
 /* One scanner for clear/key/length: keeps the scoped Storage cheap
@@ -149,9 +152,6 @@ function siteKeys(store: Storage): string[] {
  const ctl =
  (navigator as { serviceWorker?: { controller?: ServiceWorker } })
  .serviceWorker?.controller;
- /* siteKey() is the page origin ("unknown" when unparseable): one
-    computation shared by the cookie shim and the serviceWorker shim. */
- const ORIGIN = siteKey() === "unknown" ? "" : siteKey();
  const desc = Object.getOwnPropertyDescriptor(Document.prototype, "cookie");
  if (desc && ctl && /^https?:/.test(ORIGIN)) {
  let cur = "";
