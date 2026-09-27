@@ -316,8 +316,7 @@ addEventListener("message", (e: MessageEvent) => {
       });
       return es;
     } as unknown as new (u: string, p?: string | string[]) => WebSocket;
-    Object.assign(LJWS as unknown as Record<string, unknown>, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
-    (LJWS as unknown as { prototype: object }).prototype = OWS.prototype;
+    Object.assign(LJWS as unknown as Record<string, unknown>, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3, prototype: OWS.prototype });
     (w as { WebSocket?: unknown }).WebSocket = LJWS;
   }
 }
