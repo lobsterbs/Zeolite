@@ -50,7 +50,7 @@ describe("session recording", () => {
   it("keeps optional fields out unless present", () => {
     const r = finishRecording(state, { now: 2000, engine: "test", netEntries: net, traceEntries: trace, cookieJar: jar });
     expect("rewritten" in r.requests[0]).toBe(false);
-    expect(r.requests[1].rewritten).toBeUndefined();
+    expect(r.requests[1].rewritten).toBe("html");
     expect(r.requests[2].transport).toBe("RewriteFallback");
   });
 
