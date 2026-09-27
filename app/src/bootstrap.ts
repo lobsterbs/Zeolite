@@ -42,10 +42,11 @@ function fnv1a(s: string): string {
  return h.toString(36);
 }
 
-const SITE = "zl:" + fnv1a(siteKey());
+const SKEY = siteKey();
+const SITE = "zl:" + fnv1a(SKEY);
 /* The page origin ("" when unparseable): shared by the cookie shim and
  the serviceWorker shim. */
-const ORIGIN = siteKey() === "unknown" ? "" : siteKey();
+const ORIGIN = SKEY === "unknown" ? "" : SKEY;
 const KEY = (k: string) => SITE + ":" + k;
 
 /* One scanner for clear/key/length: keeps the scoped Storage cheap
@@ -145,8 +146,8 @@ function siteKeys(store: Storage): string[] {
  refreshes it asynchronously from the jar, every write applies locally
  first (read-after-write works) and is forwarded for RFC 6265
  admission. Eventually consistent across windows; exact at the jar.
- Expires-based deletion is not detected optimistically; the jar reply
- corrects it. */
+ Deletion (max-age=0 or a past Expires) is not detected optimistically;
+ the jar reply corrects the copy within milliseconds. */
 
 {
  const ctl =
@@ -177,12 +178,10 @@ function siteKeys(store: Storage): string[] {
  const name = (eq > 0 ? pair.slice(0, eq) : pair).trim();
  if (!name) return;
  const val = eq > 0 ? pair.slice(eq + 1).trim() : "";
- const m = /;\s*max-age\s*=\s*(-?\d+)/i.exec(s);
- const del = m !== null && Number(m[1]) <= 0;
  const keep = (cur === "" ? [] : cur.split("; ")).filter(
  (p) => p.slice(0, p.indexOf("=")) !== name,
  );
- if (!del) keep.push(name + "=" + val);
+ keep.push(name + "=" + val);
  cur = keep.join("; ");
  sync(s);
  },
@@ -198,9 +197,7 @@ function siteKeys(store: Storage): string[] {
 
 addEventListener("message", (e: MessageEvent) => {
  const d = e.data as { zl?: string; msg?: unknown };
- if (d && d.zl === "ws")
-  (navigator as { serviceWorker?: { controller?: { postMessage: (m: unknown, p?: MessagePort[]) => void } } })
-   .serviceWorker?.controller?.postMessage(d.msg, e.ports as unknown as MessagePort[]);
+ if (d?.zl === "ws") (navigator as { serviceWorker?: { controller?: { postMessage: (m: unknown, p?: MessagePort[]) => void } } }).serviceWorker?.controller?.postMessage(d.msg, e.ports as unknown as MessagePort[]);
 });
 
 /* navigator.serviceWorker shim: per-origin virtual registrations in
@@ -306,7 +303,6 @@ addEventListener("message", (e: MessageEvent) => {
           },
         },
         bufferedAmount: { value: 0 },
-        extensions: { value: "" },
         close: {
           value: (code?: number, reason?: string) => {
             if (wsState === 3) return;

@@ -20,9 +20,7 @@ export interface VirtualWorker {
 export interface VirtualRegistration {
   scope: string;
   installing: VirtualWorker | null;
-  waiting: VirtualWorker | null;
   active: VirtualWorker | null;
-  update(): Promise<VirtualRegistration>;
   unregister(): Promise<boolean>;
 }
 
@@ -47,9 +45,7 @@ function registration(scriptURL: string, scope: string, store: SwShimStore, sett
   const reg: VirtualRegistration = {
     scope,
     installing: settled ? null : worker,
-    waiting: null,
     active: settled ? worker : null,
-    update: () => Promise.resolve(reg),
     unregister: () => {
       store.clear();
       return Promise.resolve(true);
@@ -105,10 +101,9 @@ export function swShimGet(
 
 /** Patch a real ServiceWorkerContainer in place: register,
     getRegistration and getRegistrations become virtual, `ready`
-    resolves with the virtual registration (a synthetic one when
-    nothing was registered, so awaiting ready never hangs). controller
-    and events stay untouched: they belong to the engine's real
-    worker. */
+    resolves with the virtual registration when one exists (undefined
+    otherwise: it never hangs). controller and events stay untouched:
+    they belong to the engine's real worker. */
 export function swShimApply(container: object, store: SwShimStore, pageUrl: string): void {
   const c = container as Record<string, unknown>;
   c.register = ((u: string | URL, o?: { scope?: string }) =>
@@ -120,13 +115,9 @@ export function swShimApply(container: object, store: SwShimStore, pageUrl: stri
     return Promise.resolve(r ? [r] : []);
   }) as unknown;
   try {
-    const origin = new URL(pageUrl).origin;
     Object.defineProperty(c, "ready", {
       configurable: true,
-      get: () =>
-        Promise.resolve(
-          swShimGet(store, pageUrl) ?? registration(origin + "/zl-synthetic.js", origin + "/", store, true),
-        ),
+      get: () => Promise.resolve(swShimGet(store, pageUrl)),
     });
   } catch {
     /* ready stays native: some engines make it read-only */

@@ -47,9 +47,9 @@ therefore keeps an optimistic local copy:
 - a read triggers an asynchronous jar refresh that replaces the copy;
 - a write applies to the copy immediately (so read-after-write works),
   then forwards the write; the jar reply corrects the copy.
-- `max-age=0` deletion is detected locally; **Expires-based deletion
-  is not**: the local copy keeps the stale pair until the next jar
-  reply corrects it (milliseconds).
+- deletion (`max-age=0` or a past `Expires`) is not detected locally:
+  the copy keeps the stale pair until the next jar reply corrects it
+  (milliseconds).
 - A cold page returns `""` until the first jar reply lands.
 - Cross-window writes become visible once the other window's next
   read completes its refresh. This is eventual consistency, not a
