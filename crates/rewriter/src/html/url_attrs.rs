@@ -7,7 +7,14 @@
 /// carry no URL semantics in HTML.
 pub fn is_url_attr(tag: &str, attr: &str) -> bool {
     match attr {
-        "href" => matches!(tag, "a" | "area" | "link" | "base"),
+        // `use` and `image` load SVG sprite references (`<use
+        // href="sprite.svg#symbol">`): without them every external
+        // sprite reference stays a cross-origin URL the engine cannot
+        // serve, and a page's icons silently vanish (ChatGPT's shell
+        // sprites are the canonical case).
+        "href" => matches!(tag, "a" | "area" | "link" | "base" | "use" | "image"),
+        // SVG 1.1 spelling of the same references.
+        "xlink:href" => matches!(tag, "use" | "image"),
         "src" => matches!(
             tag,
             "img"

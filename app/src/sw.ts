@@ -461,13 +461,20 @@ self.addEventListener("fetch", (e: FetchEvent) => {
   }
   if (!isEnginePath(url.pathname)) return; // engine asset: passthrough
 
-  const dest = decodePath(url.pathname);
-  if (!dest) {
+  const dest0 = decodePath(url.pathname);
+  if (!dest0) {
     e.respondWith(new Response("zeolite: bad route", { status: 404 }));
     return;
   }
+  // Fragments are client-side only. The rewriter keeps them out of the
+  // encoded target, but older bundles or hand-built routes may carry
+  // one: strip it so a sprite referenced as "...#a", "...#b", "...#c"
+  // is one cache key, one wisp destination, one upstream identity.
+  const bareDest = dest0.startsWith("http")
+    ? dest0.split("#", 1)[0] || dest0
+    : dest0;
   // Query string travels outside the encoded destination.
-  const target = url.search ? dest + url.search : dest;
+  const target = url.search ? bareDest + url.search : bareDest;
 
   if (siteDisabled(target)) {
     e.respondWith(

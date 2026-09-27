@@ -43,6 +43,8 @@ Extension pipeline status: webRequest is wired into the engine fetch path (onBef
 - Attribute parsing must not consume bytes beyond closing quotes.
 - Preserve whitespace/delimiters where possible.
 - Use RFC-aware scheme detection.
+- URL fragments are client-side only: never part of the encoded request target, a cache key, or an upstream identity. The rewriter re-attaches them after the engine route so SVG `<use href="sprite.svg#symbol">` keeps working with one network identity per sprite.
+- SVG external references (`<use href>`, `<use xlink:href>`, `<image href>`) must be rewritten like other URL-bearing attributes or sprite icons silently break.
 - Non-engine worker paths must pass through correctly.
 - Extension asset routes must enforce web-accessible-resource rules.
 - Validate destinations after DNS resolution to prevent SSRF/DNS-rebinding bypasses.

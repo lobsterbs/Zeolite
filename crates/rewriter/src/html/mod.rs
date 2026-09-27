@@ -19,7 +19,7 @@ pub mod css;
 pub mod url_attrs;
 
 use crate::config::RewriteConfig;
-use crate::encode::resolve;
+use crate::encode::{b64u_decode, resolve};
 
 /// Tokenizer state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +92,18 @@ impl Rewriter {
             return url.to_string();
         }
         let abs = resolve(url, &self.base);
-        self.cfg.encode_url(&abs)
+        // Fragments are client-side only (SVG sprite symbol selection,
+        // in-page anchors). They must never become part of the encoded
+        // request target: every "#symbol" variant of one sprite is the
+        // same network resource. The fragment is re-attached after the
+        // engine route so the browser keeps its fragment semantics.
+        let (bare, frag) = match abs.split_once('#') {
+            Some((b, f)) => (b.to_string(), format!("#{}", f)),
+            None => (abs, String::new()),
+        };
+        let mut out = self.cfg.encode_url(&bare);
+        out.push_str(&frag);
+        out
     }
 
     /// Emit bootstrap + injections. Called once, right after <head>
@@ -517,6 +528,45 @@ mod tests {
             "got: {}",
             full
         );
+    }
+
+    #[test]
+    fn svg_use_refs_rewrite_and_fragments_stay_client_side() {
+        // `<use href>` carries an external sprite reference; without the
+        // rewrite it stays a cross-origin URL the engine cannot serve
+        // and every icon built from the sprite disappears.
+        let base = "https://example.com/app/page.html";
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let out = format!(
+            "{}{}",
+            r.process("<svg><use href=\"https://cdn.example.net/sprites.svg#sidebar\"></use></svg>"),
+            r.finish()
+        );
+        let enc_bare = cfg().encode_url("https://cdn.example.net/sprites.svg");
+        // Rewritten, with the fragment preserved AFTER the route so the
+        // browser still selects the symbol client-side...
+        assert!(
+            out.contains(&format!("href=\"{}#sidebar\"", enc_bare)),
+            "got: {}",
+            out
+        );
+        // ...and the fragment never inside the encoded request target.
+        let decoded = out
+            .split("href=\"")
+            .nth(1)
+            .and_then(|s| s.split('#').next())
+            .map(|route| {
+                route
+                    .rsplit('/')
+                    .next()
+                    .map(|seg| b64u_decode(seg))
+                    .flatten()
+            })
+            .flatten()
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default();
+        assert_eq!(decoded, "https://cdn.example.net/sprites.svg");
     }
 
     #[test]
