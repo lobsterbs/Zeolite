@@ -549,7 +549,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         "",
       ).toLowerCase() as ResourceType;
       const ruleDec = applyRules(engineRules, target, rtype);
-      const kinds: InterceptKind[] = ["request"];
+      const kinds: Exclude<InterceptKind, "response">[] = ["request"];
       if (e.request.mode === "navigate") kinds.push("navigation");
       if (rtype === "worker") kinds.push("worker");
       if (rtype === "websocket") kinds.push("websocket");
