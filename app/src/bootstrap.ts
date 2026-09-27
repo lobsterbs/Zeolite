@@ -169,9 +169,8 @@ function siteKeys(store: Storage): string[] {
  return cur;
  },
  set: (v: string) => {
- const s = String(v);
- const semi = s.indexOf(";");
- const pair = semi < 0 ? s : s.slice(0, semi);
+ const s = v;
+ const pair = s.split(";")[0];
  const eq = pair.indexOf("=");
  const name = (eq > 0 ? pair.slice(0, eq) : pair).trim();
  if (!name) return;
