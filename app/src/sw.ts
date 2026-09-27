@@ -42,6 +42,8 @@ import {
   MENUS,
   DOWNLOADS,
   PERMS,
+  ALARMS,
+  MGMT,
   bootEnabled,
   tabView,
   contentScriptMatches,
@@ -353,6 +355,10 @@ self.addEventListener("activate", (e) => {
       try {
         await extensions.startup();
         await bootEnabled();
+        /* Alarms wake MV3 backgrounds through the background module;
+           management events observe the manager's lifecycle stream. */
+        ALARMS.setWake(wakeExtension);
+        MGMT.wire(extensions);
       } catch {
         /* extension subsystem unavailable: stays inert */
       }
@@ -991,6 +997,12 @@ async function handleExtMessage(
       String(msg.__zlTabError),
       String(msg.error ?? "zeolite: content-script message failed"),
     );
+    return { ok: true };
+  }
+  if (msg && typeof msg === "object" && typeof msg.__zlDomLoaded === "string") {
+    /* Page-world bridge reports DOM readiness: the only honest
+       onDOMContentLoaded source (see ./bridge). */
+    WEBNAV.domContentLoaded(String(msg.__zlDomLoaded));
     return { ok: true };
   }
   if (msg && typeof msg === "object" && typeof msg.__zlStorage === "string") {

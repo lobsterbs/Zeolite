@@ -94,3 +94,40 @@ describe("browser.webNavigation (buildApi)", () => {
     expect(seenPerm).toHaveLength(2);
   });
 });
+
+describe("webNavigation url filters + DOMContentLoaded", () => {
+  it("applies listener url filters at delivery", () => {
+    TABS.setDispatch(() => undefined);
+    TABS.syncFromUi([tab(20, "https://match.example/", { active: true })]);
+    const seen: NavigationCommitted[] = [];
+    const off = WEBNAV.subscribeKind("committed", (i) => seen.push(i), ["*://match.example/*"]);
+    const offNo = WEBNAV.subscribeKind("committed", (i) => seen.push(i), ["*://other.example/*"]);
+    WEBNAV.committed("https://match.example/");
+    expect(seen).toHaveLength(1);
+    off();
+    offNo();
+  });
+
+  it("domContentLoaded fires for known tabs only", () => {
+    TABS.syncFromUi([tab(21, "https://dom.example/", { active: true })]);
+    const seen: NavigationCommitted[] = [];
+    const off = WEBNAV.subscribeKind("domcontentloaded", (i) => seen.push(i));
+    WEBNAV.domContentLoaded("https://dom.example/");
+    expect(seen[0]).toMatchObject({ tabId: 21, url: "https://dom.example/" });
+    WEBNAV.domContentLoaded("https://unknown.example/");
+    expect(seen).toHaveLength(1);
+    off();
+  });
+
+  it("onDOMContentLoaded is exposed and filter-capable at the API layer", async () => {
+    const withPerm = await apiFor("NavDom", ["webNavigation"]);
+    const nav = (withPerm.api.browser as Record<string, any>).webNavigation;
+    expect(typeof nav.onDOMContentLoaded.addListener).toBe("function");
+    TABS.syncFromUi([tab(22, "https://api.example/", { active: true })]);
+    const seen: NavigationCommitted[] = [];
+    nav.onDOMContentLoaded.addListener((i: NavigationCommitted) => seen.push(i), { urls: ["*://api.example/*"] });
+    WEBNAV.domContentLoaded("https://api.example/");
+    WEBNAV.domContentLoaded("https://nomatch.example/");
+    expect(seen).toHaveLength(1);
+  });
+});

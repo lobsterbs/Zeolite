@@ -21,6 +21,7 @@ import { locateManifest, readZip, DEFAULT_ZIP_LIMITS } from "./package";
 import { parseManifest } from "./manifest";
 import { normalizeExtensionPath } from "./origin";
 import { globToRegExp } from "./content-scripts";
+import { ALARMS } from "./alarms";
 import type { ExtensionId, ExtensionRecord } from "./types";
 
 export type LifecycleListener = (rec: ExtensionRecord) => void;
@@ -160,8 +161,11 @@ export class ExtensionManager {
     }
     rec.state = "uninstalled";
     rec.enabled = false;
-    this.exts.delete(id);
+    /* Lifecycle fires before the record leaves the map so
+       management/extension events observe the transition. */
     this.changed(id);
+    this.exts.delete(id);
+    ALARMS.drop(id);
   }
 
   async setEnabled(id: ExtensionId, enabled: boolean): Promise<void> {

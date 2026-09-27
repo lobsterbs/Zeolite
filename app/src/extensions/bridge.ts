@@ -128,6 +128,19 @@ export const BRIDGE_SOURCE = `(function () {
       }
     });
   }
+  /* webNavigation.onDOMContentLoaded: the page-world bridge is the
+     only honest DOM-readiness signal the engine has; pages without a
+     bridge (no matching content scripts) report nothing (see
+     ./compat). */
+  (function () {
+    var report = function () {
+      var c = ctl();
+      if (!c) return;
+      c.postMessage({ type: "zl:ext", extId: cfg.ext, msg: { __zlDomLoaded: (window.__ZL && window.__ZL.dest) || document.baseURI } });
+    };
+    if (document.readyState !== "loading") report();
+    else document.addEventListener("DOMContentLoaded", report);
+  })();
   function loadCss(href) {
     var l = document.createElement("link");
     l.rel = "stylesheet";

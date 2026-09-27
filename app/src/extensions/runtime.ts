@@ -25,6 +25,12 @@ import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
 import type { ExtensionStorageArea, StorageValue } from "./storage";
 import type { ExtensionMessenger, MessageListener, ConnectListener, MessageSender } from "./messaging";
+import { ALARMS } from "./alarms";
+import type { Alarm, AlarmCreateInfo } from "./alarms";
+import { MGMT, infoOf } from "./management";
+import type { MgmtListener } from "./management";
+import type { ExtensionManager } from "./manager";
+import { bootEnabled } from "./background";
 
 export interface EventNamespace<L> {
   addListener(l: L): void;
@@ -45,6 +51,10 @@ export function makeEvent<L>(): EventNamespace<L> & { _listeners: Set<L> } {
 export interface ApiDeps {
   messenger: ExtensionMessenger;
   storage: { local: ExtensionStorageArea; sync: ExtensionStorageArea; session: ExtensionStorageArea };
+  /** Manager owning the installed set; management.* reads live state
+      from it. Without one, management.get/getAll see nothing and the
+      mutating calls reject honestly. */
+  manager?: ExtensionManager;
 }
 
 function wrapArea(area: ExtensionStorageArea): Record<string, unknown> {
@@ -105,30 +115,43 @@ function makeTabsEvent(
 }
 
 /* webNavigation events gated by the webNavigation permission, exactly
-   as Firefox delivers them. Listener url filters are accepted but
-   not applied (documented in ./compat). */
+   as Firefox delivers them. Listener url filters use the webRequest
+   pattern grammar ({ urls: [...] }); Firefox's richer filter object
+   (urlMatches etc.) is not implemented (documented in ./compat). */
 function makeWebNavEvent(
   ext: ExtensionRecord,
   kind: NavigationKind,
-): EventNamespace<(info: NavigationCommitted) => void> {
+): {
+  addListener: (l: (info: NavigationCommitted) => void, filter?: { urls?: unknown }) => void;
+  removeListener: (l: (info: NavigationCommitted) => void) => void;
+  hasListener: (l: (info: NavigationCommitted) => void) => boolean;
+} {
   const offs = new Map<unknown, () => void>();
   return {
-    addListener: (l: (info: NavigationCommitted) => void) => {
+    addListener: (l, filter) => {
       if (offs.has(l)) return;
-      offs.set(l, WEBNAV.subscribeKind(kind, (info) => {
-        if (!ext.permissions.includes("webNavigation")) return;
-        try {
-          l(info);
-        } catch {
-          /* a broken listener is the extension's own problem */
-        }
-      }));
+      const urls = (Array.isArray(filter?.urls) ? filter!.urls : []).map(String);
+      offs.set(
+        l,
+        WEBNAV.subscribeKind(
+          kind,
+          (info) => {
+            if (!ext.permissions.includes("webNavigation")) return;
+            try {
+              l(info);
+            } catch {
+              /* a broken listener is the extension's own problem */
+            }
+          },
+          urls.length > 0 ? urls : undefined,
+        ),
+      );
     },
-    removeListener: (l: (info: NavigationCommitted) => void) => {
+    removeListener: (l) => {
       offs.get(l)?.();
       offs.delete(l);
     },
-    hasListener: (l: (info: NavigationCommitted) => void) => offs.has(l),
+    hasListener: (l) => offs.has(l),
   };
 }
 
@@ -258,12 +281,13 @@ export function buildApi(
   /* webNavigation: events derived from the real interception
      lifecycle. beforeNavigate fires at navigation interception,
      committed when the document response is known (cache hits
-     included), completed at document stream end. onDOMContentLoaded
-     is honestly absent (see ./compat). */
+     included), completed at document stream end; onDOMContentLoaded
+     arrives from the page-world bridge (no bridge, no event). */
   const webNavigationNs = {
     onBeforeNavigate: makeWebNavEvent(ext, "beforeNavigate"),
     onCommitted: makeWebNavEvent(ext, "committed"),
     onCompleted: makeWebNavEvent(ext, "completed"),
+    onDOMContentLoaded: makeWebNavEvent(ext, "domcontentloaded"),
   };
   /* contextMenus + Firefox's menus alias over one registry. */
   const contextMenusNs = {
@@ -332,6 +356,74 @@ export function buildApi(
       })()
     : undefined;
 
+  /* alarms: in-memory timers in the shared worker context (see
+     ./alarms); mounted only with the "alarms" permission so feature
+     detection answers honestly. */
+  const alarmsNs = ext.permissions.includes("alarms")
+    ? (() => {
+        const offs = new Map<unknown, () => void>();
+        const create = (name: string, info?: AlarmCreateInfo) => ALARMS.create(ext.id, name, info ?? {});
+        return {
+          create: (a: string | AlarmCreateInfo, b?: AlarmCreateInfo) => {
+            if (typeof a === "string") create(a, b);
+            else create("", a);
+          },
+          get: (name: string) => Promise.resolve(ALARMS.get(ext.id, name)),
+          getAll: () => Promise.resolve(ALARMS.getAll(ext.id)),
+          clear: (name?: string) => Promise.resolve(ALARMS.clear(ext.id, name)),
+          clearAll: () => Promise.resolve(ALARMS.clearAll(ext.id)),
+          onAlarm: {
+            addListener: (l: (a: Alarm) => void) => {
+              if (offs.has(l)) return;
+              offs.set(l, ALARMS.onAlarm(ext.id, l));
+            },
+            removeListener: (l: (a: Alarm) => void) => {
+              offs.get(l)?.();
+              offs.delete(l);
+            },
+            hasListener: (l: (a: Alarm) => void) => offs.has(l),
+          },
+        };
+      })()
+    : undefined;
+  /* management: self surface without a permission; the full surface
+     requires "management" (see ./management). Events fire for every
+     extension's lifecycle transitions. */
+  const mgr = deps.manager ?? null;
+  const mgmtPerm = () => {
+    if (!ext.permissions.includes("management")) {
+      throw new Error(
+        "zeolite: management.get/getAll/setEnabled/uninstall require the 'management' permission",
+      );
+    }
+  };
+  const managementNs = {
+    getSelf: () => Promise.resolve(infoOf(mgr?.get(ext.id) ?? ext)),
+    get: (id: string) => {
+      mgmtPerm();
+      const rec = mgr?.get(id);
+      return rec ? Promise.resolve(infoOf(rec)) : Promise.reject(new Error("no such extension: " + id));
+    },
+    getAll: () => {
+      mgmtPerm();
+      return Promise.resolve((mgr?.list() ?? []).map((r) => infoOf(r)));
+    },
+    setEnabled: (id: string, enabled: boolean) => {
+      mgmtPerm();
+      return (mgr?.setEnabled(id, enabled) ?? Promise.resolve()).then(() => bootEnabled());
+    },
+    uninstall: (id: string) => {
+      mgmtPerm();
+      return mgr?.uninstall(id) ?? Promise.reject(new Error("zeolite: no manager attached to this engine"));
+    },
+    uninstallSelf: () =>
+      mgr?.uninstall(ext.id) ?? Promise.reject(new Error("zeolite: no manager attached to this engine")),
+    onInstalled: bridged<MgmtListener>((l) => MGMT.on("installed", l)),
+    onUninstalled: bridged<MgmtListener>((l) => MGMT.on("uninstalled", l)),
+    onEnabled: bridged<MgmtListener>((l) => MGMT.on("enabled", l)),
+    onDisabled: bridged<MgmtListener>((l) => MGMT.on("disabled", l)),
+  };
+
   const browser: Record<string, unknown> = {
     runtime,
     storage: storageNs,
@@ -343,7 +435,9 @@ export function buildApi(
     menus: contextMenusNs,
     downloads: downloadsNs,
     permissions: permissionsNs,
+    management: managementNs,
     ...(webRequestNs ? { webRequest: webRequestNs } : {}),
+    ...(alarmsNs ? { alarms: alarmsNs } : {}),
   };
   /* Firefox-style chrome.* alias over the same implementations. */
   return { browser, chrome: browser };

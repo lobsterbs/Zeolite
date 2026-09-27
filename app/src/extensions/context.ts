@@ -9,6 +9,7 @@ import { buildApi } from "./runtime";
 import { ExtensionStorageArea } from "./storage";
 import { openDb } from "./idb";
 import { ExtensionMessenger } from "./messaging";
+import { extensions } from "./manager";
 import type { ExtensionId, ExtensionRecord } from "./types";
 
 export const MESSENGER = new ExtensionMessenger();
@@ -37,6 +38,7 @@ export async function getExtensionContext(ext: ExtensionRecord): Promise<Extensi
   const api = buildApi(ext, sender, {
     messenger: MESSENGER,
     storage: { local, sync, session },
+    manager: extensions,
   });
   ctx = { storage: { local, sync, session }, api };
   contexts.set(ext.id, ctx);

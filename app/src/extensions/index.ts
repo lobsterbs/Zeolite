@@ -48,6 +48,10 @@ export type {
   CompletedListener,
   ErrorOccurredListener,
 } from "./webrequest";
+export { ALARMS, AlarmRegistry } from "./alarms";
+export type { Alarm, AlarmCreateInfo, AlarmListener } from "./alarms";
+export { MGMT, ManagementEvents, infoOf } from "./management";
+export type { ManagementInfo, MgmtListener } from "./management";
 export { MENUS, ContextMenusHost } from "./contextmenus";
 export type { MenuItem, MenuClickInfo, MenuClickedListener } from "./contextmenus";
 export { DOWNLOADS, DownloadsHost } from "./downloads";
