@@ -5,7 +5,7 @@ members = ["crates/rewriter", "crates/wisp-wasm", "crates/zeolite-server", "crat
 [workspace.package]
 version = "1.6.0"
 edition = "2021"
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 wisp-core = { path = "crates/wisp-core" }
