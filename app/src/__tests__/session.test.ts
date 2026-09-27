@@ -25,7 +25,10 @@ describe("session export/import", () => {
     /* no plaintext secrets in the envelope */
     expect(JSON.stringify(blob)).not.toContain("secret-value");
     expect(JSON.stringify(blob)).not.toContain("sid");
-    const back = (await decryptSession("correct horse battery", blob)) as typeof payload;
+    const back = (await decryptSession("correct horse battery", blob)) as {
+      cookies: Array<[string, Array<{ name: string; value: string }>]>;
+      tabs: Array<{ id: number }>;
+    };
     expect(back.cookies[0][1][0].value).toBe("secret-value");
     expect(back.tabs).toEqual([{ id: 1 }]);
   });
