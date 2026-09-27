@@ -83,6 +83,11 @@ export class WispClient {
         this.streams.clear();
         for (const s of streams) s.onClose?.(1);
         this.connecting = null;
+        // Bug-scout fix: a server-side close during the handshake used
+        // to leave the pending connect() promise unsettled forever
+        // (onerror does not always fire before onclose). Rejecting here
+        // is a no-op once the promise already resolved.
+        reject(new Error("wisp websocket closed"));
         // Reconnect happens lazily on the next openStream/write.
       };
       ws.onmessage = (ev) => void this.onMessage(ev);
