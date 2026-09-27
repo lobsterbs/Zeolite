@@ -1,0 +1,40 @@
+# Support and limitation matrix (2.0 Graphene)
+
+Every row states what actually ships, verified against the code and
+the test suite, not what would be nice to have. Statuses:
+
+- supported: implemented, wired through the service worker or server,
+  covered by tests.
+- partial: implemented with documented, real limitations.
+- not supported: absent by design, not faked.
+
+| Feature | Status | Notes and limits |
+| --- | --- | --- |
+| Streaming HTML rewriting | supported | Chunked through a TransformStream; no full-body buffering. Links, iframes, scripts rewritten to engine paths. |
+| Streaming CSS rewriting | supported | url() references rewritten; same streaming path. |
+| JS rewriting | partial | Rust/WASM JsRewriter exists and runs, but token-level rewriter decisions are not surfaced to tracing (documented tracing limit). |
+| Opaque URL passthrough | supported | blob:/data: hrefs are never rewritten; isOpaqueUrl guards the fetch path. |
+| Wisp v2.1 transport | supported | All proxied traffic rides the same wisp hop; TLS terminates client-side in the vendored libcurl transport. |
+| Runtime WebSocket bridge | supported | Page WebSocket goes through the SW bridge to the transport; lifecycle + direction traced, payloads never recorded. |
+| ws:// WebSocket targets | not supported | Upgraded to wss:// by design before the transport sees the URL (traced). Plaintext WS never attempted. |
+| Virtual origins + per-origin cookie jars | partial | RFC 6265 parsing (Domain/Path/Secure/HttpOnly/SameSite), jar is the sole Cookie source for engine requests. Limits: SameSite is parsed but not enforced (no site context); Set-Cookie on intermediate redirect hops inside the transport is not captured. |
+| document.cookie virtualization | partial | Per-origin, synced to the SW via a transferred port. Eventual consistency only: a cookie deleted directly by local JS is not detected (no local deletion signal). |
+| localStorage/sessionStorage scoping | supported | Scoped per virtual origin (same FNV1a36 id as cookie jars). |
+| IndexedDB virtualization | supported | Open/deleteDatabase names prefixed per virtual origin. databases() is absent by design (honest gap, see docs/storage.md). |
+| Cache API virtualization | supported | open/delete/has/keys/match scoped to the virtual origin; own-entries only. |
+| Worker virtualization | supported | Dedicated/shared workers get a prelude: importScripts routed through the engine, dedicated-worker WebSocket bridged over postMessage. |
+| Service-worker registration for proxied sites | not supported | Registrations are virtual records (swshim); no true SW script execution for proxied origins. |
+| Download registry | supported | Counting passthrough with filename detection (content-disposition/URL) and cancellation. |
+| Session export/import | supported | AES-256-GCM + PBKDF2-SHA256 (120k iterations, hand-rolled base64). No plaintext secrets ever at rest. |
+| Fingerprinting resistance | partial | One consistent profile across navigator/screen/Date/Intl/canvas/WebGL, mirrored onto upstream headers. Limits: fixed-offset timezone, no DST simulation, Date toString zone text stays native, workers and OffscreenCanvas are not patched, default profile is a shared fixed fingerprint, not per-session randomness. |
+| Session recording + replay | supported | zlRecord artifacts; deterministic given identical rings; replay compares reachability, status class and unrewritten-URL absence only. Bodies, headers, timings and WebSocket payloads are never recorded, so never compared. |
+| Opt-in rewrite tracing | supported | 512-decision ring, zero allocation while off. Token-level wasm decisions untraced. |
+| Network inspector | supported | 256-entry ring with delta polling. fetch() and XHR are not distinguishable without initiator info; both reported as FETCH. |
+| Diagnostics | supported | 512 events, 256 trace references, one trace ID per request, secrets redacted on entry. |
+| SSRF/destination protection | supported | One policy: local names blocked pre-DNS, every resolved IP re-checked pre-connect (rebinding-safe); loopback/private/link-local/metadata/unspecified/broadcast and IPv6 ULA/link-local blocked. Test-only ZL_TEST_ALLOW_PRIVATE_DESTS=1 escape hatch must never be set in production. |
+| WebExtension compatibility | partial | Real runtime for content scripts, storage, tabs, messaging, alarms, permissions, webNavigation, webRequest, management. Some APIs, true isolated worlds and true extension service workers remain partial (see README limitations). |
+| SPA routing | supported | Client-runtime; covered by app unit tests, honestly not probeable by the HTTP compat suite (marked client-runtime in the scoreboard). |
+
+Bounded by design: 256 network-log entries, 512 tracing decisions, 512
+diagnostic events, 512KB interception body cap (BODY_LIMIT in
+intercept.ts).

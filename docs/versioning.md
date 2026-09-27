@@ -16,4 +16,5 @@ or **1.3 Carbide**.
   exported by the service worker as `ZEOLITE_VERSION`, and returned in the
   `zl:getNetLog` reply so tooling can pin and display it.
 
-Current release: **1.9 Fullerene** (cargo `1.9.0`).
+Current release: **2.0 Graphene** (cargo `2.0.0`). The 2.x line opens a
+new substance family; the roadmap's 1.x -ide sequence is complete.

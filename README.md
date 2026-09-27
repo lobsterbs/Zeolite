@@ -1,6 +1,6 @@
 # Zeolite
 ![Zeolite banner](assets/zeolite-banner.svg)
-**Current release: 1.9 Fullerene** · Rust/WASM · Wisp v2.1
+**Current release: 2.0 Graphene** · Rust/WASM · Wisp v2.1
 Zeolite is a standalone, reusable web interception/proxy engine providing a browser service-worker runtime, streaming rewriting, Wisp transport, diagnostics, and WebExtension compatibility.
 ## Current architecture
 The 1.0 release is interception + rewriting. The rewriter is production code.
@@ -43,5 +43,7 @@ cd app && npx vitest run && npm run build
 cargo run -p zeolite-server -- --port 6002 --static ../app/dist
 node suite/probe.mjs --base http://localhost:6002
 ## Roadmap
-The roadmap covers interception APIs/rules, diagnostics, WebSockets, downloads/session export, fingerprinting consistency, compatibility recording/replay and final hardening.
-See docs/versioning.md, docs/roadmap.md, docs/engine-adapter.md and docs/plugins.md.
+The roadmap is complete through 2.0: interception APIs/rules, diagnostics, WebSockets, downloads/session export, fingerprinting consistency, compatibility recording/replay, per-feature support matrix and the final security/performance audits (docs/matrix.md, docs/security.md, docs/performance.md).
+See docs/matrix.md for the full per-feature support/limitation matrix,
+docs/security.md for the security audit and docs/performance.md for
+the performance audit. See docs/versioning.md, docs/roadmap.md, docs/engine-adapter.md and docs/plugins.md.

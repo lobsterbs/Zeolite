@@ -364,7 +364,7 @@ const wsBridge = new WsBridge(
    entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
-export const ZEOLITE_VERSION = "1.9 Fullerene";
+export const ZEOLITE_VERSION = "2.0 Graphene";
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
 /* 1.7 Sulfide: download registry. Attachment responses pass through a

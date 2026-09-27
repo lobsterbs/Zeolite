@@ -210,7 +210,7 @@ replay; reaching the loopback fixture origin requires the explicit
 test-only ZL_TEST_ALLOW_PRIVATE_DESTS=1 policy escape hatch, and the
 default SSRF policy stays fully locked down.
 
-## Phase 10 — 2.0 Graphene: documentation + final hardening (next)
+## Phase 10 — 2.0 Graphene: documentation + final hardening (shipped)
 
 Prompts items 22, 23. Docs rewritten to describe actual behavior with
 a per-feature support/limitation matrix (no claims beyond reality), full
@@ -218,6 +218,22 @@ regression pass, performance audit (streaming preserved, long-running
 WebSocket memory, listener/worker cleanup) and security audit (origin,
 cookie and storage isolation, CSP, header injection, SSRF, open
 redirects).
+
+Shipped as: docs/matrix.md (every 1.x feature rated supported /
+partial / not supported with its real limits, nothing claimed beyond
+the code), docs/security.md (the SSRF policy's two-stage checks, the
+deliberate hostile-header surgery tradeoff, cookie/storage isolation,
+secrets handling, and the honestly open items: SameSite enforcement,
+host-side CSP responsibility, the test policy hatch) and
+docs/performance.md (measured bundle sizes from CI, the fixed-size
+rings, streaming preservation, cleanup paths, and suite wall-time
+facts). The regression pass is the CI suite itself: 28 vitest files
+(12 app unit + 16 extension runtime), tsc clean, cargo test/clippy
+clean, wasm builds, bootstrap 5093 bytes under the 5120 gate, all
+green on the 2.0 commit. The release is a major (cargo 2.0.0): the
+version identity moves to the Graphene family for the 2.x line; no
+API is removed in this release, the major marks the closing of the
+roadmap rather than a breaking change.
 
 ## Cross-cutting gates (every phase)
 
