@@ -17,7 +17,7 @@ renamed to `Zeolite` in the org settings (GitHub redirects keep old URLs
 working); LobsterBrowse-side references to the old engine name are
 updated in the 1.1 adapter pass.
 
-## Phase 1 — 1.1 Oxide: interception API + rules engine + modification (this release)
+## Phase 1 — 1.1 Oxide: interception API + rules engine + modification (shipped)
 
 Prompts items 9, 10, 11.
 
@@ -32,7 +32,7 @@ Prompts items 9, 10, 11.
   body transforms are opt-in with explicit size gates. Huge responses are
   never buffered just to modify them.
 
-## Phase 2 — 1.2 Halide: rewrite tracing + diagnostics + inspector depth
+## Phase 2 — 1.2 Halide: rewrite tracing + diagnostics + inspector depth (this release)
 
 Prompts items 5, 18, 4.
 

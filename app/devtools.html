@@ -8,6 +8,7 @@
       :root { color-scheme: light dark; }
       body { font: 13px/1.45 system-ui, sans-serif; margin: 0; }
       h1 { font-size: 14px; margin: 8px 12px; }
+      h2 { font-size: 13px; margin: 16px 12px 4px; }
       table { border-collapse: collapse; width: 100%; }
       th, td { text-align: left; padding: 3px 8px; border-bottom: 1px solid #8884; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
       th { position: sticky; top: 0; background: #8882; cursor: pointer; }
@@ -18,10 +19,17 @@
       #paused { color: #888; margin-left: 8px; }
       #stats { color: #888; margin-left: 8px; }
       .fb { color: #c80; }
+      tr.net { cursor: pointer; }
+      tr.net:hover { background: #8881; }
+      #detail { margin: 4px 12px 8px; padding: 6px 8px; background: #8881; white-space: pre-wrap; word-break: break-all; min-height: 1.5em; font: 12px/1.5 ui-monospace, monospace; }
+      .diag-error { color: #c33; }
+      .diag-warning { color: #c80; }
+      .diag-critical { color: #c33; font-weight: bold; }
     </style>
   </head>
   <body>
     <h1>Zeolite network inspector <span id="stats"></span><span id="paused">loading...</span></h1>
+    <pre id="detail">click a request row for details</pre>
     <table>
       <thead>
         <tr>
@@ -36,6 +44,20 @@
         </tr>
       </thead>
       <tbody id="rows"></tbody>
+    </table>
+    <h2>rewrite tracing <label><input type="checkbox" id="traceToggle" /> enabled</label></h2>
+    <table>
+      <thead>
+        <tr><th>time</th><th>subsystem</th><th>rule</th><th>original</th><th>result</th><th>resource</th></tr>
+      </thead>
+      <tbody id="traceRows"></tbody>
+    </table>
+    <h2>diagnostics</h2>
+    <table>
+      <thead>
+        <tr><th>time</th><th>severity</th><th>category</th><th>stage</th><th>message</th><th>url</th></tr>
+      </thead>
+      <tbody id="diagRows"></tbody>
     </table>
     <script type="module" src="/src/devtools.ts"></script>
   </body>

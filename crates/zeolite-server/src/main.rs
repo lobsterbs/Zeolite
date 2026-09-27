@@ -15,7 +15,7 @@ async fn main() {
     let app = zeolite_server::build_app(zeolite_server::Shared::new(cfg));
 
     let addr = format!("0.0.0.0:{}", port);
-    tracing::info!("zeolite-server 1.1 Oxide listening on {}", addr);
+    tracing::info!("zeolite-server 1.2 Halide listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
     axum::serve(listener, app)
         .with_graceful_shutdown(zeolite_server::shutdown_signal())

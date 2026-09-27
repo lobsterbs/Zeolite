@@ -15,6 +15,7 @@
      { type: "zl:teardown" }                 unregister + drop caches
    Phase 4 control plane:
      { type: "zl:getNetLog" }                snapshot of the request log
+     { type: "zl:tracing", enabled }          opt-in rewrite tracing ring (1.2)
    Replies are posted back on the given MessageChannel port, so the
    adapter (and the devtools page) get real acknowledgements.
 
@@ -30,7 +31,8 @@ import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, setRulesEnabled, type ResourceType } from "./rules";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
-import { DIAG } from "./diag";
+import { DIAG, redactSecrets } from "./diag";
+import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
 import {
   CS_ROUTE,
   EXT_ROUTE,
@@ -208,6 +210,27 @@ export interface NetEntry {
   fallbackReason?: string;
   /** Final destination after redirects, when the transport exposed it. */
   finalDest?: string;
+  /** Inspector detail record (1.2 Halide), for the detail view. */
+  detail?: NetDetail;
+}
+
+/** Per-request inspector detail (1.2 Halide): the original target
+    URL lives in the entry itself; this adds the internal engine URL,
+    timing, initiator and redacted header/cookie records. Values of
+    secrets are never stored (redactSecrets on entry). */
+export interface NetDetail {
+  /** Internal engine URL as the browser requested it (path + query). */
+  internalUrl: string;
+  /** Time until response headers, ms. */
+  ttfb: number;
+  /** Destination of the controlling page, when the SW can resolve it. */
+  initiator?: string;
+  /** Redacted request headers. */
+  reqHeaders?: Record<string, string>;
+  /** Redacted response headers, when a response was produced. */
+  respHeaders?: Record<string, string>;
+  /** Set-Cookie names seen on the response (values never stored). */
+  cookies?: string[];
 }
 
 const NET_LIMIT = 256;
@@ -219,13 +242,20 @@ function netLogPush(entry: Omit<NetEntry, "seq" | "ts">): void {
   if (netLog.length > NET_LIMIT) netLog.shift();
 }
 
+/** Flatten headers into a redacted record for the inspector detail. */
+function flatRed(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((v, k) => (out[k] = redactSecrets(v)));
+  return out;
+}
+
 /* ---- Page cache (ported from the v3 worker) -------------------- */
 /* Cache-first for proxied GETs with stale-while-revalidate. Freshness
    honors Cache-Control: max-age when present (no-store skips the cache
    entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
-export const ZEOLITE_VERSION = "1.1 Oxide";
+export const ZEOLITE_VERSION = "1.2 Halide";
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
 const ZL_PAGES = "zeolite-pages-v1";
@@ -493,6 +523,33 @@ self.addEventListener("fetch", (e: FetchEvent) => {
       const t0 = Date.now();
       const traceId = DIAG.trace();
       DIAG.stage(traceId, "REQUEST_INTERCEPTED", { url: target });
+      const internalUrl = url.pathname + url.search;
+      /* Initiator: the controlling page destination, when the SW can
+         resolve the client (unknown after a restart, for instance). */
+      let initiator: string | undefined;
+      try {
+        if (e.clientId) {
+          const client = await self.clients.get(e.clientId);
+          if (client) initiator = decodePath(new URL(client.url, self.location.origin).pathname) || undefined;
+        }
+      } catch {
+        /* initiator stays unknown */
+      }
+      const mkDetail = (resp?: Response): NetDetail => {
+        const d: NetDetail = {
+          internalUrl,
+          ttfb: Date.now() - t0,
+          initiator,
+          reqHeaders: flatRed(e.request.headers),
+        };
+        if (resp) {
+          d.respHeaders = flatRed(resp.headers);
+          const getSetCookie = (resp.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
+          const setCookies = typeof getSetCookie === "function" ? getSetCookie.call(resp.headers) : [];
+          if (setCookies.length) d.cookies = setCookies.map((c) => c.split("=", 1)[0]);
+        }
+        return d;
+      };
       /* NativeTransit decision: pre-fetch classification from the
          destination scheme + sec-fetch-dest; refined with the actual
          content type once the response arrives. */
@@ -534,6 +591,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           verdict: "blocked",
           transport: decision.mode,
           fallbackReason: decision.fallbackReason,
+          detail: mkDetail(),
         });
         return new Response("zeolite: request blocked by extension", {
           status: 403,
@@ -566,6 +624,16 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         ...(ruleDec.headers ?? {}),
         ...(ic.headers ?? {}),
       };
+      /* 1.2 Halide: opt-in rewrite tracing at the decision seams.
+         Zero allocation while tracing is off. */
+      if (ruleDec.action === "block")
+        traceDecision({ subsystem: "rules", rule: ruleDec.matched, original: target, result: "blocked", resource: rtype, traceId });
+      if (ic.block)
+        traceDecision({ subsystem: "intercept", original: target, result: "blocked", resource: rtype, traceId });
+      if (ruleDec.url)
+        traceDecision({ subsystem: "rules", rule: "rewrite", original: target, result: ruleDec.url, resource: rtype, traceId });
+      if (ic.url)
+        traceDecision({ subsystem: "intercept", original: target, result: ic.url, resource: rtype, traceId });
       if (ruleDec.action === "block" || ic.block) {
         DIAG.emit({
           category: "BLOCKED",
@@ -593,6 +661,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           verdict: ruleDec.action === "block" ? "blocked:rules" : "blocked:intercept",
           transport: decision.mode,
           fallbackReason: decision.fallbackReason,
+          detail: mkDetail(),
         });
         return new Response("zeolite: request blocked", {
           status: 403,
@@ -629,6 +698,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             verdict: "cache",
             transport: dec.mode,
             fallbackReason: dec.fallbackReason,
+            detail: mkDetail(hit),
           });
           WEBREQ.completed({ ...wrDetails, statusCode: hit.status });
           return hit;
@@ -668,6 +738,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         outHeaders.set("x-zl-proxy", "1");
         void applyOnResponse(plugins, target, resp.status, outHeaders);
         const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "");
+        traceDecision({ subsystem: "transport", rule: dec.mode, original: target, result: dec.fallbackReason ?? dec.mode, resource: rtype, traceId });
+        if (finalDest)
+          traceDecision({ subsystem: "transport", rule: "redirect", original: target, result: finalDest, resource: rtype, traceId });
         transitRecord(traceId, target, dec);
         netLogPush({
           method: e.request.method, traceId,
@@ -685,6 +758,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           transport: dec.mode,
           fallbackReason: dec.fallbackReason,
           finalDest,
+          detail: mkDetail(resp),
         });
         /* Opt-in response body transform (1.1): only when an intercept
            handler declared one AND the size gate passes. Documents and
@@ -714,6 +788,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         if (e.request.method === "GET") void pageCacheStore(e.request, resp.clone());
         if (isHtml(resp) && resp.body) {
           DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
+          traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });
           /* Main-frame document loads feed the webNavigation bridge;
              subresource fetches do not arrive in navigate mode. */
           if (e.request.mode === "navigate") WEBNAV.committed(target);
@@ -736,6 +811,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           // Standalone stylesheets: one-shot url() pass through the
           // rewriter module. Small bodies, not first-paint documents.
           DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "css rewrite" });
+          traceDecision({ subsystem: "rewriter", rule: "css", original: target, result: "rewritten", resource: rtype, traceId });
           const mod = await rewriter();
           const css = await resp.text();
           const out = mod.rewriteCss(css, self.location.origin, target, currentPrefix());
@@ -768,6 +844,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           err: String(err),
           transport: decision.mode,
           fallbackReason: decision.fallbackReason,
+          detail: mkDetail(),
         });
         return new Response(`zeolite: upstream fetch failed: ${String(err)}`, {
           status: 502,
@@ -812,7 +889,9 @@ interface ControlMessage {
     | "zl:installExtFiles"
     | "zl:extEnable"
     | "zl:extInfo"
-    | "zl:adblock";
+    | "zl:adblock"
+    | "zl:tracing"
+    | "zl:getTracing";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -850,6 +929,18 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
       setRulesEnabled(msg.enabled !== false);
       reply({ ok: true });
       break;
+    case "zl:tracing":
+      /* 1.2 Halide: opt-in rewrite tracing ring. Off by default;
+         resets to off on SW restart, so the host re-sends it. */
+      setTracing(msg.enabled !== false);
+      reply({ ok: true, enabled: msg.enabled !== false });
+      break;
+    case "zl:getTracing": {
+      /* Delta poll, same cursor protocol as zl:getNetLog. */
+      const since = (msg as { since?: number }).since ?? 0;
+      reply({ ok: true, ...tracingSnapshot(since) });
+      break;
+    }
     case "zl:siteRoute":
       if (!msg.site) {
         reply({ ok: false, error: "missing site" });
