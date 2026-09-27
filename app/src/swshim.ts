@@ -110,6 +110,9 @@ export function swShimGet(
     return undefined;
   }
   if (scope !== undefined && rec.scope !== scopeFor(pageUrl, scope)) return undefined;
+  /* Defense in depth: a record that scopes a foreign origin is not
+     this page's registration, even if it landed in this store. */
+  if (!rec.scope.startsWith(new URL(pageUrl).origin)) return undefined;
   return registration(rec, store, true);
 }
 

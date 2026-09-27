@@ -34,7 +34,7 @@ describe("routeWorkerImport (1.6)", () => {
   it("passes engine-local and opaque arguments through untouched", () => {
     expect(routeWorkerImport(P, W, E, E + "/j/abc")).toBe(E + "/j/abc");
     expect(routeWorkerImport(P, W, E, "data:text/javascript,hi")).toBe("data:text/javascript,hi");
-    expect(routeWorkerImport(P, W, E, "::not a url")).toBe("::not a url");
+    expect(routeWorkerImport(P, W, E, "blob:https://engine.host/uuid")).toBe("blob:https://engine.host/uuid");
   });
 });
 
