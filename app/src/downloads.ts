@@ -62,6 +62,10 @@ const RING = 200;
 export class DownloadTracker {
   private readonly entries: DownloadEntry[] = [];
   private readonly streams = new Map<string, TransformStream<Uint8Array, Uint8Array>>();
+  /* The readable side of a TransformStream is only reliably severable
+     through its controller: aborting the writable alone can leave the
+     readable quietly serving already-queued chunks. */
+  private readonly controllers = new Map<string, TransformStreamDefaultController<Uint8Array>>();
   private seq = 0;
 
   /** Register a new attachment response; returns its entry id. */
@@ -89,6 +93,9 @@ export class DownloadTracker {
   wrap(id: string, body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
     const entry = this.entries.find((x) => x.id === id);
     const ts = new TransformStream<Uint8Array, Uint8Array>({
+      start: (ctrl) => {
+        this.controllers.set(id, ctrl);
+      },
       transform(chunk, ctrl) {
         if (entry && entry.status === "active") entry.received += chunk.byteLength;
         ctrl.enqueue(chunk);
@@ -113,6 +120,7 @@ export class DownloadTracker {
       }
     }).finally(() => {
       this.streams.delete(id);
+      this.controllers.delete(id);
     });
     return ts.readable;
   }
@@ -128,8 +136,17 @@ export class DownloadTracker {
       entry.endedAt = Date.now();
     }
     if (ts) {
+      const ctl = this.controllers.get(id);
+      if (ctl) {
+        try {
+          ctl.error(new Error("cancelled"));
+        } catch {
+          /* already errored or closed */
+        }
+      }
       ts.writable.abort(new Error("cancelled")).catch(() => undefined);
       this.streams.delete(id);
+      this.controllers.delete(id);
       return true;
     }
     return Boolean(entry && entry.status === "cancelled");
@@ -155,6 +172,7 @@ export class DownloadTracker {
   reset(): void {
     this.entries.length = 0;
     this.streams.clear();
+    this.controllers.clear();
     this.seq = 0;
   }
 }
