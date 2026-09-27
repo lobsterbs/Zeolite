@@ -66,6 +66,43 @@ describe("TabRegistry.sendMessage", () => {
     );
   });
 
+  it("rejects a frameId option honestly instead of ignoring it", async () => {
+    const r = new TabRegistry();
+    r.syncFromUi([tab(5, "https://e.example/")]);
+    const nonces: string[] = [];
+    r.setMessageDispatch((_t, _u, _e, payload) => { nonces.push(payload.nonce); });
+    await expect(
+      r.sendMessage(fakeExt(["<all_urls>"]), 5, "x", { frameId: 0 }),
+    ).rejects.toThrow(/frame targeting is not supported/);
+    // An options object without frameId is accepted and delivered.
+    const p1 = r.sendMessage(fakeExt(["<all_urls>"]), 5, "x", {});
+    const p2 = r.sendMessage(fakeExt(["<all_urls>"]), 5, "x");
+    expect(nonces).toHaveLength(2);
+    r.resolveTabMessage(nonces[0], 1);
+    r.resolveTabMessage(nonces[1], 2);
+    await expect(p1).resolves.toBe(1);
+    await expect(p2).resolves.toBe(2);
+  });
+
+  it("rejects pending messages immediately when the tab is removed", async () => {
+    const r = new TabRegistry();
+    r.syncFromUi([tab(6, "https://f.example/"), tab(7, "https://g.example/")]);
+    const nonces: string[] = [];
+    r.setMessageDispatch((_t, _u, _e, payload) => { nonces.push(payload.nonce); });
+    const p = r.sendMessage(fakeExt(["<all_urls>"]), 6, "x");
+    const pOther = r.sendMessage(fakeExt(["<all_urls>"]), 7, "y");
+    expect(nonces).toHaveLength(2);
+    // UI sync drops tab 6: its pending reply must fail now, not at the
+    // 30s timeout; tab 7's pending message must be untouched.
+    r.syncFromUi([tab(7, "https://g.example/")]);
+    await expect(p).rejects.toThrow(/tab closed before a content script replied/);
+    r.resolveTabMessage(nonces[1], { ok: true });
+    await expect(pOther).resolves.toEqual({ ok: true });
+    // The removed tab's stale nonce and unknown nonces stay no-ops.
+    r.resolveTabMessage(nonces[0], { ignored: true });
+    r.rejectTabMessage("nope", "never registered");
+  });
+
   it("ignores replies for unknown nonces", () => {
     const r = new TabRegistry();
     r.resolveTabMessage("nope", 1);

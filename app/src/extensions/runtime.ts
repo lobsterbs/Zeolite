@@ -244,7 +244,8 @@ export function buildApi(
     update: (id: number | undefined, props: Record<string, unknown> = {}) =>
       TABS.update(id ?? null, props as { active?: boolean; url?: string }),
     remove: (ids: number | number[]) => TABS.remove(Array.isArray(ids) ? ids : [ids]),
-    sendMessage: (tabId: number, msg: unknown) => TABS.sendMessage(ext, tabId, msg),
+    sendMessage: (tabId: number, msg: unknown, options?: { frameId?: number }) =>
+      TABS.sendMessage(ext, tabId, msg, options),
     onCreated: makeTabsEvent(ext, "created"),
     onUpdated: makeTabsEvent(ext, "updated"),
     onActivated: makeTabsEvent(ext, "activated"),

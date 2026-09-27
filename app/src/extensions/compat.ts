@@ -34,7 +34,7 @@ export const COMPAT: Record<string, CompatEntry> = {
   "content-script storage access": { supported: "partial", reason: "local area via the verified bridge channel; sync/session pending" },
   "browser.scripting": { supported: "partial", reason: "executeScript/insertCSS read files from the package and run them in the page world via the SW->page channel; scripting + host permissions enforced; func injection and result capture not implemented" },
   "tabs.*": { supported: "partial", reason: "query/get/events mirror the real UI tab model via the UI->SW sync channel; create/update/remove dispatch to the UI and resolve on observed change; url/title visibility gated by the tabs/host permissions as in Firefox" },
-  "tabs.sendMessage": { supported: "partial", reason: "background->content-script delivery with host-permission checks and a 30s response window; frame targeting is not supported, and a tab whose page never answers rejects on timeout" },
+  "tabs.sendMessage": { supported: "partial", reason: "background->content-script delivery with host-permission checks and a 30s response window; frame targeting is rejected honestly (content scripts run in the page world), and a removed tab's pending message rejects immediately instead of timing out" },
   "tabs.getCurrent": { supported: "no", reason: "no tab context exists in this engine; rejects honestly" },
   "windows.*": { supported: "partial", reason: "single-window engine: get/getCurrent/getLastFocused/getAll with optional tab population; focus events never fire" },
   "cookies.*": { supported: "no", reason: "requires the Zeolite virtual cookie jar bridge" },

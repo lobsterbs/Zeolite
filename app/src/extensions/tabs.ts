@@ -85,7 +85,7 @@ export class TabRegistry {
     | null = null;
   private readonly pendingMessages = new Map<
     string,
-    { resolve: (v: unknown) => void; reject: (e: Error) => void }
+    { tabId: number; resolve: (v: unknown) => void; reject: (e: Error) => void }
   >();
   private nonceSeq = 0;
 
@@ -106,11 +106,23 @@ export class TabRegistry {
       with the first listener reply. Firefox semantics: a matching
       host permission is required; a missing tab or a missing dispatch
       host rejects honestly. Frame targeting is not supported (see
-      ./compat), and a tab whose page never answers rejects on the 30s
-      timeout. */
-  sendMessage(ext: ExtensionRecord, tabId: number, msg: unknown): Promise<unknown> {
+      ./compat), and a caller that asks for one is rejected instead of
+      having the option silently ignored. A tab whose page never
+      answers rejects on the 30s timeout — or immediately when the tab
+      is removed, whichever comes first. */
+  sendMessage(
+    ext: ExtensionRecord,
+    tabId: number,
+    msg: unknown,
+    options?: { frameId?: number },
+  ): Promise<unknown> {
     const tab = this.tabs.get(tabId);
     if (!tab) return Promise.reject(new Error("Invalid tab ID: " + tabId));
+    if (options && options.frameId !== undefined) {
+      return Promise.reject(
+        new Error("zeolite: frame targeting is not supported; content scripts run in the page world"),
+      );
+    }
     if (!hostPatternsMatch(ext.hostPermissions, tab.url)) {
       return Promise.reject(
         new Error("zeolite: tabs.sendMessage requires a host permission for " + tab.url),
@@ -128,6 +140,7 @@ export class TabRegistry {
         }
       }, 30000);
       this.pendingMessages.set(nonce, {
+        tabId,
         resolve: (v) => {
           clearTimeout(timer);
           resolve(v);
@@ -139,6 +152,16 @@ export class TabRegistry {
       });
       dispatch(tabId, tab.url, ext.id, { nonce, msg });
     });
+  }
+
+  /** Tab removed: every still-pending sendMessage to it fails now,
+      not on the 30s timeout — the page that would answer is gone. */
+  private rejectPendingForTab(tabId: number): void {
+    for (const [nonce, p] of this.pendingMessages) {
+      if (p.tabId !== tabId) continue;
+      this.pendingMessages.delete(nonce);
+      p.reject(new Error("zeolite: tab closed before a content script replied"));
+    }
   }
 
   /** Content-script reply routed back through the SW (zl:ext
@@ -207,6 +230,7 @@ export class TabRegistry {
     for (const [id, prev] of this.tabs) {
       if (next.has(id)) continue;
       this.fire({ type: "removed", tabId: id, windowId: prev.windowId ?? 1 });
+      this.rejectPendingForTab(id);
       const waits = this.pendingRemove.get(id);
       if (waits) {
         this.pendingRemove.delete(id);
