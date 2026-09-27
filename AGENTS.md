@@ -1,4 +1,4 @@
-# AGENTS.md â Zeolite
+# AGENTS.md Ã¢ÂÂ Zeolite
 
 Guidance for AI agents and human contributors. Read this before changing code, architecture, CI, or public documentation.
 
@@ -26,17 +26,17 @@ Extension pipeline status: webRequest is wired into the engine fetch path (onBef
 **Do not implement Gecko-specific architecture, dependencies, WASM, or adapters as part of NativeTransit.**
 
 ## Repository layout
-- `crates/rewriter/` â streaming Rust/WASM rewriter.
-- `crates/wisp-core/` â Wisp v2.1 protocol.
-- `crates/wisp-extensions/` â auth/lifecycle/server extensions.
-- `crates/zeolite-server/` â standalone Wisp/static server and destination protection.
-- `crates/wisp-wasm/` â WASM Wisp bindings.
-- `app/src/sw.ts` â service-worker/interception entrypoint.
-- `app/src/extensions/` â WebExtension compatibility runtime.
-- `app/src/diag.ts` â bounded diagnostics.
-- `app/src/transit.ts` â NativeTransit transport-mode decision layer + fallback record.
-- `suite/` â compatibility probes.
-- `docs/` â architecture, roadmap, versioning and adapter docs.
+- `crates/rewriter/` Ã¢ÂÂ streaming Rust/WASM rewriter.
+- `crates/wisp-core/` Ã¢ÂÂ Wisp v2.1 protocol.
+- `crates/wisp-extensions/` Ã¢ÂÂ auth/lifecycle/server extensions.
+- `crates/zeolite-server/` Ã¢ÂÂ standalone Wisp/static server and destination protection.
+- `crates/wisp-wasm/` Ã¢ÂÂ WASM Wisp bindings.
+- `app/src/sw.ts` Ã¢ÂÂ service-worker/interception entrypoint.
+- `app/src/extensions/` Ã¢ÂÂ WebExtension compatibility runtime.
+- `app/src/diag.ts` Ã¢ÂÂ bounded diagnostics.
+- `app/src/transit.ts` Ã¢ÂÂ NativeTransit transport-mode decision layer + fallback record.
+- `suite/` Ã¢ÂÂ compatibility probes.
+- `docs/` Ã¢ÂÂ architecture, roadmap, versioning and adapter docs.
 
 ## Hard invariants
 - Rewriting stays streaming; never buffer whole documents for convenience.
@@ -50,6 +50,7 @@ Extension pipeline status: webRequest is wired into the engine fetch path (onBef
 - Validate destinations after DNS resolution to prevent SSRF/DNS-rebinding bypasses.
 - Never turn the server into an unrestricted open proxy.
 - Keep credentials, cookies and bearer tokens out of diagnostics.
+- A normal WebSocket close is not a failure. `CloseEvent.wasClean` defaults to false, so the bootstrap must set it explicitly: server close frame received or client-initiated close is clean; a wisp stream dying without a close frame (1006/1002) or a failed handshake is not.
 
 ## Diagnostics
 Diagnostics are part of the engine contract. Current bounded storage is 512 diagnostic events and 256 trace entries, with a trace ID per request.
