@@ -91,19 +91,17 @@ function siteKeys(store: Storage): string[] {
  lives in the service worker, not the page). */
 
 {
- const IDB = w.indexedDB as
- | (IDBFactory & { databases?: () => Promise<Array<{ name: string }>> })
- | undefined;
+ const IDB = w.indexedDB as IDBFactory | undefined;
  if (IDB) {
  const OPEN = IDB.open.bind(IDB);
  const DEL = IDB.deleteDatabase.bind(IDB);
- const DBS = IDB.databases?.bind(IDB);
  const pre = (n: unknown) => SITE + ":" + String(n);
+ /* databases() is deliberately absent (honest unimplemented API):
+    wrapping it would risk leaking engine-own database names. */
  const shim: Record<string, unknown> = {
  open: (n: unknown, v?: number) => OPEN(pre(n), v),
  deleteDatabase: (n: unknown) => DEL(pre(n)),
  };
- if (DBS) shim.databases = () => DBS().then((rs) => rs.filter((r) => (r.name ?? "").startsWith(SITE + ":")).map((r) => ({ ...r, name: (r.name ?? "").slice(SITE.length + 1) })));
  try {
  (w as Record<string, unknown>).indexedDB = shim;
  } catch { /* read-only: stays unscoped */ }
@@ -156,14 +154,15 @@ function siteKeys(store: Storage): string[] {
  const desc = Object.getOwnPropertyDescriptor(Document.prototype, "cookie");
  if (desc && ctl && /^https?:/.test(ORIGIN)) {
  let cur = "";
- const sync = (set?: string) => {
+ /* One channel lives for the page's lifetime: the SW keeps the far
+    end and answers every message with the authoritative jar view. */
  const ch = new MessageChannel();
  ch.port1.onmessage = (ev) => {
  const d = ev.data as { cookie?: string };
  if (typeof d.cookie === "string") cur = d.cookie;
  };
- ctl.postMessage({ type: "zl:docCookie", origin: ORIGIN, set }, [ch.port2]);
- };
+ ctl.postMessage({ type: "zl:docCookie", origin: ORIGIN }, [ch.port2]);
+ const sync = (set?: string) => ch.port1.postMessage({ set });
  Object.defineProperty(document, "cookie", {
  configurable: true,
  get: () => {

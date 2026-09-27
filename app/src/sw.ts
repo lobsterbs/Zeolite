@@ -1120,17 +1120,22 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
       break;
     }
     case "zl:docCookie": {
-      /* 1.5 Silicide: document.cookie virtualization. Writes are
-         admitted RFC 6265 against the page origin (HttpOnly is
-         stripped: a script cannot mint an HttpOnly cookie); every
-         message is answered with the authoritative jar view so the
-         page-side cache stays eventually consistent. */
+      /* 1.6 Hydride: single-channel document.cookie sync. The port
+         is transferred once and kept; the initial message and every
+         follow-up on the port is answered with the authoritative jar
+         view, so the page-side cache stays eventually consistent
+         without a fresh MessageChannel per read/write. */
       if (!port || typeof msg.origin !== "string" || !/^https?:/i.test(msg.origin)) {
         reply({ ok: false, error: "bad zl:docCookie" });
         break;
       }
-      if (typeof msg.set === "string") documentCookieWrite(msg.origin, msg.set);
-      reply({ ok: true, cookie: documentCookieRead(msg.origin) });
+      const origin = msg.origin;
+      const handle = (set?: unknown) => {
+        if (typeof set === "string") documentCookieWrite(origin, set);
+        port.postMessage({ ok: true, cookie: documentCookieRead(origin) });
+      };
+      handle(msg.set);
+      port.onmessage = (ev) => handle((ev.data as { set?: unknown }).set);
       break;
     }
     case "zl:teardown":

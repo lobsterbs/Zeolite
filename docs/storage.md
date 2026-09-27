@@ -17,11 +17,12 @@ used since 1.0: `zl:<fnv1a36>:` derived from the target origin
   and stays per-tab here; the prefix isolates two sites inside one tab.
 
 - **IndexedDB**: `indexedDB.open(name)` and `deleteDatabase(name)` are
-  wrapped to open `zl:<site>:name` instead. `databases()` lists only
-  the site's own databases, un-prefixed. The engine's own databases
-  (the extension runtime's `idb` store, the cookie jar's `cookies`
-  store) live in the service worker context and are unreachable from
-  pages. `IDBFactory.cmp` is not wrapped.
+  wrapped to open `zl:<site>:name` instead. `databases()` is
+  deliberately absent on the shim (an honest unimplemented API beats
+  wrapping it and risking a leak of engine-own database names); so is
+  `IDBFactory.cmp`. The engine's own databases (the extension
+  runtime's `idb` store, the cookie jar's `cookies` store) live in
+  the service worker context and are unreachable from pages.
 
 - **Cache API**: `caches.open/delete/has` are prefixed the same way;
   `keys()` lists only the site's own caches, un-prefixed; `match()`
