@@ -99,14 +99,7 @@ function siteKeys(store: Storage): string[] {
  open: (n: unknown, v?: number) => OPEN(pre(n), v),
  deleteDatabase: (n: unknown) => DEL(pre(n)),
  };
- if (DBS) {
- shim.databases = () =>
- DBS().then((rs) =>
- rs
- .filter((r) => (r.name ?? "").startsWith(SITE + ":"))
- .map((r) => ({ ...r, name: (r.name ?? "").slice(SITE.length + 1) })),
- );
- }
+ if (DBS) shim.databases = () => DBS().then((rs) => rs.filter((r) => (r.name ?? "").startsWith(SITE + ":")).map((r) => ({ ...r, name: (r.name ?? "").slice(SITE.length + 1) })));
  try {
  (w as Record<string, unknown>).indexedDB = shim;
  } catch { /* read-only: stays unscoped */ }
@@ -156,13 +149,9 @@ function siteKeys(store: Storage): string[] {
  const ctl =
  (navigator as { serviceWorker?: { controller?: ServiceWorker } })
  .serviceWorker?.controller;
- const ORIGIN = (() => {
- try {
- return new URL(ZL.dest).origin;
- } catch {
- return "";
- }
- })();
+ /* siteKey() is the page origin ("unknown" when unparseable): one
+    computation shared by the cookie shim and the serviceWorker shim. */
+ const ORIGIN = siteKey() === "unknown" ? "" : siteKey();
  const desc = Object.getOwnPropertyDescriptor(Document.prototype, "cookie");
  if (desc && ctl && /^https?:/.test(ORIGIN)) {
  let cur = "";
@@ -220,29 +209,9 @@ addEventListener("message", (e: MessageEvent) => {
 
 {
  const NS = (navigator as { serviceWorker?: unknown }).serviceWorker;
- if (NS && /^https?:/.test(siteKey())) {
+ if (NS && /^https?:/.test(ORIGIN)) {
   const LS = w.localStorage as unknown as Storage;
-  swShimApply(NS as object, {
-   get: () => LS.getItem("swreg"),
-   set: (v: string) => void LS.setItem("swreg", v),
-   clear: () => void LS.removeItem("swreg"),
-  }, ZL.dest);
- }
-}
-
-/* ---- Worker constructor ------------------------------------------- */
-/* Workers load same-origin engine paths (intercepted by the SW); blob
- workers pass through untouched since their fetches go through the
- SW anyway. */
-
-{
- const OW = w.Worker as (new (u: string | URL, o?: WorkerOptions) => Worker) | undefined;
- if (OW) {
- const W = function (u: string | URL, o?: WorkerOptions) {
- return new OW(String(u), o);
- } as unknown as typeof OW;
- W.prototype = OW.prototype;
- (w as { Worker?: unknown }).Worker = W;
+  swShimApply(NS as object, { get: () => LS.getItem("swreg"), set: (v: string) => void LS.setItem("swreg", v), clear: () => void LS.removeItem("swreg") }, ZL.dest);
  }
 }
 
