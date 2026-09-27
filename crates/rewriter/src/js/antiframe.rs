@@ -162,7 +162,8 @@ mod tests {
 
     #[test]
     fn sinks_navigation_writes() {
-        let out = antiframe("top.location.href = u; top.location.replace(x); top.location.reload();");
+        let out =
+            antiframe("top.location.href = u; top.location.replace(x); top.location.reload();");
         assert_eq!(
             out,
             "self.zl_antiframe = u; self.zl_antiframe?.replace?.(x); self.zl_antiframe?.reload?.();"
@@ -181,7 +182,9 @@ mod tests {
 
     #[test]
     fn window_prefixed_forms() {
-        let out = antiframe("if (window.top != window.self) { window.top.location = document.location; }");
+        let out = antiframe(
+            "if (window.top != window.self) { window.top.location = document.location; }",
+        );
         assert_eq!(
             out,
             "if (self != self) { self.zl_antiframe = document.location; }"
