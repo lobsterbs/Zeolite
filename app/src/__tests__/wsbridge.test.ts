@@ -13,17 +13,18 @@ interface FakeHandlers {
 }
 
 function fakePort(): PortLike & { posted: unknown[]; closed: boolean } {
-  return {
+  const p: PortLike & { posted: unknown[]; closed: boolean } = {
     posted: [],
     closed: false,
     onmessage: null,
     postMessage(d: unknown) {
-      this.posted.push(d);
+      p.posted.push(d);
     },
     close() {
-      this.closed = true;
+      p.closed = true;
     },
-  } as never;
+  };
+  return p;
 }
 
 function fakeHooks(): { hooks: WsHooks; rec: Record<string, unknown[]> } {
