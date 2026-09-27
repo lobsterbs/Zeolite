@@ -1,6 +1,6 @@
 # Zeolite
 ![Zeolite banner](assets/zeolite-banner.svg)
-**Current release: 1.2 Halide** · Rust/WASM · Wisp v2.1
+**Current release: 1.3 Carbide** · Rust/WASM · Wisp v2.1
 Zeolite is a standalone, reusable web interception/proxy engine providing a browser service-worker runtime, streaming rewriting, Wisp transport, diagnostics, and WebExtension compatibility.
 ## Current architecture
 The 1.0 release is interception + rewriting. The rewriter is production code.
@@ -13,9 +13,9 @@ NativeTransit is the next architecture: transport/interception first, with the e
 NativeTransit is a design direction, not a claim that the current release has already replaced rewriting. If it proves stable across serious real-world compatibility tests, rewriting can eventually become optional for integrations that do not need it.
 NativeTransit reuses existing transport, cookie/session and diagnostics infrastructure. It does not add Gecko-specific architecture.
 ## Current capabilities
-Rust/WASM streaming rewriting; Wisp v2.1; service-worker interception; interception API + rules engine; bounded diagnostics; opt-in rewrite tracing; WebExtension compatibility; extension resource protection; standalone server; compatibility probes; SSRF/destination protection.
+Rust/WASM streaming rewriting; Wisp v2.1; service-worker interception; interception API + rules engine; bounded diagnostics; opt-in rewrite tracing; runtime WebSocket; WebExtension compatibility; extension resource protection; standalone server; compatibility probes; SSRF/destination protection.
 ## Important limitations
-Zeolite is not a full browser engine. Some WebExtension APIs, true isolated extension worlds, service-worker virtualization, virtual origins, cookie/storage behavior and advanced browser networking remain partial or planned.
+Zeolite is not a full browser engine. Some WebExtension APIs, true isolated extension worlds, service-worker virtualization, virtual origins, cookie/storage behavior and advanced browser networking remain partial or planned; WebSocket targets without TLS fail (ws:// is upgraded to wss:// by design).
 ## Repository layout
 - crates/rewriter — Rust/WASM rewriter
 - crates/wisp-core — Wisp v2.1
@@ -25,6 +25,7 @@ Zeolite is not a full browser engine. Some WebExtension APIs, true isolated exte
 - app/src/extensions — WebExtension runtime
 - app/src/diag.ts — diagnostics
 - app/src/tracing.ts — opt-in rewrite tracing
+- app/src/wsbridge.ts — page WebSocket bridge
 - suite — compatibility probes
 - docs — architecture/versioning/roadmap
 ## Diagnostics

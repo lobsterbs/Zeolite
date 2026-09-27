@@ -52,6 +52,17 @@ interface LibcurlClientLike {
     headers: RawHeaders,
     signal: AbortSignal | undefined,
   ): Promise<TransferrableResponse>;
+  /* WebSocket (verified in dist/index.d.ts v2.0.5): TLS-terminated
+     ws over the wisp transport. Returns [send, close]. */
+  connect(
+    url: URL,
+    protocols: string[],
+    requestHeaders: RawHeaders,
+    onopen: (protocol: string, extensions: string) => void,
+    onmessage: (data: Blob | ArrayBuffer | string) => void,
+    onclose: (code: number, reason: string) => void,
+    onerror: (error: string) => void,
+  ): [(data: Blob | ArrayBuffer | string) => void, (code: number, reason: string) => void];
   /* Cookie jar access is not part of the declared API; it may exist
      on the session. Probed defensively at runtime. */
   session?: unknown;
@@ -156,4 +167,31 @@ export async function setCookies(
   const fn = sessionMethod("setCookies") ?? sessionMethod("loadCookies");
   if (!fn) throw new Error("zeolite: cookie import not supported by vendored transport");
   await fn.call(client.session, _url, _cookies);
+}
+
+/* WebSocket (1.3 Carbide). LibcurlClient.connect terminates TLS and
+   runs the ws handshake over a raw wisp TCP stream, which is the same
+   proven path proxied HTTPS uses. */
+export interface WsHandlers {
+  onopen(protocol: string): void;
+  onmessage(data: Blob | ArrayBuffer | string): void;
+  onclose(code: number, reason: string): void;
+  onerror(error: string): void;
+}
+export interface WsHandle {
+  send(data: Blob | ArrayBuffer | string): void;
+  close(code: number, reason: string): void;
+}
+export function openWebSocket(url: string, protocols: string[], h: WsHandlers): WsHandle {
+  if (!client) throw new Error(MISSING);
+  const [send, close] = client.connect(
+    new URL(url),
+    protocols,
+    [],
+    (protocol) => h.onopen(protocol),
+    (data) => h.onmessage(data),
+    (code, reason) => h.onclose(code, reason),
+    (error) => h.onerror(error),
+  );
+  return { send, close };
 }

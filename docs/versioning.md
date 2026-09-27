@@ -1,7 +1,7 @@
 # Zeolite versioning
 
 Zeolite versions are `MAJOR.MINOR "Substance"`, for example **1.0 Nitride**
-or **1.2 Halide**.
+or **1.3 Carbide**.
 
 - The numeric part follows semver: MAJOR breaks compatibility, MINOR adds
   capability. In Cargo the version is `MAJOR.MINOR.0` (the patch digit is
@@ -16,4 +16,4 @@ or **1.2 Halide**.
   exported by the service worker as `ZEOLITE_VERSION`, and returned in the
   `zl:getNetLog` reply so tooling can pin and display it.
 
-Current release: **1.2 Halide** (cargo `1.2.0`).
+Current release: **1.3 Carbide** (cargo `1.3.0`).

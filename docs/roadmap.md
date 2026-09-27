@@ -32,7 +32,7 @@ Prompts items 9, 10, 11.
   body transforms are opt-in with explicit size gates. Huge responses are
   never buffered just to modify them.
 
-## Phase 2 — 1.2 Halide: rewrite tracing + diagnostics + inspector depth (this release)
+## Phase 2 — 1.2 Halide: rewrite tracing + diagnostics + inspector depth (shipped)
 
 Prompts items 5, 18, 4.
 
@@ -46,7 +46,7 @@ Prompts items 5, 18, 4.
   cookies, timing, initiator, raw data, and both the original target URL
   and the internal Zeolite URL. WebSocket rows land with 1.3.
 
-## Phase 3 — 1.3 Carbide: WebSocket
+## Phase 3 — 1.3 Carbide: WebSocket (this release)
 
 Prompt item 1. Runtime WebSocket over a raw Wisp TCP stream (TLS stays
 with the transport): open/message/error/close, send, binary frames,

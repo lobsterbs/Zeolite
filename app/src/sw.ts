@@ -16,6 +16,7 @@
    Phase 4 control plane:
      { type: "zl:getNetLog" }                snapshot of the request log
      { type: "zl:tracing", enabled }          opt-in rewrite tracing ring (1.2)
+     { type: "zl:wsOpen", url, protocols }   page WebSocket bridge (1.3)
    Replies are posted back on the given MessageChannel port, so the
    adapter (and the devtools page) get real acknowledgements.
 
@@ -33,6 +34,8 @@ import { applyRules, loadRules, setRulesEnabled, type ResourceType } from "./rul
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
 import { DIAG, redactSecrets } from "./diag";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
+import { openWebSocket } from "./libcurl-transport-vendored";
+import { WsBridge, type PortLike } from "./wsbridge";
 import {
   CS_ROUTE,
   EXT_ROUTE,
@@ -249,13 +252,93 @@ function flatRed(headers: Headers): Record<string, string> {
   return out;
 }
 
+/* ---- WebSocket bridge (1.3 Carbide) -------------------------------- */
+/* Pages route ws(s):// through the zl:wsOpen control message; the
+   connection runs on the libcurl transport (TLS terminates there)
+   over a raw wisp TCP stream. ws:// is upgraded to wss:// before the
+   transport sees it. One netlog row lands at open (status 101), one
+   with the final close code and byte totals at close. */
+
+const wsBridge = new WsBridge(
+  {
+    open: (url, protocols, h) =>
+      openWebSocket(url, protocols, {
+        onopen: (p) => h.onopen(p),
+        onmessage: (d) => h.onmessage(d),
+        onclose: (c, r) => h.onclose(c, r),
+        onerror: (e) => h.onerror(e),
+      }),
+  },
+  {
+    attempt: (url, upgraded) => ({
+      url,
+      upgraded,
+      entry: null as NetEntry | null,
+      bytes: 0,
+      traceId: DIAG.trace(),
+    }),
+    onReady: (token, protocol, ms) => {
+      const t = token as { url: string; entry: NetEntry | null; traceId: string };
+      netLogPush({
+        method: "WS",
+        traceId: t.traceId,
+        path: "(ws bridge)",
+        dest: t.url,
+        status: 101,
+        ms,
+        bytes: 0,
+        verdict: "ws" + (protocol ? " proto " + protocol : ""),
+        rtype: "WEBSOCKET",
+        transport: "NativeTransit",
+        detail: { internalUrl: "(wisp stream)", ttfb: ms },
+      });
+      t.entry = netLog[netLog.length - 1];
+    },
+    onBytes: (token, rx, tx) => {
+      const t = token as { entry: NetEntry | null; bytes: number };
+      t.bytes += rx + tx;
+      if (t.entry) t.entry.bytes = t.bytes;
+    },
+    onClose: (token, code, clean, ms) => {
+      const t = token as { url: string; bytes: number; traceId: string };
+      if (!clean) {
+        DIAG.emit({
+          category: "WEBSOCKET",
+          cause: "failure",
+          severity: "error",
+          message: "websocket closed abnormally",
+          technicalReason: "close code " + code,
+          url: t.url,
+          traceId: t.traceId,
+          requestId: t.traceId,
+        });
+      }
+      netLogPush({
+        method: "WS",
+        traceId: t.traceId,
+        path: "(ws bridge)",
+        dest: t.url,
+        status: code,
+        ms,
+        bytes: t.bytes,
+        verdict: clean ? "ws:closed" : "ws:aborted",
+        err: clean ? undefined : "abnormal close " + code,
+        rtype: "WEBSOCKET",
+        transport: "NativeTransit",
+        detail: { internalUrl: "(wisp stream)", ttfb: ms },
+      });
+    },
+    trace: (d) => void traceDecision(d),
+  },
+);
+
 /* ---- Page cache (ported from the v3 worker) -------------------- */
 /* Cache-first for proxied GETs with stale-while-revalidate. Freshness
    honors Cache-Control: max-age when present (no-store skips the cache
    entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
-export const ZEOLITE_VERSION = "1.2 Halide";
+export const ZEOLITE_VERSION = "1.3 Carbide";
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
 const ZL_PAGES = "zeolite-pages-v1";
@@ -891,7 +974,8 @@ interface ControlMessage {
     | "zl:extInfo"
     | "zl:adblock"
     | "zl:tracing"
-    | "zl:getTracing";
+    | "zl:getTracing"
+    | "zl:wsOpen";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -902,6 +986,9 @@ interface ControlMessage {
   tabs?: UiTab[];
   /** Delta sync cursor for zl:getNetLog. */
   since?: number;
+  /** zl:wsOpen: page WebSocket bridge destination + protocols. */
+  url?: string;
+  protocols?: string[];
   /** zl:installExt: packaged (.xpi/.zip) bytes. */
   bytes?: Uint8Array;
   /** zl:installExtFiles: unpacked directory listing, path -> bytes. */
@@ -950,9 +1037,23 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
       else disabledSites.delete(msg.site);
       reply({ ok: true });
       break;
+    case "zl:wsOpen": {
+      /* 1.3 Carbide: the port IS the connection: events flow back on
+         it, send/close flow forward on it. */
+      if (!port || typeof msg.url !== "string" || !/^wss?:/i.test(msg.url)) {
+        port?.postMessage({ ev: "error", error: "bad zl:wsOpen" });
+        port?.postMessage({ ev: "close", code: 1006, clean: false });
+        port?.close();
+        break;
+      }
+      wsBridge.open(port as unknown as PortLike, msg.url, Array.isArray(msg.protocols) ? msg.protocols : []);
+      break;
+    }
     case "zl:teardown":
       e.waitUntil(
         (async () => {
+          // Close every bridged WebSocket first: no dangling streams.
+          wsBridge.closeAll();
           // Drop every cache this SW owns, then unregister. Existing
           // pages lose their controller on next navigation; the adapter
           // also reloads them.
