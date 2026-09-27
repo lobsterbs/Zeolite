@@ -540,7 +540,9 @@ mod tests {
         r.set_base(base);
         let out = format!(
             "{}{}",
-            r.process("<svg><use href=\"https://cdn.example.net/sprites.svg#sidebar\"></use></svg>"),
+            r.process(
+                "<svg><use href=\"https://cdn.example.net/sprites.svg#sidebar\"></use></svg>"
+            ),
             r.finish()
         );
         let enc_bare = cfg().encode_url("https://cdn.example.net/sprites.svg");
