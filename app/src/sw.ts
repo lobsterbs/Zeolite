@@ -18,6 +18,7 @@
      { type: "zl:tracing", enabled }          opt-in rewrite tracing ring (1.2)
      { type: "zl:wsOpen", url, protocols }   page WebSocket bridge (1.3)
      { type: "zl:docCookie", origin, set }  per-origin document.cookie (1.5)
+     { type: "zl:fingerprint", profile }   document surface spoofing (1.8)
    Replies are posted back on the given MessageChannel port, so the
    adapter (and the devtools page) get real acknowledgements.
 
@@ -39,6 +40,7 @@ import { openWebSocket } from "./libcurl-transport-vendored";
 import { WsBridge, type PortLike } from "./wsbridge";
 import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarLoad, jarReplace, jarSnapshot } from "./cookies";
 import { DownloadTracker } from "./downloads";
+import { fingerprintScript, resolveProfile, type FingerprintProfile } from "./fingerprint";
 import { decryptSession, encryptSession } from "./session";
 import {
   CS_ROUTE,
@@ -166,7 +168,10 @@ function rewriteStream(
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   const modP = rewriter();
-  const ljInit = `<script>window.__ZL=${JSON.stringify({ dest: base })};</script>`;
+  const ljInit =
+    /* 1.8 Telluride: an active fingerprint profile rides the same
+       first chunk as the __ZL init script. */
+    `<script>window.__ZL=${JSON.stringify({ dest: base })};</script>` + (fpScript ? `<script>${fpScript}</script>` : "");
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       controller.enqueue(encoder.encode(ljInit));
@@ -356,13 +361,36 @@ const wsBridge = new WsBridge(
    entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
-export const ZEOLITE_VERSION = "1.7 Sulfide";
+export const ZEOLITE_VERSION = "1.8 Telluride";
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
 /* 1.7 Sulfide: download registry. Attachment responses pass through a
    counting stream (nothing is ever buffered whole); entries carry the
    engine-known network facts and are cancellable by id. */
 const DL = new DownloadTracker();
+
+/* 1.8 Telluride: fingerprinting resistance. The active profile is
+   compiled once into the document init script and mirrored onto the
+   upstream wire (User-Agent, Accept-Language). Null = fully native
+   surfaces, the honest default. Resets on SW restart, like the other
+   host toggles; a rejected profile never changes active state. */
+let fpProfile: FingerprintProfile | null = null;
+let fpScript: string | null = null;
+function setFingerprint(profile: unknown): { ok: true; profile?: FingerprintProfile } | { ok: false; error: string } {
+  if (profile === null || profile === undefined) {
+    fpProfile = null;
+    fpScript = null;
+    return { ok: true };
+  }
+  try {
+    const p = resolveProfile(profile);
+    fpProfile = p;
+    fpScript = fingerprintScript(p);
+    return { ok: true, profile: p };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
 
 const ZL_PAGES = "zeolite-pages-v1";
 const ZL_CACHED_AT = "x-zl-cached-at";
@@ -1032,6 +1060,13 @@ function forwardedHeaders(req: Request): Headers {
     if (ref) out.set("referer", ref);
   }
   if (!out.has("accept-language")) out.set("accept-language", "en-US,en;q=0.9");
+  /* 1.8 Telluride: while a profile is active, the wire surface must
+     match the document surface, so its UA and languages win over
+     whatever the page sent. */
+  if (fpProfile) {
+    out.set("user-agent", fpProfile.userAgent);
+    out.set("accept-language", fpProfile.languages.join(","));
+  }
   return out;
 }
 
@@ -1061,7 +1096,8 @@ interface ControlMessage {
     | "zl:downloads"
     | "zl:cancelDownload"
     | "zl:exportSession"
-    | "zl:importSession";
+    | "zl:importSession"
+    | "zl:fingerprint";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -1086,6 +1122,8 @@ interface ControlMessage {
   blob?: unknown;
   /** zl:exportSession: caller-supplied payload, encrypted whole. */
   extra?: unknown;
+  /** zl:fingerprint: profile object, or null to return to native. */
+  profile?: unknown;
   /** zl:installExt: packaged (.xpi/.zip) bytes. */
   bytes?: Uint8Array;
   /** zl:installExtFiles: unpacked directory listing, path -> bytes. */
@@ -1165,6 +1203,11 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
       port.onmessage = (ev) => handle((ev.data as { set?: unknown }).set);
       break;
     }
+    case "zl:fingerprint":
+      /* 1.8 Telluride: resolve + compile the profile, or drop back to
+         fully native surfaces. */
+      reply(setFingerprint(msg.profile ?? null));
+      break;
     case "zl:downloads":
       /* 1.7 Sulfide: registry snapshot, newest first. */
       reply({ ok: true, downloads: DL.snapshot() });

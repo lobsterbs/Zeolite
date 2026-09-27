@@ -16,4 +16,4 @@ or **1.3 Carbide**.
   exported by the service worker as `ZEOLITE_VERSION`, and returned in the
   `zl:getNetLog` reply so tooling can pin and display it.
 
-Current release: **1.7 Sulfide** (cargo `1.7.0`).
+Current release: **1.8 Telluride** (cargo `1.8.0`).

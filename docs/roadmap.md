@@ -146,14 +146,34 @@ site-scoped IndexedDB are invisible to the service worker (the host
 supplies them in the export `extra` if it wants them to travel), and
 import replaces cookie jars wholesale without merging.
 
-## Phase 8 — 1.8 Telluride: fingerprinting resistance (next)
+## Phase 8 — 1.8 Telluride: fingerprinting resistance (shipped)
 
 Prompt item 14. One internally-consistent config object drives
 userAgent, platform, screen, timezone, language, hardwareConcurrency,
 deviceMemory, canvas and WebGL surfaces. Configurable by the host app;
 no per-session randomization, no contradictory values.
 
-## Phase 9 — 1.9 Fullerene: compat suite + scoreboard + recording/replay
+Shipped as the 1.8 release: app/src/fingerprint.ts defines the
+FingerprintProfile as data - resolveProfile derives what the host
+omitted (platform from the UA) and refuses contradictory values
+instead of merging them - and compiles it (fingerprintScript) into a
+deterministic document init script: navigator (userAgent, appVersion,
+platform, language(s), hardwareConcurrency, deviceMemory),
+window.screen, a fixed-offset timezone (getTimezoneOffset, local Date
+getters, Intl.DateTimeFormat zone), canvas (toDataURL/toBlob/
+getImageData deterministically perturbed from a profile-seeded hash)
+and WebGL UNMASKED_VENDOR/RENDERER. The service worker prepends the
+compiled script to the window.__ZL first chunk of every rewritten
+document and mirrors the profile User-Agent and Accept-Language onto
+engine-initiated upstream requests (zl:fingerprint {profile} /
+{profile: null}). Honest limits: fixed offset, no DST simulation,
+Date toString zone text stays native, workers and OffscreenCanvas are
+not patched (documents only), timezoneName/utcOffsetMin consistency is
+the host's job (no tz database in the engine), and the default
+profile is deliberately a shared fixed fingerprint, not per-session
+randomness.
+
+## Phase 9 — 1.9 Fullerene: compat suite + scoreboard + recording/replay (next)
 
 Prompts items 15, 16, 17. Expand the probe suite to real browser
 behavior (HTML/CSS/JS, fetch, XHR, WebSocket, workers, storage, cookies,

@@ -1,57 +1,79 @@
-# Fingerprint hygiene (Phase 3, honest scope)
+# Fingerprinting resistance (1.8 Telluride)
 
-## What exists today
+Phase 8, prompt item 14. One internally-consistent config object - a
+FingerprintProfile - drives every spoofed surface. The engine never
+invents values and never randomizes per session: two sessions with the
+same profile look identical to each other on purpose. A profile that
+contradicts itself is refused, not silently merged.
 
-The transport seam is real: `app/src/libcurl-transport-vendored.ts` is
-a committed adapter that loads the vendored `@mercuryworkshop/libcurl-transport`
-dist at runtime (`/libcurl/index.mjs`). The bundle itself is
-AGPL-3.0-only (~2.1 MB), so it is never committed; the CI workflow
-vendors a pinned version (2.0.5) into `app/public/libcurl` and the
-build verifies it landed in `dist`. Without the vendor step the adapter
-throws at runtime and the suite records transport-missing.
-Impersonation itself: nothing measurable yet. The compat suite must
-first report block rates for the stock build before any shaping is
-justified. Measure first, then impersonate.
+## Enabling it
 
-## Where TLS actually terminates
+Post a control message to the service worker (same channel as
+`zl:config`):
 
-The service worker cannot terminate TLS: a `fetch()` to the real
-destination from the SW is cross-origin and blocked. All proxied HTTPS
-therefore goes over wisp TCP streams, and TLS is terminated by the
-libcurl wasm transport in the page context (the same BareMux-compatible
-path Scramjet uses; see `app/src/libcurl-transport-vendored.ts`).
+```js
+navigator.serviceWorker.controller.postMessage({
+  type: "zl:fingerprint",
+  profile: { /* partial or full profile, see below */ },
+});
+```
 
-Consequence: fingerprint impersonation is a property of that libcurl
-build, not of the wisp server. The server only relays opaque TCP bytes.
-"Server-side TLS impersonation via rquest/wreq" as originally sketched
-would only apply in a future server-terminated HTTP proxy mode; that
-mode does not exist and adding it is a new phase, not a patch.
+Pass `profile: null` to drop back to fully native surfaces. The reply
+arrives on the MessageChannel port as `{ ok: true, profile }` or
+`{ ok: false, error }` with the reason a profile was rejected. Like the
+adblock and tracing toggles, the fingerprint resets to native on
+service-worker restart: the host re-sends it after boot.
 
-## What impersonation would actually mean
+## Profile fields
 
-- Cipher/ALPN/extension-order configuration of the vendored libcurl
-  build (BoringSSL-style ClientHello shaping). This is done at
-  build-time of the vendored transport, in the vendoring seam.
-- HTTP/2 SETTINGS frame ordering and pseudo-header order in the curl
-  build.
-- Nothing on the Rust server changes: it stays a dumb TCP relay.
+All fields are optional except `userAgent`; everything omitted stays
+native except what can be derived from the UA (`platform`).
 
-The intended upgrade path is swapping the vendored transport's
-internal HTTP client for an rquest-style impersonating client compiled
-to wasm. That dependency is not added yet: it is unverified against
-wasm32, and the rule is that the compat suite must first show that
-sites actually reject the current build's fingerprint.
+- `userAgent` - required, must be a full browser UA string.
+- `platform` - derived from the UA when omitted (`Win32` for Windows
+  NT, `MacIntel` for Mac, `Linux armv8l` for Android, ...). An explicit
+  value that contradicts the UA is rejected.
+- `languages` - array shown as `navigator.language` / `languages` and
+  sent upstream as `Accept-Language`.
+- `utcOffsetMin` - minutes ahead of UTC (Oslo summer: 120). Patches
+  `Date.prototype.getTimezoneOffset` and the local Date getters.
+- `timezoneName` - IANA zone name patched into `Intl.DateTimeFormat`.
+- `hardwareConcurrency`, `deviceMemoryGB` - navigator surfaces.
+- `screen` - `{ width, height, availWidth, availHeight, colorDepth,
+  pixelDepth }` for `window.screen`.
+- `webglVendor`, `webglRenderer` - the UNMASKED_VENDOR /
+  UNMASKED_RENDERER strings; both or neither.
+- `canvasSeed` - deterministic seed for canvas perturbation.
 
-## AGPL note
+The default profile (used when the host asks for the default rather
+than supplying one) is a coherent Chrome-on-Windows desktop.
 
-`@mercuryworkshop/libcurl-transport` and `libcurl.js` are AGPL-3.0-only.
-They are vendored at build time, never committed. Anyone serving a
-built engine that includes these bundles must honor AGPL-3.0 for the
-transport and, per AGPL, for the combined work it links against. There
-is no non-libcurl fallback in the SW: without the vendored bundle,
-proxied navigation throws transport-missing by design.
+## What is spoofed and where
 
-## Done-when for this phase item
+The service worker compiles the profile into an init script once and
+prepends it to the `window.__ZL` init chunk it already emits at the
+start of every rewritten HTML document. Engine-initiated upstream
+requests carry the profile `User-Agent` and `Accept-Language`, so the
+document surface and the wire surface agree.
 
-"Fingerprint impersonation measurably reduces blocks" is not met and
-cannot be met until the suite reports block rates to compare.
+## Honest limits
+
+- No per-session randomization by design: the default profile is a
+  fixed fingerprint shared by every default-configured session.
+- The timezone is a fixed offset, not a zone database: DST transitions
+  inside a faked zone are not simulated, and
+  `Date.prototype.toString` / `toTimeString` zone text still comes from
+  the host's real locale setting.
+- `OffscreenCanvas` and worker threads are not patched: workers get
+  the worker prelude, not the fingerprint script. The engine's own
+  hands (the transport, the server) are outside a page's reach.
+- The canvas perturbation is a small deterministic pixel nudge
+  (seeded by `canvasSeed`), not a full canvas-noise engine; sites
+  reading canvas output through other paths (e.g. `captureStream`)
+  are not covered.
+- WebGL spoofing covers `UNMASKED_VENDOR` / `UNMASKED_RENDERER` only;
+  the rest of the GL parameter surface stays native, and GPU-side
+  fingerprinting (shader timing, driver quirks) is out of scope.
+- The engine does not carry a timezone database, so it cannot verify
+  that `timezoneName` matches `utcOffsetMin`; the host is responsible
+  for that pair being consistent.
