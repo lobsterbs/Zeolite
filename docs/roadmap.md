@@ -46,7 +46,7 @@ Prompts items 5, 18, 4.
   cookies, timing, initiator, raw data, and both the original target URL
   and the internal Zeolite URL. WebSocket rows land with 1.3.
 
-## Phase 3 — 1.3 Carbide: WebSocket (this release)
+## Phase 3 — 1.3 Carbide: WebSocket (shipped)
 
 Prompt item 1. Runtime WebSocket over a raw Wisp TCP stream (TLS stays
 with the transport): open/message/error/close, send, binary frames,
@@ -54,7 +54,7 @@ reconnecting apps, ws:// upgraded to wss://. Connections and messages
 are visible in the inspector; connection state is cleaned up on
 close/teardown to avoid leaks.
 
-## Phase 4 — 1.4 Boride: virtual origins + cookies
+## Phase 4 — 1.4 Boride: virtual origins + cookies (shipped)
 
 Prompt item 2. Virtual-origin registry mapping each target origin to
 its Zeolite-internal representation; per-origin cookie jars with Domain,
@@ -62,7 +62,16 @@ Path, Secure, SameSite, expiration/max-age, host-only and deletion
 semantics; Set-Cookie surgery in the rewriter emit; redirects re-bind
 cookies correctly. Isolation between target origins is a hard gate.
 
-## Phase 5 — 1.5 Silicide: storage virtualization + blob/data URLs
+Shipped as the 1.4 release: the registry and jars live in `app/src/cookies.ts`
+(RFC 6265 admission, Set-Cookie capture before hostile-header surgery,
+jar-as-Cookie-source on every engine request, IndexedDB persistence;
+see docs/cookies.md). Honest limits: Set-Cookie on intermediate redirect
+hops followed inside the transport is not captured (only final responses
+are), SameSite is parsed but not enforced (engine-initiated requests
+have no site context), and document.cookie virtualization is Phase 5
+scope.
+
+## Phase 5 — 1.5 Silicide: storage virtualization + blob/data URLs (next)
 
 Prompts items 3, 8. Per-origin localStorage/sessionStorage/IndexedDB
 partitioning (extending the existing `zl:<sitehash>:` scheme), Cache API

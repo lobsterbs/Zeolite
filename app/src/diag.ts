@@ -20,6 +20,7 @@ export type DiagCategory =
   | "SERVICE_WORKER"
   | "CORS"
   | "CSP"
+  | "COOKIE"
   | "EXTENSION"
   | "BROWSER_API"
   | "PARSER"

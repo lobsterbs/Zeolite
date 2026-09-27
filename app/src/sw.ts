@@ -36,6 +36,7 @@ import { DIAG, redactSecrets } from "./diag";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
 import { openWebSocket } from "./libcurl-transport-vendored";
 import { WsBridge, type PortLike } from "./wsbridge";
+import { applySetCookie, cookieHeaderFor, jarLoad, jarClear } from "./cookies";
 import {
   CS_ROUTE,
   EXT_ROUTE,
@@ -98,6 +99,8 @@ const HOSTILE = [
   "cross-origin-embedder-policy",
   "cross-origin-resource-policy",
   "permissions-policy",
+  "set-cookie",
+  "set-cookie2",
 ];
 
 function stripHostile(headers: Headers): Headers {
@@ -338,7 +341,7 @@ const wsBridge = new WsBridge(
    entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
-export const ZEOLITE_VERSION = "1.3 Carbide";
+export const ZEOLITE_VERSION = "1.4 Boride";
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
 const ZL_PAGES = "zeolite-pages-v1";
@@ -397,7 +400,11 @@ async function pageCacheStore(req: Request, resp: Response): Promise<void> {
 /** Re-fetch a cached request straight through the wisp transport. */
 async function wispFetchCacheBypass(req: Request): Promise<Response> {
   const dest = decodePath(new URL(req.url).pathname) + new URL(req.url).search;
-  return wispFetch(dest, { method: "GET", redirect: "follow" });
+  /* 1.4 Boride: cache refreshes carry the jar's Cookie header too. */
+  const headers = new Headers();
+  const jarCookie = cookieHeaderFor(dest);
+  if (jarCookie) headers.set("cookie", jarCookie);
+  return wispFetch(dest, { method: "GET", headers, redirect: "follow" });
 }
 
 /* ---- Per-site route table ------------------------------------------ */
@@ -459,6 +466,13 @@ self.addEventListener("activate", (e) => {
       /* Warm the transport so the first proxied request skips libcurl
          init. A missing vendored build just logs, as before. */
       netGeneration++;
+      /* 1.4 Boride: restore the persisted cookie jar. Storage failure
+         means an in-memory jar, never an activate failure. */
+      try {
+        await jarLoad();
+      } catch {
+        /* in-memory jar only */
+      }
       try {
         await ensureCurl();
       } catch {
@@ -799,6 +813,12 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         const sendHeaders = replaced ?? fwd;
         await applyOnRequest(plugins, target, sendHeaders);
         for (const [k, v] of Object.entries(extraHeaders)) sendHeaders.set(k, v);
+        /* 1.4 Boride: the jar is the authoritative Cookie source for
+           engine-initiated requests, written last so rules and
+           interception cannot smuggle another origin's cookies. */
+        const jarCookie = cookieHeaderFor(target);
+        if (jarCookie) sendHeaders.set("cookie", jarCookie);
+        else sendHeaders.delete("cookie");
         const resp = await wispFetch(target, {
           method: e.request.method,
           headers: sendHeaders,
@@ -813,6 +833,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         if (finalDest) {
           DIAG.stage(traceId, "REDIRECTED", { url: target, message: "final destination " + finalDest });
         }
+        /* 1.4 Boride: capture Set-Cookie into the per-origin jar before
+           hostile-header surgery strips it from the page view. */
+        applySetCookie(finalDest ?? target, resp.headers);
         const headers = stripHostile(resp.headers);
         /* webRequest.onHeadersReceived: blocking listeners may replace
            the response header set the page will see. */
@@ -942,7 +965,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
     restore the real destination as Referer. */
 function forwardedHeaders(req: Request): Headers {
   const out = new Headers();
-  const skip = new Set(["host", "connection", "referer", "origin"]);
+  const skip = new Set(["host", "connection", "referer", "origin", "cookie"]);
   for (const [k, v] of req.headers) {
     if (!skip.has(k.toLowerCase())) out.set(k, v);
   }
@@ -1054,6 +1077,8 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
         (async () => {
           // Close every bridged WebSocket first: no dangling streams.
           wsBridge.closeAll();
+          // 1.4 Boride: cookies do not survive an engine switch.
+          jarClear();
           // Drop every cache this SW owns, then unregister. Existing
           // pages lose their controller on next navigation; the adapter
           // also reloads them.
