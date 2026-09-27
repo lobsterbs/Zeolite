@@ -46,7 +46,7 @@ describe("session export/import", () => {
 
   it("rejects things that are not session blobs", async () => {
     await expect(decryptSession("p", null)).rejects.toThrow("not a session blob");
-    await expect(decryptSession("p", { zlSession: 2 })).rejects.toThrow("not a session blob");
+    await expect(decryptSession("p", { zlSession: 2 })).rejects.toThrow("not a Zeolite session blob");
     await expect(decryptSession("p", { zlSession: 1, alg: "ROT13", iter: 1, salt: "AAAAAAAA", iv: "AAAAAAAAAAAAAAAA", data: "AAAA" })).rejects.toThrow("not a Zeolite session blob");
     await expect(decryptSession("p", { zlSession: 1, alg: "AES-256-GCM/PBKDF2-SHA256", iter: 5e9, salt: "AAAAAAAA", iv: "AAAAAAAAAAAAAAAA", data: "AAAA" })).rejects.toThrow("not a Zeolite session blob");
   });

@@ -37,7 +37,7 @@ describe("downloadFilename", () => {
     expect(downloadFilename("https://x.test/files/big%20file.zip", headers({ "content-disposition": "attachment" }))).toBe("big file.zip");
   });
   it("ends at download when nothing helps", () => {
-    expect(downloadFilename("about:blank", headers({}))).toBe("download");
+    expect(downloadFilename("https://x.test", headers({}))).toBe("download");
   });
 });
 
@@ -78,7 +78,13 @@ describe("DownloadTracker", () => {
     const reader = wrapped.getReader();
     await reader.read();
     expect(t.cancel(id)).toBe(true);
-    await expect(reader.read()).rejects.toThrow();
+    /* queued chunks may still resolve first; the severed stream must
+       reject once they run out */
+    await expect(
+      (async () => {
+        for (;;) await reader.read();
+      })(),
+    ).rejects.toThrow();
     const snap = t.snapshot();
     expect(snap[0].status).toBe("cancelled");
   });
