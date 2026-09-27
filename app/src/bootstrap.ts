@@ -100,8 +100,8 @@ function siteKeys(store: Storage): string[] {
  shim.databases = () =>
  DBS().then((rs) =>
  rs
- .filter((r) => r.name.startsWith(SITE + ":"))
- .map((r) => ({ ...r, name: r.name.slice(SITE.length + 1) })),
+ .filter((r) => (r.name ?? "").startsWith(SITE + ":"))
+ .map((r) => ({ ...r, name: (r.name ?? "").slice(SITE.length + 1) })),
  );
  }
  try {
@@ -126,10 +126,9 @@ function siteKeys(store: Storage): string[] {
  has: (n: unknown) => HAS(pre(n)),
  keys: () => KEYS().then((ks) => ks.filter(own).map(strip)),
  match: async (rq: Request | string, o?: CacheQueryOptions) => {
- const { cacheName: _cn, ...q } = o ?? {};
  for (const n of await KEYS()) {
  if (!own(n)) continue;
- const hit = await (await CA.open(n)).match(rq, q);
+ const hit = await (await CA.open(n)).match(rq, o);
  if (hit) return hit;
  }
  return undefined;
