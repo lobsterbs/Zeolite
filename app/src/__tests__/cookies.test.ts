@@ -5,6 +5,7 @@ import {
   applySetCookie,
   cookieHeaderFor,
   cookiesResetForTests,
+  jarHeaders,
   jarLoad,
   jarMerge,
   jarPersist,
@@ -234,5 +235,60 @@ describe("jar merge mode (2.2)", () => {
     expect(r.cookies).toBe(0);
     expect(r.conflicts).toBe(0);
     expect(jarSnapshot().size).toBe(0);
+  });
+});
+
+describe("jarHeaders (issue #10: transport set-cookie visibility)", () => {
+  const gs = (h: Headers): (() => string[]) | undefined =>
+    (h as Headers & { getSetCookie?: () => string[] }).getSetCookie;
+
+  it("documents the fetch-spec drop the raw pairs work around", () => {
+    const h = new Headers();
+    h.append("set-cookie", "a=1; Path=/");
+    h.append("set-cookie", "b=2; Path=/");
+    /* Headers keep every set-cookie entry... */
+    const hf = gs(h);
+    if (hf) expect(hf.call(h)).toHaveLength(2);
+    /* ...but constructing a Response drops them entirely (fetch spec:
+       set-cookie is a forbidden response-header name). */
+    const resp = new Response(null, { status: 200, headers: h });
+    const rf = gs(resp.headers);
+    if (rf) expect(rf.call(resp.headers)).toEqual([]);
+  });
+
+  it("rebuilds every set-cookie from the transport raw pairs", () => {
+    const resp = new Response(null, { status: 200 }) as Response & {
+      rawHeaders?: Array<[string, string]>;
+    };
+    resp.rawHeaders = [
+      ["content-type", "text/plain"],
+      ["set-cookie", "a=1; Path=/"],
+      ["set-cookie", "b=2; Path=/"],
+    ];
+    const jh = jarHeaders(resp);
+    const jf = gs(jh);
+    if (jf) expect(jf.call(jh)).toEqual(["a=1; Path=/", "b=2; Path=/"]);
+    else expect(jh.get("set-cookie")).toContain("a=1");
+    expect(jh.get("content-type")).toBe("text/plain");
+  });
+
+  it("falls back to the response headers without raw pairs", () => {
+    const h = new Headers();
+    h.append("content-type", "text/plain");
+    const resp = new Response(null, { status: 200, headers: h });
+    expect(jarHeaders(resp).get("content-type")).toBe("text/plain");
+  });
+
+  it("the jar sees every set-cookie through the raw-pair view", () => {
+    registerOrigin("https://fixture.example");
+    const resp = new Response(null, { status: 200 }) as Response & {
+      rawHeaders?: Array<[string, string]>;
+    };
+    resp.rawHeaders = [
+      ["set-cookie", "s=a; Path=/"],
+      ["set-cookie", "s2=b; Path=/"],
+    ];
+    applySetCookie("https://fixture.example/set", jarHeaders(resp));
+    expect(cookieHeaderFor("https://fixture.example/")).toBe("s=a; s2=b");
   });
 });

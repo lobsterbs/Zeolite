@@ -4,22 +4,26 @@
      self.__ZL_PREFIX__      the live engine route prefix
      self.__ZL_WORKER_URL__  the upstream worker script URL
 
-   Inside the worker: importScripts() arguments are routed through the
-   engine codec (a raw cross-origin importScripts would bypass the
-   engine and its subresource fetches would fail), and worker
+   Inside the worker: importScripts() arguments and fetch() inputs are
+   routed through the engine codec (a raw cross-origin importScripts
+   would bypass the engine and its subresource fetches would fail; a
+   root-relative worker fetch resolves engine-local and escapes to the
+   embedder origin), and worker
    WebSocket is bridged over postMessage to the parent page, which
    relays to the engine's existing zl:wsOpen seam. 2.3 Selenide:
    shared workers bridge the same way over their newest connect port
    (no parent page postMessage exists there); module workers get
    specifier routing from the SW body pass instead of this prelude,
-   where importScripts does not exist. */
+   where importScripts does not exist (their fetch() inputs still
+   route from here). */
 
 import { encodeDest, setScheme } from "./codec";
 
-/** Route one importScripts() argument through the engine codec.
-    Engine-local, opaque (blob:/data:) and unparseable arguments are
-    returned untouched. */
-export function routeWorkerImport(
+/** Route one worker-issued URL (an importScripts() argument or a
+    fetch() input) through the engine codec, resolved against the
+    upstream worker URL. Engine-local, opaque (blob:/data:) and
+    unparseable arguments are returned untouched. */
+export function routeWorkerUrl(
   prefix: string,
   workerUrl: string,
   engineOrigin: string,
@@ -43,6 +47,7 @@ export function routeWorkerImport(
 
 const G = globalThis as unknown as {
   importScripts?: (...args: string[]) => void;
+  fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   __ZL_PREFIX__?: string;
   __ZL_WORKER_URL__?: string;
   WebSocket?: new (u: string, p?: string | string[]) => WebSocket;
@@ -50,13 +55,32 @@ const G = globalThis as unknown as {
   location?: { href: string; origin: string };
 };
 
-if (typeof G.importScripts === "function") {
+/* The baked prefix marks a prelude-injected worker context; plain
+   module imports (vitest) stay no-ops. */
+const prefix = G.__ZL_PREFIX__;
+const workerUrl = G.__ZL_WORKER_URL__ ?? G.location?.href ?? "";
+const engineOrigin = G.location?.origin ?? "";
+
+if (prefix && typeof G.importScripts === "function") {
   const IS = G.importScripts.bind(globalThis);
-  const prefix = G.__ZL_PREFIX__ ?? "/j/";
-  const workerUrl = G.__ZL_WORKER_URL__ ?? G.location?.href ?? "";
-  const engineOrigin = G.location?.origin ?? "";
   (globalThis as { importScripts?: unknown }).importScripts = (...args: string[]) =>
-    IS(...args.map((a) => routeWorkerImport(prefix, workerUrl, engineOrigin, a)));
+    IS(...args.map((a) => routeWorkerUrl(prefix, workerUrl, engineOrigin, a)));
+}
+
+/* Issue #4: a worker fetch() with a root-relative URL resolves against
+   the worker script's engine-local URL, escapes to the embedder origin
+   and 404s. Same rule as importScripts: resolve against the upstream
+   worker URL and route cross-origin http(s) through the codec. Both
+   classic and module workers get this prelude. */
+if (prefix && typeof G.fetch === "function") {
+  const OF = G.fetch.bind(globalThis);
+  (globalThis as { fetch?: unknown }).fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : null;
+    /* Request objects carry one-shot bodies that cannot be replayed
+       through a rebuilt URL; they pass to the native fetch untouched. */
+    if (url === null) return OF(input, init);
+    return OF(routeWorkerUrl(prefix, workerUrl, engineOrigin, url), init);
+  };
 }
 
 /* Dedicated-worker WebSocket bridge: same event semantics as the page
@@ -179,7 +203,9 @@ if ((typeof G.postMessage === "function" || SHARED) && typeof G.WebSocket === "f
       },
       send: {
         value: (data: unknown) => {
-          if (wsState !== 1) throw new DOMException("invalid state", "InvalidStateError");
+          /* Spec: send() while CONNECTING buffers (the bridge queues
+             until the handshake completes); only CLOSING/CLOSED throw. */
+          if (wsState >= 2) throw new DOMException("invalid state", "InvalidStateError");
           ch.port1.postMessage({ op: "send", data });
         },
       },

@@ -98,14 +98,17 @@ describe("WsBridge", () => {
     const b = new WsBridge(factory, hooks);
     const p = fakePort();
     b.open(p, "wss://example.com/", []);
-    /* send before open is ignored */
+    /* send before open buffers (WebSocket CONNECTING semantics, issue #4) */
     p.onmessage?.({ data: { op: "send", data: "early" } });
     expect(sent).toEqual([]);
     handlers[0].h.onopen("chat");
     expect(p.posted).toContainEqual({ ev: "open", protocol: "chat" });
     expect(rec.readies).toHaveLength(1);
+    /* the buffered frame flushed after the open event */
+    expect(sent).toEqual(["early"]);
+    expect(rec.bytes).toContainEqual({ rx: 0, tx: 5 });
     p.onmessage?.({ data: { op: "send", data: "hi" } });
-    expect(sent).toEqual(["hi"]);
+    expect(sent).toEqual(["early", "hi"]);
     expect(rec.bytes).toContainEqual({ rx: 0, tx: 2 });
     handlers[0].h.onmessage("yo");
     expect(p.posted).toContainEqual({ ev: "message", data: "yo" });

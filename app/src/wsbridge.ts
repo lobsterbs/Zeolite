@@ -69,6 +69,11 @@ interface Conn {
   url: string;
   ready: boolean;
   t0: number;
+  /** Sends that arrived before the handshake completed. WebSocket
+      semantics: send() while CONNECTING buffers, so pages that write
+      immediately after new WebSocket() do not lose data while the
+      transport initializes or the handshake runs. */
+  pending: unknown[];
 }
 
 export class WsBridge {
@@ -99,16 +104,21 @@ export class WsBridge {
       url: target,
       ready: false,
       t0: Date.now(),
+      pending: [],
     };
     this.conns.set(port, conn);
     port.onmessage = (ev) => {
       const m = ev.data as { op?: string; data?: unknown; code?: number; reason?: string };
       const c = this.conns.get(port);
       if (!c) return;
-      if (m?.op === "send" && c.ready) {
-        this.hooks.onBytes(c.token, 0, byteSize(m.data));
-        this.hooks.trace({ subsystem: "websocket", original: "tx", result: c.url, resource: "websocket" });
-        c.handle.send(m.data);
+      if (m?.op === "send") {
+        if (c.ready) {
+          this.hooks.onBytes(c.token, 0, byteSize(m.data));
+          this.hooks.trace({ subsystem: "websocket", original: "tx", result: c.url, resource: "websocket" });
+          c.handle.send(m.data);
+        } else {
+          c.pending.push(m.data);
+        }
       } else if (m?.op === "close") {
         try {
           c.handle.close(m.code ?? 1000, m.reason ?? "");
@@ -125,6 +135,14 @@ export class WsBridge {
           this.hooks.onReady(conn.token, protocol, Date.now() - conn.t0);
           this.hooks.trace({ subsystem: "websocket", original: target, result: "open", resource: "websocket" });
           port.postMessage({ ev: "open", protocol });
+          /* Flush everything buffered during the handshake, after the
+             open event so page onopen handlers run first (native
+             order). */
+          for (const d of conn.pending.splice(0)) {
+            this.hooks.onBytes(conn.token, 0, byteSize(d));
+            this.hooks.trace({ subsystem: "websocket", original: "tx", result: conn.url, resource: "websocket" });
+            conn.handle.send(d);
+          }
         },
         onmessage: (data) => {
           if (this.conns.get(port) !== conn) return;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decodePath, isWorkerDestination, setScheme } from "../codec";
-import { pickRelayPort, routeWorkerImport } from "../worker-prelude";
+import { pickRelayPort, routeWorkerUrl } from "../worker-prelude";
 import { swShimApply, swShimGet, swShimRegister } from "../swshim";
 
 describe("worker destinations (1.6)", () => {
@@ -13,28 +13,40 @@ describe("worker destinations (1.6)", () => {
   });
 });
 
-describe("routeWorkerImport (1.6)", () => {
+describe("routeWorkerUrl (1.6: importScripts and worker fetch)", () => {
   const P = "/j/";
   const W = "https://api.site/worker.js";
   const E = "https://engine.host";
 
   it("routes a relative argument through the engine codec", () => {
-    const out = routeWorkerImport(P, W, E, "lib.js");
+    const out = routeWorkerUrl(P, W, E, "lib.js");
     expect(out.startsWith(P)).toBe(true);
     setScheme(P);
     expect(decodePath(out)).toBe("https://api.site/lib.js");
   });
 
   it("routes an absolute upstream argument", () => {
-    const out = routeWorkerImport(P, W, E, "https://cdn.other/x.js");
+    const out = routeWorkerUrl(P, W, E, "https://cdn.other/x.js");
     setScheme(P);
     expect(decodePath(out)).toBe("https://cdn.other/x.js");
   });
 
   it("passes engine-local and opaque arguments through untouched", () => {
-    expect(routeWorkerImport(P, W, E, E + "/j/abc")).toBe(E + "/j/abc");
-    expect(routeWorkerImport(P, W, E, "data:text/javascript,hi")).toBe("data:text/javascript,hi");
-    expect(routeWorkerImport(P, W, E, "blob:https://engine.host/uuid")).toBe("blob:https://engine.host/uuid");
+    expect(routeWorkerUrl(P, W, E, E + "/j/abc")).toBe(E + "/j/abc");
+    expect(routeWorkerUrl(P, W, E, "data:text/javascript,hi")).toBe("data:text/javascript,hi");
+    expect(routeWorkerUrl(P, W, E, "blob:https://engine.host/uuid")).toBe("blob:https://engine.host/uuid");
+  });
+
+  it("routes a root-relative worker fetch input against the worker URL (issue #4)", () => {
+    const out = routeWorkerUrl(P, W, E, "/data.json");
+    setScheme(P);
+    expect(decodePath(out)).toBe("https://api.site/data.json");
+  });
+
+  it("routes a relative worker fetch input against the worker script directory (issue #4)", () => {
+    const out = routeWorkerUrl(P, W, E, "api/data.json");
+    setScheme(P);
+    expect(decodePath(out)).toBe("https://api.site/api/data.json");
   });
 });
 

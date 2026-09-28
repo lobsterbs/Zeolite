@@ -58,7 +58,7 @@ import { beginRecording, finishRecording, type RecordingState } from "./recordin
 import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket } from "./libcurl-transport-vendored";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
-import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarLoad, jarMerge, jarReplace, jarSnapshot, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
+import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarHeaders, jarLoad, jarMerge, jarReplace, jarSnapshot, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
 import { fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
 import { decryptSession, encryptSession } from "./session";
@@ -930,8 +930,12 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           };
           if (resp) {
             d.respHeaders = flatRed(resp.headers);
-            const getSetCookie = (resp.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
-            const setCookies = typeof getSetCookie === "function" ? getSetCookie.call(resp.headers) : [];
+            /* Issue #10: set-cookie never survives Response construction
+               (fetch spec: forbidden response-header name); the jar view
+               carries it instead. */
+            const jh = jarHeaders(resp);
+            const getSetCookie = (jh as Headers & { getSetCookie?: () => string[] }).getSetCookie;
+            const setCookies = typeof getSetCookie === "function" ? getSetCookie.call(jh) : [];
             if (setCookies.length) d.cookies = setCookies.map((c) => c.split("=", 1)[0]);
           }
           return d;
@@ -1134,7 +1138,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           let resp = await wispFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
           for (let hops = 0; resp.status >= 300 && resp.status < 400 && hops < MAX_REDIRECT_HOPS; hops++) {
             /* Capture this hop's Set-Cookie against the URL it came from. */
-            applySetCookie(hopUrl, resp.headers);
+            applySetCookie(hopUrl, jarHeaders(resp));
             const loc = resp.headers.get("location");
             if (!loc) break; /* 3xx without Location: surface as-is */
             let next: string;
@@ -1173,7 +1177,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              hostile-header surgery strips it from the page view. A 3xx
              that surfaced (hop cap, unresolvable or unreplayable hop)
              still lands here, captured against its own hop URL. */
-          applySetCookie(finalDest ?? hopUrl, resp.headers);
+          applySetCookie(finalDest ?? hopUrl, jarHeaders(resp));
           const headers = stripHostile(resp.headers);
           /* Issue #2: engine routes serve their own origin. The preserved
              target ACAO (e.g. "https://excalidraw.com") fails the CORS
@@ -1557,6 +1561,19 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
         port?.postMessage({ ev: "error", error: "bad zl:wsOpen" });
         port?.postMessage({ ev: "close", code: 1006, clean: false });
         port?.close();
+        break;
+      }
+      /* Issue #4: an all-cached page can open a WebSocket before any
+         proxied fetch initialized the transport; openWebSocket would
+         throw on the uninitialized client and every bridge ws closed
+         1006. Wait for the transport here (sends queue at the bridge
+         until the handshake completes). */
+      try {
+        await ensureCurl();
+      } catch {
+        port.postMessage({ ev: "error", error: "transport unavailable" });
+        port.postMessage({ ev: "close", code: 1006, clean: false });
+        port.close();
         break;
       }
       wsBridge.open(port as unknown as PortLike, msg.url, Array.isArray(msg.protocols) ? msg.protocols : []);

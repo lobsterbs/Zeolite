@@ -339,6 +339,20 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
   return { name, stored: true, deleted: false };
 }
 
+/** Jar header view of a transport Response. Response construction
+    drops set-cookie (fetch spec: forbidden response-header name), so
+    the vendored transport exposes its raw header pairs on the
+    Response object; rebuild a readable Headers from them so the jar
+    sees every set-cookie. Plain Responses (no rawHeaders) fall back to
+    their own headers. */
+export function jarHeaders(resp: Response): Headers {
+  const raw = (resp as Response & { rawHeaders?: Array<[string, string]> }).rawHeaders;
+  if (!Array.isArray(raw)) return resp.headers;
+  const h = new Headers();
+  for (const [k, v] of raw) h.append(k, v);
+  return h;
+}
+
 /** Capture every Set-Cookie header of a response into the jar. This is
     the SW seam: called on every proxied response, before hostile-header
     surgery strips set-cookie from what the page sees. */

@@ -259,6 +259,17 @@ addEventListener("message", relay);
       if (!/^wss?:$/.test(u.protocol)) {
         return new OWS(url, protocols);
       }
+      /* Issue #4: a same-origin ws from a proxied page means the
+         virtual origin. The engine host serves no ws endpoints, so
+         wss://<engine host>/x would fail; retarget to the site. */
+      if (ORIGIN && u.origin === (w.location as { origin: string }).origin) {
+        try {
+          const vo = new URL(ORIGIN);
+          u = new URL(u.protocol + "//" + vo.host + u.pathname + u.search);
+        } catch {
+          /* unparseable virtual origin: keep engine-local */
+        }
+      }
       const es = new EventTarget() as unknown as WebSocket;
       let wsState = 0;
       let binType: "blob" | "arraybuffer" = "blob";
@@ -309,7 +320,9 @@ addEventListener("message", relay);
         ctl.postMessage(
           {
             type: "zl:wsOpen",
-            url,
+            /* u.href, not the original string: a same-origin URL may
+               have been retargeted to the virtual origin above. */
+            url: u.href,
             protocols:
               protocols === undefined ? [] : Array.isArray(protocols) ? protocols : [protocols],
           },
@@ -336,7 +349,9 @@ addEventListener("message", relay);
         },
         send: {
           value: (data: unknown) => {
-            if (wsState !== 1) throw new DOMException("invalid state", "InvalidStateError");
+            /* Spec: send() while CONNECTING buffers at the bridge; only
+               CLOSING/CLOSED throw. */
+            if (wsState >= 2) throw new DOMException("invalid state", "InvalidStateError");
             ch.port1.postMessage({ op: "send", data });
           },
         },

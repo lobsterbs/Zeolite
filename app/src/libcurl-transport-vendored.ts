@@ -155,11 +155,16 @@ export async function fetch(url: string, init?: RequestInit): Promise<Response> 
   const res = await c.request(new URL(url), method, init?.body ?? null, headers, signal);
   const h2 = new Headers();
   for (const [k, v] of res.headers) h2.append(k, v);
-  return new Response(res.body as BodyInit | null, {
+  const resp = new Response(res.body as BodyInit | null, {
     status: res.status,
     statusText: res.statusText,
     headers: h2,
   });
+  /* Response construction drops set-cookie (fetch spec: forbidden
+     response-header name), so the cookie jar can never read it off
+     resp.headers. The transport's raw pairs survive here instead. */
+  (resp as Response & { rawHeaders?: RawHeaders }).rawHeaders = res.headers;
+  return resp;
 }
 
 /* WebSocket (1.3 Carbide). LibcurlClient.connect terminates TLS and
