@@ -86,10 +86,32 @@ fn is_scheme(s: &str) -> bool {
     b.all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
 }
 
+/// Split `s` (an authority followed by its path/query/fragment tail)
+/// into userinfo, lowercased host:port and tail. WHATWG special schemes
+/// normalize the host to lowercase; userinfo and path keep their case
+/// (issue #19).
+fn split_authority(s: &str) -> (String, String, &str) {
+    let auth_end = s.find(['/', '?', '#']).unwrap_or(s.len());
+    let (auth, tail) = s.split_at(auth_end);
+    let (userinfo, hostport) = match auth.rfind('@') {
+        Some(i) => (&auth[..i + 1], &auth[i + 1..]),
+        None => ("", auth),
+    };
+    (userinfo.to_string(), hostport.to_ascii_lowercase(), tail)
+}
+
 /// Resolve `url` against `base` (the current page's real destination URL).
-/// Hand-rolled to keep the wasm bundle free of a URL crate; covers the
-/// forms that occur in real markup (absolute, protocol-relative,
-/// root-relative, path-relative, fragment, query-only).
+/// Hand-rolled to keep the wasm bundle free of a URL crate; follows the
+/// WHATWG URL algorithm for the forms that occur in real markup
+/// (absolute, protocol-relative, root-relative, path-relative,
+/// query-only): dot segments with trailing-segment semantics, preserved
+/// empty path segments, backslash-as-slash for special-scheme bases and
+/// scheme/host lowercasing all match `new URL(url, base)` (issue #19).
+///
+/// Two deliberate deviations, both intentional for a rewriter: the empty
+/// string and fragment-only references resolve to themselves so the
+/// caller keeps them client-side (issue #12) instead of encoding a
+/// route for the base document.
 pub fn resolve(url: &str, base: &str) -> String {
     let url = url.trim();
     if url.is_empty() || url.starts_with('#') {
@@ -98,12 +120,24 @@ pub fn resolve(url: &str, base: &str) -> String {
     // Engine-local paths and other non-URLs pass through untouched.
     // A scheme is ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":" per RFC
     // 3986; anything else falls through to relative resolution.
-    let has_scheme = match url.find(':') {
-        Some(ci) => is_scheme(&url[..ci]),
-        None => false,
-    };
-    if has_scheme
-        || url.starts_with("data:")
+    if let Some(ci) = url.find(':') {
+        if is_scheme(&url[..ci]) {
+            let sch = &url[..ci];
+            // WHATWG parity (issue #19): for special schemes the
+            // browser lowercases scheme and host (never userinfo or
+            // path) before navigating; the encoded destination must
+            // match what the page actually loads or cache keys and
+            // host matching drift.
+            if (sch.eq_ignore_ascii_case("http") || sch.eq_ignore_ascii_case("https"))
+                && url[ci..].starts_with("://")
+            {
+                let (userinfo, hostport, tail) = split_authority(&url[ci + 3..]);
+                return format!("{}://{}{}{}", sch.to_ascii_lowercase(), userinfo, hostport, tail);
+            }
+            return url.to_string();
+        }
+    }
+    if url.starts_with("data:")
         || url.starts_with("blob:")
         || url.starts_with("javascript:")
         || url.starts_with("mailto:")
@@ -116,33 +150,63 @@ pub fn resolve(url: &str, base: &str) -> String {
         Some(i) => (&base[..i + 3], &base[i + 3..]),
         None => return url.to_string(),
     };
-    let (host, base_path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
+    let (host, base_path) = match rest.find(['/', '?', '#']) {
+        Some(i) if rest.as_bytes()[i] == b'/' => (&rest[..i], &rest[i..]),
+        // No path before the query/fragment: the base path is "/".
+        Some(i) => (&rest[..i], "/"),
         None => (rest, "/"),
     };
     let root = format!("{}{}", scheme, host);
-    if let Some(p) = url.strip_prefix("//") {
-        // Protocol-relative.
-        return format!("{}{}", scheme, p);
+    // WHATWG parity (issue #19): a special-scheme base treats "\"
+    // exactly like "/" everywhere a browser would.
+    let special =
+        scheme.eq_ignore_ascii_case("https://") || scheme.eq_ignore_ascii_case("http://");
+    let rel = if special {
+        url.replace('\\', "/")
+    } else {
+        url.to_string()
+    };
+    if let Some(p) = rel.strip_prefix("//") {
+        // Protocol-relative, with the same host normalization.
+        let (userinfo, hostport, tail) = split_authority(p);
+        return format!("{}{}{}{}", scheme, userinfo, hostport, tail);
     }
-    if url.starts_with('/') {
-        return format!("{}{}", root, url);
+    if rel.starts_with('/') {
+        return format!("{}{}", root, rel);
     }
-    if url.starts_with('?') {
+    if rel.starts_with('?') {
         let p = base_path.split(['?', '#']).next().unwrap_or("/");
-        return format!("{}{}{}", root, p, url);
+        return format!("{}{}{}", root, p, rel);
     }
-    // Path-relative: resolve against the base's directory.
-    let dir = match base_path.rfind('/') {
-        Some(i) => &base_path[..i + 1],
+    // Path-relative: WHATWG dot-segment elimination against the base's
+    // directory. "." and ".." as the final segment resolve to an empty
+    // final segment (a trailing slash); empty segments from "//" are
+    // preserved (issue #19).
+    let (path_part, suffix) = match rel.find(['?', '#']) {
+        Some(i) => (&rel[..i], &rel[i..]),
+        None => (rel.as_str(), ""),
+    };
+    let base_dir = base_path.split(['?', '#']).next().unwrap_or("/");
+    let dir = match base_dir.rfind('/') {
+        Some(i) => &base_dir[..i + 1],
         None => "/",
     };
-    let mut segs: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
-    for seg in url.split(['?', '#']).next().unwrap_or("").split('/') {
-        match seg {
-            "." | "" => {}
+    let mut segs: Vec<&str> = if dir == "/" {
+        Vec::new()
+    } else {
+        dir[1..dir.len() - 1].split('/').collect()
+    };
+    let parts: Vec<&str> = path_part.split('/').collect();
+    for (i, seg) in parts.iter().enumerate() {
+        let last = i + 1 == parts.len();
+        match *seg {
+            "." if last => segs.push(""),
+            "." => {}
             ".." => {
                 segs.pop();
+                if last {
+                    segs.push("");
+                }
             }
             s => segs.push(s),
         }
@@ -152,9 +216,6 @@ pub fn resolve(url: &str, base: &str) -> String {
     } else {
         format!("/{}", segs.join("/"))
     };
-    let tail = url.split('/').next_back().unwrap_or("");
-    let qpos = tail.find(['?', '#']).map(|i| url.len() - tail.len() + i);
-    let suffix = qpos.map(|i| &url[i..]).unwrap_or("");
     format!("{}{}{}", root, path, suffix)
 }
 
@@ -238,6 +299,69 @@ mod tests {
             resolve("data:image/png;base64,AAA", b),
             "data:image/png;base64,AAA"
         );
+    }
+
+    /// Issue #19: WHATWG conformance table. Every expected value is
+    /// `new URL(input, base).href` from a real browser, except the two
+    /// documented deviations (empty and fragment-only references return
+    /// themselves so the rewriter keeps them client-side, see #12).
+    #[test]
+    fn resolve_whatwg_table() {
+        let b = "https://example.com/a/b/c.html";
+        let table: &[(&str, &str, &str)] = &[
+            // (input, base, expected)
+            ("d.png", b, "https://example.com/a/b/d.png"),
+            ("../up", b, "https://example.com/a/up"),
+            (".", b, "https://example.com/a/b/"),
+            ("..", b, "https://example.com/a/"),
+            ("./", b, "https://example.com/a/b/"),
+            ("../../x", b, "https://example.com/x"),
+            ("../../../../x", b, "https://example.com/x"),
+            // Empty segments from "//" are preserved.
+            ("a//b", b, "https://example.com/a/b/a//b"),
+            ("..", "https://example.com/a//b/c.html", "https://example.com/a//"),
+            ("../up", "https://example.com/a//b/c.html", "https://example.com/a//up"),
+            ("y", "https://example.com//x", "https://example.com//y"),
+            ("y", "https://example.com//x/", "https://example.com//x/y"),
+            ("g", "https://example.com:8443/a/b/c.html", "https://example.com:8443/a/b/g"),
+            ("g", "https://example.com", "https://example.com/g"),
+            ("/x", b, "https://example.com/x"),
+            ("//cdn.example.net/x", b, "https://cdn.example.net/x"),
+            // Backslash is slash for special-scheme bases.
+            ("\\x", b, "https://example.com/x"),
+            ("a\\b.html", b, "https://example.com/a/b/a/b.html"),
+            ("\\\\cdn.example.net\\x", b, "https://cdn.example.net/x"),
+            // Query-only replaces the query and drops the fragment.
+            ("?q=1", b, "https://example.com/a/b/c.html?q=1"),
+            ("?", b, "https://example.com/a/b/c.html?"),
+            ("?z=2", "https://example.com/a/b/c.html#top", "https://example.com/a/b/c.html?z=2"),
+            // Scheme and host lowercase; userinfo and path do not.
+            ("HTTPS://EXAMPLE.COM/x", b, "https://example.com/x"),
+            (
+                "HtTp://User:Pw@EXAMPLE.com:8080/PaTh",
+                b,
+                "http://user:pw@example.com:8080/PaTh",
+            ),
+            // Percent-sequences pass through untouched.
+            ("a%20b.png", b, "https://example.com/a/b/a%20b.png"),
+            ("/%7Euser", b, "https://example.com/%7Euser"),
+            ("%41", b, "https://example.com/a/b/%41"),
+            // Opaque schemes stay untouched.
+            ("data:image/png;base64,AAA", b, "data:image/png;base64,AAA"),
+            ("blob:https://example.com/x", b, "blob:https://example.com/x"),
+            ("javascript:void(0)", b, "javascript:void(0)"),
+            ("mailto:a@b.c", b, "mailto:a@b.c"),
+            ("tel:+15551234", b, "tel:+15551234"),
+            ("about:blank", b, "about:blank"),
+            // Documented deviations: kept client-side by the caller.
+            ("#frag", b, "#frag"),
+            ("#frag", "https://example.com/a/b/c.html?q=1", "#frag"),
+            ("", b, ""),
+            ("#", b, "#"),
+        ];
+        for (input, base, expected) in table {
+            assert_eq!(resolve(input, base), *expected, "resolve({input:?}, {base:?})");
+        }
     }
 
     #[test]
