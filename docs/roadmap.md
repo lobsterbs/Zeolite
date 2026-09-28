@@ -103,10 +103,18 @@ Closes the 1.6/1.8 limits.
 - Keep the honest boundary: no virtual SW script is ever fetched or
   executed; the engine owns the only real scope.
 
-## Phase 14 - 2.4 Bromide: rewriter parity + server-side streaming
+## Phase 14 - 2.4 Bromide: rewriter parity + deep LobsterBrowse integration
 
 - Port LobsterBrowse's js_antiframe pass into the wasm rewriter (known
   parity gap since the split).
+- Deep LobsterBrowse integration: the /zlsw/ embed stops being an
+  afterthought. The subpath alias is a first-class build target (the 2.1
+  CI variant becomes the LB-consumed artifact), the zl: control plane is
+  bridged into LB's DevTools surfaces, and the download registry, session
+  export, fingerprint profiles and cookie-jar UI consume the engine
+  implementations instead of parallel LB ones. The architectural gate
+  still holds: the engine keeps zero LB imports and stays
+  standalone-buildable; all integration lives in the adapter.
 - CSS stream size gate: stream large CSS without injecting the
   window.__ZL init script for non-document CSS responses.
 - zeolite-server: arena reuse for the streaming rewrite paths; keep
