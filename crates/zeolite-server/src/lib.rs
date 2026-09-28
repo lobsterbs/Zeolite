@@ -4,7 +4,7 @@
 //! 1. Static-host the built engine app (SW, bootstrap, rewriter wasm).
 //! 2. Upgrade `GET /wisp/` to the Wisp v2.1 protocol and relay TCP and UDP.
 //!
-//! The wisp protocol itself comes from LobsterBrowse's `wisp-core`
+//! The wisp protocol itself comes from this workspace's `wisp-core`
 //! crate: framing, packets and the server handshake state machine are
 //! reused, not reimplemented. This crate only owns the sockets, the
 //! destination policy, limits, lifecycle and logging.
