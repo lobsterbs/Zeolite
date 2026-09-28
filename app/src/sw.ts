@@ -536,6 +536,11 @@ function cacheTtl(headers: Headers): number {
 }
 
 async function pageCacheMatch(req: Request): Promise<Response | null> {
+  /* Issue #13: a Range request must never be satisfied from a stored
+     full-body 200 entry (the whole 2 MiB replayed as a 200, no
+     content-range). Range semantics belong to the origin: bypass the
+     cache; forwardedHeaders passes the header to the wisp path. */
+  if (req.headers.has("range")) return null;
   let hit: Response | undefined;
   try {
     hit = await (await caches.open(ZL_PAGES)).match(req);

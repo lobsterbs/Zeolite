@@ -111,6 +111,14 @@ impl Rewriter {
             }
         }
         let abs = resolve(url, &self.base);
+        // Fragment-only and empty URLs never reach the network: the
+        // browser resolves them against the CURRENT route. Encoding
+        // them would manufacture a bare engine-prefix route with no
+        // destination at all (issue #12: every same-page anchor link
+        // navigated to 404 "zeolite: bad route").
+        if abs.is_empty() || abs.starts_with('#') {
+            return abs;
+        }
         // Fragments are client-side only (SVG sprite symbol selection,
         // in-page anchors). They must never become part of the encoded
         // request target: every "#symbol" variant of one sprite is the
@@ -590,6 +598,24 @@ mod tests {
             .and_then(|b| String::from_utf8(b).ok())
             .unwrap_or_default();
         assert_eq!(decoded, "https://cdn.example.net/sprites.svg");
+    }
+
+    #[test]
+    fn fragment_only_hrefs_pass_through() {
+        // Issue #12: href="#frag" came out as the bare engine prefix +
+        // fragment - a route with no encoded destination - so every
+        // same-page anchor link navigated to 404 "zeolite: bad route".
+        // A fragment-only href must stay untouched: the browser
+        // resolves it against the current route client-side.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/dir/page.html");
+        let out = format!(
+            "{}{}",
+            r.process("<a href=\"#nav\">skip</a><a href=\"\">empty</a>"),
+            r.finish()
+        );
+        assert!(out.contains("<a href=\"#nav\">"), "got: {}", out);
+        assert!(out.contains("<a href=\"\">"), "got: {}", out);
     }
 
     #[test]
