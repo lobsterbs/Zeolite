@@ -47,7 +47,8 @@ const SITE = "zl:" + fnv1a(SKEY);
 /* The page origin ("" when unparseable): shared by the cookie shim and
  the serviceWorker shim. */
 const ORIGIN = SKEY === "unknown" ? "" : SKEY;
-const KEY = (k: string) => SITE + ":" + k;
+const pre = (n: unknown) => SITE + ":" + String(n);
+const KEY = (k: string) => pre(k);
 
 /* One scanner for clear/key/length: keeps the scoped Storage cheap
  and the minified bootstrap inside its CI size budget. */
@@ -55,7 +56,7 @@ function siteKeys(store: Storage): string[] {
  const ks: string[] = [];
  for (let i = 0; i < store.length; i++) {
  const k = store.key(i);
- if (k && k.startsWith(SITE + ":")) ks.push(k);
+ if (k?.startsWith(SITE + ":")) ks.push(k);
  }
  return ks;
 }
@@ -64,20 +65,18 @@ function siteKeys(store: Storage): string[] {
  for (const name of ["localStorage", "sessionStorage"] as const) {
  const LS = w[name] as Storage | undefined;
  if (!LS || typeof LS !== "object") continue;
- const store = LS;
- const api = {
- getItem: (k: string) => store.getItem(KEY(k)),
- setItem: (k: string, v: string) => store.setItem(KEY(k), v),
- removeItem: (k: string) => store.removeItem(KEY(k)),
+ const scoped = Object.assign(Object.create(Storage.prototype), {
+ getItem: (k: string) => LS.getItem(KEY(k)),
+ setItem: (k: string, v: string) => LS.setItem(KEY(k), v),
+ removeItem: (k: string) => LS.removeItem(KEY(k)),
  clear: () => {
- siteKeys(store).forEach((k) => store.removeItem(k));
+ siteKeys(LS).forEach((k) => LS.removeItem(k));
  },
- key: (i: number) => siteKeys(store)[i] ?? null,
+ key: (i: number) => siteKeys(LS)[i] ?? null,
  get length() {
- return siteKeys(store).length;
+ return siteKeys(LS).length;
  },
- };
- const scoped = Object.assign(Object.create(Storage.prototype), api) as Storage;
+ }) as Storage;
  try {
  Object.defineProperty(w, name, { value: scoped, configurable: true });
  } catch { /* read-only context: storage then stays unscoped */ }
@@ -96,7 +95,6 @@ function siteKeys(store: Storage): string[] {
  const OPEN = IDB.open.bind(IDB);
  const DEL = IDB.deleteDatabase.bind(IDB);
  const CMP = typeof IDB.cmp === "function" ? IDB.cmp.bind(IDB) : null;
- const pre = (n: unknown) => SITE + ":" + String(n);
  /* databases() is deliberately absent (honest unimplemented API):
     wrapping it would risk leaking engine-own database names. cmp()
     (2.2 Arsenide) compares two prefixed names, so ordering stays
@@ -120,7 +118,6 @@ function siteKeys(store: Storage): string[] {
  const DEL = CA.delete.bind(CA);
  const HAS = CA.has.bind(CA);
  const KEYS = CA.keys.bind(CA);
- const pre = (n: unknown) => SITE + ":" + String(n);
  const own = (n: string) => n.startsWith(SITE + ":");
  const shim: Record<string, unknown> = {
  open: (n: unknown) => OPEN(pre(n)),
@@ -174,8 +171,7 @@ function siteKeys(store: Storage): string[] {
  return cur;
  },
  set: (v: string) => {
- const s = v;
- const pair = s.split(";")[0];
+ const pair = v.split(";")[0];
  const eq = pair.indexOf("=");
  const name = (eq > 0 ? pair.slice(0, eq) : pair).trim();
  if (!name) return;
@@ -235,7 +231,7 @@ addEventListener("message", (e: MessageEvent) => {
       } catch {
         throw new DOMException(String(url), "SyntaxError");
       }
-      if (u.protocol !== "ws:" && u.protocol !== "wss:") {
+      if (!/^wss?:$/.test(u.protocol)) {
         return new OWS(url, protocols);
       }
       const es = new EventTarget() as unknown as WebSocket;
