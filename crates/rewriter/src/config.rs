@@ -95,15 +95,16 @@ impl RewriteConfig {
         let candidate = if let Some(i) = url.find("://") {
             let rest = &url[i + 3..];
             let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-            url.get(..(url.len() - rest.len() + end))?
-                .to_string()
+            url.get(..(url.len() - rest.len() + end))?.to_string()
         } else {
             url.to_string()
         };
         let local = if self.origin.is_empty() {
             candidate.as_str()
         } else {
-            candidate.strip_prefix(&self.origin).unwrap_or(candidate.as_str())
+            candidate
+                .strip_prefix(&self.origin)
+                .unwrap_or(candidate.as_str())
         };
         let rest = match &self.codec {
             Codec::Base64Url { prefix } => local.strip_prefix(prefix.as_str())?,
@@ -167,13 +168,7 @@ mod tests {
         let dest2 = "https://www.google.com/search?q=hi";
         let route2 = format!("/zl/{}", crate::encode::b64u_encode(dest2.as_bytes()));
         let bound2 = format!("https://www.google.com{}", route2);
-        let nested = format!(
-            "/zl/{}",
-            crate::encode::b64u_encode(bound2.as_bytes())
-        );
-        assert_eq!(
-            c.unwrap_engine_route(&nested).as_deref(),
-            Some(dest2)
-        );
+        let nested = format!("/zl/{}", crate::encode::b64u_encode(bound2.as_bytes()));
+        assert_eq!(c.unwrap_engine_route(&nested).as_deref(), Some(dest2));
     }
 }

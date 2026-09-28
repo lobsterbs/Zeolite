@@ -767,15 +767,20 @@ mod tests {
         let dest = "https://www.google.com/search?q=hi";
         let route = format!("/zl/{}", crate::encode::b64u_encode(dest.as_bytes()));
         let bound = format!("https://www.google.com{}", route);
-        let nested = format!(
-            "/zl/{}",
-            crate::encode::b64u_encode(bound.as_bytes())
-        );
+        let nested = format!("/zl/{}", crate::encode::b64u_encode(bound.as_bytes()));
         let mut r = Rewriter::new(c.clone());
         r.set_base("https://www.google.com/");
-        let out = format!("{}{}", r.process(&format!("<a href=\"{}\">x</a>", nested)), r.finish());
+        let out = format!(
+            "{}{}",
+            r.process(&format!("<a href=\"{}\">x</a>", nested)),
+            r.finish()
+        );
         let want = c.encode_url(dest);
-        assert!(out.contains(&format!("href=\"{}\"", want)), "unwrapped to one route: {}", out);
+        assert!(
+            out.contains(&format!("href=\"{}\"", want)),
+            "unwrapped to one route: {}",
+            out
+        );
         // Zero surviving layers: neither bound form appears at all.
         assert!(!out.contains(&bound), "no target-host-bound route: {}", out);
         assert!(!out.contains(&nested), "no nested route: {}", out);
