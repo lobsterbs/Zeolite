@@ -3,7 +3,8 @@
    network inspector's log.
 
    URL shape: engine-local routes under a configurable prefix (default
-   /j/, rotatable at runtime via an zl:config message). Requests that
+   /j/, rotatable at runtime via an zl:config message, persisted across
+   worker restarts since issue #17). Requests that
    are engine assets (sw.js, bootstrap.js, devtools.html, ...) or the
    wisp endpoint pass through untouched. All prefix/scheme decisions go
    through ./codec helpers (bug-scout fix: "/j/" was previously hard
@@ -23,7 +24,10 @@
      { type: "zl:recordStop" }             build the zlRecord artifact
    2.1 Halogen control plane:
      { type: "zl:ping" }                    version handshake (replies
-                                             { ok, version, degraded })
+                                             { ok, version, degraded,
+                                               prefix, scheme } so
+                                             embedders can detect a
+                                             route-shape revert, #17)
    2.2 Arsenide control plane:
      { type: "zl:sameSite", policy }        opt-in jar SameSite policy
                                              ("off" | "approx")
@@ -37,7 +41,8 @@
    wasm-pack build --target web -> copy into app/src/rewriter_wasm). */
 
 /// <reference lib="webworker" />
-import { decodePath, encodeDest, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { decodePath, encodeDest, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setScheme, unwrapDest, currentPrefix, currentScheme } from "./codec";
+import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
@@ -536,11 +541,6 @@ function cacheTtl(headers: Headers): number {
 }
 
 async function pageCacheMatch(req: Request): Promise<Response | null> {
-  /* Issue #13: a Range request must never be satisfied from a stored
-     full-body 200 entry (the whole 2 MiB replayed as a 200, no
-     content-range). Range semantics belong to the origin: bypass the
-     cache; forwardedHeaders passes the header to the wisp path. */
-  if (req.headers.has("range")) return null;
   let hit: Response | undefined;
   try {
     hit = await (await caches.open(ZL_PAGES)).match(req);
@@ -551,15 +551,46 @@ async function pageCacheMatch(req: Request): Promise<Response | null> {
   const at = Number(hit.headers.get(ZL_CACHED_AT) ?? 0);
   const ttl = cacheTtl(hit.headers);
   if (!ttl) return null;
-  if (Date.now() - at < ttl) return hit;
-  /* Stale: serve it now, refresh in the background. */
-  try {
-    const fresh = await wispFetchCacheBypass(req);
-    if (fresh.ok) await pageCacheStore(req, fresh);
-  } catch {
-    /* offline: the stale copy stays served */
+  if (Date.now() - at >= ttl) {
+    /* Stale: serve it now, refresh in the background. */
+    try {
+      const fresh = await wispFetchCacheBypass(req);
+      if (fresh.ok) await pageCacheStore(req, fresh);
+    } catch {
+      /* offline: the stale copy stays served */
+    }
   }
+  /* Issues #13 + #18: a Range request is answered from the stored full
+     entry only when exactly one byte range names a slice the engine can
+     serve (plain body under the size cap). Everything else bypasses the
+     cache so the origin owns range semantics; forwardedHeaders passes
+     the header to the wisp path. */
+  const rangeHeader = req.headers.get("range");
+  if (rangeHeader) return await rangeFromEntry(hit, rangeHeader);
   return hit;
+}
+
+/** Issue #18: slice a single-range request out of a stored full 200.
+    206 + content-range on success, 416 when unsatisfiable, null to
+    bypass (multi-range, compressed or oversized entries). */
+async function rangeFromEntry(hit: Response, rangeHeader: string): Promise<Response | null> {
+  /* A compressed body cannot be sliced: the range would cut the
+     encoded stream, not the resource. */
+  if (hit.headers.get("content-encoding")) return null;
+  const body = new Uint8Array(await hit.arrayBuffer());
+  if (body.byteLength > ZL_RANGE_MAX) return null;
+  const plan = planRange(rangeHeader, body.byteLength);
+  if (plan.kind === "bypass") return null;
+  const headers = new Headers(hit.headers);
+  if (plan.kind === "unsatisfiable") {
+    headers.set("content-range", `bytes */${body.byteLength}`);
+    return new Response(null, { status: 416, headers });
+  }
+  const slice = new Uint8Array(body.subarray(plan.start, plan.end + 1));
+  headers.set("content-range", `bytes ${plan.start}-${plan.end}/${body.byteLength}`);
+  headers.set("content-length", String(slice.byteLength));
+  headers.set("accept-ranges", "bytes");
+  return new Response(slice, { status: 206, headers });
 }
 
 async function pageCacheStore(req: Request, resp: Response): Promise<void> {
@@ -771,7 +802,45 @@ function csInjectUrls(target: string, req: Request): string[] {
   return urls;
 }
 
-self.addEventListener("fetch", (e: FetchEvent) => {
+/* ---- Route-shape persistence (issue #17) -------------------------- */
+
+/* The rotated prefix/scheme used to be in-memory only: a worker
+   restart reverted to the default and long-lived pages silently lost
+   their route shape (their /zl/ routes became passthroughs answered by
+   the host's no-worker notice, zl:ping still ok). The shape now
+   persists in a dedicated Cache Storage entry and restores on every
+   worker start; zl:ping and the zl:config ack also echo it so embedders
+   can detect drift. zl:teardown drops every cache, this one included,
+   which is the intended full reset. */
+const ZL_ROUTE_CACHE = "zeolite-route-v1";
+const ZL_ROUTE_KEY = new URL("route-config.json", self.registration.scope).href;
+const routeReady: Promise<void> = (async () => {
+  try {
+    const hit = await (await caches.open(ZL_ROUTE_CACHE)).match(ZL_ROUTE_KEY);
+    if (hit) {
+      const cfg = (await hit.json()) as { prefix?: string; scheme?: "b64u" | "mirror" };
+      setScheme(cfg.prefix ?? "/j/", cfg.scheme === "mirror" ? "mirror" : "b64u");
+    }
+  } catch {
+    /* storage unavailable: defaults stay until the next zl:config */
+  }
+})();
+
+async function persistRoute(prefix: string, scheme: "b64u" | "mirror"): Promise<void> {
+  try {
+    await (await caches.open(ZL_ROUTE_CACHE)).put(
+      ZL_ROUTE_KEY,
+      new Response(JSON.stringify({ prefix, scheme })),
+    );
+  } catch {
+    /* storage unavailable: the in-memory rotation still works */
+  }
+}
+
+self.addEventListener("fetch", async (e: FetchEvent) => {
+  /* Issue #17: the persisted route shape restores asynchronously; every
+     path classification below depends on it. */
+  await routeReady;
   const url = new URL(e.request.url);
   if (url.origin !== self.location.origin) return; // not ours: browser handles it
   /* 1.5 Silicide: opaque schemes (blob:, data:, about:) are browser-native
@@ -1431,13 +1500,26 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
 
   switch (msg?.type) {
     case "zl:ping":
-      reply({ ok: true, version: ZEOLITE_VERSION, degraded: engineDegraded });
+      /* Issue #17: echo the live route shape so embedders can detect a
+         revert to defaults (worker restart, storage wipe) and re-push
+         their config. */
+      reply({
+        ok: true,
+        version: ZEOLITE_VERSION,
+        degraded: engineDegraded,
+        prefix: currentPrefix(),
+        scheme: currentScheme(),
+      });
       break;
-    case "zl:config":
+    case "zl:config": {
       // Rotate the URL shape at runtime.
-      setScheme(msg.prefix ?? "/j/", msg.scheme ?? "b64u");
-      reply({ ok: true });
+      const scheme = msg.scheme === "mirror" ? "mirror" : "b64u";
+      setScheme(msg.prefix ?? "/j/", scheme);
+      /* Issue #17: persist so a worker restart keeps the shape. */
+      void persistRoute(currentPrefix(), scheme);
+      reply({ ok: true, prefix: currentPrefix(), scheme });
       break;
+    }
     case "zl:adblock":
       /* Host toggle for the compiled rules (the migrated ad/tracker
          lists in /rules.json). Data stays loaded; decisions become
