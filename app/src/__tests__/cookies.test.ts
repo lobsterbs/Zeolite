@@ -242,18 +242,18 @@ describe("jarHeaders (issue #10: transport set-cookie visibility)", () => {
   const gs = (h: Headers): (() => string[]) | undefined =>
     (h as Headers & { getSetCookie?: () => string[] }).getSetCookie;
 
-  it("documents the fetch-spec drop the raw pairs work around", () => {
+  it("documents that Headers keeps every raw set-cookie pair", () => {
+    /* Headers keep every set-cookie entry even though Chromium drops
+       them when a Response is constructed (fetch spec: set-cookie is a
+       forbidden response-header name). undici/vitest does not implement
+       that guard, so the drop cannot be asserted here; that is exactly
+       why jarHeaders reads the transport rawHeaders expando instead of
+       trusting resp.headers. */
     const h = new Headers();
     h.append("set-cookie", "a=1; Path=/");
     h.append("set-cookie", "b=2; Path=/");
-    /* Headers keep every set-cookie entry... */
     const hf = gs(h);
     if (hf) expect(hf.call(h)).toHaveLength(2);
-    /* ...but constructing a Response drops them entirely (fetch spec:
-       set-cookie is a forbidden response-header name). */
-    const resp = new Response(null, { status: 200, headers: h });
-    const rf = gs(resp.headers);
-    if (rf) expect(rf.call(resp.headers)).toEqual([]);
   });
 
   it("rebuilds every set-cookie from the transport raw pairs", () => {
