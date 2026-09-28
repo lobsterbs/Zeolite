@@ -76,8 +76,9 @@ jobs:
       - name: Measure wasm bundles (record; budget enforcement is the Phase 1 gate)
         run: du -b app/src/rewriter_wasm/rewriter_wasm_bg.wasm app/src/wisp_wasm/wisp_wasm_bg.wasm
       - uses: actions/upload-artifact@v4
-        name: zeolite-wasm
-        path: app/src/
+        with:
+          name: zeolite-wasm
+          path: app/src/
 
   app:
     runs-on: ubuntu-latest
