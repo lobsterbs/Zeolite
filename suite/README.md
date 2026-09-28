@@ -55,15 +55,17 @@ application is client-side). All fixture rows share one wisp session:
 multiplexing streams over one connection is the point of the protocol.
 
 Two extra servers are spawned from the repo-root
-target/release/zeolite-server binary on fixed ports, each verifying a
+target/release/zeolite-server binary on fixed ports below the Linux
+ephemeral range (runner outbound connections squat ports inside it
+and the bind dies with AddrInUse), each verifying a
 production-default behavior the main compat server cannot demonstrate
 because it runs with the loopback escape hatch:
 
-- port 46102, ssrf-private-blocked: started WITHOUT
+- port 16102, ssrf-private-blocked: started WITHOUT
   ZL_TEST_ALLOW_PRIVATE_DESTS, a loopback CONNECT must be refused with
   close reason 0x48 (BLOCKED) and no relayed bytes (policy.rs resolves
   DNS first and validates every address before connecting).
-- port 46103, auth-required-refusal: started with
+- port 16103, auth-required-refusal: started with
   ZL_WISP_USER/ZL_WISP_PASSWORD, a keyless v2 client must be refused
   during the handshake with close reason 0xc2 (AUTH_REQUIRED).
 

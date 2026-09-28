@@ -45,10 +45,14 @@ const BASE = process.argv.includes("--base")
 /* Repo-root server binary, independent of the process CWD. */
 const SERVER = fileURLToPath(new URL("../target/release/zeolite-server", import.meta.url));
 
-/* ponytail: fixed high ports instead of port 0 + stdout parsing; a
-   collision fails the row loudly, which is the honest outcome. */
-const SSRF_PORT = 46102;
-const AUTH_PORT = 46103;
+/* ponytail: fixed ports instead of port 0 + stdout parsing; a real
+   collision still fails the row loudly, which is the honest outcome.
+   They must sit below the Linux ephemeral range (32768+): inside it
+   the runner's own outbound connections squat the ports and both
+   servers die on bind with AddrInUse before any row can run (proven
+   by run 36479436783). */
+const SSRF_PORT = 16102;
+const AUTH_PORT = 16103;
 
 const bareEnv = () => {
   const env = { ...process.env };

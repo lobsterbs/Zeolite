@@ -4,7 +4,11 @@
    hrefs, a CSS file with url() references, a JS file, redirect
    chains, an attachment download, media bytes, error statuses and a
    Set-Cookie endpoint. Everything is static and byte-stable, so
-   probe results against it are deterministic.
+   probe results against it are deterministic. Every body pins
+   Content-Length explicitly: the runner's node otherwise answers with
+   chunked framing (run 36479436783 delivered the 458B page as a 470B
+   chunked body and the 9B echo as 9\r\necho:ping\r\n0\r\n\r\n),
+   and byte-stable means byte-stable.
 
    The engine's SSRF policy blocks loopback destinations by default;
    the nightly compat job starts zeolite-server with
@@ -40,25 +44,25 @@ export function startFixtureServer() {
       const { HTML, CSS, JS } = fixtureContent(origin);
       const path = (req.url ?? "/").split("?")[0];
       if (path === "/page.html") {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(HTML) });
         res.end(HTML);
       } else if (path === "/page2") {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength("<!doctype html><title>page two</title><p>page-two-marker</p>") });
         res.end("<!doctype html><title>page two</title><p>page-two-marker</p>");
       } else if (path === "/frame.html") {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength("<!doctype html><p>frame-marker</p>") });
         res.end("<!doctype html><p>frame-marker</p>");
       } else if (path === "/style.css") {
-        res.writeHead(200, { "content-type": "text/css" });
+        res.writeHead(200, { "content-type": "text/css", "content-length": Buffer.byteLength(CSS) });
         res.end(CSS);
       } else if (path === "/app.js") {
-        res.writeHead(200, { "content-type": "text/javascript" });
+        res.writeHead(200, { "content-type": "text/javascript", "content-length": Buffer.byteLength(JS) });
         res.end(JS);
       } else if (path === "/logo.png" || path === "/bg.png" || path === "/x.png") {
-        res.writeHead(200, { "content-type": "image/png" });
+        res.writeHead(200, { "content-type": "image/png", "content-length": MEDIA.length });
         res.end(MEDIA);
       } else if (path === "/media.bin") {
-        res.writeHead(200, { "content-type": "video/mp4" });
+        res.writeHead(200, { "content-type": "video/mp4", "content-length": MEDIA.length });
         res.end(MEDIA);
       } else if (path === "/redirect301") {
         res.writeHead(301, { location: `${origin}/page2` });
@@ -70,26 +74,26 @@ export function startFixtureServer() {
         res.writeHead(307, { location: `${origin}/app.js` });
         res.end();
       } else if (path === "/download") {
-        res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="fixture.bin"' });
+        res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="fixture.bin"', "content-length": MEDIA.length });
         res.end(MEDIA);
       } else if (path === "/echo") {
         let body = "";
         req.on("data", (c) => (body += c));
         req.on("end", () => {
-          res.writeHead(200, { "content-type": "text/plain" });
+          res.writeHead(200, { "content-type": "text/plain", "content-length": Buffer.byteLength("echo:" + body) });
           res.end("echo:" + body);
         });
       } else if (path === "/setcookie") {
-        res.writeHead(200, { "content-type": "text/plain", "set-cookie": "fx=1; Path=/" });
+        res.writeHead(200, { "content-type": "text/plain", "set-cookie": "fx=1; Path=/", "content-length": Buffer.byteLength("cookie-set") });
         res.end("cookie-set");
       } else if (path === "/missing") {
-        res.writeHead(404, { "content-type": "text/plain" });
+        res.writeHead(404, { "content-type": "text/plain", "content-length": Buffer.byteLength("not-found-marker") });
         res.end("not-found-marker");
       } else if (path === "/boom") {
-        res.writeHead(500, { "content-type": "text/plain" });
+        res.writeHead(500, { "content-type": "text/plain", "content-length": Buffer.byteLength("server-error-marker") });
         res.end("server-error-marker");
       } else {
-        res.writeHead(404, { "content-type": "text/plain" });
+        res.writeHead(404, { "content-type": "text/plain", "content-length": Buffer.byteLength("nope") });
         res.end("nope");
       }
     });
