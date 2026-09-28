@@ -27,7 +27,7 @@ const ZL = ((w.__ZL as { dest: string } | undefined) ??
 
 function siteKey(): string {
  try {
- return String(new URL(ZL.dest).origin);
+ return new URL(ZL.dest).origin;
  } catch {
  return "unknown";
  }
@@ -229,7 +229,7 @@ addEventListener("message", (e: MessageEvent) => {
       try {
         u = new URL(url);
       } catch {
-        throw new DOMException(String(url), "SyntaxError");
+        throw new DOMException(url, "SyntaxError");
       }
       if (!/^wss?:$/.test(u.protocol)) {
         return new OWS(url, protocols);
