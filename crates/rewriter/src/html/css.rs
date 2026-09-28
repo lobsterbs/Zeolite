@@ -145,7 +145,10 @@ mod tests {
             "a{background:url(img/x.png)}b{background:url( 'y.png' )}",
             &enc,
         );
-        assert_eq!(out, "a{background:url('[img/x.png]')}b{background:url('[y.png]')}");
+        assert_eq!(
+            out,
+            "a{background:url('[img/x.png]')}b{background:url('[y.png]')}"
+        );
     }
 
     #[test]
