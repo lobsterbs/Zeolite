@@ -27,7 +27,7 @@ the test suite, not what would be nice to have. Statuses:
 | Download registry | supported | Counting passthrough with filename detection (content-disposition/URL) and cancellation. |
 | Session export/import | supported | AES-256-GCM + PBKDF2-SHA256 (120k iterations, hand-rolled base64). No plaintext secrets ever at rest. |
 | Fingerprinting resistance | partial | One consistent profile across navigator/screen/Date/Intl/canvas/WebGL, mirrored onto upstream headers. Limits: fixed-offset timezone, no DST simulation, Date toString zone text stays native, workers and OffscreenCanvas are not patched, default profile is a shared fixed fingerprint, not per-session randomness. |
-| Session recording + replay | supported | zlRecord artifacts; deterministic given identical rings; replay compares reachability, status class and unrewritten-URL absence only. Bodies, headers, timings and WebSocket payloads are never recorded, so never compared. |
+| Session recording + replay | supported | zlRecord artifacts; deterministic given identical rings; replay compares reachability, status class, unrewritten-URL absence, plus the recorded WebSocket lifecycle and cookie-jar-shape facts against the artifact contract (direction/kind/URL shape; names and scopes, never values). Bodies, headers, timings and WebSocket payloads are never recorded, so never compared. |
 | Opt-in rewrite tracing | supported | 512-decision ring, zero allocation while off. Token-level wasm decisions untraced. |
 | Network inspector | supported | 256-entry ring with delta polling. fetch() and XHR are not distinguishable without initiator info; both reported as FETCH. |
 | Diagnostics | supported | 512 events, 256 trace references, one trace ID per request, secrets redacted on entry. |
