@@ -837,10 +837,7 @@ async function persistRoute(prefix: string, scheme: "b64u" | "mirror"): Promise<
   }
 }
 
-self.addEventListener("fetch", async (e: FetchEvent) => {
-  /* Issue #17: the persisted route shape restores asynchronously; every
-     path classification below depends on it. */
-  await routeReady;
+self.addEventListener("fetch", (e: FetchEvent) => {
   const url = new URL(e.request.url);
   if (url.origin !== self.location.origin) return; // not ours: browser handles it
   /* 1.5 Silicide: opaque schemes (blob:, data:, about:) are browser-native
@@ -862,539 +859,541 @@ self.addEventListener("fetch", async (e: FetchEvent) => {
     );
     return;
   }
-  /* Route computation. Two shapes reach the engine origin:
-     - engine routes (isEnginePath): decode, then unwrap nested routes
-       (the rewriter used to rewrap bound routes per pass, and older
-       dists still emit /zl/<b64> chains bound to the target host).
-     - everything else: engine assets pass through; other same-origin
-       paths are escaped fetches from a rewritten page (finding 3):
-       reroute them against the origin of the serving page, recovered
-       from the request referrer. No decodable referrer: passthrough. */
-  let dest0: string | null;
-  if (isEnginePath(url.pathname)) {
-    const raw = decodePath(url.pathname);
-    if (!raw) {
-      e.respondWith(new Response("zeolite: bad route", { status: 404 }));
-      return;
-    }
-    dest0 = unwrapDest(raw);
-  } else {
-    if (isEngineAsset(url.pathname)) return; // engine asset: passthrough
-    const refDest = e.request.referrer
-      ? referrerDest(e.request.referrer, url.pathname + url.search)
-      : null;
-    if (!refDest) return; // unknown same-origin path: passthrough
-    dest0 = refDest;
-  }
-  // Fragments are client-side only. The rewriter keeps them out of the
-  // encoded target, but older bundles or hand-built routes may carry
-  // one: strip it so a sprite referenced as "...#a", "...#b", "...#c"
-  // is one cache key, one wisp destination, one upstream identity.
-  const bareDest = dest0.startsWith("http")
-    ? dest0.split("#", 1)[0] || dest0
-    : dest0;
-  // Query string travels outside the encoded destination.
-  let target = url.search ? bareDest + url.search : bareDest;
-
-  if (siteDisabled(target)) {
-    e.respondWith(
-      new Response("zeolite: site disabled for this engine", {
-        status: 403,
-        headers: { "content-type": "text/plain" },
-      }),
-    );
-    return;
-  }
-
+  /* Issue #17: the route classification below depends on the restored
+     route shape, so it runs after routeReady. respondWith is armed
+     synchronously first: a cold-start fetch (restore still pending)
+     must still be intercepted, not fall through to the origin with the
+     default route shape. */
   e.respondWith(
     (async () => {
-      const t0 = Date.now();
-      const traceId = DIAG.trace();
-      DIAG.stage(traceId, "REQUEST_INTERCEPTED", { url: target });
-      const internalUrl = url.pathname + url.search;
-      /* Initiator: the controlling page destination, when the SW can
-         resolve the client (unknown after a restart, for instance). */
-      let initiator: string | undefined;
-      try {
-        if (e.clientId) {
-          const client = await self.clients.get(e.clientId);
-          if (client) initiator = decodePath(new URL(client.url, self.location.origin).pathname) || undefined;
-        }
-      } catch {
-        /* initiator stays unknown */
+      await routeReady;
+      /* Route computation. Two shapes reach the engine origin:
+         - engine routes (isEnginePath): decode, then unwrap nested routes
+           (the rewriter used to rewrap bound routes per pass, and older
+           dists still emit /zl/<b64> chains bound to the target host).
+         - everything else: engine assets pass through; other same-origin
+           paths are escaped fetches from a rewritten page (finding 3):
+           reroute them against the origin of the serving page, recovered
+           from the request referrer. No decodable referrer: passthrough. */
+      let dest0: string | null;
+      if (isEnginePath(url.pathname)) {
+        const raw = decodePath(url.pathname);
+        if (!raw) return new Response("zeolite: bad route", { status: 404 });
+        dest0 = unwrapDest(raw);
+      } else {
+        if (isEngineAsset(url.pathname)) return fetch(e.request); // engine asset: passthrough
+        const refDest = e.request.referrer
+          ? referrerDest(e.request.referrer, url.pathname + url.search)
+          : null;
+        if (!refDest) return fetch(e.request); // unknown same-origin path: passthrough
+        dest0 = refDest;
       }
-      const mkDetail = (resp?: Response): NetDetail => {
-        const d: NetDetail = {
-          internalUrl,
-          ttfb: Date.now() - t0,
-          initiator,
-          reqHeaders: flatRed(e.request.headers),
-        };
-        if (resp) {
-          d.respHeaders = flatRed(resp.headers);
-          const getSetCookie = (resp.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
-          const setCookies = typeof getSetCookie === "function" ? getSetCookie.call(resp.headers) : [];
-          if (setCookies.length) d.cookies = setCookies.map((c) => c.split("=", 1)[0]);
-        }
-        return d;
-      };
-      /* NativeTransit decision: pre-fetch classification from the
-         destination scheme + sec-fetch-dest; refined with the actual
-         content type once the response arrives. */
-      const decision = decideTransport(target, e.request.headers.get("sec-fetch-dest") ?? "");
-      /* webNavigation.onBeforeNavigate: navigation-mode requests
-         report the interception itself, before any cache or upstream
-         work. */
-      if (e.request.mode === "navigate") WEBNAV.beforeNavigate(target);
-      /* Shared webRequest details for every hook below. */
-      const wrDetails = {
-        requestId: traceId,
-        url: target,
-        method: e.request.method,
-        type: wrType(e.request.headers.get("sec-fetch-dest") ?? ""),
-        timeStamp: Date.now(),
-      };
-      /* webRequest.onBeforeRequest: a blocking listener can cancel the
-         request before cache or transport. */
-      if (WEBREQ.beforeRequest(wrDetails)) {
-        DIAG.emit({
-          category: "BLOCKED",
-          cause: "blocked",
-          severity: "info",
-          message: "request cancelled by extension webRequest",
-          stage: "REQUEST_INTERCEPTED",
-          url: target,
-          traceId,
-          requestId: traceId,
-        });
-        transitRecord(traceId, target, decision);
-        netLogPush({
-          method: e.request.method, traceId,
-          path: url.pathname + url.search,
-          dest: target,
-          status: 403,
-          rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
-          ms: Date.now() - t0,
-          bytes: -1,
-          verdict: "blocked",
-          transport: decision.mode,
-          fallbackReason: decision.fallbackReason,
-          detail: mkDetail(),
-        });
-        return new Response("zeolite: request blocked by extension", {
-          status: 403,
-          headers: { "content-type": "text/plain" },
-        });
-      }
-      /* Phase 1 (1.1 Oxide): rules engine + interception API. Data
-         rules first, then programmatic handlers; a block from either
-         wins, before cache and transport. See docs/interception.md. */
-      const engineRules = await loadRules();
-      const rtype = classifyRtype(
-        e.request.headers.get("sec-fetch-dest") ?? "",
-        "",
-      ).toLowerCase() as ResourceType;
-      const ruleDec = applyRules(engineRules, target, rtype);
-      const kinds: Exclude<InterceptKind, "response">[] = ["request"];
-      if (e.request.mode === "navigate") kinds.push("navigation");
-      if (rtype === "worker") kinds.push("worker");
-      if (rtype === "websocket") kinds.push("websocket");
-      if (rtype === "fetch") kinds.push("fetch");
-      const flatReq: Record<string, string> = {};
-      e.request.headers.forEach((v, k) => (flatReq[k] = v));
-      const ic = runRequestInterception(kinds, {
-        url: ruleDec.url ?? target,
-        method: e.request.method,
-        rtype,
-        headers: flatReq,
-      });
-      const extraHeaders: Record<string, string> = {
-        ...(ruleDec.headers ?? {}),
-        ...(ic.headers ?? {}),
-      };
-      /* 1.2 Halide: opt-in rewrite tracing at the decision seams.
-         Zero allocation while tracing is off. */
-      if (ruleDec.action === "block")
-        traceDecision({ subsystem: "rules", rule: ruleDec.matched, original: target, result: "blocked", resource: rtype, traceId });
-      if (ic.block)
-        traceDecision({ subsystem: "intercept", original: target, result: "blocked", resource: rtype, traceId });
-      if (ruleDec.url)
-        traceDecision({ subsystem: "rules", rule: "rewrite", original: target, result: ruleDec.url, resource: rtype, traceId });
-      if (ic.url)
-        traceDecision({ subsystem: "intercept", original: target, result: ic.url, resource: rtype, traceId });
-      if (ruleDec.action === "block" || ic.block) {
-        DIAG.emit({
-          category: "BLOCKED",
-          cause: "blocked",
-          severity: "info",
-          message:
-            "request blocked by " +
-            (ruleDec.action === "block"
-              ? "rules (" + (ruleDec.matched ?? "") + ")"
-              : "intercept handler"),
-          stage: "REQUEST_INTERCEPTED",
-          url: target,
-          traceId,
-          requestId: traceId,
-        });
-        transitRecord(traceId, target, decision);
-        netLogPush({
-          method: e.request.method, traceId,
-          path: url.pathname + url.search,
-          dest: target,
-          status: 403,
-          rtype: rtype.toUpperCase(),
-          ms: Date.now() - t0,
-          bytes: -1,
-          verdict: ruleDec.action === "block" ? "blocked:rules" : "blocked:intercept",
-          transport: decision.mode,
-          fallbackReason: decision.fallbackReason,
-          detail: mkDetail(),
-        });
-        return new Response("zeolite: request blocked", {
-          status: 403,
-          headers: { "content-type": "text/plain" },
-        });
-      }
-      if (ruleDec.url || ic.url) target = ic.url ?? ruleDec.url ?? target;
+      // Fragments are client-side only. The rewriter keeps them out of the
+      // encoded target, but older bundles or hand-built routes may carry
+      // one: strip it so a sprite referenced as "...#a", "...#b", "...#c"
+      // is one cache key, one wisp destination, one upstream identity.
+      const bareDest = dest0.startsWith("http")
+        ? dest0.split("#", 1)[0] || dest0
+        : dest0;
+      // Query string travels outside the encoded destination.
+      let target = url.search ? bareDest + url.search : bareDest;
 
-      /* Cache-first for proxied GETs. */
-      if (e.request.method === "GET") {
-        const hit = await pageCacheMatch(e.request);
-        if (hit) {
-          const dec = refineWithContent(decision, hit.headers.get("content-type") ?? "");
-          transitRecord(traceId, target, dec);
-          /* Bug-scout fix: cache-hit navigations used to skip the
-             webNavigation lifecycle entirely. */
-          if (
-            e.request.mode === "navigate" &&
-            (hit.headers.get("content-type") ?? "").includes("text/html")
-          ) {
-            WEBNAV.committed(target);
+      if (siteDisabled(target)) {
+        return new Response("zeolite: site disabled for this engine", {
+          status: 403,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+
+      return (async () => {
+        const t0 = Date.now();
+        const traceId = DIAG.trace();
+        DIAG.stage(traceId, "REQUEST_INTERCEPTED", { url: target });
+        const internalUrl = url.pathname + url.search;
+        /* Initiator: the controlling page destination, when the SW can
+           resolve the client (unknown after a restart, for instance). */
+        let initiator: string | undefined;
+        try {
+          if (e.clientId) {
+            const client = await self.clients.get(e.clientId);
+            if (client) initiator = decodePath(new URL(client.url, self.location.origin).pathname) || undefined;
           }
+        } catch {
+          /* initiator stays unknown */
+        }
+        const mkDetail = (resp?: Response): NetDetail => {
+          const d: NetDetail = {
+            internalUrl,
+            ttfb: Date.now() - t0,
+            initiator,
+            reqHeaders: flatRed(e.request.headers),
+          };
+          if (resp) {
+            d.respHeaders = flatRed(resp.headers);
+            const getSetCookie = (resp.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
+            const setCookies = typeof getSetCookie === "function" ? getSetCookie.call(resp.headers) : [];
+            if (setCookies.length) d.cookies = setCookies.map((c) => c.split("=", 1)[0]);
+          }
+          return d;
+        };
+        /* NativeTransit decision: pre-fetch classification from the
+           destination scheme + sec-fetch-dest; refined with the actual
+           content type once the response arrives. */
+        const decision = decideTransport(target, e.request.headers.get("sec-fetch-dest") ?? "");
+        /* webNavigation.onBeforeNavigate: navigation-mode requests
+           report the interception itself, before any cache or upstream
+           work. */
+        if (e.request.mode === "navigate") WEBNAV.beforeNavigate(target);
+        /* Shared webRequest details for every hook below. */
+        const wrDetails = {
+          requestId: traceId,
+          url: target,
+          method: e.request.method,
+          type: wrType(e.request.headers.get("sec-fetch-dest") ?? ""),
+          timeStamp: Date.now(),
+        };
+        /* webRequest.onBeforeRequest: a blocking listener can cancel the
+           request before cache or transport. */
+        if (WEBREQ.beforeRequest(wrDetails)) {
+          DIAG.emit({
+            category: "BLOCKED",
+            cause: "blocked",
+            severity: "info",
+            message: "request cancelled by extension webRequest",
+            stage: "REQUEST_INTERCEPTED",
+            url: target,
+            traceId,
+            requestId: traceId,
+          });
+          transitRecord(traceId, target, decision);
           netLogPush({
             method: e.request.method, traceId,
             path: url.pathname + url.search,
             dest: target,
-            status: hit.status,
-            rtype: classifyRtype(
-              e.request.headers.get("sec-fetch-dest") ?? "",
-              hit.headers.get("content-type") ?? "",
-            ),
+            status: 403,
+            rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
             ms: Date.now() - t0,
-            bytes: Number(hit.headers.get("content-length") ?? -1),
-            verdict: "cache",
-            transport: dec.mode,
-            fallbackReason: dec.fallbackReason,
-            detail: mkDetail(hit),
+            bytes: -1,
+            verdict: "blocked",
+            transport: decision.mode,
+            fallbackReason: decision.fallbackReason,
+            detail: mkDetail(),
           });
-          WEBREQ.completed({ ...wrDetails, statusCode: hit.status });
-          return hit;
+          return new Response("zeolite: request blocked by extension", {
+            status: 403,
+            headers: { "content-type": "text/plain" },
+          });
         }
-      }
-      const rules = await siteRules();
-      const rule = ruleFor(rules, target);
-      const plugins = rule.plugins;
-      try {
-        DIAG.stage(traceId, "UPSTREAM_REQUEST", { url: target });
-        const fwd = forwardedHeaders(e.request);
-        /* webRequest.onBeforeSendHeaders: blocking listeners may
-           replace the outgoing header set (validated pairs only). */
-        const replaced = WEBREQ.beforeSendHeaders(wrDetails, fwd);
-        const sendHeaders = replaced ?? fwd;
-        await applyOnRequest(plugins, target, sendHeaders);
-        for (const [k, v] of Object.entries(extraHeaders)) sendHeaders.set(k, v);
-        /* 2.2 Arsenide: initiator context for the opt-in SameSite
-           policy. The referrer is an engine route; referrerDest decodes
-           it. Navigations are top-level for lax purposes. */
-        const reqCtx: CookieRequestContext = {
-          initiator: e.request.referrer
-            ? referrerDest(e.request.referrer, url.pathname + url.search) ?? undefined
-            : undefined,
-          navigation: (e.request.headers.get("sec-fetch-dest") ?? "") === "document",
+        /* Phase 1 (1.1 Oxide): rules engine + interception API. Data
+           rules first, then programmatic handlers; a block from either
+           wins, before cache and transport. See docs/interception.md. */
+        const engineRules = await loadRules();
+        const rtype = classifyRtype(
+          e.request.headers.get("sec-fetch-dest") ?? "",
+          "",
+        ).toLowerCase() as ResourceType;
+        const ruleDec = applyRules(engineRules, target, rtype);
+        const kinds: Exclude<InterceptKind, "response">[] = ["request"];
+        if (e.request.mode === "navigate") kinds.push("navigation");
+        if (rtype === "worker") kinds.push("worker");
+        if (rtype === "websocket") kinds.push("websocket");
+        if (rtype === "fetch") kinds.push("fetch");
+        const flatReq: Record<string, string> = {};
+        e.request.headers.forEach((v, k) => (flatReq[k] = v));
+        const ic = runRequestInterception(kinds, {
+          url: ruleDec.url ?? target,
+          method: e.request.method,
+          rtype,
+          headers: flatReq,
+        });
+        const extraHeaders: Record<string, string> = {
+          ...(ruleDec.headers ?? {}),
+          ...(ic.headers ?? {}),
         };
-        /* 1.4 Boride: the jar is the authoritative Cookie source for
-           engine-initiated requests, written last so rules and
-           interception cannot smuggle another origin's cookies. */
-        const jarCookie = cookieHeaderFor(target, reqCtx);
-        if (jarCookie) sendHeaders.set("cookie", jarCookie);
-        else sendHeaders.delete("cookie");
-        /* 2.2 Arsenide: the transport fetch adapter ignores the redirect
-           option and surfaces 3xx responses, so hops followed inside
-           the transport never reached the jar and dropped their
-           Set-Cookie. The SW now follows the hop chain itself and
-           captures Set-Cookie on every hop. 303 (and POST on 301/302)
-           continues as GET per the fetch spec; 307/308 replay the
-           method, which a one-shot stream body cannot do, so those
-           surface to the page with a mapped Location (below) and the
-           browser re-issues the request. */
-        let hopUrl = target;
-        let hopMethod = e.request.method;
-        let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
-          ? undefined
-          : e.request.body;
-        let resp = await wispFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
-        for (let hops = 0; resp.status >= 300 && resp.status < 400 && hops < MAX_REDIRECT_HOPS; hops++) {
-          /* Capture this hop's Set-Cookie against the URL it came from. */
-          applySetCookie(hopUrl, resp.headers);
-          const loc = resp.headers.get("location");
-          if (!loc) break; /* 3xx without Location: surface as-is */
-          let next: string;
-          try {
-            next = new URL(loc, hopUrl).href;
-          } catch {
-            break; /* unresolvable Location: surface the 3xx as-is */
+        /* 1.2 Halide: opt-in rewrite tracing at the decision seams.
+           Zero allocation while tracing is off. */
+        if (ruleDec.action === "block")
+          traceDecision({ subsystem: "rules", rule: ruleDec.matched, original: target, result: "blocked", resource: rtype, traceId });
+        if (ic.block)
+          traceDecision({ subsystem: "intercept", original: target, result: "blocked", resource: rtype, traceId });
+        if (ruleDec.url)
+          traceDecision({ subsystem: "rules", rule: "rewrite", original: target, result: ruleDec.url, resource: rtype, traceId });
+        if (ic.url)
+          traceDecision({ subsystem: "intercept", original: target, result: ic.url, resource: rtype, traceId });
+        if (ruleDec.action === "block" || ic.block) {
+          DIAG.emit({
+            category: "BLOCKED",
+            cause: "blocked",
+            severity: "info",
+            message:
+              "request blocked by " +
+              (ruleDec.action === "block"
+                ? "rules (" + (ruleDec.matched ?? "") + ")"
+                : "intercept handler"),
+            stage: "REQUEST_INTERCEPTED",
+            url: target,
+            traceId,
+            requestId: traceId,
+          });
+          transitRecord(traceId, target, decision);
+          netLogPush({
+            method: e.request.method, traceId,
+            path: url.pathname + url.search,
+            dest: target,
+            status: 403,
+            rtype: rtype.toUpperCase(),
+            ms: Date.now() - t0,
+            bytes: -1,
+            verdict: ruleDec.action === "block" ? "blocked:rules" : "blocked:intercept",
+            transport: decision.mode,
+            fallbackReason: decision.fallbackReason,
+            detail: mkDetail(),
+          });
+          return new Response("zeolite: request blocked", {
+            status: 403,
+            headers: { "content-type": "text/plain" },
+          });
+        }
+        if (ruleDec.url || ic.url) target = ic.url ?? ruleDec.url ?? target;
+
+        /* Cache-first for proxied GETs. */
+        if (e.request.method === "GET") {
+          const hit = await pageCacheMatch(e.request);
+          if (hit) {
+            const dec = refineWithContent(decision, hit.headers.get("content-type") ?? "");
+            transitRecord(traceId, target, dec);
+            /* Bug-scout fix: cache-hit navigations used to skip the
+               webNavigation lifecycle entirely. */
+            if (
+              e.request.mode === "navigate" &&
+              (hit.headers.get("content-type") ?? "").includes("text/html")
+            ) {
+              WEBNAV.committed(target);
+            }
+            netLogPush({
+              method: e.request.method, traceId,
+              path: url.pathname + url.search,
+              dest: target,
+              status: hit.status,
+              rtype: classifyRtype(
+                e.request.headers.get("sec-fetch-dest") ?? "",
+                hit.headers.get("content-type") ?? "",
+              ),
+              ms: Date.now() - t0,
+              bytes: Number(hit.headers.get("content-length") ?? -1),
+              verdict: "cache",
+              transport: dec.mode,
+              fallbackReason: dec.fallbackReason,
+              detail: mkDetail(hit),
+            });
+            WEBREQ.completed({ ...wrDetails, statusCode: hit.status });
+            return hit;
           }
-          if (resp.status === 307 || resp.status === 308) {
-            if (hopBody) break; /* one-shot stream: cannot replay */
-          } else if (resp.status === 303 || hopMethod === "POST") {
-            hopMethod = "GET";
-            hopBody = undefined;
-          } else if (hopBody) {
-            break; /* one-shot stream: cannot replay */
-          }
-          /* The jar is per-origin: cookies for the hop target, not the
-             original one. */
-          const hopCookie = cookieHeaderFor(next, reqCtx);
-          if (hopCookie) sendHeaders.set("cookie", hopCookie);
+        }
+        const rules = await siteRules();
+        const rule = ruleFor(rules, target);
+        const plugins = rule.plugins;
+        try {
+          DIAG.stage(traceId, "UPSTREAM_REQUEST", { url: target });
+          const fwd = forwardedHeaders(e.request);
+          /* webRequest.onBeforeSendHeaders: blocking listeners may
+             replace the outgoing header set (validated pairs only). */
+          const replaced = WEBREQ.beforeSendHeaders(wrDetails, fwd);
+          const sendHeaders = replaced ?? fwd;
+          await applyOnRequest(plugins, target, sendHeaders);
+          for (const [k, v] of Object.entries(extraHeaders)) sendHeaders.set(k, v);
+          /* 2.2 Arsenide: initiator context for the opt-in SameSite
+             policy. The referrer is an engine route; referrerDest decodes
+             it. Navigations are top-level for lax purposes. */
+          const reqCtx: CookieRequestContext = {
+            initiator: e.request.referrer
+              ? referrerDest(e.request.referrer, url.pathname + url.search) ?? undefined
+              : undefined,
+            navigation: (e.request.headers.get("sec-fetch-dest") ?? "") === "document",
+          };
+          /* 1.4 Boride: the jar is the authoritative Cookie source for
+             engine-initiated requests, written last so rules and
+             interception cannot smuggle another origin's cookies. */
+          const jarCookie = cookieHeaderFor(target, reqCtx);
+          if (jarCookie) sendHeaders.set("cookie", jarCookie);
           else sendHeaders.delete("cookie");
-          DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
-          hopUrl = next;
-          resp = await wispFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
-        }
-        DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
-        /* Stage E: the SW-followed hop chain is the authority on the
-           final destination; a transport-exposed final URL is the
-           fallback. */
-        const finalUrl = typeof resp.url === "string" ? resp.url : "";
-        const finalDest = hopUrl !== target ? hopUrl : finalUrl && finalUrl !== target ? finalUrl : undefined;
-        if (finalDest) {
-          DIAG.stage(traceId, "REDIRECTED", { url: target, message: "final destination " + finalDest });
-        }
-        /* 1.4 Boride: capture Set-Cookie into the per-origin jar before
-           hostile-header surgery strips it from the page view. A 3xx
-           that surfaced (hop cap, unresolvable or unreplayable hop)
-           still lands here, captured against its own hop URL. */
-        applySetCookie(finalDest ?? hopUrl, resp.headers);
-        const headers = stripHostile(resp.headers);
-        /* Issue #2: engine routes serve their own origin. The preserved
-           target ACAO (e.g. "https://excalidraw.com") fails the CORS
-           check Chromium applies to module and crossorigin script
-           responses - they download but never execute. The engine's own
-           CORS facts replace the target's; cross-origin consumers fail
-           closed (see app/src/cors.ts). */
-        applyEngineCors(headers, self.location.origin, e.request.credentials);
-        /* webRequest.onHeadersReceived: blocking listeners may replace
-           the response header set the page will see. */
-        const rHeaders = WEBREQ.headersReceived(wrDetails, resp.status, headers);
-        const outHeaders = rHeaders ?? headers;
-        outHeaders.set("x-zl-proxy", "1");
-        /* Finding 1: a 3xx that reached the page (hop cap reached, no
-           Location, or a hop whose one-shot body cannot replay) must not
-           hand the browser a target-host URL: map Location to an engine
-           route so the follow stays inside the engine. The hop's
-           Set-Cookie was already captured (hop loop or just above). */
-        if (resp.status >= 300 && resp.status < 400) {
-          const loc = outHeaders.get("location");
-          if (loc) {
+          /* 2.2 Arsenide: the transport fetch adapter ignores the redirect
+             option and surfaces 3xx responses, so hops followed inside
+             the transport never reached the jar and dropped their
+             Set-Cookie. The SW now follows the hop chain itself and
+             captures Set-Cookie on every hop. 303 (and POST on 301/302)
+             continues as GET per the fetch spec; 307/308 replay the
+             method, which a one-shot stream body cannot do, so those
+             surface to the page with a mapped Location (below) and the
+             browser re-issues the request. */
+          let hopUrl = target;
+          let hopMethod = e.request.method;
+          let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
+            ? undefined
+            : e.request.body;
+          let resp = await wispFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
+          for (let hops = 0; resp.status >= 300 && resp.status < 400 && hops < MAX_REDIRECT_HOPS; hops++) {
+            /* Capture this hop's Set-Cookie against the URL it came from. */
+            applySetCookie(hopUrl, resp.headers);
+            const loc = resp.headers.get("location");
+            if (!loc) break; /* 3xx without Location: surface as-is */
+            let next: string;
             try {
-              outHeaders.set("location", encodeDest(new URL(loc, finalDest ?? target).href));
+              next = new URL(loc, hopUrl).href;
             } catch {
-              /* unreachable/relative Location: leave as-is */
+              break; /* unresolvable Location: surface the 3xx as-is */
+            }
+            if (resp.status === 307 || resp.status === 308) {
+              if (hopBody) break; /* one-shot stream: cannot replay */
+            } else if (resp.status === 303 || hopMethod === "POST") {
+              hopMethod = "GET";
+              hopBody = undefined;
+            } else if (hopBody) {
+              break; /* one-shot stream: cannot replay */
+            }
+            /* The jar is per-origin: cookies for the hop target, not the
+               original one. */
+            const hopCookie = cookieHeaderFor(next, reqCtx);
+            if (hopCookie) sendHeaders.set("cookie", hopCookie);
+            else sendHeaders.delete("cookie");
+            DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
+            hopUrl = next;
+            resp = await wispFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
+          }
+          DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
+          /* Stage E: the SW-followed hop chain is the authority on the
+             final destination; a transport-exposed final URL is the
+             fallback. */
+          const finalUrl = typeof resp.url === "string" ? resp.url : "";
+          const finalDest = hopUrl !== target ? hopUrl : finalUrl && finalUrl !== target ? finalUrl : undefined;
+          if (finalDest) {
+            DIAG.stage(traceId, "REDIRECTED", { url: target, message: "final destination " + finalDest });
+          }
+          /* 1.4 Boride: capture Set-Cookie into the per-origin jar before
+             hostile-header surgery strips it from the page view. A 3xx
+             that surfaced (hop cap, unresolvable or unreplayable hop)
+             still lands here, captured against its own hop URL. */
+          applySetCookie(finalDest ?? hopUrl, resp.headers);
+          const headers = stripHostile(resp.headers);
+          /* Issue #2: engine routes serve their own origin. The preserved
+             target ACAO (e.g. "https://excalidraw.com") fails the CORS
+             check Chromium applies to module and crossorigin script
+             responses - they download but never execute. The engine's own
+             CORS facts replace the target's; cross-origin consumers fail
+             closed (see app/src/cors.ts). */
+          applyEngineCors(headers, self.location.origin, e.request.credentials);
+          /* webRequest.onHeadersReceived: blocking listeners may replace
+             the response header set the page will see. */
+          const rHeaders = WEBREQ.headersReceived(wrDetails, resp.status, headers);
+          const outHeaders = rHeaders ?? headers;
+          outHeaders.set("x-zl-proxy", "1");
+          /* Finding 1: a 3xx that reached the page (hop cap reached, no
+             Location, or a hop whose one-shot body cannot replay) must not
+             hand the browser a target-host URL: map Location to an engine
+             route so the follow stays inside the engine. The hop's
+             Set-Cookie was already captured (hop loop or just above). */
+          if (resp.status >= 300 && resp.status < 400) {
+            const loc = outHeaders.get("location");
+            if (loc) {
+              try {
+                outHeaders.set("location", encodeDest(new URL(loc, finalDest ?? target).href));
+              } catch {
+                /* unreachable/relative Location: leave as-is */
+              }
             }
           }
-        }
-        void applyOnResponse(plugins, target, resp.status, outHeaders);
-        const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "");
-        traceDecision({ subsystem: "transport", rule: dec.mode, original: target, result: dec.fallbackReason ?? dec.mode, resource: rtype, traceId });
-        if (finalDest)
-          traceDecision({ subsystem: "transport", rule: "redirect", original: target, result: finalDest, resource: rtype, traceId });
-        transitRecord(traceId, target, dec);
-        netLogPush({
-          method: e.request.method, traceId,
-          path: url.pathname + url.search,
-          dest: target,
-          status: resp.status,
-          ms: Date.now() - t0,
-          bytes: Number(resp.headers.get("content-length") ?? -1),
-          verdict: plugins?.length ? "pass:" + plugins.length : undefined,
-          rtype: classifyRtype(
-            e.request.headers.get("sec-fetch-dest") ?? "",
-            resp.headers.get("content-type") ?? "",
-          ),
-          rewritten: isHtml(resp) ? "html" : isCss(resp) ? "css" : undefined,
-          transport: dec.mode,
-          fallbackReason: dec.fallbackReason,
-          finalDest,
-          detail: mkDetail(resp),
-        });
-        /* Opt-in response body transform (1.1): only when an intercept
-           handler declared one AND the size gate passes. Documents and
-           stylesheets are excluded (the streaming rewriter owns
-           those); transformed responses are never page-cached. */
-        const flatOut: Record<string, string> = {};
-        outHeaders.forEach((v, k) => (flatOut[k] = v));
-        const rIc = runResponseInterception({
-          url: target,
-          status: resp.status,
-          rtype,
-          headers: flatOut,
-        });
-        if (rIc.headers) {
-          for (const [k, v] of Object.entries(rIc.headers)) outHeaders.set(k, v);
-        }
-        if (rIc.body && !isHtml(resp) && !isCss(resp)) {
-          const clen = Number(resp.headers.get("content-length") ?? -1);
-          if (clen >= 0 && clen <= BODY_LIMIT) {
-            WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-            return new Response(rIc.body(await resp.text()), {
-              status: resp.status,
-              headers: outHeaders,
-            });
-          }
-        }
-        if (e.request.method === "GET") void pageCacheStore(e.request, resp.clone());
-        if (isHtml(resp) && resp.body) {
-          DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
-          traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });
-          /* Main-frame document loads feed the webNavigation bridge;
-             subresource fetches do not arrive in navigate mode. */
-          if (e.request.mode === "navigate") WEBNAV.committed(target);
-          const csInject = csInjectUrls(target, e.request);
-          return new Response(
-            rewriteStream(resp.body, target, rule, csInject, () => {
-              /* webNavigation.onCompleted + webRequest.onCompleted:
-                 the document stream (and with it the navigation) is
-                 done. */
-              WEBNAV.completed(target);
-              WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-            }),
-            {
-              status: resp.status,
-              headers: outHeaders,
-            },
-          );
-        }
-        if (isCss(resp) && resp.body) {
-          /* 2.4 Bromide: standalone stylesheets stream through the wasm
-             CSS rewriter (previously a one-shot pass over a fully
-             buffered body). Completion events fire at stream end, like
-             the HTML path. */
-          DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "css rewrite stream wired" });
-          traceDecision({ subsystem: "rewriter", rule: "css", original: target, result: "streaming", resource: rtype, traceId });
-          return new Response(
-            cssRewriteStream(resp.body, target, () => {
-              DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
-              WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-            }),
-            {
-              status: resp.status,
-              headers: outHeaders,
-            },
-          );
-        }
-        /* Module worker scripts (module scripts fetch with mode "cors",
-           classic workers with same-origin): import specifiers cannot
-           be routed from the prelude - they resolve before any script
-           runs, and import() is host syntax - so the SW rewrites the
-           specifiers in the body itself (2.3 Selenide). A text pass
-           cannot run on a chunked stream, so the body is buffered;
-           worker scripts are not first-paint documents. */
-        if (isWorkerDestination(e.request.destination) && e.request.mode === "cors" && resp.body) {
-          DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "module worker specifier pass" });
-          traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
-          const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
-          const head =
-            "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) +
-            ";self.__ZL_WORKER_URL__=" + JSON.stringify(target) + ";\n" +
-            (await workerPrelude()) +
-            (fpWorkerScript ? "\n" + fpWorkerScript : "");
-          WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-          return new Response(head + src, { status: resp.status, headers: outHeaders });
-        }
-        if (isWorkerDestination(e.request.destination) && resp.body) {
-          /* 1.6 Hydride: classic/shared worker scripts get the prelude
-             prepended (importScripts routing, worker WebSocket bridge).
-             2.3 Selenide: an active fingerprint profile is compiled
-             into a worker-context init script and prepended too
-             (WorkerNavigator + OffscreenCanvas surfaces). Streaming is
-             preserved: everything prepended is one extra first chunk. */
-          DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude" });
-          const prelude =
-            "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) +
-            ";self.__ZL_WORKER_URL__=" + JSON.stringify(target) + ";\n" +
-            (await workerPrelude()) +
-            (fpWorkerScript ? "\n" + fpWorkerScript : "");
-          const body = new ReadableStream<Uint8Array>({
-            async start(c) {
-              c.enqueue(new TextEncoder().encode(prelude));
-              const rd = resp.body!.getReader();
-              for (;;) {
-                const { done, value } = await rd.read();
-                if (done) break;
-                c.enqueue(value);
-              }
-              c.close();
-            },
+          void applyOnResponse(plugins, target, resp.status, outHeaders);
+          const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "");
+          traceDecision({ subsystem: "transport", rule: dec.mode, original: target, result: dec.fallbackReason ?? dec.mode, resource: rtype, traceId });
+          if (finalDest)
+            traceDecision({ subsystem: "transport", rule: "redirect", original: target, result: finalDest, resource: rtype, traceId });
+          transitRecord(traceId, target, dec);
+          netLogPush({
+            method: e.request.method, traceId,
+            path: url.pathname + url.search,
+            dest: target,
+            status: resp.status,
+            ms: Date.now() - t0,
+            bytes: Number(resp.headers.get("content-length") ?? -1),
+            verdict: plugins?.length ? "pass:" + plugins.length : undefined,
+            rtype: classifyRtype(
+              e.request.headers.get("sec-fetch-dest") ?? "",
+              resp.headers.get("content-type") ?? "",
+            ),
+            rewritten: isHtml(resp) ? "html" : isCss(resp) ? "css" : undefined,
+            transport: dec.mode,
+            fallbackReason: dec.fallbackReason,
+            finalDest,
+            detail: mkDetail(resp),
           });
+          /* Opt-in response body transform (1.1): only when an intercept
+             handler declared one AND the size gate passes. Documents and
+             stylesheets are excluded (the streaming rewriter owns
+             those); transformed responses are never page-cached. */
+          const flatOut: Record<string, string> = {};
+          outHeaders.forEach((v, k) => (flatOut[k] = v));
+          const rIc = runResponseInterception({
+            url: target,
+            status: resp.status,
+            rtype,
+            headers: flatOut,
+          });
+          if (rIc.headers) {
+            for (const [k, v] of Object.entries(rIc.headers)) outHeaders.set(k, v);
+          }
+          if (rIc.body && !isHtml(resp) && !isCss(resp)) {
+            const clen = Number(resp.headers.get("content-length") ?? -1);
+            if (clen >= 0 && clen <= BODY_LIMIT) {
+              WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+              return new Response(rIc.body(await resp.text()), {
+                status: resp.status,
+                headers: outHeaders,
+              });
+            }
+          }
+          if (e.request.method === "GET") void pageCacheStore(e.request, resp.clone());
+          if (isHtml(resp) && resp.body) {
+            DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
+            traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });
+            /* Main-frame document loads feed the webNavigation bridge;
+               subresource fetches do not arrive in navigate mode. */
+            if (e.request.mode === "navigate") WEBNAV.committed(target);
+            const csInject = csInjectUrls(target, e.request);
+            return new Response(
+              rewriteStream(resp.body, target, rule, csInject, () => {
+                /* webNavigation.onCompleted + webRequest.onCompleted:
+                   the document stream (and with it the navigation) is
+                   done. */
+                WEBNAV.completed(target);
+                WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+              }),
+              {
+                status: resp.status,
+                headers: outHeaders,
+              },
+            );
+          }
+          if (isCss(resp) && resp.body) {
+            /* 2.4 Bromide: standalone stylesheets stream through the wasm
+               CSS rewriter (previously a one-shot pass over a fully
+               buffered body). Completion events fire at stream end, like
+               the HTML path. */
+            DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "css rewrite stream wired" });
+            traceDecision({ subsystem: "rewriter", rule: "css", original: target, result: "streaming", resource: rtype, traceId });
+            return new Response(
+              cssRewriteStream(resp.body, target, () => {
+                DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
+                WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+              }),
+              {
+                status: resp.status,
+                headers: outHeaders,
+              },
+            );
+          }
+          /* Module worker scripts (module scripts fetch with mode "cors",
+             classic workers with same-origin): import specifiers cannot
+             be routed from the prelude - they resolve before any script
+             runs, and import() is host syntax - so the SW rewrites the
+             specifiers in the body itself (2.3 Selenide). A text pass
+             cannot run on a chunked stream, so the body is buffered;
+             worker scripts are not first-paint documents. */
+          if (isWorkerDestination(e.request.destination) && e.request.mode === "cors" && resp.body) {
+            DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "module worker specifier pass" });
+            traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
+            const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
+            const head =
+              "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) +
+              ";self.__ZL_WORKER_URL__=" + JSON.stringify(target) + ";\n" +
+              (await workerPrelude()) +
+              (fpWorkerScript ? "\n" + fpWorkerScript : "");
+            WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            return new Response(head + src, { status: resp.status, headers: outHeaders });
+          }
+          if (isWorkerDestination(e.request.destination) && resp.body) {
+            /* 1.6 Hydride: classic/shared worker scripts get the prelude
+               prepended (importScripts routing, worker WebSocket bridge).
+               2.3 Selenide: an active fingerprint profile is compiled
+               into a worker-context init script and prepended too
+               (WorkerNavigator + OffscreenCanvas surfaces). Streaming is
+               preserved: everything prepended is one extra first chunk. */
+            DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude" });
+            const prelude =
+              "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) +
+              ";self.__ZL_WORKER_URL__=" + JSON.stringify(target) + ";\n" +
+              (await workerPrelude()) +
+              (fpWorkerScript ? "\n" + fpWorkerScript : "");
+            const body = new ReadableStream<Uint8Array>({
+              async start(c) {
+                c.enqueue(new TextEncoder().encode(prelude));
+                const rd = resp.body!.getReader();
+                for (;;) {
+                  const { done, value } = await rd.read();
+                  if (done) break;
+                  c.enqueue(value);
+                }
+                c.close();
+              },
+            });
+            WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            return new Response(body, { status: resp.status, headers: outHeaders });
+          }
           WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-          return new Response(body, { status: resp.status, headers: outHeaders });
+          /* 1.7 Sulfide: attachment responses join the download
+             registry. The body stays a stream - a counting passthrough
+             forwards every chunk untouched, so the browser keeps
+             writing the file to disk and nothing is buffered whole. */
+          if (resp.body && (outHeaders.get("content-disposition") ?? "").toLowerCase().includes("attachment")) {
+            const id = DL.begin(target, resp.headers, outHeaders.get("content-type") ?? "application/octet-stream", Number(resp.headers.get("content-length") ?? -1));
+            return new Response(DL.wrap(id, resp.body), { status: resp.status, headers: outHeaders });
+          }
+          return new Response(resp.body, { status: resp.status, headers: outHeaders });
+        } catch (err) {
+          DIAG.failure({
+            traceId,
+            category: "TRANSPORT",
+            cause: "upstream",
+            stage: "REWRITE_FAILED",
+            message: "proxied request failed",
+            technicalReason: String(err),
+            url: target,
+          });
+          WEBREQ.errorOccurred({ ...wrDetails, error: String(err) });
+          transitRecord(traceId, target, decision);
+          netLogPush({
+            method: e.request.method, traceId,
+            path: url.pathname + url.search,
+            dest: target,
+            status: 0,
+            rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
+            ms: Date.now() - t0,
+            bytes: -1,
+            err: String(err),
+            transport: decision.mode,
+            fallbackReason: decision.fallbackReason,
+            detail: mkDetail(),
+          });
+          /* Issue #3: failed navigations answer with the engine-owned
+             error page (target, one honest category line, retry, zl-error
+             meta). Every other destination keeps the honest 502 plain
+             text body - subresources get no UI. */
+          if (e.request.mode === "navigate") {
+            return new Response(
+              errorPage({
+                route: url.pathname + url.search,
+                target,
+                category: classifyFailure(String(err)),
+                engineVersion: ZEOLITE_VERSION,
+              }),
+              { status: 502, headers: { "content-type": "text/html; charset=utf-8" } },
+            );
+          }
+          return new Response(`zeolite: upstream fetch failed: ${String(err)}`, {
+            status: 502,
+            headers: { "content-type": "text/plain" },
+          });
         }
-        WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-        /* 1.7 Sulfide: attachment responses join the download
-           registry. The body stays a stream - a counting passthrough
-           forwards every chunk untouched, so the browser keeps
-           writing the file to disk and nothing is buffered whole. */
-        if (resp.body && (outHeaders.get("content-disposition") ?? "").toLowerCase().includes("attachment")) {
-          const id = DL.begin(target, resp.headers, outHeaders.get("content-type") ?? "application/octet-stream", Number(resp.headers.get("content-length") ?? -1));
-          return new Response(DL.wrap(id, resp.body), { status: resp.status, headers: outHeaders });
-        }
-        return new Response(resp.body, { status: resp.status, headers: outHeaders });
-      } catch (err) {
-        DIAG.failure({
-          traceId,
-          category: "TRANSPORT",
-          cause: "upstream",
-          stage: "REWRITE_FAILED",
-          message: "proxied request failed",
-          technicalReason: String(err),
-          url: target,
-        });
-        WEBREQ.errorOccurred({ ...wrDetails, error: String(err) });
-        transitRecord(traceId, target, decision);
-        netLogPush({
-          method: e.request.method, traceId,
-          path: url.pathname + url.search,
-          dest: target,
-          status: 0,
-          rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
-          ms: Date.now() - t0,
-          bytes: -1,
-          err: String(err),
-          transport: decision.mode,
-          fallbackReason: decision.fallbackReason,
-          detail: mkDetail(),
-        });
-        /* Issue #3: failed navigations answer with the engine-owned
-           error page (target, one honest category line, retry, zl-error
-           meta). Every other destination keeps the honest 502 plain
-           text body - subresources get no UI. */
-        if (e.request.mode === "navigate") {
-          return new Response(
-            errorPage({
-              route: url.pathname + url.search,
-              target,
-              category: classifyFailure(String(err)),
-              engineVersion: ZEOLITE_VERSION,
-            }),
-            { status: 502, headers: { "content-type": "text/html; charset=utf-8" } },
-          );
-        }
-        return new Response(`zeolite: upstream fetch failed: ${String(err)}`, {
-          status: 502,
-          headers: { "content-type": "text/plain" },
-        });
-      }
+      })();
     })(),
   );
 });
@@ -1493,7 +1492,10 @@ interface ControlMessage {
   files?: Array<[string, Uint8Array]>;
 }
 
-self.addEventListener("message", (e: ExtendableMessageEvent) => {
+self.addEventListener("message", async (e: ExtendableMessageEvent) => {
+  /* Issue #17: the restored route shape settles asynchronously; a
+     cold-start ping must not report the default shape mid-restore. */
+  await routeReady;
   const msg = e.data as ControlMessage;
   const port = e.ports[0];
   const reply = (payload: unknown) => port?.postMessage(payload);
