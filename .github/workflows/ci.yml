@@ -76,9 +76,8 @@ jobs:
       - name: Measure wasm bundles (record; budget enforcement is the Phase 1 gate)
         run: du -b app/src/rewriter_wasm/rewriter_wasm_bg.wasm app/src/wisp_wasm/wisp_wasm_bg.wasm
       - uses: actions/upload-artifact@v4
-        with:
-          name: zeolite-wasm
-          path: app/src/
+        name: zeolite-wasm
+        path: app/src/
 
   app:
     runs-on: ubuntu-latest
@@ -113,6 +112,21 @@ jobs:
             exit 1
           fi
           ls -la app/public/libcurl
+      - name: SW-scope loading lint (no dynamic import in SW-reachable code)
+        # Chromium forbids import() on ServiceWorkerGlobalScope and the
+        # failure only appears at runtime (commit 73463a4 fixed exactly
+        # this). Engine code under app/src must never call import() with
+        # a string literal. Page-context entries are exempt: import()
+        # is legal where they run. Content scripts served into pages may
+        # need an exemption later; add it here, do not weaken the gate.
+        run: |
+          cd app
+          PAT=$'import[[:space:]]*\\([[:space:]]*["\'`]'
+          HITS=$(grep -rnE "$PAT" src --include='*.ts' | grep -v '__tests__' | grep -vE 'src/(main|devtools|bootstrap)\.ts' || true)
+          if [ -n "$HITS" ]; then
+            echo "$HITS" | head -9 | while IFS= read -r l; do echo "::error::SWIMPORT $l"; done
+            exit 1
+          fi
       - name: typecheck + build
         run: |
           cd app && npm install
@@ -144,6 +158,26 @@ jobs:
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
           if [ "$SIZE" -ge 5120 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 5120)"; exit 1; fi
+      - name: Subpath-alias build gate (2.1 Halogen)
+        # LobsterBrowse embeds the dist bundle under /zlsw/. A frozen
+        # origin-root asset URL 404s there and every proxied document
+        # dies silently (commit 6e9d395 fixed exactly this). Build the
+        # bundle the way the embedder consumes it, then statically
+        # assert the SW resolves engine assets against its own script
+        # URL, never against an absolute path.
+        run: |
+          cd app
+          npx vite build --base=/zlsw/ --outDir dist-subpath > subpath.out 2>&1 || { tail -30 subpath.out; exit 1; }
+          PAT=$'["\']/(zlsw/)?(rewriter_wasm|wisp_wasm|prelude|libcurl)'
+          BAD=$(grep -nE "$PAT" dist-subpath/sw.js || true)
+          if [ -n "$BAD" ]; then
+            echo "$BAD" | head -9 | while IFS= read -r l; do echo "::error::SUBPATH absolute asset URL in sw.js: $l"; done
+            exit 1
+          fi
+          if ! grep -q 'location\.href' dist-subpath/sw.js; then
+            echo "::error::SUBPATH sw.js never references location.href; asset resolution is not SW-relative"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: zeolite-app
