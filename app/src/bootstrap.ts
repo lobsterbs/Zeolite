@@ -44,7 +44,8 @@ const ORIGIN = (() => {
  }
 })();
 const SITE = "zl:" + fnv1a(ORIGIN || "unknown");
-const pre = (n: unknown) => SITE + ":" + String(n);
+const P = SITE + ":";
+const pre = (n: unknown) => P + String(n);
 
 /* One scanner for clear/key/length: keeps the scoped Storage cheap
  and the minified bootstrap inside its CI size budget. */
@@ -52,7 +53,7 @@ function siteKeys(store: Storage): string[] {
  const ks: string[] = [];
  for (let i = 0; i < store.length; i++) {
  const k = store.key(i);
- if (k?.startsWith(SITE + ":")) ks.push(k);
+ if (k?.startsWith(P)) ks.push(k);
  }
  return ks;
 }
@@ -61,7 +62,7 @@ function siteKeys(store: Storage): string[] {
  for (const name of ["localStorage", "sessionStorage"] as const) {
  const LS = w[name] as Storage | undefined;
  if (!LS) continue;
- const scoped = Object.assign(Object.create(Storage.prototype), {
+ const scoped = {
  getItem: (k: string) => LS.getItem(pre(k)),
  setItem: (k: string, v: string) => LS.setItem(pre(k), v),
  removeItem: (k: string) => LS.removeItem(pre(k)),
@@ -72,7 +73,7 @@ function siteKeys(store: Storage): string[] {
  get length() {
  return siteKeys(LS).length;
  },
- }) as Storage;
+ } as Storage;
  try {
  Object.defineProperty(w, name, { value: scoped, configurable: true });
  } catch { /* read-only context: storage then stays unscoped */ }
@@ -90,7 +91,6 @@ function siteKeys(store: Storage): string[] {
  if (IDB) {
  const OPEN = IDB.open.bind(IDB);
  const DEL = IDB.deleteDatabase.bind(IDB);
- const CMP = typeof IDB.cmp === "function" ? IDB.cmp.bind(IDB) : null;
  /* databases() is deliberately absent (honest unimplemented API):
     wrapping it would risk leaking engine-own database names. cmp()
     (2.2 Arsenide) compares two prefixed names, so ordering stays
@@ -100,7 +100,10 @@ function siteKeys(store: Storage): string[] {
  open: (n: unknown, v?: number) => OPEN(pre(n), v),
  deleteDatabase: (n: unknown) => DEL(pre(n)),
  };
- if (CMP) shim.cmp = (a: unknown, b: unknown) => CMP(pre(a), pre(b));
+ if (typeof IDB.cmp === "function") {
+ const CMP = IDB.cmp.bind(IDB);
+ shim.cmp = (a: unknown, b: unknown) => CMP(pre(a), pre(b));
+ }
  try {
  (w as Record<string, unknown>).indexedDB = shim;
  } catch { /* read-only: stays unscoped */ }
@@ -114,7 +117,7 @@ function siteKeys(store: Storage): string[] {
  const DEL = CA.delete.bind(CA);
  const HAS = CA.has.bind(CA);
  const KEYS = CA.keys.bind(CA);
- const own = (n: string) => n.startsWith(SITE + ":");
+ const own = (n: string) => n.startsWith(P);
  const shim: Record<string, unknown> = {
  open: (n: unknown) => OPEN(pre(n)),
  delete: (n: unknown) => DEL(pre(n)),
@@ -148,7 +151,7 @@ function siteKeys(store: Storage): string[] {
  const ctl =
  (navigator as { serviceWorker?: { controller?: ServiceWorker } })
  .serviceWorker?.controller;
- if (ctl && /^https?:/.test(ORIGIN)) {
+ if (ctl && ORIGIN) {
  let cur = "";
  /* One channel lives for the page's lifetime: the SW keeps the far
     end and answers every message with the authoritative jar view. */
@@ -193,10 +196,11 @@ function siteKeys(store: Storage): string[] {
  their prelude posts the same message on its newest connect port -
  the SharedWorker wrapper below hooks that port into this same relay. */
 
-const relay = (d: { zl?: string; msg?: unknown }, p?: MessagePort[]) => {
- if (d?.zl === "ws") (navigator as { serviceWorker?: { controller?: { postMessage: (m: unknown, p?: MessagePort[]) => void } } }).serviceWorker?.controller?.postMessage(d.msg, p);
+const relay = (e: MessageEvent) => {
+ const d = e.data as { zl?: string; msg?: unknown };
+ if (d?.zl === "ws") (navigator as { serviceWorker?: { controller?: { postMessage: (m: unknown, p?: MessagePort[]) => void } } }).serviceWorker?.controller?.postMessage(d.msg, e.ports as unknown as MessagePort[]);
 };
-addEventListener("message", (e: MessageEvent) => relay(e.data as { zl?: string; msg?: unknown }, e.ports as MessagePort[]));
+addEventListener("message", relay);
 
 /* SharedWorker ctor wrapper (2.3 Selenide): the wrapper does not touch
  the script URL (same routing story as dedicated workers: relative
@@ -210,7 +214,7 @@ addEventListener("message", (e: MessageEvent) => relay(e.data as { zl?: string; 
  if (OSW) {
  const wrap = function (u: string, o?: string) {
  const s = new OSW(u, o);
- s.port.addEventListener("message", (e: MessageEvent) => relay(e.data as { zl?: string; msg?: unknown }, e.ports as MessagePort[]));
+ s.port.addEventListener("message", relay);
  return s;
  };
  try {
@@ -225,7 +229,7 @@ addEventListener("message", (e: MessageEvent) => relay(e.data as { zl?: string; 
 
 {
  const NS = (navigator as { serviceWorker?: unknown }).serviceWorker;
- if (NS && /^https?:/.test(ORIGIN)) {
+ if (NS && ORIGIN) {
   const LS = w.localStorage as unknown as Storage;
   swShimApply(NS as object, { get: () => LS.getItem("swreg"), set: (v: string) => LS.setItem("swreg", v), clear: () => LS.removeItem("swreg") }, ZL.dest);
  }
