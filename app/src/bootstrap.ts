@@ -264,8 +264,9 @@ addEventListener("message", relay);
          wss://<engine host>/x would fail; retarget to the site. */
       if (ORIGIN && u.origin === (w.location as { origin: string }).origin) {
         try {
-          const vo = new URL(ORIGIN);
-          u = new URL(u.protocol + "//" + vo.host + u.pathname + u.search);
+          const vp = u.protocol;
+          u = new URL(u.pathname + u.search, ORIGIN);
+          u.protocol = vp;
         } catch {
           /* unparseable virtual origin: keep engine-local */
         }
@@ -281,24 +282,22 @@ addEventListener("message", relay);
           es.dispatchEvent(e);
         });
       };
-      const fail = () => {
-        wsState = 3;
-        disp(new Event("error"));
-        disp(new CloseEvent("close", { code: 1006, wasClean: false }));
-      };
       ch.port1.onmessage = (ev) => {
+        /* This port is dedicated to the bridge: every message on it
+           comes from the engine and always carries the fields its ev
+           name promises (open: protocol, close: code/clean). */
         const m = ev.data as {
-          ev?: string;
+          ev: string;
           data?: unknown;
           code?: number;
           clean?: boolean;
           protocol?: string;
         };
-        if (m?.ev === "open") {
+        if (m.ev === "open") {
           wsState = 1;
           proto = m.protocol ?? "";
           disp(new Event("open"));
-        } else if (m?.ev === "message") {
+        } else if (m.ev === "message") {
           q = q.then(async () => {
             let data: unknown = m.data;
             if (binType === "arraybuffer" && data instanceof Blob) {
@@ -306,16 +305,19 @@ addEventListener("message", relay);
             }
             es.dispatchEvent(new MessageEvent("message", { data, origin: u.origin }));
           });
-        } else if (m?.ev === "error") {
+        } else if (m.ev === "error") {
           disp(new Event("error"));
-        } else if (m?.ev === "close") {
+        } else if (m.ev === "close") {
           wsState = 3;
-          disp(new CloseEvent("close", { code: m.code ?? 1005, wasClean: m.clean !== false }));
+          disp(new CloseEvent("close", { code: m.code, wasClean: m.clean }));
         }
       };
       const ctl = navigator.serviceWorker?.controller;
       if (!ctl) {
-        fail();
+        /* No controller: fail the way a dead ws endpoint would. */
+        wsState = 3;
+        disp(new Event("error"));
+        disp(new CloseEvent("close", { code: 1006, wasClean: false }));
       } else {
         ctl.postMessage(
           {
@@ -323,8 +325,7 @@ addEventListener("message", relay);
             /* u.href, not the original string: a same-origin URL may
                have been retargeted to the virtual origin above. */
             url: u.href,
-            protocols:
-              protocols === undefined ? [] : Array.isArray(protocols) ? protocols : [protocols],
+            protocols: ([] as string[]).concat(protocols ?? []),
           },
           [ch.port2],
         );
