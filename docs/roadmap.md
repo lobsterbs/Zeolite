@@ -137,13 +137,27 @@ Closes the 1.6/1.8 limits.
 - Deep LobsterBrowse integration: the /zlsw/ embed stops being an
   afterthought. The subpath alias is a first-class build target (the 2.1
   CI variant becomes the LB-consumed artifact), the zl: control plane is
-  bridged into LB's DevTools surfaces, and the download registry, session
-  export, fingerprint profiles and cookie-jar UI consume the engine
-  implementations instead of parallel LB ones. The architectural gate
-  still holds: the engine keeps zero LB imports and stays
+  bridged into LB's DevTools surfaces (net log and diagnostics since
+  2.3, the downloads registry since 2.4), and the session export/import
+  and download registry UIs consume the engine implementations instead
+  of parallel LB ones (Settings session export/import and the DevTools
+  downloads registry, both in the adapter repo). The cookie-jar and
+  fingerprint-profile surfaces still need engine control messages
+  (there is no zl:getJars today); they stay open follow-through for the
+  2.x line rather than gate items for this release. The architectural
+  gate still holds: the engine keeps zero LB imports and stays
   standalone-buildable; all integration lives in the adapter.
-- zeolite-server: arena reuse for the streaming rewrite paths; keep
-  time-to-first-paint the primary metric, measured in the CI artifacts.
+- zeolite-server arena reuse: RESOLVED BY AUDIT - the premise was
+  stale, like the antiframe row. The server has no streaming rewrite
+  paths: it relays opaque wisp bytes, and rewriting happens client-side
+  in the SW's wasm rewriters, which already retain state across chunks
+  (the incomplete-token tail) and whose per-chunk allocations are the
+  JS-wasm boundary Strings inherent to wasm-bindgen. The server's relay
+  loops already reuse their socket-read buffers; the per-packet Vec
+  copies that remain are dictated by the wisp-core Packet API. No
+  arena-shaped allocation exists to reuse, and the program rules forbid
+  claiming a perf win without a gate, so first paint stays what it
+  already was: measured by the scoreboard in the CI artifacts.
 
 ## Phase 15 - 2.5 Iodide: scoreboard expansion + real-site probes
 
