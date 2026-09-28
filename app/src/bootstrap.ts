@@ -2,8 +2,8 @@
  rewriter ( right after opens).
 
  Budget: under 5 KB minified (CI enforces). It only patches behavior:
- storage scoping, storage/cookie virtualization, Worker constructors,
- WebSocket routing, the worker WebSocket relay and the
+ storage scoping, storage/cookie virtualization, the shared-worker
+ port relay, WebSocket routing, the worker WebSocket relay and the
  navigator.serviceWorker shim.
  URL-level fetch/XHR need no patch: pages navigate within engine-local
  paths that the service worker intercepts natively.
@@ -25,14 +25,6 @@ const ZL = ((w.__ZL as { dest: string } | undefined) ??
  session-export filter: everything under "zl::" travels in the
  blob, everything else stays put. */
 
-function siteKey(): string {
- try {
- return new URL(ZL.dest).origin;
- } catch {
- return "unknown";
- }
-}
-
 function fnv1a(s: string): string {
  let h = 0x811c9dc5;
  for (let i = 0; i < s.length; i++) {
@@ -42,13 +34,17 @@ function fnv1a(s: string): string {
  return h.toString(36);
 }
 
-const SKEY = siteKey();
-const SITE = "zl:" + fnv1a(SKEY);
-/* The page origin ("" when unparseable): shared by the cookie shim and
- the serviceWorker shim. */
-const ORIGIN = SKEY === "unknown" ? "" : SKEY;
+/* The page origin ("" when unparseable): the storage prefix derives
+ from it and the cookie / serviceWorker shims share it. */
+const ORIGIN = (() => {
+ try {
+ return new URL(ZL.dest).origin;
+ } catch {
+ return "";
+ }
+})();
+const SITE = "zl:" + fnv1a(ORIGIN || "unknown");
 const pre = (n: unknown) => SITE + ":" + String(n);
-const KEY = (k: string) => pre(k);
 
 /* One scanner for clear/key/length: keeps the scoped Storage cheap
  and the minified bootstrap inside its CI size budget. */
@@ -64,11 +60,11 @@ function siteKeys(store: Storage): string[] {
 {
  for (const name of ["localStorage", "sessionStorage"] as const) {
  const LS = w[name] as Storage | undefined;
- if (!LS || typeof LS !== "object") continue;
+ if (!LS) continue;
  const scoped = Object.assign(Object.create(Storage.prototype), {
- getItem: (k: string) => LS.getItem(KEY(k)),
- setItem: (k: string, v: string) => LS.setItem(KEY(k), v),
- removeItem: (k: string) => LS.removeItem(KEY(k)),
+ getItem: (k: string) => LS.getItem(pre(k)),
+ setItem: (k: string, v: string) => LS.setItem(pre(k), v),
+ removeItem: (k: string) => LS.removeItem(pre(k)),
  clear: () => {
  siteKeys(LS).forEach((k) => LS.removeItem(k));
  },
@@ -152,8 +148,7 @@ function siteKeys(store: Storage): string[] {
  const ctl =
  (navigator as { serviceWorker?: { controller?: ServiceWorker } })
  .serviceWorker?.controller;
- const desc = Object.getOwnPropertyDescriptor(Document.prototype, "cookie");
- if (desc && ctl && /^https?:/.test(ORIGIN)) {
+ if (ctl && /^https?:/.test(ORIGIN)) {
  let cur = "";
  /* One channel lives for the page's lifetime: the SW keeps the far
     end and answers every message with the authoritative jar view. */
@@ -164,6 +159,7 @@ function siteKeys(store: Storage): string[] {
  };
  ctl.postMessage({ type: "zl:docCookie", origin: ORIGIN }, [ch.port2]);
  const sy = (set?: string) => ch.port1.postMessage({ set });
+ try {
  Object.defineProperty(document, "cookie", {
  configurable: true,
  get: () => {
@@ -176,7 +172,7 @@ function siteKeys(store: Storage): string[] {
  const name = (eq > 0 ? pair.slice(0, eq) : pair).trim();
  if (!name) return;
  const val = eq > 0 ? pair.slice(eq + 1).trim() : "";
- const keep = (cur === "" ? [] : cur.split("; ")).filter(
+ const keep = (cur ? cur.split("; ") : []).filter(
  (p) => p.slice(0, p.indexOf("=")) !== name,
  );
  keep.push(name + "=" + val);
@@ -185,18 +181,43 @@ function siteKeys(store: Storage): string[] {
  },
  });
  sy();
+ } catch { /* non-configurable: cookie stays native */ }
  }
 }
 
 /* ---- worker WebSocket relay + serviceWorker shim ------------------- */
 /* 1.6 Hydride: workers have no direct channel to the service worker.
  The worker prelude posts its zl:wsOpen to the parent page; this relay
- forwards it (with the transferred port) to the engine controller. */
+ forwards it (with the transferred port) to the engine controller.
+ 2.3 Selenide: shared workers have no parent-page postMessage, so
+ their prelude posts the same message on its newest connect port -
+ the SharedWorker wrapper below hooks that port into this same relay. */
 
-addEventListener("message", (e: MessageEvent) => {
- const d = e.data as { zl?: string; msg?: unknown };
- if (d?.zl === "ws") (navigator as { serviceWorker?: { controller?: { postMessage: (m: unknown, p?: MessagePort[]) => void } } }).serviceWorker?.controller?.postMessage(d.msg, e.ports as unknown as MessagePort[]);
-});
+const relay = (d: { zl?: string; msg?: unknown }, p?: MessagePort[]) => {
+ if (d?.zl === "ws") (navigator as { serviceWorker?: { controller?: { postMessage: (m: unknown, p?: MessagePort[]) => void } } }).serviceWorker?.controller?.postMessage(d.msg, p);
+};
+addEventListener("message", (e: MessageEvent) => relay(e.data as { zl?: string; msg?: unknown }, e.ports as MessagePort[]));
+
+/* SharedWorker ctor wrapper (2.3 Selenide): the wrapper does not touch
+ the script URL (same routing story as dedicated workers: relative
+ URLs resolve engine-local, the SW recovers the destination) - it
+ only bridges the worker's WebSocket control messages, which arrive
+ on the SharedWorker's port instead of a page message event. Page
+ code never sees the traffic; a read-only SharedWorker property
+ keeps the native ctor (no relay, documented limit). */
+{
+ const OSW = w.SharedWorker as (new (u: string, o?: string) => SharedWorker) | undefined;
+ if (OSW) {
+ const wrap = function (u: string, o?: string) {
+ const s = new OSW(u, o);
+ s.port.addEventListener("message", (e: MessageEvent) => relay(e.data as { zl?: string; msg?: unknown }, e.ports as MessagePort[]));
+ return s;
+ };
+ try {
+ w.SharedWorker = wrap;
+ } catch { /* read-only: shared workers stay unrelayed */ }
+ }
+}
 
 /* navigator.serviceWorker shim: per-origin virtual registrations in
  the site-scoped localStorage. No script ever runs - the engine owns
@@ -206,7 +227,7 @@ addEventListener("message", (e: MessageEvent) => {
  const NS = (navigator as { serviceWorker?: unknown }).serviceWorker;
  if (NS && /^https?:/.test(ORIGIN)) {
   const LS = w.localStorage as unknown as Storage;
-  swShimApply(NS as object, { get: () => LS.getItem("swreg"), set: (v: string) => void LS.setItem("swreg", v), clear: () => void LS.removeItem("swreg") }, ZL.dest);
+  swShimApply(NS as object, { get: () => LS.getItem("swreg"), set: (v: string) => LS.setItem("swreg", v), clear: () => LS.removeItem("swreg") }, ZL.dest);
  }
 }
 
@@ -241,7 +262,7 @@ addEventListener("message", (e: MessageEvent) => {
       const ch = new MessageChannel();
       let q = Promise.resolve();
       const disp = (e: Event) => {
-        q = q.then(() => void es.dispatchEvent(e));
+        q = q.then(() => es.dispatchEvent(e));
       };
       const fail = () => {
         wsState = 3;

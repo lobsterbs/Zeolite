@@ -4,6 +4,7 @@ import {
   canvasSeedHash,
   fingerprintScript,
   resolveProfile,
+  workerFingerprintScript,
 } from "../fingerprint";
 
 describe("resolveProfile", () => {
@@ -119,6 +120,58 @@ describe("fingerprintScript", () => {
     expect(s).not.toContain("hardwareConcurrency");
     expect(s).not.toContain("deviceMemory");
     expect(s).not.toContain("Screen.prototype");
+    expect(s).not.toContain("getTimezoneOffset");
+    expect(s).not.toContain("37445");
+  });
+});
+
+describe("workerFingerprintScript (2.3 Selenide)", () => {
+  it("is deterministic and side-effect free", () => {
+    const a = workerFingerprintScript(DEFAULT_PROFILE);
+    const b = workerFingerprintScript(DEFAULT_PROFILE);
+    expect(a).toBe(b);
+    expect(a).not.toContain("Math.random");
+    expect(a).not.toContain("Date.now");
+  });
+
+  it("patches WorkerNavigator surfaces, not document ones", () => {
+    const s = workerFingerprintScript(DEFAULT_PROFILE);
+    expect(s).toContain(DEFAULT_PROFILE.userAgent);
+    expect(s).toContain('"Win32"');
+    expect(s).toContain("hardwareConcurrency");
+    expect(s).toContain("deviceMemory");
+    expect(s).toContain("globalThis.navigator");
+    expect(s).not.toContain("Navigator.prototype");
+    expect(s).not.toContain("Screen.prototype");
+    expect(s).not.toContain("HTMLCanvasElement");
+  });
+
+  it("perturbs OffscreenCanvas with the same seed as documents", () => {
+    const s = workerFingerprintScript(DEFAULT_PROFILE);
+    expect(s).toContain("OffscreenCanvas");
+    expect(s).toContain("convertToBlob");
+    expect(s).toContain("transferToImageBitmap");
+    expect(s).toContain("getImageData");
+    expect(s).toContain(String(canvasSeedHash(DEFAULT_PROFILE.canvasSeed)));
+    const doc = fingerprintScript(DEFAULT_PROFILE);
+    const seed = String(canvasSeedHash(DEFAULT_PROFILE.canvasSeed));
+    expect(s).toContain(seed);
+    expect(doc).toContain(seed);
+  });
+
+  it("carries timezone and webgl patches when the profile sets them", () => {
+    const s = workerFingerprintScript(DEFAULT_PROFILE);
+    expect(s).toContain("getTimezoneOffset");
+    expect(s).toContain("Intl.DateTimeFormat");
+    expect(s).toContain("37445");
+    expect(s).toContain("37446");
+  });
+
+  it("omits patches the profile leaves native", () => {
+    const bare = resolveProfile({ userAgent: DEFAULT_PROFILE.userAgent, canvasSeed: "x" });
+    const s = workerFingerprintScript(bare);
+    expect(s).not.toContain("hardwareConcurrency");
+    expect(s).not.toContain("deviceMemory");
     expect(s).not.toContain("getTimezoneOffset");
     expect(s).not.toContain("37445");
   });

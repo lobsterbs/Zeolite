@@ -6,13 +6,13 @@
 
    Inside the worker: importScripts() arguments are routed through the
    engine codec (a raw cross-origin importScripts would bypass the
-   engine and its subresource fetches would fail), and dedicated-
-   worker WebSocket is bridged over postMessage to the parent page,
-   which relays to the engine's existing zl:wsOpen seam. SharedWorker
-   globals have no single parent page: their WebSocket stays native
-   (documented limit). Module workers: importScripts does not exist,
-   so this prelude is inert there; the rewriter already rewrote their
-   import specifiers. */
+   engine and its subresource fetches would fail), and worker
+   WebSocket is bridged over postMessage to the parent page, which
+   relays to the engine's existing zl:wsOpen seam. 2.3 Selenide:
+   shared workers bridge the same way over their newest connect port
+   (no parent page postMessage exists there); module workers get
+   specifier routing from the SW body pass instead of this prelude,
+   where importScripts does not exist. */
 
 import { encodeDest, setScheme } from "./codec";
 
@@ -61,9 +61,32 @@ if (typeof G.importScripts === "function") {
 
 /* Dedicated-worker WebSocket bridge: same event semantics as the page
    bootstrap shim, but the channel is opened towards the parent page,
-   which forwards to the service worker. Only dedicated workers have
-   self.postMessage to a single parent. */
-if (typeof G.postMessage === "function" && typeof G.WebSocket === "function") {
+   which forwards to the service worker. 2.3 Selenide: shared workers
+   have no parent-page postMessage, so the shim relays over the newest
+   connect port instead - the page-side bootstrap relay (installed on
+   worker.port by the SharedWorker constructor wrapper) carries the
+   transferred port to the SW once, and all event traffic then flows on
+   the shim's private MessageChannel. The engine is the relay, not a
+   page: no page code ever sees a WebSocket event. A shared shim with
+   no connected port fails closed (error + 1006 close), never native. */
+const sharedPorts: unknown[] = [];
+const SHARED =
+  typeof G.postMessage !== "function" &&
+  typeof (globalThis as { onconnect?: unknown }).onconnect !== "undefined";
+if (SHARED && typeof (globalThis as { addEventListener?: unknown }).addEventListener === "function") {
+  (globalThis as unknown as { addEventListener: (t: string, l: (ev: MessageEvent) => void) => void }).addEventListener("connect", (ev) => {
+    const p = ev.ports?.[0];
+    if (p) sharedPorts.push(p);
+  });
+}
+
+/** The port a shared-worker shim relays over: the newest connect port.
+    Pure, testable. */
+export function pickRelayPort<T>(ports: T[]): T | null {
+  return ports.length ? ports[ports.length - 1] : null;
+}
+
+if ((typeof G.postMessage === "function" || SHARED) && typeof G.WebSocket === "function") {
   const OWS = G.WebSocket;
   const LJWS = function (url: string, protocols?: string | string[]) {
     let u: URL;
@@ -116,10 +139,24 @@ if (typeof G.postMessage === "function" && typeof G.WebSocket === "function") {
         disp(new CloseEvent("close", { code: m.code ?? 1005, wasClean: m.clean !== false }));
       }
     };
-    G.postMessage!(
-      { zl: "ws", msg: { type: "zl:wsOpen", url, protocols: protocols === undefined ? [] : Array.isArray(protocols) ? protocols : [protocols] } },
-      [ch.port2],
-    );
+    const wsMsg = {
+      zl: "ws",
+      msg: {
+        type: "zl:wsOpen",
+        url,
+        protocols: protocols === undefined ? [] : Array.isArray(protocols) ? protocols : [protocols],
+      },
+    };
+    if (typeof G.postMessage === "function") {
+      G.postMessage(wsMsg, [ch.port2]);
+    } else {
+      const relay = pickRelayPort(sharedPorts as MessagePort[]);
+      if (!relay) {
+        fail();
+      } else {
+        relay.postMessage(wsMsg, [ch.port2]);
+      }
+    }
 
     Object.defineProperties(es, {
       readyState: { get: () => wsState },

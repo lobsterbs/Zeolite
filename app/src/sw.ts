@@ -38,6 +38,9 @@
 
 /// <reference lib="webworker" />
 import { decodePath, encodeDest, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { applyEngineCors } from "./cors";
+import { classifyFailure, errorPage } from "./errorpage";
+import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, refineWithContent, transitRecord, transitStats } from "./transit";
 import { ZL_WISP_URL } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
@@ -52,7 +55,7 @@ import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
 import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarLoad, jarMerge, jarReplace, jarSnapshot, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
-import { fingerprintScript, resolveProfile, type FingerprintProfile } from "./fingerprint";
+import { fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
 import { decryptSession, encryptSession } from "./session";
 import {
   CS_ROUTE,
@@ -447,16 +450,21 @@ let fpProfile: FingerprintProfile | null = null;
 /* 1.9 Fullerene: active session recording, when any. */
 let rec: RecordingState | null = null;
 let fpScript: string | null = null;
+/* 2.3 Selenide: the same profile compiled for worker contexts
+   (WorkerNavigator + OffscreenCanvas; documents keep fpScript). */
+let fpWorkerScript: string | null = null;
 function setFingerprint(profile: unknown): { ok: true; profile?: FingerprintProfile } | { ok: false; error: string } {
   if (profile === null || profile === undefined) {
     fpProfile = null;
     fpScript = null;
+    fpWorkerScript = null;
     return { ok: true };
   }
   try {
     const p = resolveProfile(profile);
     fpProfile = p;
     fpScript = fingerprintScript(p);
+    fpWorkerScript = workerFingerprintScript(p);
     return { ok: true, profile: p };
   } catch (e) {
     return { ok: false, error: (e as Error).message };
@@ -503,7 +511,15 @@ async function pageCacheStore(req: Request, resp: Response): Promise<void> {
   if (!ttl || resp.status !== 200) return;
   try {
     const cache = await caches.open(ZL_PAGES);
-    const stored = new Response(resp.body, { status: 200, headers: resp.headers });
+    /* Issue #2 + hostile-header hygiene: the cache must never store the
+       target's CORS or hostile response headers - cache hits bypass the
+       live surgery path, so a stored target ACAO would break module
+       scripts and a stored Set-Cookie would replay against the engine
+       origin on every hit. The jar already captured Set-Cookie on the
+       live path; the stored copy is the surgered view. */
+    const storedHeaders = stripHostile(resp.headers);
+    applyEngineCors(storedHeaders, self.location.origin, req.credentials);
+    const stored = new Response(resp.body, { status: 200, headers: storedHeaders });
     stored.headers.set(ZL_CACHED_AT, String(Date.now()));
     await cache.put(req, stored);
     let keys = await cache.keys();
@@ -1036,6 +1052,13 @@ self.addEventListener("fetch", (e: FetchEvent) => {
            still lands here, captured against its own hop URL. */
         applySetCookie(finalDest ?? hopUrl, resp.headers);
         const headers = stripHostile(resp.headers);
+        /* Issue #2: engine routes serve their own origin. The preserved
+           target ACAO (e.g. "https://excalidraw.com") fails the CORS
+           check Chromium applies to module and crossorigin script
+           responses - they download but never execute. The engine's own
+           CORS facts replace the target's; cross-origin consumers fail
+           closed (see app/src/cors.ts). */
+        applyEngineCors(headers, self.location.origin, e.request.credentials);
         /* webRequest.onHeadersReceived: blocking listeners may replace
            the response header set the page will see. */
         const rHeaders = WEBREQ.headersReceived(wrDetails, resp.status, headers);
@@ -1139,17 +1162,38 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
           return new Response(out, { status: resp.status, headers: outHeaders });
         }
+        /* Module worker scripts (module scripts fetch with mode "cors",
+           classic workers with same-origin): import specifiers cannot
+           be routed from the prelude - they resolve before any script
+           runs, and import() is host syntax - so the SW rewrites the
+           specifiers in the body itself (2.3 Selenide). A text pass
+           cannot run on a chunked stream, so the body is buffered;
+           worker scripts are not first-paint documents. */
+        if (isWorkerDestination(e.request.destination) && e.request.mode === "cors" && resp.body) {
+          DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "module worker specifier pass" });
+          traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
+          const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
+          const head =
+            "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) +
+            ";self.__ZL_WORKER_URL__=" + JSON.stringify(target) + ";\n" +
+            (await workerPrelude()) +
+            (fpWorkerScript ? "\n" + fpWorkerScript : "");
+          WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+          return new Response(head + src, { status: resp.status, headers: outHeaders });
+        }
         if (isWorkerDestination(e.request.destination) && resp.body) {
           /* 1.6 Hydride: classic/shared worker scripts get the prelude
-             prepended (importScripts routing, dedicated-worker
-             WebSocket bridge); module workers keep their rewritten
-             specifiers and the prelude is inert there. Streaming is
-             preserved: the prelude is one extra first chunk. */
+             prepended (importScripts routing, worker WebSocket bridge).
+             2.3 Selenide: an active fingerprint profile is compiled
+             into a worker-context init script and prepended too
+             (WorkerNavigator + OffscreenCanvas surfaces). Streaming is
+             preserved: everything prepended is one extra first chunk. */
           DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude" });
           const prelude =
             "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) +
             ";self.__ZL_WORKER_URL__=" + JSON.stringify(target) + ";\n" +
-            (await workerPrelude());
+            (await workerPrelude()) +
+            (fpWorkerScript ? "\n" + fpWorkerScript : "");
           const body = new ReadableStream<Uint8Array>({
             async start(c) {
               c.enqueue(new TextEncoder().encode(prelude));
@@ -1200,6 +1244,21 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           fallbackReason: decision.fallbackReason,
           detail: mkDetail(),
         });
+        /* Issue #3: failed navigations answer with the engine-owned
+           error page (target, one honest category line, retry, zl-error
+           meta). Every other destination keeps the honest 502 plain
+           text body - subresources get no UI. */
+        if (e.request.mode === "navigate") {
+          return new Response(
+            errorPage({
+              route: url.pathname + url.search,
+              target,
+              category: classifyFailure(String(err)),
+              engineVersion: ZEOLITE_VERSION,
+            }),
+            { status: 502, headers: { "content-type": "text/html; charset=utf-8" } },
+          );
+        }
         return new Response(`zeolite: upstream fetch failed: ${String(err)}`, {
           status: 502,
           headers: { "content-type": "text/plain" },

@@ -332,3 +332,124 @@ try {
   parts.push(`})();`);
   return parts.join("\n");
 }
+
+/** Compile the profile into the worker-context init script (2.3
+    Selenide). Same design rules as fingerprintScript, adapted to what
+    exists in workers: WorkerNavigator carries userAgent, platform,
+    language(s), hardwareConcurrency and deviceMemory; there is no
+    Screen, no HTMLCanvasElement and no document.cookie. Date/Intl
+    timezone patches apply unchanged; OffscreenCanvas surfaces
+    (convertToBlob, transferToImageBitmap, the 2D context getImageData)
+    get the same deterministic perturbation as document canvases, so a
+    canvas fingerprint computed in a worker matches the document's.
+    WebGL UNMASKED_* patches are included too: the contexts exist in
+    workers via OffscreenCanvas ("webgl"/"webgl2"). Pure and
+    deterministic: same profile in, byte-identical script out. */
+export function workerFingerprintScript(p: FingerprintProfile): string {
+  const parts: string[] = [];
+  parts.push(`(function(){
+"use strict";
+function prop(obj, name, get) {
+  try { Object.defineProperty(obj, name, { get: get, configurable: true }); } catch (e) {}
+}
+var zlNav = Object.getPrototypeOf(globalThis.navigator);
+prop(zlNav, "userAgent", function () { return ${JSON.stringify(p.userAgent)}; });
+prop(zlNav, "appVersion", function () { return ${JSON.stringify(p.userAgent.slice("Mozilla/".length))}; });
+prop(zlNav, "platform", function () { return ${JSON.stringify(p.platform)}; });
+prop(zlNav, "language", function () { return ${JSON.stringify(p.languages[0])}; });
+prop(zlNav, "languages", function () { return ${JSON.stringify(p.languages)}; });`);
+
+  if (p.hardwareConcurrency !== null) {
+    parts.push(`prop(zlNav, "hardwareConcurrency", function () { return ${p.hardwareConcurrency}; });`);
+  }
+  if (p.deviceMemoryGB !== null) {
+    parts.push(`prop(zlNav, "deviceMemory", function () { return ${p.deviceMemoryGB}; });`);
+  }
+
+  if (p.utcOffsetMin !== null || p.timezoneName !== null) {
+    const off = p.utcOffsetMin ?? 0;
+    parts.push(`\ntry {
+  var zlOff = ${off};
+  Date.prototype.getTimezoneOffset = function () { return -zlOff; };
+  var pairs = [["getFullYear", "getUTCFullYear"], ["getMonth", "getUTCMonth"], ["getDate", "getUTCDate"], ["getDay", "getUTCDay"], ["getHours", "getUTCHours"], ["getMinutes", "getUTCMinutes"], ["getSeconds", "getUTCSeconds"], ["getMilliseconds", "getUTCMilliseconds"]];
+  for (var i = 0; i < pairs.length; i++) {
+    (function (local, utc) {
+      var orig = Date.prototype[utc];
+      Date.prototype[local] = function () { return orig.call(new Date(this.getTime() + zlOff * 60000)); };
+    })(pairs[i][0], pairs[i][1]);
+  }
+  var origYear = Date.prototype.getUTCFullYear;
+  Date.prototype.getYear = function () { return origYear.call(new Date(this.getTime() + zlOff * 60000)) - 1900; };
+} catch (e) {}`);
+    if (p.timezoneName) {
+      parts.push(`\ntry {
+  var zlZone = ${JSON.stringify(p.timezoneName)};
+  var ZlDTF = Intl.DateTimeFormat;
+  var Patched = class extends ZlDTF {
+    constructor(locales, options) {
+      if (options && typeof options === "object" && !("timeZone" in options)) options = Object.assign({}, options, { timeZone: zlZone });
+      else if (!options) options = { timeZone: zlZone };
+      super(locales, options);
+    }
+  };
+  Patched.supportedLocalesOf = ZlDTF.supportedLocalesOf;
+  Intl.DateTimeFormat = Patched;
+} catch (e) {}`);
+    }
+  }
+
+  if (p.webglVendor && p.webglRenderer) {
+    parts.push(`\ntry {
+  var zlVendor = ${JSON.stringify(p.webglVendor)}, zlRenderer = ${JSON.stringify(p.webglRenderer)};
+  for (var C of [globalThis.WebGLRenderingContext, globalThis.WebGL2RenderingContext]) {
+    if (!C) continue;
+    var orig = C.prototype.getParameter;
+    C.prototype.getParameter = function (p) {
+      if (p === 37445) return zlVendor;
+      if (p === 37446) return zlRenderer;
+      return orig.call(this, p);
+    };
+  }
+} catch (e) {}`);
+  }
+
+  parts.push(`\ntry {
+  var zlSeed = ${canvasSeedHash(p.canvasSeed)};
+  function zlPerturb(data) {
+    var n = data.length;
+    for (var k = 0; k < 4 && n; k++) {
+      var idx = (zlSeed + k * 9973) % n;
+      data[idx] = (data[idx] + (((zlSeed >>> (k * 3)) & 1) ? 1 : 255)) & 255;
+    }
+  }
+  var OOC = globalThis.OffscreenCanvas;
+  if (OOC && OOC.prototype) {
+    var zlPerturbCanvas = function (c) {
+      try {
+        var ctx = c.getContext("2d");
+        if (ctx) {
+          var img = ctx.getImageData(0, 0, c.width, c.height);
+          zlPerturb(img.data);
+          ctx.putImageData(img, 0, 0);
+        }
+      } catch (e) {}
+    };
+    var origBlob = OOC.prototype.convertToBlob;
+    if (origBlob) OOC.prototype.convertToBlob = function () { zlPerturbCanvas(this); return origBlob.apply(this, arguments); };
+    var origTIB = OOC.prototype.transferToImageBitmap;
+    if (origTIB) OOC.prototype.transferToImageBitmap = function () { zlPerturbCanvas(this); return origTIB.apply(this, arguments); };
+    var OC2D = globalThis.OffscreenCanvasRenderingContext2D;
+    if (OC2D) {
+      var origGID = OC2D.prototype.getImageData;
+      OC2D.prototype.getImageData = function () {
+        var img = origGID.apply(this, arguments);
+        zlPerturb(img.data);
+        return img;
+      };
+    }
+  }
+} catch (e) {}`);
+
+  parts.push(`\n})();`);
+  return parts.join("\n");
+}

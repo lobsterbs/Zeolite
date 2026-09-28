@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decodePath, isWorkerDestination, setScheme } from "../codec";
-import { routeWorkerImport } from "../worker-prelude";
+import { pickRelayPort, routeWorkerImport } from "../worker-prelude";
 import { swShimApply, swShimGet, swShimRegister } from "../swshim";
 
 describe("worker destinations (1.6)", () => {
@@ -35,6 +35,19 @@ describe("routeWorkerImport (1.6)", () => {
     expect(routeWorkerImport(P, W, E, E + "/j/abc")).toBe(E + "/j/abc");
     expect(routeWorkerImport(P, W, E, "data:text/javascript,hi")).toBe("data:text/javascript,hi");
     expect(routeWorkerImport(P, W, E, "blob:https://engine.host/uuid")).toBe("blob:https://engine.host/uuid");
+  });
+});
+
+describe("pickRelayPort (2.3 Selenide shared bridge)", () => {
+  it("relays over the newest connect port", () => {
+    const a = { id: 1 } as unknown as MessagePort;
+    const b = { id: 2 } as unknown as MessagePort;
+    expect(pickRelayPort([a])).toBe(a);
+    expect(pickRelayPort([a, b])).toBe(b);
+  });
+
+  it("null with no connected port: the shim fails closed, never native", () => {
+    expect(pickRelayPort<MessagePort>([])).toBeNull();
   });
 });
 
