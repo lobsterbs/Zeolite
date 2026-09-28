@@ -1,4 +1,4 @@
-# Support and limitation matrix (2.3 Selenide)
+# Support and limitation matrix (2.4 Bromide)
 
 Every row states what actually ships, verified against the code and
 the test suite, not what would be nice to have. Statuses:
@@ -11,8 +11,9 @@ the test suite, not what would be nice to have. Statuses:
 | Feature | Status | Notes and limits |
 | --- | --- | --- |
 | Streaming HTML rewriting | supported | Chunked through a TransformStream; no full-body buffering. Links, iframes, scripts rewritten to engine paths. |
-| Streaming CSS rewriting | supported | url() references rewritten; same streaming path. |
+| Streaming CSS rewriting | supported | url() references rewritten. `<style>` blocks are one-shot inside the HTML stream; standalone stylesheets stream chunk by chunk with only the incomplete url( tail retained (2.4), byte-identical to the one-shot pass. No init script is injected for CSS: it is not a document, the bootstrap never runs there. |
 | JS rewriting | partial | Rust/WASM JsRewriter exists and runs, but token-level rewriter decisions are not surfaced to tracing (documented tracing limit). |
+| Frame-buster neutralization | supported | js::antiframe pass (shipped in 2.3): framed-detection guards fold to their not-framed values, `top.location` navigation writes sink into `self.zl_antiframe`, reads map to the page's own location; method-call sinks are optional-chained so they are silent no-ops with no runtime definitions. Runs on every script body and inline event handler after the URL-literal pass. |
 | Opaque URL passthrough | supported | blob:/data: hrefs are never rewritten; isOpaqueUrl guards the fetch path. |
 | Nested-route unwrap at decode | supported | A decoded destination that is itself an engine route (any host binding, stale double-wrap from old dists) is peeled to the innermost destination (bounded 8 layers) before transport. |
 | Escaped same-origin fetch reroute | partial | Same-origin non-asset requests from a rewritten page are rerouted against the origin recovered from the request referrer (issue #1 finding 3). No decodable referrer = passthrough; request bodies of escaped fetches are rerouted, so genuinely engine-local paths a page invents cannot be recovered. |

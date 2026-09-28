@@ -8,6 +8,11 @@ measured by CI.
 
 - HTML and CSS rewriting runs through a TransformStream chunk-by-
   chunk; responses are never fully buffered for rewriting.
+- Standalone stylesheets stream the same way since 2.4 Bromide
+  (JsCssRewriter): through 2.3 they were buffered whole for a one-shot
+  url() pass, which delayed first paint on large CSS. The streaming
+  rewriter retains only the incomplete url( token tail between
+  chunks, so output is byte-identical to the one-shot pass.
 - Interception request bodies are capped by BODY_LIMIT (intercept.ts);
   a body larger than the cap is not read into memory whole.
 - Tracing and diagnostics are opt-in and zero-allocation while off:

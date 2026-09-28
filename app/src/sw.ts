@@ -161,8 +161,13 @@ interface JsRewriter {
   add_injection(path: string): void;
   set_blocked_hosts(hosts: string[]): void;
 }
+interface JsCssRewriter {
+  process(chunk: string): string;
+  finish(): string;
+}
 interface RewriterMod {
   JsRewriter: new (origin: string, base: string, prefix: string) => JsRewriter;
+  JsCssRewriter: new (origin: string, base: string, prefix: string) => JsCssRewriter;
   rewriteCss(css: string, origin: string, base: string, prefix: string): string;
   /* wasm-pack --target web output: `default` is the async init that
      fetches and instantiates the .wasm binary. Without it every
@@ -264,6 +269,52 @@ function rewriteStream(
           category: "REWRITE",
           severity: "error",
           message: "html rewrite stream failed",
+          technicalReason: String(e),
+          url: base,
+        });
+        controller.error(e);
+      }
+    },
+  });
+}
+
+/* 2.4 Bromide: standalone stylesheet bodies stream chunk by chunk
+   through the wasm CSS rewriter (2.3 buffered the whole body for a
+   one-shot pass, so large CSS delayed first paint). No window.__ZL
+   init is injected here: CSS is not a document, the bootstrap never
+   runs in a stylesheet context. The rewriter retains only the
+   incomplete url( tail between chunks. */
+function cssRewriteStream(
+  body: ReadableStream<Uint8Array>,
+  base: string,
+  onDone?: () => void,
+): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  const modP = rewriter();
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        const mod = await modP;
+        const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix());
+        const reader = body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            const tail = rw.finish();
+            if (tail) controller.enqueue(encoder.encode(tail));
+            controller.close();
+            onDone?.();
+            return;
+          }
+          const out = rw.process(decoder.decode(value, { stream: true }));
+          if (out) controller.enqueue(encoder.encode(out));
+        }
+      } catch (e) {
+        DIAG.emit({
+          category: "REWRITE",
+          severity: "error",
+          message: "css rewrite stream failed",
           technicalReason: String(e),
           url: base,
         });
@@ -1151,16 +1202,22 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           );
         }
         if (isCss(resp) && resp.body) {
-          // Standalone stylesheets: one-shot url() pass through the
-          // rewriter module. Small bodies, not first-paint documents.
-          DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "css rewrite" });
-          traceDecision({ subsystem: "rewriter", rule: "css", original: target, result: "rewritten", resource: rtype, traceId });
-          const mod = await rewriter();
-          const css = await resp.text();
-          const out = mod.rewriteCss(css, self.location.origin, target, currentPrefix());
-          DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
-          WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-          return new Response(out, { status: resp.status, headers: outHeaders });
+          /* 2.4 Bromide: standalone stylesheets stream through the wasm
+             CSS rewriter (previously a one-shot pass over a fully
+             buffered body). Completion events fire at stream end, like
+             the HTML path. */
+          DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "css rewrite stream wired" });
+          traceDecision({ subsystem: "rewriter", rule: "css", original: target, result: "streaming", resource: rtype, traceId });
+          return new Response(
+            cssRewriteStream(resp.body, target, () => {
+              DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
+              WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            }),
+            {
+              status: resp.status,
+              headers: outHeaders,
+            },
+          );
         }
         /* Module worker scripts (module scripts fetch with mode "cors",
            classic workers with same-origin): import specifiers cannot

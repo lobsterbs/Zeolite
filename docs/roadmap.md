@@ -45,7 +45,10 @@ The original 23-item program is complete. History, one line per release:
   specifier pass, SharedWorker WebSocket through the engine bridge,
   worker + OffscreenCanvas fingerprint patches), plus the issue-tab
   fixes: engine-route CORS response-header surgery (#2) and the
-  engine-owned navigation error page (#3).
+  engine-owned navigation error page (#3). It also carried the
+  rewriter's frame-buster neutralization pass (js::antiframe), landed
+  just before the cut, closing what this roadmap first listed as a
+  Phase 14 item.
 
 Post-2.0 stabilization commits (2026-09-27/28) fixed three bugs that
 broke every proxied request after the 2.0 push: dynamic import() on
@@ -116,10 +119,21 @@ Closes the 1.6/1.8 limits.
 - Keep the honest boundary: no virtual SW script is ever fetched or
   executed; the engine owns the only real scope.
 
-## Phase 14 - 2.4 Bromide: rewriter parity + deep LobsterBrowse integration
+## Phase 14 - 2.4 Bromide: rewriter parity + deep LobsterBrowse integration (in progress)
 
-- Port LobsterBrowse's js_antiframe pass into the wasm rewriter (known
-  parity gap since the split).
+- Port LobsterBrowse's js_antiframe pass into the wasm rewriter:
+  DONE - shipped inside 2.3 Selenide (see the history line above);
+  the row is in docs/matrix.md.
+- CSS stream size gate: DONE - standalone stylesheets stream through
+  the wasm CSS rewriter chunk by chunk (JsCssRewriter, crates/rewriter
+  html/css.rs). No whole-body buffering, so large CSS no longer delays
+  first paint; the rewriter retains only the incomplete url( tail
+  between chunks and output is byte-identical to the one-shot pass
+  (Rust test: every char-boundary split). No window.__ZL init is
+  injected for the non-document CSS response: CSS is not a document,
+  the bootstrap never runs in a stylesheet context. The planned size
+  threshold turned out unnecessary: streaming unconditionally is
+  simpler and strictly better.
 - Deep LobsterBrowse integration: the /zlsw/ embed stops being an
   afterthought. The subpath alias is a first-class build target (the 2.1
   CI variant becomes the LB-consumed artifact), the zl: control plane is
@@ -128,8 +142,6 @@ Closes the 1.6/1.8 limits.
   implementations instead of parallel LB ones. The architectural gate
   still holds: the engine keeps zero LB imports and stays
   standalone-buildable; all integration lives in the adapter.
-- CSS stream size gate: stream large CSS without injecting the
-  window.__ZL init script for non-document CSS responses.
 - zeolite-server: arena reuse for the streaming rewrite paths; keep
   time-to-first-paint the primary metric, measured in the CI artifacts.
 
