@@ -56,6 +56,17 @@ start of every rewritten HTML document. Engine-initiated upstream
 requests carry the profile `User-Agent` and `Accept-Language`, so the
 document surface and the wire surface agree.
 
+Since 2.3 Selenide the same profile is compiled a second time, into a
+worker-context init script prepended to every proxied dedicated,
+shared and module worker script: WorkerNavigator surfaces
+(userAgent, platform, language(s), hardwareConcurrency, deviceMemory),
+the timezone and Intl patches, WebGL UNMASKED_* (the contexts exist
+in workers through OffscreenCanvas), and the same deterministic
+canvas perturbation on OffscreenCanvas convertToBlob /
+transferToImageBitmap / the 2D context's getImageData, seeded
+identically to the document pass, so a canvas fingerprint computed in
+a worker matches the document's.
+
 ## Honest limits
 
 - No per-session randomization by design: the default profile is a
@@ -64,9 +75,11 @@ document surface and the wire surface agree.
   inside a faked zone are not simulated, and
   `Date.prototype.toString` / `toTimeString` zone text still comes from
   the host's real locale setting.
-- `OffscreenCanvas` and worker threads are not patched: workers get
-  the worker prelude, not the fingerprint script. The engine's own
-  hands (the transport, the server) are outside a page's reach.
+- The worker/OffscreenCanvas pass (2.3) covers WorkerNavigator,
+  Date/Intl timezone, WebGL UNMASKED_* and OffscreenCanvas 2D output;
+  worker-side surfaces with no document counterpart (for example a
+  worker's own `import.meta` or heap usage) stay native. The engine's
+  own hands (the transport, the server) are outside a page's reach.
 - The canvas perturbation is a small deterministic pixel nudge
   (seeded by `canvasSeed`), not a full canvas-noise engine; sites
   reading canvas output through other paths (e.g. `captureStream`)

@@ -41,6 +41,11 @@ The original 23-item program is complete. History, one line per release:
   Set-Cookie capture, SameSite opt-in knob, session import merge with
   per-cookie conflict rules, download ring persistence to site-scoped
   IndexedDB, IDBFactory.cmp wrap).
+- 2.3 Selenide: worker virtualization completion (module-worker import
+  specifier pass, SharedWorker WebSocket through the engine bridge,
+  worker + OffscreenCanvas fingerprint patches), plus the issue-tab
+  fixes: engine-route CORS response-header surgery (#2) and the
+  engine-owned navigation error page (#3).
 
 Post-2.0 stabilization commits (2026-09-27/28) fixed three bugs that
 broke every proxied request after the 2.0 push: dynamic import() on
@@ -98,7 +103,7 @@ Closes the honest limits recorded in 1.4/1.5/1.7.
   built.
 - Wrap IDBFactory.cmp in the storage partition.
 
-## Phase 13 - 2.3 Selenide: worker virtualization completion
+## Phase 13 - 2.3 Selenide: worker virtualization completion (shipped)
 
 Closes the 1.6/1.8 limits.
 
