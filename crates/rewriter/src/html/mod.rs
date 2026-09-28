@@ -91,6 +91,18 @@ impl Rewriter {
         if !self.cfg.origin.is_empty() && url.starts_with(&self.cfg.origin) {
             return url.to_string();
         }
+        // Already-encoded engine route in root-relative form
+        // ("/prefix/<b64>"): keep as-is. resolve() would bind it to the
+        // TARGET host (https://target/prefix/<b64>, dead cross-origin)
+        // and encode_url would wrap the route once more per pass (the
+        // double-wrap loop, issue #1 finding 4). Only a decodable
+        // http(s) destination counts, so a target page that genuinely
+        // uses the prefix as a plain path still rewrites normally.
+        if let Some(dest) = self.cfg.decode_engine_route(url) {
+            if dest.starts_with("http://") || dest.starts_with("https://") {
+                return url.to_string();
+            }
+        }
         let abs = resolve(url, &self.base);
         // Fragments are client-side only (SVG sprite symbol selection,
         // in-page anchors). They must never become part of the encoded
@@ -501,6 +513,7 @@ fn format_attr(name: &str, value: &str, quote: Option<char>) -> String {
 mod tests {
     use super::*;
     use crate::config::RewriteConfig;
+    use crate::encode::Codec;
 
     fn cfg() -> RewriteConfig {
         RewriteConfig {
@@ -694,5 +707,33 @@ mod tests {
         r.set_base("https://example.com/");
         let out = r.process("<img src=\"https://ad.doubleclick.net/x.gif\">");
         assert!(out.trim().is_empty(), "got: {:?}", out);
+    }
+
+    #[test]
+    fn engine_routes_never_rewrap_or_bind_to_target() {
+        // Issue #1 finding 4: an already-encoded engine route inside a
+        // document must survive rewriting unchanged. The old path
+        // resolved it against the TARGET base (binding it to the target
+        // host: https://target/zl/<b64>, dead cross-origin) and
+        // re-encoded it, nesting one more layer per pass.
+        let c = RewriteConfig {
+            origin: "https://proxy.example".into(),
+            codec: Codec::Base64Url {
+                prefix: "/zl/".into(),
+            },
+            ..cfg()
+        };
+        let dest = "https://chatgpt.com/foo?prompt=1";
+        let route = format!("/zl/{}", crate::encode::b64u_encode(dest.as_bytes()));
+        let mut r = Rewriter::new(c);
+        r.set_base("https://chatgpt.com/");
+        let doc = format!("<a href=\"{}\">x</a><img src=\"{}\">", route, route);
+        let out = format!("{}{}", r.process(&doc), r.finish());
+        assert_eq!(out.matches(&route).count(), 2, "routes unchanged: {}", out);
+        assert!(
+            !out.contains("https://chatgpt.com/zl/"),
+            "no target-host binding: {}",
+            out
+        );
     }
 }
