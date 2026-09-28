@@ -106,7 +106,9 @@ impl JsCssRewriter {
             codec: Codec::Base64Url { prefix },
             ..Default::default()
         };
-        Self { inner: crate::html::css::CssRewriter::new(css_enc(cfg, base)) }
+        Self {
+            inner: crate::html::css::CssRewriter::new(css_enc(cfg, base)),
+        }
     }
 
     /// Feed one body chunk, get back everything that can be emitted now.

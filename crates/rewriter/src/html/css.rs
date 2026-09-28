@@ -141,7 +141,10 @@ mod tests {
 
     #[test]
     fn urls() {
-        let out = rewrite_stylesheet("a{background:url(img/x.png)}b{background:url( 'y.png' )}", &enc);
+        let out = rewrite_stylesheet(
+            "a{background:url(img/x.png)}b{background:url( 'y.png' )}",
+            &enc,
+        );
         assert_eq!(out, "a{background:url('[img/x.png]')}b{background:url('[y.png]')}");
     }
 
@@ -154,7 +157,11 @@ mod tests {
     #[test]
     fn streaming_matches_one_shot() {
         let css = "a{background:url(https://e.com/x.png)}b{background:url( 'y.png' )}\u{e5}rste{c:url(\"z.woff2\")}@media print{body{color:red}}";
-        let splits: Vec<usize> = css.char_indices().map(|(i, _)| i).filter(|&i| i > 0).collect();
+        let splits: Vec<usize> = css
+            .char_indices()
+            .map(|(i, _)| i)
+            .filter(|&i| i > 0)
+            .collect();
         chunked_eq(css, &splits);
     }
 
