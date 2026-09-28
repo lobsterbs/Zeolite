@@ -5,6 +5,7 @@ on:
   pull_request:
   schedule:
     - cron: "0 3 * * *"
+  workflow_dispatch:
 
 # The engine-bundle publish step pushes the dist branch with the
 # workflow token; the repo default grants it read-only.
@@ -208,11 +209,17 @@ jobs:
           git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/lobsterbs/Zeolite.git" HEAD:dist
 
   compat:
-    # Nightly only: needs a built engine. Phase 1 gate: YouTube + Reddit
-    # pass with first-paint ratio <= 2x.
-    if: github.event_name == 'schedule'
+    # Nightly plus on-demand (workflow_dispatch): needs a built engine.
+    # Real-site probes are report-only since 2.5 Iodide - their
+    # failures open issues and never gate, because flaky external
+    # targets must not break CI. The fixture-based capability gates
+    # and the replay comparison stay hard gates.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     needs: [rust, app]
+    permissions:
+      contents: write # scoreboard branch publish
+      issues: write # failed real-site probes file issues
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -240,6 +247,37 @@ jobs:
           path: |
             suite/scoreboard.*
             suite/capabilities.*
+      # 2.5 Iodide: a failing real-site probe opens one deduplicated
+      # issue per site (title search, so a persistently failing site
+      # keeps a single open issue instead of one per nightly run).
+      # The issue is closed by hand once the site passes again. This
+      # step never fails the job; neither do the probes themselves.
+      - name: Open issues for failed real-site probes
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -f suite/scoreboard.json ]; then
+            echo "no scoreboard produced; nothing to file"
+            exit 0
+          fi
+          FAILS=$(jq -r '.results[] | select(.status == "fail") | .name' suite/scoreboard.json)
+          if [ -z "$FAILS" ]; then
+            echo "all real-site probes passed"
+            exit 0
+          fi
+          for SITE in $FAILS; do
+            TITLE="compat-probe: $SITE failing"
+            N=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$TITLE" --json number --jq 'length')
+            if [ "$N" = "0" ]; then
+              NOTE=$(jq -r --arg s "$SITE" '.results[] | select(.name == $s) | "error: \(.error // "(none)") ratio: \(.ratio // "-")"' suite/scoreboard.json)
+              BODY=$(printf 'Nightly real-site probe failed (run %s).\n\n%s\n\nFull results: scoreboard branch, scoreboard.json.' "$GITHUB_RUN_ID" "$NOTE")
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY" || true
+              echo "opened issue for $SITE"
+            else
+              echo "open issue already exists for $SITE"
+            fi
+          done
       # Publish the scoreboard as a public page (Phase 4): the latest
       # JSON + Markdown land on the "scoreboard" branch, force-updated
       # so the branch always reflects the newest nightly run.
@@ -254,7 +292,7 @@ jobs:
           git config user.email "ci@lobsterbrowse.invalid"
           git checkout --orphan scoreboard
           git rm -rf --quiet . || true
-          cp suite/scoreboard.json suite/scoreboard.md . 2>/dev/null || cp suite/scoreboard.json .
-          git add scoreboard.*
+          cp suite/scoreboard.json suite/scoreboard.md suite/capabilities.json suite/capabilities.md . 2>/dev/null || cp suite/scoreboard.json .
+          git add scoreboard.* capabilities.*
           git commit -m "scoreboard: nightly compat run ${GITHUB_RUN_ID}"
           git push -f origin HEAD:scoreboard

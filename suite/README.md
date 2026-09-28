@@ -1,7 +1,8 @@
 # Zeolite compat suite
 
 Nightly compatibility checks against a running Zeolite engine. Runs in
-the scheduled CI job only (cron 0 3 * * *), never on ordinary pushes.
+the scheduled CI job (cron 0 3 * * *) and on workflow_dispatch, never
+on ordinary pushes.
 
 ## probe.mjs - real-site probes
 
@@ -10,9 +11,11 @@ the scheduled CI job only (cron 0 3 * * *), never on ordinary pushes.
 Measures time-to-first-byte through the engine versus direct for a
 fixed site list (YouTube, Reddit, Wikipedia, GitHub, Discord) and
 records failing subresources. Writes scoreboard.json / scoreboard.md;
-the CI publishes them to the scoreboard branch. The Phase 1 gate:
-YouTube + Reddit pass with first-paint ratio <= 2x. Failures must
-become SiteConfig rules + a probe test, never a hardcoded engine hack.
+the CI publishes them to the scoreboard branch. Report-only since
+2.5 Iodide: probe failures never gate the run, because flaky external
+targets must not break CI; the compat job opens one deduplicated issue
+per failing site instead. Failures must become SiteConfig rules + a
+probe test, never a hardcoded engine hack.
 
 ## capabilities.mjs - per-capability scoreboard (1.9 Fullerene)
 

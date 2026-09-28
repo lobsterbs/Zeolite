@@ -1,7 +1,9 @@
 /* Compat suite: nightly probes through a running Zeolite engine,
    compared against direct access. Produces scoreboard.json and
-   scoreboard.md. Failures must become SiteConfig rules + a probe test,
-   never a hardcoded hack in the engine.
+   scoreboard.md. Report-only since 2.5 Iodide: probe failures never
+   gate the run; the compat job opens one deduplicated issue per
+   failing site instead. Failures must become SiteConfig rules + a
+   probe test, never a hardcoded hack in the engine.
    Usage: node suite/probe.mjs --base https://jet.example.com */
 
 import { writeFileSync } from "node:fs";
@@ -97,9 +99,13 @@ const md = [
       `| ${r.name} | ${r.status === "pass" ? "PASS" : "FAIL"} | ${r.ttfbDirect ?? "-"}ms | ${r.ttfbProxy ?? "-"}ms | ${r.ratio ?? "-"}x | ${r.error ?? ""} |`
   ),
   "",
-  "Phase 1 gate: YouTube + Reddit pass with ratio <= 2x.",
+  "Report-only since 2.5 Iodide: failures open issues, they never gate",
+  "(flaky external targets must not break CI).",
   "",
 ].join("\n");
 writeFileSync("suite/scoreboard.md", md);
 
-process.exit(passed === results.length ? 0 : 1);
+/* 2.5 Iodide: real-site results never gate the run. Flaky external
+   targets must not break CI; failures are recorded in the JSON and the
+   compat job files one deduplicated issue per failing site. */
+process.exit(0);
