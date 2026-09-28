@@ -21,6 +21,14 @@
      { type: "zl:fingerprint", profile }   document surface spoofing (1.8)
      { type: "zl:recordStart", recId }     deterministic session recording (1.9)
      { type: "zl:recordStop" }             build the zlRecord artifact
+   2.1 Halogen control plane:
+     { type: "zl:ping" }                    version handshake (replies
+                                             { ok, version, degraded })
+   2.2 Arsenide control plane:
+     { type: "zl:sameSite", policy }        opt-in jar SameSite policy
+                                             ("off" | "approx")
+     { type: "zl:importSession", ..., mode: "merge", rule }  merge-mode
+                                             session import (default replace)
    Replies are posted back on the given MessageChannel port, so the
    adapter (and the devtools page) get real acknowledgements.
 
@@ -42,7 +50,7 @@ import { beginRecording, finishRecording, type RecordingState } from "./recordin
 import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket } from "./libcurl-transport-vendored";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
-import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarLoad, jarReplace, jarSnapshot } from "./cookies";
+import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarLoad, jarMerge, jarReplace, jarSnapshot, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
 import { fingerprintScript, resolveProfile, type FingerprintProfile } from "./fingerprint";
 import { decryptSession, encryptSession } from "./session";
@@ -136,6 +144,11 @@ function stripHostile(headers: Headers): Headers {
   }
   return out;
 }
+
+/* 2.2 Arsenide: bound on SW-followed redirect hops (the transport
+   surfaces 3xx; the loop follows). Past the cap the 3xx is surfaced to
+   the page with a mapped Location instead of looping forever. */
+const MAX_REDIRECT_HOPS = 10;
 
 /* ---- Streaming rewriter wiring ------------------------------------- */
 
@@ -457,7 +470,7 @@ const ZL_PAGE_LIMIT = 60;
 
 function cacheTtl(headers: Headers): number {
   const cc = (headers.get("cache-control") ?? "").toLowerCase();
-  if (/no-store/.test(cc)) return 0;
+  if (/\bno-store\b/.test(cc)) return 0;
   const m = /(?:^|[,\s])max-age=(\d+)/.exec(cc);
   if (m) return Math.min(Number(m[1]) * 1000, 24 * 60 * 60 * 1000);
   return ZL_DEFAULT_TTL;
@@ -503,14 +516,16 @@ async function pageCacheStore(req: Request, resp: Response): Promise<void> {
   }
 }
 
-/** Re-fetch a cached request straight through the wisp transport. */
+/** Re-fetch a cached request straight through the wisp transport. The
+    transport adapter ignores the fetch redirect option (3xx responses
+    surface to the caller), so no redirect hint is passed. */
 async function wispFetchCacheBypass(req: Request): Promise<Response> {
   const dest = decodePath(new URL(req.url).pathname) + new URL(req.url).search;
   /* 1.4 Boride: cache refreshes carry the jar's Cookie header too. */
   const headers = new Headers();
   const jarCookie = cookieHeaderFor(dest);
   if (jarCookie) headers.set("cookie", jarCookie);
-  return wispFetch(dest, { method: "GET", headers, redirect: "follow" });
+  return wispFetch(dest, { method: "GET", headers });
 }
 
 /* ---- Per-site route table ------------------------------------------ */
@@ -578,6 +593,14 @@ self.addEventListener("activate", (e) => {
         await jarLoad();
       } catch {
         /* in-memory jar only */
+      }
+      /* 2.2 Arsenide: restore the persisted download registry. Entries
+         that were active across the restart are honestly marked
+         interrupted by the load itself; resume stays unbuilt. */
+      try {
+        await DL.load();
+      } catch {
+        /* in-memory registry only */
       }
       try {
         await ensureCurl();
@@ -940,40 +963,89 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         const sendHeaders = replaced ?? fwd;
         await applyOnRequest(plugins, target, sendHeaders);
         for (const [k, v] of Object.entries(extraHeaders)) sendHeaders.set(k, v);
+        /* 2.2 Arsenide: initiator context for the opt-in SameSite
+           policy. The referrer is an engine route; referrerDest decodes
+           it. Navigations are top-level for lax purposes. */
+        const reqCtx: CookieRequestContext = {
+          initiator: e.request.referrer
+            ? referrerDest(e.request.referrer, url.pathname + url.search) ?? undefined
+            : undefined,
+          navigation: (e.request.headers.get("sec-fetch-dest") ?? "") === "document",
+        };
         /* 1.4 Boride: the jar is the authoritative Cookie source for
            engine-initiated requests, written last so rules and
            interception cannot smuggle another origin's cookies. */
-        const jarCookie = cookieHeaderFor(target);
+        const jarCookie = cookieHeaderFor(target, reqCtx);
         if (jarCookie) sendHeaders.set("cookie", jarCookie);
         else sendHeaders.delete("cookie");
-        const resp = await wispFetch(target, {
-          method: e.request.method,
-          headers: sendHeaders,
-          body: ["GET", "HEAD"].includes(e.request.method) ? undefined : e.request.body,
-          redirect: "follow",
-        });
-        DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: target, message: "upstream status " + resp.status });
-        /* Stage E: when the transport exposes the final URL, record the
-           logical destination after the redirect chain. */
+        /* 2.2 Arsenide: the transport fetch adapter ignores the redirect
+           option and surfaces 3xx responses, so hops followed inside
+           the transport never reached the jar and dropped their
+           Set-Cookie. The SW now follows the hop chain itself and
+           captures Set-Cookie on every hop. 303 (and POST on 301/302)
+           continues as GET per the fetch spec; 307/308 replay the
+           method, which a one-shot stream body cannot do, so those
+           surface to the page with a mapped Location (below) and the
+           browser re-issues the request. */
+        let hopUrl = target;
+        let hopMethod = e.request.method;
+        let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
+          ? undefined
+          : e.request.body;
+        let resp = await wispFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
+        for (let hops = 0; resp.status >= 300 && resp.status < 400 && hops < MAX_REDIRECT_HOPS; hops++) {
+          /* Capture this hop's Set-Cookie against the URL it came from. */
+          applySetCookie(hopUrl, resp.headers);
+          const loc = resp.headers.get("location");
+          if (!loc) break; /* 3xx without Location: surface as-is */
+          let next: string;
+          try {
+            next = new URL(loc, hopUrl).href;
+          } catch {
+            break; /* unresolvable Location: surface the 3xx as-is */
+          }
+          if (resp.status === 307 || resp.status === 308) {
+            if (hopBody) break; /* one-shot stream: cannot replay */
+          } else if (resp.status === 303 || hopMethod === "POST") {
+            hopMethod = "GET";
+            hopBody = undefined;
+          } else if (hopBody) {
+            break; /* one-shot stream: cannot replay */
+          }
+          /* The jar is per-origin: cookies for the hop target, not the
+             original one. */
+          const hopCookie = cookieHeaderFor(next, reqCtx);
+          if (hopCookie) sendHeaders.set("cookie", hopCookie);
+          else sendHeaders.delete("cookie");
+          DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
+          hopUrl = next;
+          resp = await wispFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
+        }
+        DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
+        /* Stage E: the SW-followed hop chain is the authority on the
+           final destination; a transport-exposed final URL is the
+           fallback. */
         const finalUrl = typeof resp.url === "string" ? resp.url : "";
-        const finalDest = finalUrl && finalUrl !== target ? finalUrl : undefined;
+        const finalDest = hopUrl !== target ? hopUrl : finalUrl && finalUrl !== target ? finalUrl : undefined;
         if (finalDest) {
           DIAG.stage(traceId, "REDIRECTED", { url: target, message: "final destination " + finalDest });
         }
         /* 1.4 Boride: capture Set-Cookie into the per-origin jar before
-           hostile-header surgery strips it from the page view. */
-        applySetCookie(finalDest ?? target, resp.headers);
+           hostile-header surgery strips it from the page view. A 3xx
+           that surfaced (hop cap, unresolvable or unreplayable hop)
+           still lands here, captured against its own hop URL. */
+        applySetCookie(finalDest ?? hopUrl, resp.headers);
         const headers = stripHostile(resp.headers);
         /* webRequest.onHeadersReceived: blocking listeners may replace
            the response header set the page will see. */
         const rHeaders = WEBREQ.headersReceived(wrDetails, resp.status, headers);
         const outHeaders = rHeaders ?? headers;
         outHeaders.set("x-zl-proxy", "1");
-        /* Finding 1: when a transport surfaces a 3xx instead of following
-           it, the Location header is target-host-absolute and would escape
-           the engine (the browser then 404s on the target host). Map it
-           to an engine route so the follow stays inside the engine. The
-           hop's Set-Cookie was already captured above. */
+        /* Finding 1: a 3xx that reached the page (hop cap reached, no
+           Location, or a hop whose one-shot body cannot replay) must not
+           hand the browser a target-host URL: map Location to an engine
+           route so the follow stays inside the engine. The hop's
+           Set-Cookie was already captured (hop loop or just above). */
         if (resp.status >= 300 && resp.status < 400) {
           const loc = outHeaders.get("location");
           if (loc) {
@@ -1187,6 +1259,7 @@ interface ControlMessage {
     | "zl:cancelDownload"
     | "zl:exportSession"
     | "zl:importSession"
+    | "zl:sameSite"
     | "zl:fingerprint"
     | "zl:recordStart"
     | "zl:recordStop";
@@ -1212,6 +1285,12 @@ interface ControlMessage {
   passphrase?: string;
   /** zl:importSession: the encrypted session blob. */
   blob?: unknown;
+  /** zl:importSession: "replace" (default) or "merge" (2.2 Arsenide). */
+  mode?: "replace" | "merge";
+  /** zl:importSession merge conflict rule. */
+  rule?: string;
+  /** zl:sameSite: jar SameSite policy knob ("off" | "approx"). */
+  policy?: unknown;
   /** zl:exportSession: caller-supplied payload, encrypted whole. */
   extra?: unknown;
   /** zl:fingerprint: profile object, or null to return to native. */
@@ -1396,8 +1475,18 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
               extra?: unknown;
             };
             if (!Array.isArray(data.cookies)) throw new Error("no cookies in session blob");
-            jarReplace(data.cookies);
-            reply({ ok: true, extra: data.extra ?? null });
+            /* 2.2 Arsenide: merge mode with a per-cookie conflict rule;
+               replace stays the default so existing callers are
+               unchanged. */
+            if (msg.mode === "merge") {
+              const rule: JarConflictRule =
+                msg.rule === "import-wins" || msg.rule === "keep-newest" ? msg.rule : "keep-existing";
+              const counts = jarMerge(data.cookies, rule);
+              reply({ ok: true, extra: data.extra ?? null, merged: counts });
+            } else {
+              jarReplace(data.cookies);
+              reply({ ok: true, extra: data.extra ?? null });
+            }
           } catch (err) {
             reply({ ok: false, error: String(err) });
           }
@@ -1405,6 +1494,12 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
       );
       break;
     }
+    case "zl:sameSite":
+      /* 2.2 Arsenide: opt-in SameSite policy knob on the jar. Unknown
+         values fall back to "off" and the reply reports the effective
+         policy so the caller cannot believe a bogus knob landed. */
+      reply({ ok: true, policy: setSameSitePolicy(msg.policy) });
+      break;
     case "zl:teardown":
       e.waitUntil(
         (async () => {

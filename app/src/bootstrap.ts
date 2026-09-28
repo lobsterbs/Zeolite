@@ -95,13 +95,18 @@ function siteKeys(store: Storage): string[] {
  if (IDB) {
  const OPEN = IDB.open.bind(IDB);
  const DEL = IDB.deleteDatabase.bind(IDB);
+ const CMP = typeof IDB.cmp === "function" ? IDB.cmp.bind(IDB) : null;
  const pre = (n: unknown) => SITE + ":" + String(n);
  /* databases() is deliberately absent (honest unimplemented API):
-    wrapping it would risk leaking engine-own database names. */
+    wrapping it would risk leaking engine-own database names. cmp()
+    (2.2 Arsenide) compares two prefixed names, so ordering stays
+    consistent inside the site scope; it is absent when the host
+    factory does not provide it, rather than faked. */
  const shim: Record<string, unknown> = {
  open: (n: unknown, v?: number) => OPEN(pre(n), v),
  deleteDatabase: (n: unknown) => DEL(pre(n)),
  };
+ if (CMP) shim.cmp = (a: unknown, b: unknown) => CMP(pre(a), pre(b));
  try {
  (w as Record<string, unknown>).indexedDB = shim;
  } catch { /* read-only: stays unscoped */ }

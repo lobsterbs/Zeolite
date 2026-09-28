@@ -6,9 +6,11 @@ import {
   cookieHeaderFor,
   cookiesResetForTests,
   jarLoad,
+  jarMerge,
   jarPersist,
   jarSnapshot,
   registerOrigin,
+  setSameSitePolicy,
 } from "../cookies";
 
 beforeEach(() => cookiesResetForTests());
@@ -125,5 +127,108 @@ describe("jar persistence", () => {
     expect(cookieHeaderFor("https://a.example/")).toBeNull();
     await jarLoad();
     expect(cookieHeaderFor("https://a.example/")).toBe("keep=1");
+  });
+});
+
+describe("samesite policy knob (2.2)", () => {
+  it("is off by default: strict cookies attach even cross-site", () => {
+    applySetCookie("https://a.example/", resp(["s=1; SameSite=Strict"]));
+    expect(cookieHeaderFor("https://a.example/", { initiator: "https://evil.test/x" })).toBe("s=1");
+  });
+
+  it("approx: strict is dropped for a cross-site initiator, none passes", () => {
+    setSameSitePolicy("approx");
+    applySetCookie("https://a.example/", resp(["s=1; SameSite=Strict", "n=2; SameSite=None; Secure"]));
+    expect(cookieHeaderFor("https://a.example/", { initiator: "https://evil.test/x" })).toBe("n=2");
+  });
+
+  it("approx: lax attaches cross-site only on navigations", () => {
+    setSameSitePolicy("approx");
+    applySetCookie("https://a.example/", resp(["l=1; SameSite=Lax"]));
+    expect(cookieHeaderFor("https://a.example/", { initiator: "https://evil.test/x", navigation: false })).toBeNull();
+    expect(cookieHeaderFor("https://a.example/", { initiator: "https://evil.test/x", navigation: true })).toBe("l=1");
+  });
+
+  it("approx: same-site initiator attaches strict", () => {
+    setSameSitePolicy("approx");
+    applySetCookie("https://a.example/", resp(["s=1; SameSite=Strict"]));
+    expect(cookieHeaderFor("https://a.example/", { initiator: "https://sub.a.example/p" })).toBe("s=1");
+  });
+
+  it("approx: an unattributed SameSite cookie defaults to lax", () => {
+    setSameSitePolicy("approx");
+    applySetCookie("https://a.example/", resp(["d=1"]));
+    expect(cookieHeaderFor("https://a.example/", { initiator: "https://evil.test/x" })).toBeNull();
+    expect(cookieHeaderFor("https://a.example/", { initiator: "https://evil.test/x", navigation: true })).toBe("d=1");
+  });
+
+  it("approx: an unknown initiator is treated as same-site", () => {
+    setSameSitePolicy("approx");
+    applySetCookie("https://a.example/", resp(["s=1; SameSite=Strict"]));
+    expect(cookieHeaderFor("https://a.example/")).toBe("s=1");
+  });
+
+  it("unknown knob values fall back to off and report it", () => {
+    expect(setSameSitePolicy("bogus")).toBe("off");
+  });
+});
+
+describe("jar merge mode (2.2)", () => {
+  function ck(name: string, value: string, created: number) {
+    return {
+      name,
+      value,
+      domain: "a.example",
+      hostOnly: true,
+      path: "/",
+      secure: false,
+      httpOnly: false,
+      sameSite: null,
+      expires: 0,
+      created,
+    };
+  }
+
+  it("merges new cookies, resolves conflicts per rule", () => {
+    applySetCookie("https://a.example/", resp(["keep=1", "conf=v1"]));
+    const aId = registerOrigin("https://a.example/").id;
+    const bId = registerOrigin("https://b.example/").id;
+    const now = Date.now();
+    const imported: Array<[string, unknown[]]> = [
+      [aId, [ck("conf", "v2", now), ck("new", "x", now)]],
+      [bId, [{ ...ck("other", "y", now), domain: "b.example" }]],
+    ];
+    const r = jarMerge(imported, "keep-existing");
+    expect(r.jars).toBe(2);
+    expect(r.cookies).toBe(2);
+    expect(r.conflicts).toBe(1);
+    expect(cookieHeaderFor("https://a.example/")).toBe("keep=1; conf=v1; new=x");
+    expect(cookieHeaderFor("https://b.example/")).toBe("other=y");
+  });
+
+  it("import-wins replaces the conflicting cookie", () => {
+    applySetCookie("https://a.example/", resp(["conf=v1"]));
+    const aId = registerOrigin("https://a.example/").id;
+    const r = jarMerge([[aId, [ck("conf", "v2", Date.now())]]], "import-wins");
+    expect(r.conflicts).toBe(1);
+    expect(cookieHeaderFor("https://a.example/")).toBe("conf=v2");
+  });
+
+  it("keep-newest honors the created timestamp", () => {
+    applySetCookie("https://a.example/", resp(["conf=v1"]));
+    const aId = registerOrigin("https://a.example/").id;
+    jarMerge([[aId, [ck("conf", "older", Date.now() - 5000)]]], "keep-newest");
+    expect(cookieHeaderFor("https://a.example/")).toBe("conf=v1");
+    jarMerge([[aId, [ck("conf", "newer", Date.now() + 5000)]]], "keep-newest");
+    expect(cookieHeaderFor("https://a.example/")).toBe("conf=newer");
+  });
+
+  it("drops malformed records without admitting them", () => {
+    const aId = registerOrigin("https://a.example/").id;
+    const r = jarMerge([[aId, [{ name: 5 }, "junk"]], ["not-a-pair"]], "keep-existing");
+    expect(r.jars).toBe(0);
+    expect(r.cookies).toBe(0);
+    expect(r.conflicts).toBe(0);
+    expect(jarSnapshot().size).toBe(0);
   });
 });

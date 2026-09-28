@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import "fake-indexeddb/auto";
+import { beforeEach, describe, expect, it } from "vitest";
 import { DownloadTracker, downloadFilename } from "../downloads";
+import { openDb, idbClear, idbGetAllKeys, STORE_DOWNLOADS } from "../extensions/idb";
 
 function headers(h: Record<string, string>): Headers {
   return new Headers(h);
@@ -121,5 +123,69 @@ describe("DownloadTracker", () => {
     const snap = t.snapshot();
     expect(snap[0].status).toBe("error");
     expect(snap[0].error).toBe("stream failed");
+  });
+});
+
+describe("download registry persistence (2.2)", () => {
+  beforeEach(async () => {
+    try {
+      const db = await openDb();
+      await idbClear(db, STORE_DOWNLOADS);
+    } catch {
+      /* storage unavailable: the persistence tests then fail honestly */
+    }
+  });
+
+  it("persists and reloads across a tracker restart", async () => {
+    const a = new DownloadTracker();
+    const id = a.begin("https://x.test/a.bin", headers({ "content-disposition": 'attachment; filename="a.bin"' }), "application/octet-stream", 5);
+    await drain(a.wrap(id, streamOf([new Uint8Array(2), new Uint8Array(3)])));
+    await a.persist();
+    const b = new DownloadTracker();
+    await b.load();
+    const snap = b.snapshot();
+    expect(snap).toHaveLength(1);
+    expect(snap[0].status).toBe("done");
+    expect(snap[0].filename).toBe("a.bin");
+    expect(snap[0].received).toBe(5);
+    a.reset(); /* drop the pending debounce timer: no straggler writes */
+  });
+
+  it("honestly marks an active entry interrupted on load", async () => {
+    const a = new DownloadTracker();
+    a.begin("https://y.test/live.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", -1);
+    await a.persist();
+    const b = new DownloadTracker();
+    await b.load();
+    const snap = b.snapshot();
+    expect(snap).toHaveLength(1);
+    expect(snap[0].status).toBe("error");
+    expect(snap[0].error).toBe("interrupted: worker restarted");
+    a.reset();
+  });
+
+  it("keeps ids unique across a restart", async () => {
+    const a = new DownloadTracker();
+    a.begin("https://x.test/1", headers({ "content-disposition": "attachment" }), "a", -1);
+    a.begin("https://x.test/2", headers({ "content-disposition": "attachment" }), "b", -1);
+    await a.persist();
+    const b = new DownloadTracker();
+    await b.load();
+    const fresh = b.begin("https://x.test/3", headers({ "content-disposition": "attachment" }), "c", -1);
+    expect(fresh).toBe("dl3");
+    expect(b.snapshot().map((e) => e.id)).toContain("dl3");
+    a.reset();
+    b.reset();
+  });
+
+  it("scopes records per source site", async () => {
+    const a = new DownloadTracker();
+    a.begin("https://one.test/f", headers({ "content-disposition": "attachment" }), "a", -1);
+    a.begin("https://two.test/f", headers({ "content-disposition": "attachment" }), "b", -1);
+    await a.persist();
+    const db = await openDb();
+    const keys = await idbGetAllKeys(db, STORE_DOWNLOADS);
+    expect(keys.sort()).toEqual(["site:https://one.test", "site:https://two.test"]);
+    a.reset();
   });
 });

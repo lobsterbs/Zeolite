@@ -17,8 +17,13 @@
      served as ordinary responses; the browser may still save them,
      but the engine honestly does not classify them.
    - Speed is a whole-lifetime average, not a rolling window.
-   - The registry is in-memory: it does not survive a service-worker
-     restart, and finished entries are kept in a bounded ring. */
+   - 2.2 Arsenide: the ring persists to site-scoped IndexedDB (keyed
+     by the source origin) so entries survive a service-worker
+     restart. An entry that was active at shutdown is honestly marked
+     error/interrupted on load: no stream survives a restart, and
+     resume is not built (still no-resume). */
+
+import { openDb, idbGet, idbGetAllKeys, idbPut, STORE_DOWNLOADS } from "./extensions/idb";
 
 export interface DownloadEntry {
   id: string;
@@ -67,6 +72,7 @@ export class DownloadTracker {
      readable quietly serving already-queued chunks. */
   private readonly controllers = new Map<string, TransformStreamDefaultController<Uint8Array>>();
   private seq = 0;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Register a new attachment response; returns its entry id. */
   begin(source: string, headers: Headers, mime: string, size: number): string {
@@ -84,7 +90,76 @@ export class DownloadTracker {
       speed: 0,
     });
     if (this.entries.length > RING) this.entries.shift();
+    this.schedulePersist();
     return id;
+  }
+
+  /* ---- persistence (2.2 Arsenide) -------------------------------- */
+
+  /* Site scoping: one record per source origin, so a site's history is
+     isolated from another's, the same partitioning the jar uses. */
+  private siteKey(source: string): string {
+    try {
+      return "site:" + new URL(source).origin;
+    } catch {
+      return "site:unknown";
+    }
+  }
+
+  private schedulePersist(): void {
+    if (this.saveTimer !== null) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.persist().catch(() => undefined);
+    }, 500);
+  }
+
+  /** Write the ring grouped per source origin. Storage failures mean an
+      in-memory registry, never an engine failure. Exported for hosts
+      and tests that want a forced flush. */
+  async persist(): Promise<void> {
+    const db = await openDb();
+    const bySite = new Map<string, DownloadEntry[]>();
+    for (const e of this.entries) {
+      const k = this.siteKey(e.source);
+      const list = bySite.get(k) ?? [];
+      list.push(e);
+      bySite.set(k, list);
+    }
+    for (const k of await idbGetAllKeys(db, STORE_DOWNLOADS)) {
+      if (!bySite.has(k)) bySite.set(k, []); /* drop sites that emptied */
+    }
+    await Promise.all([...bySite].map(([k, list]) => idbPut(db, STORE_DOWNLOADS, k, list)));
+  }
+
+  /** Restore the persisted ring (SW activate). Entries that were active
+      when the worker died are honestly marked error: no stream
+      survives a restart and resume is not built. */
+  async load(): Promise<void> {
+    const db = await openDb();
+    const keys = await idbGetAllKeys(db, STORE_DOWNLOADS);
+    const restored: DownloadEntry[] = [];
+    for (const k of keys) {
+      const rec = (await idbGet(db, STORE_DOWNLOADS, k)) as DownloadEntry[] | undefined;
+      if (!Array.isArray(rec)) continue;
+      for (const e of rec) {
+        if (typeof e?.id !== "string" || typeof e?.source !== "string") continue;
+        restored.push(
+          e.status === "active"
+            ? { ...e, status: "error", endedAt: Date.now(), error: "interrupted: worker restarted" }
+            : e,
+        );
+      }
+    }
+    restored.sort((a, b) => a.startedAt - b.startedAt);
+    this.entries.length = 0;
+    this.entries.push(...restored.slice(-RING));
+    /* ids must stay unique across a restart: restart the sequence past
+       every restored numeric suffix. */
+    for (const e of this.entries) {
+      const n = Number(e.id.slice(2));
+      if (Number.isInteger(n) && n > this.seq) this.seq = n;
+    }
   }
 
   /** Wrap a response body in the counting passthrough. Streaming is
@@ -92,6 +167,7 @@ export class DownloadTracker {
       arrives and never accumulated. */
   wrap(id: string, body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
     const entry = this.entries.find((x) => x.id === id);
+    const tracker = this;
     const ts = new TransformStream<Uint8Array, Uint8Array>({
       start: (ctrl) => {
         this.controllers.set(id, ctrl);
@@ -105,6 +181,7 @@ export class DownloadTracker {
           entry.status = "done";
           entry.endedAt = Date.now();
         }
+        tracker.schedulePersist();
       },
     });
     this.streams.set(id, ts);
@@ -121,6 +198,7 @@ export class DownloadTracker {
     }).finally(() => {
       this.streams.delete(id);
       this.controllers.delete(id);
+      this.schedulePersist();
     });
     return ts.readable;
   }
@@ -134,6 +212,7 @@ export class DownloadTracker {
     if (entry && entry.status === "active") {
       entry.status = "cancelled";
       entry.endedAt = Date.now();
+      this.schedulePersist();
     }
     if (ts) {
       const ctl = this.controllers.get(id);
@@ -170,6 +249,10 @@ export class DownloadTracker {
 
   /** Tests only. */
   reset(): void {
+    if (this.saveTimer !== null) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
     this.entries.length = 0;
     this.streams.clear();
     this.controllers.clear();

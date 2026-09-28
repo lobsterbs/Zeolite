@@ -12,12 +12,17 @@
    isolated by construction. That is the hard gate.
 
    Honesty notes (docs/cookies.md):
-   - Redirect hops followed inside the transport never surface here:
-     the jar sees every request the engine initiates and every final
-     response, not intermediate 3xx hops.
-   - SameSite is parsed and stored but not enforced: every proxied
-     request is engine-initiated and has no meaningful site-for-sites
-     context. SameSite=None without Secure is rejected (spec rule).
+   - 2.2 Arsenide: the SW now follows 3xx hops itself (the transport
+     surfaces them rather than following), calling applySetCookie on
+     every hop response, so hop cookies are captured. Hops the SW
+     cannot follow (307/308 with a one-shot stream body) are surfaced
+     to the page with a mapped Location; their Set-Cookie is captured
+     before that.
+   - SameSite is enforced only through the opt-in policy knob
+     (setSameSitePolicy, off by default): every proxied request is
+     engine-initiated, so the site-for-sites context is an
+     approximation built from the request referrer. SameSite=None
+     without Secure is rejected regardless of the knob (spec rule).
    - document.cookie is not virtualized yet (Phase 5 scope).
    - The transport (libcurl) may hold cookies internally; this jar is
      the engine's authoritative Cookie source for requests it
@@ -33,6 +38,38 @@ import { traceDecision } from "./tracing";
 import { openDb, idbGet, idbPut, STORE_COOKIES } from "./extensions/idb";
 
 export type SameSite = "strict" | "lax" | "none";
+
+/* 2.2 Arsenide: opt-in SameSite enforcement. "off" (default) keeps the
+   1.4 behavior. "approx" enforces the attribute with a site context the
+   caller supplies: the SW passes the decoded referrer (the page that
+   initiated the request) and whether the request is a top-level
+   navigation. Requests without a decodable initiator are treated as
+   same-site; that is the honest limit of an engine-initiated fetch. */
+export type SameSitePolicy = "off" | "approx";
+
+/* Session import merge rules for jarMerge (2.2 Arsenide). */
+export type JarConflictRule = "import-wins" | "keep-existing" | "keep-newest";
+
+/** Initiator context for cookie attachment (SameSite approximation). */
+export interface CookieRequestContext {
+  /** Decoded initiator URL (the page that caused this request), when known. */
+  initiator?: string;
+  /** True for top-level navigations (sec-fetch-dest: document). */
+  navigation?: boolean;
+}
+
+let sameSitePolicy: SameSitePolicy = "off";
+
+/** Set the SameSite policy knob. Unknown values fall back to "off";
+    the effective policy is returned so the caller can report it. */
+export function setSameSitePolicy(p: unknown): SameSitePolicy {
+  sameSitePolicy = p === "approx" ? "approx" : "off";
+  return sameSitePolicy;
+}
+
+export function sameSitePolicyState(): SameSitePolicy {
+  return sameSitePolicy;
+}
 
 export interface Cookie {
   name: string;
@@ -128,6 +165,30 @@ function looksLikeIp(host: string): boolean {
 
 function domainMatch(host: string, domain: string): boolean {
   return host === domain || (host.endsWith("." + domain) && !looksLikeIp(host));
+}
+
+/* ponytail: site-for-cookies approximation without a public-suffix list:
+   the last two host labels (single-label and IP hosts are their own
+   site), the same approximation the domain gate already relies on. */
+function siteOfHost(host: string): string {
+  if (looksLikeIp(host) || !host.includes(".")) return host;
+  const parts = host.split(".");
+  return parts.slice(-2).join(".");
+}
+
+/* SameSite gate (2.2 Arsenide, opt-in). Off = attach as before. Under
+   "approx": None always passes (admission already required Secure);
+   the cookie's effective policy is its attribute, null meaning lax
+   (the browser default). Same-site or unknown initiator passes;
+   cross-site passes only lax on a top-level navigation. */
+function sameSiteAllows(c: Cookie, u: ParsedUrl, ctx?: CookieRequestContext): boolean {
+  if (sameSitePolicy !== "approx") return true;
+  const effective = c.sameSite ?? "lax";
+  if (effective === "none") return true;
+  const init = ctx?.initiator ? parseUrl(ctx.initiator) : null;
+  if (!init) return true; /* unknown initiator: honest approximation */
+  if (siteOfHost(u.host) === siteOfHost(init.host)) return true;
+  return effective === "lax" && ctx?.navigation === true;
 }
 
 /** RFC 6265 5.1.4 default-path. */
@@ -289,8 +350,10 @@ export function applySetCookie(responseUrl: string, headers: Headers): SetCookie
 }
 
 /** Assemble the Cookie header value for a request URL, or null when
-    the jar has no match. Expired cookies are purged lazily here. */
-export function cookieHeaderFor(requestUrl: string): string | null {
+    the jar has no match. Expired cookies are purged lazily here.
+    The optional context carries the initiator (for the opt-in SameSite
+    policy) and whether this is a top-level navigation. */
+export function cookieHeaderFor(requestUrl: string, ctx?: CookieRequestContext): string | null {
   const u = parseUrl(requestUrl);
   if (!u) return null;
   const now = Date.now();
@@ -308,7 +371,9 @@ export function cookieHeaderFor(requestUrl: string): string | null {
   for (const list of jars.values()) {
     for (const c of list) {
       const domainOk = c.hostOnly ? u.host === c.domain : domainMatch(u.host, c.domain);
-      if (domainOk && (!c.secure || u.secure) && pathMatch(u.path, c.path)) matched.push(c);
+      if (domainOk && (!c.secure || u.secure) && pathMatch(u.path, c.path) && sameSiteAllows(c, u, ctx)) {
+        matched.push(c);
+      }
     }
   }
   matched.sort((a, b) => b.path.length - a.path.length || a.created - b.created);
@@ -403,6 +468,58 @@ export function jarReplace(entries: Array<[string, unknown[]]>): void {
   jarPersist().catch(() => undefined);
 }
 
+/** Session import merge mode (2.2 Arsenide): merge records into the
+    live jars instead of replacing them. Cookie identity is the same
+    one admission uses (name+domain+hostOnly+path); a conflict is
+    resolved by the rule. Malformed records are dropped, never
+    admitted. Returns honest counts for the reply. */
+export function jarMerge(
+  entries: Array<[string, unknown[]]>,
+  rule: JarConflictRule,
+): { jars: number; cookies: number; conflicts: number } {
+  let jarsTouched = 0;
+  let cookies = 0;
+  let conflicts = 0;
+  for (const entry of entries) {
+    if (!Array.isArray(entry) || typeof entry[0] !== "string" || !Array.isArray(entry[1])) continue;
+    const key = entry[0];
+    const jar = jars.get(key) ?? [];
+    let touched = false;
+    for (const raw of entry[1]) {
+      const c = raw as Partial<Cookie>;
+      if (
+        typeof c?.name !== "string" ||
+        typeof c?.domain !== "string" ||
+        typeof c?.hostOnly !== "boolean" ||
+        typeof c?.path !== "string" ||
+        typeof c?.value !== "string"
+      ) {
+        continue;
+      }
+      const sameCookie = (x: Cookie) =>
+        x.name === c.name && x.domain === c.domain && x.hostOnly === c.hostOnly && x.path === c.path;
+      const idx = jar.findIndex(sameCookie);
+      if (idx >= 0) {
+        conflicts++;
+        if (rule === "import-wins") jar[idx] = c as Cookie;
+        else if (rule === "keep-newest" && typeof c.created === "number" && c.created > jar[idx].created) {
+          jar[idx] = c as Cookie;
+        }
+      } else {
+        jar.push(c as Cookie);
+        cookies++;
+      }
+      touched = true;
+    }
+    if (touched) {
+      jars.set(key, jar);
+      jarsTouched++;
+    }
+  }
+  jarPersist().catch(() => undefined);
+  return { jars: jarsTouched, cookies, conflicts };
+}
+
 /** Teardown: cookies do not survive an engine switch. */
 export function jarClear(): void {
   jars.clear();
@@ -418,4 +535,5 @@ export function cookiesResetForTests(): void {
   }
   jars.clear();
   registry.clear();
+  sameSitePolicy = "off";
 }
