@@ -141,7 +141,12 @@ function rewriter(): Promise<RewriterMod> {
   if (!rewriterMod) {
     rewriterMod = (async () => {
       const mod = rewriterWasm as unknown as RewriterMod;
-      if (typeof mod.default === "function") await mod.default();
+      // Vite freezes the wasm-pack default URL to the origin root, which 404s
+      // when the bundle is aliased under a subpath (LobsterBrowse /zlsw/).
+      // Resolve the wasm URL against the SW script URL instead.
+      if (typeof mod.default === "function") {
+        await mod.default(new URL("rewriter_wasm_bg.wasm", self.location.href));
+      }
       return mod;
     })();
   }
@@ -154,7 +159,7 @@ function rewriter(): Promise<RewriterMod> {
 let preludeCache: string | null = null;
 async function workerPrelude(): Promise<string> {
   if (preludeCache === null) {
-    const r = await fetch(new URL("worker-prelude.js", self.registration.scope).href);
+    const r = await fetch(new URL("worker-prelude.js", self.location.href).href);
     preludeCache = await r.text();
   }
   return preludeCache;
@@ -189,13 +194,16 @@ function rewriteStream(
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       controller.enqueue(encoder.encode(ljInit));
-      const mod = await modP;
-      const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix());
-      for (const path of rule.inject ?? []) rw.add_injection(path);
-      if (rule.block?.length) rw.set_blocked_hosts(rule.block);
-      for (const u of csInject) rw.add_injection(u);
       const reader = body.getReader();
       try {
+        // Rewriter init and construction live inside the try: an init failure
+        // (e.g. a wasm 404) used to reject outside the try and kill every fresh
+        // HTML response with no diag event and no console error.
+        const mod = await modP;
+        const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix());
+        for (const path of rule.inject ?? []) rw.add_injection(path);
+        if (rule.block?.length) rw.set_blocked_hosts(rule.block);
+        for (const u of csInject) rw.add_injection(u);
         for (;;) {
           const { done, value } = await reader.read();
           if (done) {
@@ -209,6 +217,13 @@ function rewriteStream(
           if (out) controller.enqueue(encoder.encode(out));
         }
       } catch (e) {
+        DIAG.emit({
+          category: "REWRITE",
+          severity: "error",
+          message: "html rewrite stream failed",
+          technicalReason: String(e),
+          url: base,
+        });
         controller.error(e);
       }
     },
