@@ -262,7 +262,9 @@ addEventListener("message", (e: MessageEvent) => relay(e.data as { zl?: string; 
       const ch = new MessageChannel();
       let q = Promise.resolve();
       const disp = (e: Event) => {
-        q = q.then(() => es.dispatchEvent(e));
+        q = q.then(() => {
+          es.dispatchEvent(e);
+        });
       };
       const fail = () => {
         wsState = 3;
