@@ -191,8 +191,8 @@ describe("jar merge mode (2.2)", () => {
 
   it("merges new cookies, resolves conflicts per rule", () => {
     applySetCookie("https://a.example/", resp(["keep=1", "conf=v1"]));
-    const aId = registerOrigin("https://a.example/").id;
-    const bId = registerOrigin("https://b.example/").id;
+    const aId = registerOrigin("https://a.example").id;
+    const bId = registerOrigin("https://b.example").id;
     const now = Date.now();
     const imported: Array<[string, unknown[]]> = [
       [aId, [ck("conf", "v2", now), ck("new", "x", now)]],
@@ -208,7 +208,7 @@ describe("jar merge mode (2.2)", () => {
 
   it("import-wins replaces the conflicting cookie", () => {
     applySetCookie("https://a.example/", resp(["conf=v1"]));
-    const aId = registerOrigin("https://a.example/").id;
+    const aId = registerOrigin("https://a.example").id;
     const r = jarMerge([[aId, [ck("conf", "v2", Date.now())]]], "import-wins");
     expect(r.conflicts).toBe(1);
     expect(cookieHeaderFor("https://a.example/")).toBe("conf=v2");
@@ -216,7 +216,7 @@ describe("jar merge mode (2.2)", () => {
 
   it("keep-newest honors the created timestamp", () => {
     applySetCookie("https://a.example/", resp(["conf=v1"]));
-    const aId = registerOrigin("https://a.example/").id;
+    const aId = registerOrigin("https://a.example").id;
     jarMerge([[aId, [ck("conf", "older", Date.now() - 5000)]]], "keep-newest");
     expect(cookieHeaderFor("https://a.example/")).toBe("conf=v1");
     jarMerge([[aId, [ck("conf", "newer", Date.now() + 5000)]]], "keep-newest");
@@ -224,7 +224,7 @@ describe("jar merge mode (2.2)", () => {
   });
 
   it("drops malformed records without admitting them", () => {
-    const aId = registerOrigin("https://a.example/").id;
+    const aId = registerOrigin("https://a.example").id;
     const bad = [
       [aId, [{ name: 5 }, "junk"]],
       ["not-a-pair"],
