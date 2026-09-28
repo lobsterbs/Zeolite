@@ -216,7 +216,7 @@ jobs:
     # and the replay comparison stay hard gates.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    needs: [rust, app]
+    needs: [rust]
     permissions:
       contents: write # scoreboard branch publish
       issues: write # failed real-site probes file issues
@@ -225,10 +225,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Build server + app, run probes locally
+      - name: Build server, run probes locally
+        # The probes drive zeolite-server over plain HTTP; no SW app
+        # build is needed (the server starts without --static, and the
+        # old app-build lines could never have worked: sw.ts imports
+        # the wasm artifacts that only the wasm job's artifact carries,
+        # not a bare checkout - the first ever compat run died there).
         run: |
           cargo build -p zeolite-server --release
-          cd app && npm install && npm run build && cd ..
           # ZL_TEST_ALLOW_PRIVATE_DESTS=1: test-only policy escape hatch
           # so the engine may reach the local fixture origin. The
           # default policy stays fully locked down.
