@@ -225,7 +225,11 @@ describe("jar merge mode (2.2)", () => {
 
   it("drops malformed records without admitting them", () => {
     const aId = registerOrigin("https://a.example/").id;
-    const r = jarMerge([[aId, [{ name: 5 }, "junk"]], ["not-a-pair"]], "keep-existing");
+    const bad = [
+      [aId, [{ name: 5 }, "junk"]],
+      ["not-a-pair"],
+    ] as unknown as Array<[string, unknown[]]>;
+    const r = jarMerge(bad, "keep-existing");
     expect(r.jars).toBe(0);
     expect(r.cookies).toBe(0);
     expect(r.conflicts).toBe(0);

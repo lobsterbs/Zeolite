@@ -58,6 +58,7 @@ export type DiagStage =
   | "SCRIPT_EXECUTION"
   | "DOWNSTREAM_REQUEST"
   | "TRANSPORT_FALLBACK"
+  | "REDIRECT_HOP"
   | "REDIRECTED";
 
 export interface DiagEvent {
