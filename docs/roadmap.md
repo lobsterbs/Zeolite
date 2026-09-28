@@ -49,6 +49,14 @@ The original 23-item program is complete. History, one line per release:
   rewriter's frame-buster neutralization pass (js::antiframe), landed
   just before the cut, closing what this roadmap first listed as a
   Phase 14 item.
+- 2.4 Bromide: rewriter parity (standalone CSS streams chunk by chunk
+  through the wasm CSS rewriter, byte-identical to the one-shot pass)
+  and deep adapter integration: session export/import and the
+  downloads registry UIs consume the engine control plane instead of
+  parallel implementations. The antiframe port turned out already
+  shipped in 2.3; the zeolite-server arena-reuse item was resolved by
+  audit (the server relays opaque bytes, there are no server-side
+  rewrite paths to pool).
 
 Post-2.0 stabilization commits (2026-09-27/28) fixed three bugs that
 broke every proxied request after the 2.0 push: dynamic import() on
@@ -119,7 +127,7 @@ Closes the 1.6/1.8 limits.
 - Keep the honest boundary: no virtual SW script is ever fetched or
   executed; the engine owns the only real scope.
 
-## Phase 14 - 2.4 Bromide: rewriter parity + deep LobsterBrowse integration (in progress)
+## Phase 14 - 2.4 Bromide: rewriter parity + deep LobsterBrowse integration (shipped)
 
 - Port LobsterBrowse's js_antiframe pass into the wasm rewriter:
   DONE - shipped inside 2.3 Selenide (see the history line above);
