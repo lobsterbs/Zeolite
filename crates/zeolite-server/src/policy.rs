@@ -207,35 +207,35 @@ mod tests {
     fn blocks_special_use_ranges() {
         let p = DestinationPolicy::default();
         for s in [
-            "0.1.2.3", // 0.0.0.0/8
-            "100.64.0.1", // CGNAT 100.64.0.0/10
+            "0.1.2.3",         // 0.0.0.0/8
+            "100.64.0.1",      // CGNAT 100.64.0.0/10
             "100.100.100.200", // Alibaba metadata, inside CGNAT
-            "192.0.0.9", // 192.0.0.0/24 (Oracle metadata lives here)
-            "192.0.2.7",   // TEST-NET-1
-            "198.18.0.5",  // benchmarking 198.18.0.0/15
-            "198.51.100.7", // TEST-NET-2
-            "203.0.113.9", // TEST-NET-3
-            "224.0.0.1",   // multicast
+            "192.0.0.9",       // 192.0.0.0/24 (Oracle metadata lives here)
+            "192.0.2.7",       // TEST-NET-1
+            "198.18.0.5",      // benchmarking 198.18.0.0/15
+            "198.51.100.7",    // TEST-NET-2
+            "203.0.113.9",     // TEST-NET-3
+            "224.0.0.1",       // multicast
             "239.255.255.250", // SSDP multicast
-            "240.1.2.3",   // reserved 240.0.0.0/4
+            "240.1.2.3",       // reserved 240.0.0.0/4
         ] {
             let ip: IpAddr = s.parse().unwrap();
             assert_eq!(p.check_ip(&ip), Verdict::Block, "should block {s}");
         }
         for s in [
-            "::ffff:127.0.0.1",  // mapped loopback
+            "::ffff:127.0.0.1",       // mapped loopback
             "::ffff:169.254.169.254", // mapped cloud metadata
-            "::ffff:10.0.0.1",   // mapped RFC1918
-            "::127.0.0.1",       // compatible-form loopback
-            "::0.0.0.2",         // compatible form, 0.0.0.0/8
-            "64:ff9b::7f00:1",   // NAT64 embedding 127.0.0.1
-            "64:ff9b::a00:1",    // NAT64 embedding 10.0.0.1
-            "2002:7f00:1::",     // 6to4 embedding 127.0.0.1
-            "2002:a00:1::",      // 6to4 embedding 10.0.0.1
-            "ff02::1",           // multicast
-            "fec0::1",           // site-local
-            "2001:db8::1",       // documentation
-            "2001::0.0.0.1",     // Teredo 2001::/32
+            "::ffff:10.0.0.1",        // mapped RFC1918
+            "::127.0.0.1",            // compatible-form loopback
+            "::0.0.0.2",              // compatible form, 0.0.0.0/8
+            "64:ff9b::7f00:1",        // NAT64 embedding 127.0.0.1
+            "64:ff9b::a00:1",         // NAT64 embedding 10.0.0.1
+            "2002:7f00:1::",          // 6to4 embedding 127.0.0.1
+            "2002:a00:1::",           // 6to4 embedding 10.0.0.1
+            "ff02::1",                // multicast
+            "fec0::1",                // site-local
+            "2001:db8::1",            // documentation
+            "2001::0.0.0.1",          // Teredo 2001::/32
         ] {
             let ip: IpAddr = s.parse().unwrap();
             assert_eq!(p.check_ip(&ip), Verdict::Block, "should block {s}");
@@ -249,9 +249,9 @@ mod tests {
         for s in [
             "1.1.1.1",
             "8.8.8.8",
-            "::ffff:8.8.8.8", // mapped, embedded address is global
+            "::ffff:8.8.8.8",   // mapped, embedded address is global
             "64:ff9b::808:808", // NAT64 embedding 8.8.8.8
-            "2002:808:808::", // 6to4 embedding 8.8.8.8
+            "2002:808:808::",   // 6to4 embedding 8.8.8.8
             "2606:4700::1111",
             "2001:4860:4860::8888", // global 2001:: space, not Teredo
         ] {

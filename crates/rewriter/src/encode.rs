@@ -132,7 +132,13 @@ pub fn resolve(url: &str, base: &str) -> String {
                 && url[ci..].starts_with("://")
             {
                 let (userinfo, hostport, tail) = split_authority(&url[ci + 3..]);
-                return format!("{}://{}{}{}", sch.to_ascii_lowercase(), userinfo, hostport, tail);
+                return format!(
+                    "{}://{}{}{}",
+                    sch.to_ascii_lowercase(),
+                    userinfo,
+                    hostport,
+                    tail
+                );
             }
             return url.to_string();
         }
@@ -159,8 +165,7 @@ pub fn resolve(url: &str, base: &str) -> String {
     let root = format!("{}{}", scheme, host);
     // WHATWG parity (issue #19): a special-scheme base treats "\"
     // exactly like "/" everywhere a browser would.
-    let special =
-        scheme.eq_ignore_ascii_case("https://") || scheme.eq_ignore_ascii_case("http://");
+    let special = scheme.eq_ignore_ascii_case("https://") || scheme.eq_ignore_ascii_case("http://");
     let rel = if special {
         url.replace('\\', "/")
     } else {
@@ -319,11 +324,23 @@ mod tests {
             ("../../../../x", b, "https://example.com/x"),
             // Empty segments from "//" are preserved.
             ("a//b", b, "https://example.com/a/b/a//b"),
-            ("..", "https://example.com/a//b/c.html", "https://example.com/a//"),
-            ("../up", "https://example.com/a//b/c.html", "https://example.com/a//up"),
+            (
+                "..",
+                "https://example.com/a//b/c.html",
+                "https://example.com/a//",
+            ),
+            (
+                "../up",
+                "https://example.com/a//b/c.html",
+                "https://example.com/a//up",
+            ),
             ("y", "https://example.com//x", "https://example.com//y"),
             ("y", "https://example.com//x/", "https://example.com//x/y"),
-            ("g", "https://example.com:8443/a/b/c.html", "https://example.com:8443/a/b/g"),
+            (
+                "g",
+                "https://example.com:8443/a/b/c.html",
+                "https://example.com:8443/a/b/g",
+            ),
             ("g", "https://example.com", "https://example.com/g"),
             ("/x", b, "https://example.com/x"),
             ("//cdn.example.net/x", b, "https://cdn.example.net/x"),
@@ -334,7 +351,11 @@ mod tests {
             // Query-only replaces the query and drops the fragment.
             ("?q=1", b, "https://example.com/a/b/c.html?q=1"),
             ("?", b, "https://example.com/a/b/c.html?"),
-            ("?z=2", "https://example.com/a/b/c.html#top", "https://example.com/a/b/c.html?z=2"),
+            (
+                "?z=2",
+                "https://example.com/a/b/c.html#top",
+                "https://example.com/a/b/c.html?z=2",
+            ),
             // Scheme and host lowercase; userinfo and path do not.
             ("HTTPS://EXAMPLE.COM/x", b, "https://example.com/x"),
             (
@@ -348,7 +369,11 @@ mod tests {
             ("%41", b, "https://example.com/a/b/%41"),
             // Opaque schemes stay untouched.
             ("data:image/png;base64,AAA", b, "data:image/png;base64,AAA"),
-            ("blob:https://example.com/x", b, "blob:https://example.com/x"),
+            (
+                "blob:https://example.com/x",
+                b,
+                "blob:https://example.com/x",
+            ),
             ("javascript:void(0)", b, "javascript:void(0)"),
             ("mailto:a@b.c", b, "mailto:a@b.c"),
             ("tel:+15551234", b, "tel:+15551234"),
@@ -360,7 +385,11 @@ mod tests {
             ("#", b, "#"),
         ];
         for (input, base, expected) in table {
-            assert_eq!(resolve(input, base), *expected, "resolve({input:?}, {base:?})");
+            assert_eq!(
+                resolve(input, base),
+                *expected,
+                "resolve({input:?}, {base:?})"
+            );
         }
     }
 
