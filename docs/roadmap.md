@@ -33,6 +33,14 @@ The original 23-item program is complete. History, one line per release:
   (zlRecord, suite/replay.mjs), nightly compat job.
 - 2.0 Graphene: docs matrix, security audit (docs/security.md),
   performance audit (docs/performance.md), full regression pass.
+- 2.1 Halogen: load-path gates (subpath-alias CI build variant,
+  SW-scope import() lint, transport-init self-report, zl:ping version
+  handshake). Landed without a version-string bump; no 2.1 release
+  was cut.
+- 2.2 Arsenide: cookie/session limit closure (SW-followed redirect-hop
+  Set-Cookie capture, SameSite opt-in knob, session import merge with
+  per-cookie conflict rules, download ring persistence to site-scoped
+  IndexedDB, IDBFactory.cmp wrap).
 
 Post-2.0 stabilization commits (2026-09-27/28) fixed three bugs that
 broke every proxied request after the 2.0 push: dynamic import() on
@@ -50,7 +58,7 @@ adds a gate that would have caught a shipped break. Same rules as
 before: one phase per release, CI green before the next, nothing claimed
 without a gate or test.
 
-## Phase 11 - 2.1 Halogen: load-path gates + stale-worker defense
+## Phase 11 - 2.1 Halogen: load-path gates + stale-worker defense (shipped)
 
 The three network-failure bugs all shared one property: the code built,
 tested, and shipped green while the engine could not load a single page.
@@ -74,7 +82,7 @@ This phase makes that class of failure loud.
   the served bundle version (the stale-worker failure mode users hit
   after a dist republish).
 
-## Phase 12 - 2.2 Arsenide: cookie/session limit closure
+## Phase 12 - 2.2 Arsenide: cookie/session limit closure (shipped)
 
 Closes the honest limits recorded in 1.4/1.5/1.7.
 
