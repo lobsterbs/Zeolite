@@ -161,7 +161,7 @@ jobs:
           echo "bootstrap.js: $SIZE bytes"
           if [ "$SIZE" -ge 5120 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 5120)"; exit 1; fi
       - name: Subpath-alias build gate (2.1 Halogen)
-        # LobsterBrowse serves the DEFAULT-base dist bundle under the
+        # The adapter serves the DEFAULT-base dist bundle under the
         # /zlsw/ path. An asset URL frozen to the origin root 404s there
         # and every proxied document dies silently (commit 6e9d395 fixed
         # exactly this; a first attempt at this gate built with
@@ -216,6 +216,9 @@ jobs:
     # and the replay comparison stay hard gates.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # The first wisp-based run deadlocked for 36 minutes before being
+    # cancelled by hand; a hung probe must fail loudly, not at 6 hours.
+    timeout-minutes: 20
     needs: [rust]
     permissions:
       contents: write # scoreboard branch publish
@@ -297,6 +300,6 @@ jobs:
           git checkout --orphan scoreboard
           git rm -rf --quiet . || true
           cp suite/scoreboard.json suite/scoreboard.md suite/capabilities.json suite/capabilities.md . 2>/dev/null || cp suite/scoreboard.json .
-          git add scoreboard.* capabilities.*
+          git add scoreboard.* capabilities.* || git add scoreboard.*
           git commit -m "scoreboard: nightly compat run ${GITHUB_RUN_ID}"
           git push -f origin HEAD:scoreboard

@@ -43,7 +43,7 @@ const BASE = process.argv.includes("--base")
   : "http://localhost:6002";
 
 /* Repo-root server binary, independent of the process CWD. */
-const SERVER = fileURLToPath(new URL("../../target/release/zeolite-server", import.meta.url));
+const SERVER = fileURLToPath(new URL("../target/release/zeolite-server", import.meta.url));
 
 /* ponytail: fixed high ports instead of port 0 + stdout parsing; a
    collision fails the row loudly, which is the honest outcome. */
@@ -62,8 +62,10 @@ const startServer = (port, env) =>
       env,
       stdio: ["ignore", "ignore", "inherit"],
     });
-    proc.on("error", reject);
-    resolve(proc);
+    proc.once("error", reject);
+    // Resolve after the current turn so a spawn error (bad binary path)
+    // rejects the promise instead of being swallowed by an early resolve.
+    setImmediate(() => resolve(proc));
   });
 
 /* Wait for a spawned server to accept wisp sessions. The last error

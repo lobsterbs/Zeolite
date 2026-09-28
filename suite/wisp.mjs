@@ -54,9 +54,16 @@ export function wispSession(base) {
     // not listening yet, refused, or no /wisp/ route) must reject instead
     // of leaving the promise pending forever.
     let settled = false;
+    const handshakeTimer = setTimeout(() => {
+      finishHandshake(new Error("wisp handshake timed out (no CONTINUE(0) within 5s)"));
+      try {
+        ws.close();
+      } catch {}
+    }, 5000);
     const finishHandshake = (err, sessionOut) => {
       if (settled) return;
       settled = true;
+      clearTimeout(handshakeTimer);
       err ? reject(err) : resolve(sessionOut);
     };
     const session = {
@@ -96,6 +103,12 @@ export function wispSession(base) {
         p[3] = h.length;
         p.set(h, 4);
         ws.send(frame(T.CONNECT, sid, p));
+        // v2 flow control: the server's relay reader spends one credit
+        // per DATA packet it sends downstream, starting from zero. With
+        // no initial CONTINUE grant the relay deadlocks: the server
+        // waits for a grant while the client waits for data. Announce
+        // the client receive window up front.
+        ws.send(frame(T.CONTINUE, sid, new Uint8Array([128, 0, 0, 0])));
         return stream;
       },
       close() {
@@ -118,9 +131,10 @@ export function wispSession(base) {
         // window; probes send one small request per stream, so the
         // initial grant is never exhausted. Nothing else to do.
       } else if (type === T.DATA) {
-        // One credit is spent per relayed DATA packet; grant one back
-        // per packet received so the server keeps reading upstream.
-        ws.send(frame(T.CONTINUE, id, new Uint8Array([1, 0, 0, 0])));
+        // One credit is spent per relayed DATA packet; top the window
+        // back up per packet received so the server keeps reading
+        // upstream (the grant is an absolute window, not a delta).
+        ws.send(frame(T.CONTINUE, id, new Uint8Array([16, 0, 0, 0])));
         streams.get(id)?._recv(payload);
       } else if (type === T.CLOSE) {
         const reason = payload.length ? payload[0] : 0x01;
@@ -139,7 +153,9 @@ export function wispSession(base) {
       for (const s of streams.values()) s._close(0);
     });
     ws.addEventListener("error", () => {
-      /* surfaced via the close event */
+      // Undici can deliver only an "error" event for a refused
+      // connection (no "close" follows); settle the handshake here too.
+      finishHandshake(new Error("wisp session error before the handshake completed (server not listening or refused)"));
     });
   });
 }
