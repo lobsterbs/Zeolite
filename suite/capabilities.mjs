@@ -1,30 +1,108 @@
-/* Capability probes (Phase 9, 1.9 Fullerene): per-capability scoreboard
-   over the server path, against a deterministic local fixture origin.
-   Verdicts are facts, never invented percentages. Capabilities that
-   live in the client runtime (WebSocket bridge, worker virtualization,
-   storage, Cache API, client cookie jars, SPA routing) are marked
-   client-runtime: they are covered by the app unit suite and session
-   recording, and are honestly NOT probed here - a plain HTTP probe
-   cannot execute page JavaScript.
+/* Capability scoreboard (2.5 Iodide), rebuilt on the real engine
+   surface. The 1.9 version probed capabilities over HTTP fetches to
+   ${BASE}/j/<b64url>, a route zeolite-server has never had (it is a
+   wisp relay: /wisp/ plus a static fallback); every row failed with
+   404 on the first run that ever executed (36472949276).
 
-   Gated capabilities (gate: true) fail the run; the rest are
-   report-only so the nightly scoreboard surfaces reality without
-   pretending. Failures must become fixes, never quiet score tuning.
+   What a wisp relay can actually guarantee is now what is gated,
+   deterministically, against the local fixture origin:
+   - the v2.1 handshake,
+   - TCP CONNECT through the relay,
+   - byte-exact relay of requests and responses (both directions),
+   - upstream status preservation (301/302/307, 404, 500, cookies),
+   - the SSRF policy: a second server started WITHOUT the
+     ZL_TEST_ALLOW_PRIVATE_DESTS escape hatch must refuse a loopback
+     CONNECT with close reason 0x48,
+   - auth enforcement: a third server with ZL_WISP_USER /
+     ZL_WISP_PASSWORD set must refuse a keyless client with 0xc2.
+   Rewriting capabilities (html/css/js/url rewriting, opaque URLs,
+   iframes, fetch rerouting) live client-side in the SW's wasm
+   rewriters; they are covered by the app unit suite and the wasm job
+   and are honestly listed as client-runtime, never probed from node.
+
+   Gated rows (gate: true) fail the run; the rest are report-only so
+   the scoreboard surfaces reality without pretending. Verdicts are
+   facts, never invented percentages.
 
    Usage: node suite/capabilities.mjs --base http://localhost:6002
+   (the base server must run with ZL_TEST_ALLOW_PRIVATE_DESTS=1 so it
+   may reach the loopback fixture; the two extra servers it spawns
+   verify the opposite, production-default behaviors).
    Writes suite/capabilities.json and suite/capabilities.md. */
 
 import { writeFileSync } from "node:fs";
-import { b64uEncode } from "./codec.mjs";
+import { Buffer } from "node:buffer";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { connect as tcpConnect } from "node:net";
 import { MEDIA, startFixtureServer } from "./fixtures.mjs";
+import { wispSession, streamRequest, statusLine, bodyOf, reasonName, CLOSE } from "./wisp.mjs";
 
 const BASE = process.argv.includes("--base")
   ? process.argv[process.argv.indexOf("--base") + 1]
   : "http://localhost:6002";
 
-const engine = (url) => `${BASE}/j/${b64uEncode(new TextEncoder().encode(url))}`;
+/* Repo-root server binary, independent of the process CWD. */
+const SERVER = fileURLToPath(new URL("../../target/release/zeolite-server", import.meta.url));
 
-const { server, origin } = await startFixtureServer();
+/* ponytail: fixed high ports instead of port 0 + stdout parsing; a
+   collision fails the row loudly, which is the honest outcome. */
+const SSRF_PORT = 46102;
+const AUTH_PORT = 46103;
+
+const bareEnv = () => {
+  const env = { ...process.env };
+  delete env.ZL_TEST_ALLOW_PRIVATE_DESTS;
+  return env;
+};
+
+const startServer = (port, env) =>
+  new Promise((resolve, reject) => {
+    const proc = spawn(SERVER, ["--port", String(port)], {
+      env,
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+    proc.on("error", reject);
+    resolve(proc);
+  });
+
+/* Wait for a spawned server to accept wisp sessions. The last error
+   is preserved in the thrown message: the auth row asserts on it. */
+async function awaitServer(port, tries = 20) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await wispSession(`http://127.0.0.1:${port}`);
+    } catch (e) {
+      last = e;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  throw new Error(`server on port ${port} never accepted a wisp session: ${last ? last.message : "unknown"}`);
+}
+
+/* The same raw request over a direct socket to the fixture: the
+   reference for byte-exact relay comparison. */
+function directRaw(port, request) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const sock = tcpConnect(port, "127.0.0.1");
+    sock.setTimeout(15000, () => {
+      sock.destroy();
+      reject(new Error("direct fixture request timed out"));
+    });
+    sock.on("error", reject);
+    sock.on("connect", () => sock.write(request));
+    sock.on("data", (c) => chunks.push(c));
+    sock.on("close", () => resolve({ bytes: Buffer.concat(chunks) }));
+  });
+}
+
+const rawGet = (host, port, path) =>
+  `GET ${path} HTTP/1.1\r\nHost: ${host}:${port}\r\nUser-Agent: zeolite-compat/2.5\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
+
+const { server, port: fxPort } = await startFixtureServer();
+const fxHost = "127.0.0.1";
 
 const caps = [];
 const check = async (name, gate, fn) => {
@@ -41,124 +119,151 @@ const check = async (name, gate, fn) => {
   process.stdout.write(`${name}: ${status}${note ? " (" + note + ")" : ""}\n`);
 };
 
-const bodyOf = async (resp) => {
-  const buf = await resp.arrayBuffer();
-  return { text: new TextDecoder().decode(buf), bytes: Buffer.from(buf) };
-};
+/* Every fixture row shares one wisp session: multiplexing streams over
+   one connection is the point of the protocol. */
+const session = await wispSession(BASE);
 
-const unrewrittenAttrs = (html) =>
-  [...html.matchAll(/(?:href|src)=["']([^"']+)["']/g)]
-    .map((m) => m[1])
-    .filter((v) => v.startsWith(origin));
+await check("wisp-handshake", true, async () => ({ ok: true, note: "v2.1 INFO exchange + CONTINUE(0)" }));
 
-await check("html-links", true, async () => {
-  const resp = await fetch(engine(`${origin}/page.html`));
-  const { text } = await bodyOf(resp);
-  const bad = unrewrittenAttrs(text);
-  if (resp.status !== 200) return { ok: false, note: "status " + resp.status };
-  if (!text.includes("opaque blob")) return { ok: false, note: "page body wrong" };
-  return bad.length ? { ok: false, note: "unrewritten: " + bad.slice(0, 2).join(", ") } : { ok: true };
+await check("tcp-connect", true, async () => {
+  const resp = await streamRequest(session, fxHost, fxPort, rawGet(fxHost, fxPort, "/page.html"));
+  return resp.bytes.length
+    ? { ok: true, note: `${resp.bytes.length} bytes relayed` }
+    : { ok: false, note: "no data, close " + reasonName(resp.closeReason) };
 });
 
-await check("opaque-urls", true, async () => {
-  const resp = await fetch(engine(`${origin}/page.html`));
-  const { text } = await bodyOf(resp);
-  return text.includes(`blob:${origin}/uuid`) && text.includes('href="data:text/plain,hello"')
-    ? { ok: true }
-    : { ok: false, note: "blob/data hrefs were touched" };
+await check("relay-response-bytes", true, async () => {
+  const viaEngine = await streamRequest(session, fxHost, fxPort, rawGet(fxHost, fxPort, "/page.html"));
+  const direct = await directRaw(fxPort, rawGet(fxHost, fxPort, "/page.html"));
+  // Bodies only: the Date header differs between the two requests.
+  const a = bodyOf(viaEngine);
+  const b = bodyOf(direct);
+  return a.equals(b)
+    ? { ok: true, note: `body ${a.length}B byte-identical to direct` }
+    : { ok: false, note: `body differs: engine ${a.length}B vs direct ${b.length}B` };
 });
 
-await check("css-urls", false, async () => {
-  const resp = await fetch(engine(`${origin}/style.css`));
-  const { text } = await bodyOf(resp);
-  return text.includes(`url(${origin}/`) || text.includes(`url("${origin}/`)
-    ? { ok: false, note: "css url() not rewritten" }
-    : { ok: true };
+await check("relay-request-echo", true, async () => {
+  const req = `POST /echo HTTP/1.1\r\nHost: ${fxHost}:${fxPort}\r\nContent-Length: 4\r\nConnection: close\r\n\r\nping`;
+  const resp = await streamRequest(session, fxHost, fxPort, req);
+  const body = bodyOf(resp).toString("utf8");
+  return body === "echo:ping"
+    ? { ok: true, note: "request bytes relayed upstream and echoed" }
+    : { ok: false, note: "echo mismatch: " + body.slice(0, 40) };
 });
 
-await check("js-serve", true, async () => {
-  const resp = await fetch(engine(`${origin}/app.js`));
-  const { text } = await bodyOf(resp);
-  const ct = (resp.headers.get("content-type") ?? "").toLowerCase();
-  if (resp.status !== 200) return { ok: false, note: "status " + resp.status };
-  if (!ct.includes("javascript")) return { ok: false, note: "content-type " + ct };
-  return text.includes("stable-marker-7f3a") ? { ok: true } : { ok: false, note: "marker missing" };
+await check("relay-media-bytes", true, async () => {
+  const resp = await streamRequest(session, fxHost, fxPort, rawGet(fxHost, fxPort, "/media.bin"));
+  return bodyOf(resp).equals(MEDIA)
+    ? { ok: true, note: `${MEDIA.length}B binary body intact` }
+    : { ok: false, note: "media bytes differ" };
 });
 
-await check("fetch-get", true, async () => {
-  const resp = await fetch(engine(`${origin}/page2`));
-  const { text } = await bodyOf(resp);
-  return resp.status === 200 && text.includes("page-two-marker")
-    ? { ok: true }
-    : { ok: false, note: "status " + resp.status };
+await check("relay-download-bytes", true, async () => {
+  const resp = await streamRequest(session, fxHost, fxPort, rawGet(fxHost, fxPort, "/download"));
+  return bodyOf(resp).equals(MEDIA)
+    ? { ok: true, note: "attachment body intact" }
+    : { ok: false, note: "download bytes differ" };
 });
 
-await check("fetch-post", true, async () => {
-  const resp = await fetch(engine(`${origin}/echo`), { method: "POST", body: "ping" });
-  const { text } = await bodyOf(resp);
-  return text === "echo:ping" ? { ok: true } : { ok: false, note: "echo mismatch: " + text.slice(0, 40) };
+for (const [name, path, want] of [
+  ["relay-status-404", "/missing", 404],
+  ["relay-status-500", "/boom", 500],
+]) {
+  await check(name, true, async () => {
+    const resp = await streamRequest(session, fxHost, fxPort, rawGet(fxHost, fxPort, path));
+    const st = statusLine(resp);
+    return st === want ? { ok: true, note: `status ${st}` } : { ok: false, note: `status ${st}, wanted ${want}` };
+  });
+}
+
+for (const [name, path, want] of [
+  ["relay-redirect-301", "/redirect301", 301],
+  ["relay-redirect-302", "/redirect302", 302],
+  ["relay-redirect-307", "/redirect307", 307],
+]) {
+  await check(name, true, async () => {
+    // Raw TCP means no redirect following: the relay must preserve the
+    // upstream status and Location, and following is the client's job
+    // (recorded as 200-class in sessions because the SW follows).
+    const resp = await streamRequest(session, fxHost, fxPort, rawGet(fxHost, fxPort, path));
+    const st = statusLine(resp);
+    const head = resp.bytes.subarray(0, resp.bytes.indexOf(Buffer.from("\r\n\r\n", "latin1"))).toString("latin1");
+    return st === want && /location:/i.test(head)
+      ? { ok: true, note: `status ${st} + Location preserved` }
+      : { ok: false, note: `status ${st}, wanted ${want} with Location` };
+  });
+}
+
+await check("relay-set-cookie", true, async () => {
+  const resp = await streamRequest(session, fxHost, fxPort, rawGet(fxHost, fxPort, "/setcookie"));
+  const head = resp.bytes.subarray(0, resp.bytes.indexOf(Buffer.from("\r\n\r\n", "latin1"))).toString("latin1");
+  return /set-cookie:/i.test(head)
+    ? { ok: true, note: "upstream Set-Cookie bytes preserved (jar application is client-side)" }
+    : { ok: false, note: "set-cookie missing from relayed head" };
 });
 
-await check("iframe-src", false, async () => {
-  const resp = await fetch(engine(`${origin}/page.html`));
-  const { text } = await bodyOf(resp);
-  const m = text.match(/<iframe[^>]*src=["']([^"']+)["']/);
-  return m && !m[1].startsWith(origin) ? { ok: true } : { ok: false, note: "iframe src not rewritten" };
-});
+session.close();
 
-await check("redirect-301", false, async () => {
-  const resp = await fetch(engine(`${origin}/redirect301`));
-  const { text } = await bodyOf(resp);
-  return resp.status === 200 && text.includes("page-two-marker") ? { ok: true } : { ok: false, note: "status " + resp.status };
+/* SSRF: the spawned server has NO escape hatch; loopback CONNECT must
+   be refused with close reason 0x48 (policy.rs resolve-then-validate,
+   checked before any connect). */
+const ssrfServer = await startServer(SSRF_PORT, bareEnv());
+await check("ssrf-private-blocked", true, async () => {
+  const s = await awaitServer(SSRF_PORT);
+  try {
+    const resp = await streamRequest(s, fxHost, fxPort, rawGet(fxHost, fxPort, "/page.html"), { timeoutMs: 8000 });
+    return resp.bytes.length === 0 && resp.closeReason === CLOSE.BLOCKED
+      ? { ok: true, note: "loopback CONNECT refused with reason 0x48" }
+      : { ok: false, note: `unexpected relay: ${resp.bytes.length}B, close ${reasonName(resp.closeReason)}` };
+  } finally {
+    s.close();
+  }
 });
+ssrfServer.kill();
 
-await check("redirect-302", false, async () => {
-  const resp = await fetch(engine(`${origin}/redirect302`));
-  const { text } = await bodyOf(resp);
-  return resp.status === 200 && !text.includes(origin) ? { ok: true } : { ok: false, note: "status " + resp.status };
+/* Auth: a server with password auth configured must refuse a keyless
+   v2 client during the handshake (close 0xc2). */
+const authEnv = bareEnv();
+authEnv.ZL_WISP_USER = "probe";
+authEnv.ZL_WISP_PASSWORD = "probe-pass";
+const authServer = await startServer(AUTH_PORT, authEnv);
+await check("auth-required-refusal", true, async () => {
+  try {
+    await awaitServer(AUTH_PORT, 3);
+    return { ok: false, note: "keyless session accepted; auth not enforced" };
+  } catch (e) {
+    return /AUTH_REQUIRED/.test(e.message)
+      ? { ok: true, note: "keyless v2 handshake refused with reason 0xc2" }
+      : { ok: false, note: "wrong refusal: " + e.message };
+  }
 });
+authServer.kill();
 
-await check("redirect-307", false, async () => {
-  const resp = await fetch(engine(`${origin}/redirect307`));
-  const { text } = await bodyOf(resp);
-  return resp.status === 200 && text.includes("stable-marker-7f3a") ? { ok: true } : { ok: false, note: "status " + resp.status };
-});
-
-await check("download-attachment", false, async () => {
-  const resp = await fetch(engine(`${origin}/download`));
-  const { bytes } = await bodyOf(resp);
-  const cd = resp.headers.get("content-disposition") ?? "(absent)";
-  return bytes.equals(MEDIA) ? { ok: true, note: "content-disposition: " + cd } : { ok: false, note: "bytes differ" };
-});
-
-await check("media-bytes", false, async () => {
-  const resp = await fetch(engine(`${origin}/media.bin`));
-  const { bytes } = await bodyOf(resp);
-  const ct = resp.headers.get("content-type") ?? "(absent)";
-  return bytes.equals(MEDIA) && ct.includes("video") ? { ok: true, note: ct } : { ok: false, note: "bytes/type differ" };
-});
-
-await check("error-404", false, async () => {
-  const resp = await fetch(engine(`${origin}/missing`));
-  return resp.status === 404 ? { ok: true } : { ok: false, note: "status " + resp.status };
-});
-
-await check("error-500", false, async () => {
-  const resp = await fetch(engine(`${origin}/boom`));
-  return resp.status === 500 ? { ok: true } : { ok: false, note: "status " + resp.status };
-});
-
-await check("set-cookie-header", false, async () => {
-  const resp = await fetch(engine(`${origin}/setcookie`));
-  const sc = resp.headers.get("set-cookie") ?? "(absent)";
-  return { ok: resp.status === 200, note: "server path set-cookie: " + sc };
-});
-
-/* Client-runtime capabilities: honestly not probeable over plain
-   HTTP. Listed so the scoreboard states coverage instead of
-   inventing a result. */
-for (const name of ["websocket-bridge", "worker-virtualization", "storage-virtualization", "cache-api", "client-cookie-jars", "spa-routing"]) {
-  caps.push({ name, gate: false, status: "client-runtime", note: "covered by app unit tests + session recording; not executable from an HTTP probe" });
+/* Client-runtime capabilities: honestly not observable from a node
+   probe (the wasm rewriters and the interception paths live in the
+   service worker). Listed so the scoreboard states coverage instead
+   of inventing a result; gated by the app unit suite + wasm job. */
+for (const name of [
+  "html-links",
+  "opaque-urls",
+  "css-urls",
+  "iframe-src",
+  "js-serve",
+  "fetch-reroute",
+  "websocket-bridge",
+  "worker-virtualization",
+  "storage-virtualization",
+  "cache-api",
+  "client-cookie-jars",
+  "spa-routing",
+]) {
+  caps.push({
+    name,
+    gate: false,
+    status: "client-runtime",
+    note: "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp",
+  });
 }
 
 server.close();
@@ -166,7 +271,8 @@ server.close();
 const gatedFails = caps.filter((c) => c.gate && c.status !== "pass");
 const scoreboard = {
   base: BASE,
-  fixture: origin,
+  transport: "wisp v2.1 over /wisp/",
+  fixture: `127.0.0.1:${fxPort}`,
   generated: new Date().toISOString(),
   summary: {
     pass: caps.filter((c) => c.status === "pass").length,
@@ -182,14 +288,15 @@ const md = [
   "# Zeolite capability scoreboard",
   "",
   `Generated: ${scoreboard.generated}`,
-  `Engine: ${BASE} - fixture: ${origin}`,
+  `Engine: ${BASE} - wisp v2.1 transport - fixture: ${scoreboard.fixture}`,
   "",
   "| capability | gate | status | notes |",
   "| --- | --- | --- | --- |",
   ...caps.map((c) => `| ${c.name} | ${c.gate ? "yes" : "report"} | ${c.status.toUpperCase()} | ${(c.note ?? "").replace(/\|/g, "/")} |`),
   "",
-  "Gated capabilities fail the nightly run; report-only ones surface reality without gating.",
-  "Client-runtime rows are honestly not probeable over plain HTTP (no browser in CI).",
+  "Gated capabilities fail the run; report-only ones surface reality without gating.",
+  "Client-runtime rows live in the SW/wasm client runtime (no browser in CI):",
+  "they are covered by the app unit suite and the wasm job, not probed here.",
   "",
 ].join("\n");
 writeFileSync("suite/capabilities.md", md);

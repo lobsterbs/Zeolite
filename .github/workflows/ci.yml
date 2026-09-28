@@ -203,7 +203,7 @@ jobs:
           cd /tmp/bundle
           git init -q -b dist .
           git config user.name "zeolite-ci"
-          git config user.email "ci@lobsterbrowse.invalid"
+          git config user.email "ci@zeolite.invalid"
           git add -A
           git commit -q -m "engine bundle: build ${GITHUB_RUN_ID}"
           git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/lobsterbs/Zeolite.git" HEAD:dist
@@ -293,7 +293,7 @@ jobs:
             exit 0
           fi
           git config user.name "zeolite-ci"
-          git config user.email "ci@lobsterbrowse.invalid"
+          git config user.email "ci@zeolite.invalid"
           git checkout --orphan scoreboard
           git rm -rf --quiet . || true
           cp suite/scoreboard.json suite/scoreboard.md suite/capabilities.json suite/capabilities.md . 2>/dev/null || cp suite/scoreboard.json .
