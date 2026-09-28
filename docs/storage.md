@@ -17,12 +17,15 @@ used since 1.0: `zl:<fnv1a36>:` derived from the target origin
   and stays per-tab here; the prefix isolates two sites inside one tab.
 
 - **IndexedDB**: `indexedDB.open(name)` and `deleteDatabase(name)` are
-  wrapped to open `zl:<site>:name` instead. `databases()` is
-  deliberately absent on the shim (an honest unimplemented API beats
-  wrapping it and risking a leak of engine-own database names); so is
-  `IDBFactory.cmp`. The engine's own databases (the extension
-  runtime's `idb` store, the cookie jar's `cookies` store) live in
-  the service worker context and are unreachable from pages.
+  wrapped to open `zl:<site>:name` instead. `IDBFactory.cmp` is wrapped
+  the same way (both arguments prefixed, so ordering stays consistent
+  inside the site scope; absent when the host factory lacks it, never
+  faked). `databases()` is deliberately absent on the shim (an honest
+  unimplemented API beats wrapping it and risking a leak of
+  engine-own database names). The engine's own databases (the
+  extension runtime's `idb` store, the cookie jar's `cookies` store,
+  the download registry's `downloads` store) live in the service
+  worker context and are unreachable from pages.
 
 - **Cache API**: `caches.open/delete/has` are prefixed the same way;
   `keys()` lists only the site's own caches, un-prefixed; `match()`
@@ -75,3 +78,4 @@ IndexedDB record (see docs/cookies.md). `zl:teardown` drops every
 cache the service worker owns (site-prefixed ones included) and
 unregisters the engine; storage keys and databases are left behind
 by design (session export is Phase 7 scope).
+

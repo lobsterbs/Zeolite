@@ -30,6 +30,17 @@ Content-Disposition, then the last path segment of the source URL, then
   the counting stream, which aborts the page's download and stops the
   upstream flow. Unknown or already-finished ids return `ok: false`.
 
+## Persistence (2.2 Arsenide)
+
+The ring persists to site-scoped IndexedDB (one record per source
+origin, the extension subsystem's idb helper, DB version 3): entries
+survive a service-worker restart. Writes are debounced and flush on
+lifecycle transitions (registered, done, error, cancelled). On load,
+an entry that was active when the worker died is honestly marked
+`error` with `interrupted: worker restarted`: no stream survives a
+restart. Entry ids stay unique across restarts (the sequence restarts
+past every restored id).
+
 ## Honest limits
 
 - Only `Content-Disposition: attachment` responses are classified as
@@ -37,7 +48,10 @@ Content-Disposition, then the last path segment of the source URL, then
   ordinary response; the browser may still save it, but Zeolite does
   not claim to track it.
 - Speed is a whole-lifetime average, not a rolling window.
-- The registry is in memory with a bounded ring (200 entries): it does
-  not survive a service-worker restart, and old entries are dropped,
-  not invented.
-- Resuming a partial download is not implemented; cancelling is.
+- The ring is bounded (200 entries): old entries are dropped, not
+  invented. Since 2.2 the ring persists across SW restarts; before
+  2.2 it was in memory only.
+- Resuming a partial download is not implemented; cancelling is. A
+  persisted `error/interrupted` entry is a record, not a resume
+  promise.
+

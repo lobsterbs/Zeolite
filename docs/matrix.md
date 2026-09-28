@@ -19,15 +19,15 @@ the test suite, not what would be nice to have. Statuses:
 | Wisp v2.1 transport | supported | All proxied traffic rides the same wisp hop; TLS terminates client-side in the vendored libcurl transport. |
 | Runtime WebSocket bridge | supported | Page WebSocket goes through the SW bridge to the transport; lifecycle + direction traced, payloads never recorded. |
 | ws:// WebSocket targets | not supported | Upgraded to wss:// by design before the transport sees the URL (traced). Plaintext WS never attempted. |
-| Virtual origins + per-origin cookie jars | partial | RFC 6265 parsing (Domain/Path/Secure/HttpOnly/SameSite), jar is the sole Cookie source for engine requests. Limits: SameSite is parsed but not enforced (no site context); Set-Cookie on intermediate redirect hops inside the transport is not captured. A 3xx surfaced by the transport has its Location mapped to an engine route so the follow cannot escape (issue #1 finding 1). |
+| Virtual origins + per-origin cookie jars | partial | RFC 6265 parsing (Domain/Path/Secure/HttpOnly/SameSite), jar is the sole Cookie source for engine requests. SameSite enforced only through the opt-in zl:sameSite knob (approximate site context from the request referrer). Set-Cookie on redirect hops is captured: the SW follows the hop chain itself (the transport surfaces 3xx) and captures every hop; a hop it cannot follow (307/308 with a stream body, 10-hop cap) is surfaced with its Location mapped to an engine route (issue #1 finding 1). |
 | document.cookie virtualization | partial | Per-origin, synced to the SW via a transferred port. Eventual consistency only: a cookie deleted directly by local JS is not detected (no local deletion signal). |
 | localStorage/sessionStorage scoping | supported | Scoped per virtual origin (same FNV1a36 id as cookie jars). |
-| IndexedDB virtualization | supported | Open/deleteDatabase names prefixed per virtual origin. databases() is absent by design (honest gap, see docs/storage.md). |
+| IndexedDB virtualization | supported | Open/deleteDatabase names prefixed per virtual origin; IDBFactory.cmp compares prefixed names (consistent ordering in-scope, absent when the host lacks it). databases() is absent by design (honest gap, see docs/storage.md). |
 | Cache API virtualization | supported | open/delete/has/keys/match scoped to the virtual origin; own-entries only. |
 | Worker virtualization | supported | Dedicated/shared workers get a prelude: importScripts routed through the engine, dedicated-worker WebSocket bridged over postMessage. |
 | Service-worker registration for proxied sites | not supported | Registrations are virtual records (swshim); no true SW script execution for proxied origins. |
-| Download registry | supported | Counting passthrough with filename detection (content-disposition/URL) and cancellation. |
-| Session export/import | supported | AES-256-GCM + PBKDF2-SHA256 (120k iterations, hand-rolled base64). No plaintext secrets ever at rest. |
+| Download registry | supported | Counting passthrough with filename detection (content-disposition/URL) and cancellation. Ring persists to site-scoped IndexedDB across SW restarts (2.2); active entries at restart are honestly marked interrupted. No resume. |
+| Session export/import | supported | AES-256-GCM + PBKDF2-SHA256 (120k iterations, hand-rolled base64). No plaintext secrets ever at rest. Import supports replace (default) and merge with per-cookie conflict rules (2.2). |
 | Fingerprinting resistance | partial | One consistent profile across navigator/screen/Date/Intl/canvas/WebGL, mirrored onto upstream headers. Limits: fixed-offset timezone, no DST simulation, Date toString zone text stays native, workers and OffscreenCanvas are not patched, default profile is a shared fixed fingerprint, not per-session randomness. |
 | Session recording + replay | supported | zlRecord artifacts; deterministic given identical rings; replay compares reachability, status class, unrewritten-URL absence, plus the recorded WebSocket lifecycle and cookie-jar-shape facts against the artifact contract (direction/kind/URL shape; names and scopes, never values). Bodies, headers, timings and WebSocket payloads are never recorded, so never compared. |
 | Opt-in rewrite tracing | supported | 512-decision ring, zero allocation while off. Token-level wasm decisions untraced. |
@@ -40,3 +40,4 @@ the test suite, not what would be nice to have. Statuses:
 Bounded by design: 256 network-log entries, 512 tracing decisions, 512
 diagnostic events, 512KB interception body cap (BODY_LIMIT in
 intercept.ts).
+

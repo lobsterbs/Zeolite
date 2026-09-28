@@ -31,8 +31,9 @@ of a response and admits each cookie with:
 - `Secure`: stored; secure cookies attach only to https requests.
 - `HttpOnly`: stored; there is no page-side cookie exposure to enforce
   it against yet.
-- `SameSite`: parsed and stored, never enforced (see limits). The spec
-  rule `SameSite=None` requires `Secure` is enforced as a hard gate.
+- `SameSite`: parsed and stored. Enforced only through the opt-in
+  policy knob (below). The spec rule `SameSite=None` requires `Secure`
+  is enforced as a hard gate regardless of the knob.
 - host-only cookies (no Domain attribute) attach only to the exact
   response host, never to subdomains.
 - `Max-Age` / `Expires`: `max-age<=0` or a past `Expires` deletes the
@@ -42,16 +43,56 @@ of a response and admits each cookie with:
 
 ## Request assembly
 
-`cookieHeaderFor(requestUrl)` returns the `Cookie` header value for a
-request: every cookie whose domain, path and Secure attributes match,
+`cookieHeaderFor(requestUrl, ctx?)` returns the `Cookie` header value for
+a request: every cookie whose domain, path and Secure attributes match,
 ordered by longest path first, then earliest creation. Null when
-nothing matches.
+nothing matches. The optional context carries the request initiator
+and whether it is a top-level navigation; it feeds the SameSite knob.
 
 The service worker attaches this as the final cookie write on every
 outgoing proxied request, and drops the browser's engine-origin
 `Cookie` header: engine-origin cookies never leak upstream, and rule
 or interceptor header modifications cannot leak another origin's
 cookies.
+
+## SameSite policy knob (2.2 Arsenide)
+
+`setSameSitePolicy` (control message `zl:sameSite { policy }`) turns
+SameSite enforcement on. Off by default. Under `"approx"`:
+
+- the cookie's effective policy is its attribute, `null` meaning lax
+  (the browser default);
+- `SameSite=None` always attaches (admission already required Secure);
+- the site context is the request initiator recovered from the
+  referrer: same-site (or unknown) initiator attaches everything;
+- cross-site initiator drops strict, and allows lax only on
+  top-level navigations.
+
+This is an approximation, honestly: every proxied request is
+engine-initiated, the engine only sees the referrer, and the
+site-for-cookies computation is the last-two-host-labels heuristic (no
+public-suffix list). Requests the SW follows across redirect hops keep
+the original initiator context.
+
+## Redirect hops (2.2 Arsenide)
+
+The transport's fetch adapter surfaces 3xx responses instead of
+following them, so the SW follows the hop chain itself: every hop's
+`Set-Cookie` is captured against the hop URL, 303 (and POST on
+301/302) continues as GET, and 307/308 replay the method. A hop whose
+one-shot stream body cannot replay, a hop past the cap (10), or a 3xx
+without a resolvable Location is surfaced to the page with its
+Location mapped to an engine route (its Set-Cookie is still captured).
+
+## Session import modes (2.2 Arsenide)
+
+`zl:importSession` accepts `mode: "replace"` (default, the 1.7
+behavior) or `mode: "merge"` with `rule: "import-wins" |
+"keep-existing" | "keep-newest"`. Merge mode adds imported cookies
+into the live jars; a conflict (same name + domain + hostOnly + path)
+is resolved by the rule, `keep-newest` comparing the `created`
+timestamps. Malformed records are dropped, never admitted. The reply
+carries honest counts: `{ jars, cookies, conflicts }`.
 
 ## Set-Cookie surgery
 
@@ -74,19 +115,19 @@ isolated by construction.
 
 The whole jar is one record in IndexedDB (service workers have no
 localStorage; the extension subsystem's idb helper is reused, DB
-version 2 adds the `cookies` store). Writes are debounced; the SW
-restores the jar on activate. `zl:teardown` clears it: cookies do not
-survive an engine switch.
+version 3 carries the `cookies` and `downloads` stores). Writes are
+debounced; the SW restores the jar on activate. `zl:teardown` clears
+it: cookies do not survive an engine switch.
 
 ## Honest limits
 
-- Redirects are followed inside the transport (`redirect: "follow"`),
-  so `Set-Cookie` headers on intermediate 3xx hops never surface to
-  the jar. The jar sees every request the engine initiates and every
-  final response; intermediate hops are handled by the transport's
-  own redirect logic.
-- SameSite is stored, not enforced: every proxied request is
-  engine-initiated and has no meaningful site-for-sites context.
+- Redirect hops are followed by the SW itself (the transport surfaces
+  3xx), so `Set-Cookie` on intermediate hops is captured (2.2). A hop
+  the SW cannot follow (307/308 with a one-shot stream body, or past
+  the 10-hop cap) is surfaced to the page with a mapped Location; its
+  `Set-Cookie` is captured before that.
+- SameSite is enforced only through the opt-in knob, and the site
+  context is an approximation (see the knob section).
 - `document.cookie` is not virtualized yet: page scripts read and
   write the engine-origin cookie store, not this jar. That is Phase
   5 (storage virtualization) scope.
@@ -97,6 +138,8 @@ survive an engine switch.
 
 ## Status
 
-Implemented (1.4 Boride). Tested in
+Implemented (1.4 Boride; SameSite knob, hop capture and merge-mode
+import added in 2.2 Arsenide). Tested in
 `app/src/__tests__/cookies.test.ts` (admission, matching, deletion,
-isolation, ordering, persistence).
+isolation, ordering, persistence, SameSite knob, merge mode).
+
