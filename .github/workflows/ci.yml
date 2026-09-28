@@ -160,22 +160,23 @@ jobs:
           echo "bootstrap.js: $SIZE bytes"
           if [ "$SIZE" -ge 5120 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 5120)"; exit 1; fi
       - name: Subpath-alias build gate (2.1 Halogen)
-        # LobsterBrowse embeds the dist bundle under /zlsw/. A frozen
-        # origin-root asset URL 404s there and every proxied document
-        # dies silently (commit 6e9d395 fixed exactly this). Build the
-        # bundle the way the embedder consumes it, then statically
-        # assert the SW resolves engine assets against its own script
-        # URL, never against an absolute path.
+        # LobsterBrowse serves the DEFAULT-base dist bundle under the
+        # /zlsw/ path. An asset URL frozen to the origin root 404s there
+        # and every proxied document dies silently (commit 6e9d395 fixed
+        # exactly this; a first attempt at this gate built with
+        # --base=/zlsw/, which legitimately produces /zlsw/-prefixed
+        # refs and false-fails). Statically assert the built SW
+        # references no origin-root engine-asset path and resolves
+        # against its own script URL.
         run: |
           cd app
-          npx vite build --base=/zlsw/ --outDir dist-subpath > subpath.out 2>&1 || { tail -30 subpath.out; exit 1; }
           PAT=$'["\']/(zlsw/)?(rewriter_wasm|wisp_wasm|prelude|libcurl)'
-          BAD=$(grep -nE "$PAT" dist-subpath/sw.js || true)
+          BAD=$(grep -oE ".{0,40}$PAT.{0,50}" dist/sw.js || true)
           if [ -n "$BAD" ]; then
-            echo "$BAD" | head -9 | while IFS= read -r l; do echo "::error::SUBPATH absolute asset URL in sw.js: $l"; done
+            echo "$BAD" | head -9 | while IFS= read -r l; do echo "::error::SUBPATH origin-root asset URL in sw.js: $l"; done
             exit 1
           fi
-          if ! grep -q 'location\.href' dist-subpath/sw.js; then
+          if ! grep -q 'location\.href' dist/sw.js; then
             echo "::error::SUBPATH sw.js never references location.href; asset resolution is not SW-relative"
             exit 1
           fi
