@@ -10,7 +10,7 @@
 //! as much rewritten output as it can and retains only the incomplete
 //! token tail for the next call.
 
-pub const VERSION: &str = "2.2 Arsenide";
+pub const VERSION: &str = "2.3 Selenide";
 
 pub mod config;
 pub mod encode;
