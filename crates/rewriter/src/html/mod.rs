@@ -742,7 +742,6 @@ mod tests {
             "no target-host binding: {}",
             out
         );
-    }
         assert!(
             !out.contains("https://chatgpt.com/zl/"),
             "no target-host binding: {}",
