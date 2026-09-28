@@ -5,247 +5,144 @@ one version milestone (see docs/versioning.md) and lands through CI
 (cargo fmt/clippy/test, wasm build, tsc, vite build, compat probes) before
 the next phase starts. No phase starts while the previous one is red.
 
-## Phase 0 — 1.0 Nitride (shipped)
+## Shipped: the 1.x/2.0 program
 
-Rename LobsterJet to Zeolite across crates, workspace, CI, app and docs;
-introduce the version system (docs/versioning.md) with the version
-indicator exposed in the rewriter crate, the service worker and the
-network log reply.
+The original 23-item program is complete. History, one line per release:
 
-Known follow-ups for this phase: the GitHub repository itself must be
-renamed to `Zeolite` in the org settings (GitHub redirects keep old URLs
-working); LobsterBrowse-side references to the old engine name are
-updated in the 1.1 adapter pass.
+- 1.0 Nitride: rename to Zeolite, version system (docs/versioning.md).
+- 1.1 Oxide: interception API, rules engine, header/response modification,
+  LobsterBrowse ad/tracker blocking migrated onto it.
+- 1.2 Halide: rewrite tracing ring (zl:tracing), DIAG diagnostics feed,
+  inspector detail view.
+- 1.3 Carbide: WebSocket over raw Wisp TCP streams, inspector rows,
+  connection cleanup.
+- 1.4 Boride: virtual origins + per-origin RFC 6265 cookie jars
+  (app/src/cookies.ts, docs/cookies.md).
+- 1.5 Silicide: storage virtualization (zl:<sitehash>: prefixing for
+  localStorage/sessionStorage/IndexedDB/Cache API), document.cookie
+  virtualization, blob:/data:/about: passthrough (docs/storage.md).
+- 1.6 Hydride: worker virtualization (worker-prelude.ts, classic workers,
+  dedicated-worker WS bridge), navigator.serviceWorker shim (docs in
+  phase notes).
+- 1.7 Sulfide: download registry (streamed, cancellable), encrypted
+  session export/import (AES-256-GCM + PBKDF2).
+- 1.8 Telluride: fingerprint profiles as data, deterministic document
+  init script, UA/Accept-Language mirroring (docs/fingerprint.md).
+- 1.9 Fullerene: capability scoreboard against a fixture origin
+  (suite/capabilities.mjs), deterministic session recording + replay
+  (zlRecord, suite/replay.mjs), nightly compat job.
+- 2.0 Graphene: docs matrix, security audit (docs/security.md),
+  performance audit (docs/performance.md), full regression pass.
 
-## Phase 1 — 1.1 Oxide: interception API + rules engine + modification (shipped)
+Post-2.0 stabilization commits (2026-09-27/28) fixed three bugs that
+broke every proxied request after the 2.0 push: dynamic import() on
+ServiceWorkerGlobalScope (now fetch + Function constructor), the module's
+own exported fetch shadowing globalThis.fetch in loadBundle, and
+wasm/worker-prelude asset URLs frozen to the origin root 404ing under the
+subpath alias. All verified live in the real service worker; each one
+escaped CI because no gate exercised the full SW load path. That gap is
+the first item of the new program.
 
-Prompts items 9, 10, 11.
+## New program: the 2.x line
 
-- Public interception API on the engine: `intercept("fetch" |
-  "websocket" | "navigation" | "worker" | "request" | "response")`
-  handlers that can inspect, block, rewrite URLs and modify headers
-  safely. Modular, documented, standalone (no LobsterBrowse deps).
-- Rules engine: block / allow / rewrite / modify lists plus
-  resource-type filters, as reusable data the engine compiles once.
-- LobsterBrowse's ad/tracker blocking migrates onto this system.
-- Streaming is preserved: header-only transforms by default; response
-  body transforms are opt-in with explicit size gates. Huge responses are
-  never buffered just to modify them.
+Each phase below closes honest limits the 1.x releases wrote down, or
+adds a gate that would have caught a shipped break. Same rules as
+before: one phase per release, CI green before the next, nothing claimed
+without a gate or test.
 
-## Phase 2 — 1.2 Halide: rewrite tracing + diagnostics + inspector depth (shipped)
+## Phase 11 - 2.1 Halogen: load-path gates + stale-worker defense
 
-Prompts items 5, 18, 4.
+The three network-failure bugs all shared one property: the code built,
+tested, and shipped green while the engine could not load a single page.
+This phase makes that class of failure loud.
 
-- Opt-in rewrite tracing: per-decision records (original value, result,
-  rule/subsystem, resource, timestamp) in a ring buffer in the service
-  worker, enabled by a `zl:tracing` message. Zero allocation when off.
-- DevTools diagnostics feed with concrete errors (SW registration
-  failed, cookie rejected, rewrite failed, worker failed, storage
-  unavailable, request blocked) including URL, subsystem, timestamp.
-- Inspector detail view per request: headers, request, response,
-  cookies, timing, initiator, raw data, and both the original target URL
-  and the internal Zeolite URL. WebSocket rows land with 1.3.
+- CI subpath-alias build variant: build the app bundle with the dist
+  assets aliased under a subpath (as LobsterBrowse's /zlsw/ does), then
+  statically assert every asset URL referenced by sw.js resolves
+  relative to self.location.href, not to the origin root. Gate fails on
+  any frozen absolute asset path.
+- SW-scope loading lint: forbid dynamic import() in any file reachable
+  from sw.ts (CI grep gate), since Chromium forbids it on
+  ServiceWorkerGlobalScope and the failure only shows at runtime.
+- Transport-init self-report: if the transport bundle or the rewriter
+  wasm fails to initialize, emit a DIAG event with the concrete error
+  before any request is attempted, and answer every zl:* control
+  message with a degraded-mode flag so devtools and the host can see a
+  dead engine instead of diagnosing 502s.
+- Version handshake: sw answers a zl:ping with its version string; the
+  devtools page warns when the installed worker version differs from
+  the served bundle version (the stale-worker failure mode users hit
+  after a dist republish).
 
-## Phase 3 — 1.3 Carbide: WebSocket (shipped)
+## Phase 12 - 2.2 Arsenide: cookie/session limit closure
 
-Prompt item 1. Runtime WebSocket over a raw Wisp TCP stream (TLS stays
-with the transport): open/message/error/close, send, binary frames,
-reconnecting apps, ws:// upgraded to wss://. Connections and messages
-are visible in the inspector; connection state is cleaned up on
-close/teardown to avoid leaks.
+Closes the honest limits recorded in 1.4/1.5/1.7.
 
-## Phase 4 — 1.4 Boride: virtual origins + cookies (shipped)
+- Set-Cookie capture on intermediate redirect hops followed inside the
+  transport, not only on final responses.
+- SameSite: parsed since 1.4 but never enforced. Add an opt-in policy
+  knob on the jar (off by default, honest about site-context
+  approximation for engine-initiated requests).
+- Session import currently replaces cookie jars wholesale; add a merge
+  mode with per-jar conflict rules.
+- Download registry: persist the ring to site-scoped IndexedDB so entries
+  survive a SW restart; keep no-resume honest until resume is actually
+  built.
+- Wrap IDBFactory.cmp in the storage partition.
 
-Prompt item 2. Virtual-origin registry mapping each target origin to
-its Zeolite-internal representation; per-origin cookie jars with Domain,
-Path, Secure, SameSite, expiration/max-age, host-only and deletion
-semantics; Set-Cookie surgery in the rewriter emit; redirects re-bind
-cookies correctly. Isolation between target origins is a hard gate.
+## Phase 13 - 2.3 Selenide: worker virtualization completion
 
-Shipped as the 1.4 release: the registry and jars live in `app/src/cookies.ts`
-(RFC 6265 admission, Set-Cookie capture before hostile-header surgery,
-jar-as-Cookie-source on every engine request, IndexedDB persistence;
-see docs/cookies.md). Honest limits: Set-Cookie on intermediate redirect
-hops followed inside the transport is not captured (only final responses
-are), SameSite is parsed but not enforced (engine-initiated requests
-have no site context), and document.cookie virtualization is Phase 5
-scope.
+Closes the 1.6/1.8 limits.
 
-## Phase 5 — 1.5 Silicide: storage virtualization + blob/data URLs (shipped)
+- Module workers get the prelude treatment (route import specifiers in
+  the prelude, not only via rewriter passes).
+- SharedWorker WebSocket through the engine bridge (single relay parent
+  rule stays: the engine is the relay, not a page).
+- Fingerprint patches for workers and OffscreenCanvas (currently
+  documents only).
+- Keep the honest boundary: no virtual SW script is ever fetched or
+  executed; the engine owns the only real scope.
 
-Prompts items 3, 8. Per-origin localStorage/sessionStorage/IndexedDB
-partitioning (extending the existing `zl:<sitehash>:` scheme), Cache API
-partitioning where practical, and correct blob:/data:/about: handling
-(createObjectURL, blob workers, blob media, generated downloads) with
-regression tests.
+## Phase 14 - 2.4 Bromide: rewriter parity + server-side streaming
 
-Shipped as the 1.5 release: localStorage/sessionStorage are scoped by
-the existing `zl:<sitehash>:` key prefix in the bootstrap; IndexedDB
-names and Cache API names are prefixed the same way (open, delete,
-databases, has, keys, match are wrapped, so a proxied site only ever
-sees its own databases and caches); document.cookie is virtualized
-through the `zl:docCookie` control message against the 1.4 jar (the
-page keeps an eventually-consistent cache because the getter is
-synchronous); blob:/data:/about: pass through the fetch handler
-untouched (see docs/storage.md). Honest limits: document.cookie reads
-are eventually consistent (the local cache is corrected by the
-authoritative jar reply), Expires-based deletion is not detected
-optimistically in the page, and IDBFactory.cmp is not wrapped.
+- Port LobsterBrowse's js_antiframe pass into the wasm rewriter (known
+  parity gap since the split).
+- CSS stream size gate: stream large CSS without injecting the
+  window.__ZL init script for non-document CSS responses.
+- zeolite-server: arena reuse for the streaming rewrite paths; keep
+  time-to-first-paint the primary metric, measured in the CI artifacts.
 
-## Phase 6 — 1.6 Hydride: worker + service worker virtualization (shipped)
+## Phase 15 - 2.5 Iodide: scoreboard expansion + real-site probes
 
-Prompts items 6, 7. Classic and module workers wrapped with the runtime
-(importScripts, module imports, fetch, WebSocket keep working through
-the engine); SharedWorker where practical. navigator.serviceWorker
-shim (register/getRegistration(s)/unregister/update, installing/
-waiting/active/controller states) with per-origin isolation. Browser
-security limits (the engine origin owns the real SW scope) are
-documented, not hacked around.
+- Promote report-only scoreboard rows to gated as they become
+  CI-verifiable; never invent percentages.
+- A periodic (not per-push) probe pass against a small list of real
+  destinations through a real zeolite-server, results committed as
+  structured JSON only; failures open issues, they do not gate merges
+  (flaky external targets must not break CI).
+- Extend replay comparisons to WebSocket lifecycle and cookie jar shape
+  (both already recorded; never payloads or values).
 
-Shipped as the 1.6 release: classic worker scripts served by the engine
-get a prelude (app/src/worker-prelude.ts) prepended by the SW, with the
-live route prefix and upstream worker URL baked into the injected first
-line: importScripts() arguments are routed through the engine codec,
-and dedicated-worker WebSocket is bridged over postMessage to the
-parent page, which relays to the existing zl:wsOpen seam (streaming
-preserved: the prelude is one extra first chunk). navigator.serviceWorker
-is virtualized per origin (app/src/swshim.ts + bootstrap wiring):
-registrations are records in the site-scoped storage with an
-installing -> activated state machine, and register/getRegistration(s)/
-unregister/update/ready are shape-compatible. Honest limits: no virtual
-SW script is ever fetched or executed (the engine owns the only real
-scope - browser security, documented not hacked), controller stays the
-engine's real worker, SharedWorker WebSocket stays native (no single
-parent page), and module workers rely on the rewriter's specifier
-passes instead of the prelude.
+## Phase 16 - 3.0 Diamond: hardening release
 
-## Phase 7 — 1.7 Sulfide: downloads + session export (shipped)
-
-Prompts items 12, 13. Download manager fed by engine network info:
-filename, MIME, size, progress, speed, source, status, errors,
-cancellation; streamed to disk, never fully buffered. Encrypted session
-export/import (cookies, storage, IndexedDB, tabs) in a format clearly
-separate from engine configuration; no plaintext secrets.
-
-Shipped as the 1.7 release: attachment responses (Content-Disposition:
-attachment) are tracked by a download registry (app/src/downloads.ts):
-the body stays a stream through a counting passthrough, so the browser
-writes the file to disk exactly as the native flow would and nothing is
-buffered whole; entries carry filename (RFC 6266/URL fallback), MIME,
-size, received bytes, whole-lifetime speed, source, status and error,
-and are cancellable by id (zl:downloads / zl:cancelDownload). Session
-export is one encrypted envelope (app/src/session.ts):
-AES-256-GCM with a PBKDF2-SHA256-derived key (120k iterations, fresh
-salt/iv per export, GCM tag detects tampering); the payload is cookies
-(jars) + tabs + caller-supplied extras, and exists only as ciphertext
-in the blob (zl:exportSession / zl:importSession). Honest limits: only
-Content-Disposition: attachment responses are classified as downloads,
-the registry is in memory (bounded ring, no restart survival, no
-resume), speed is a lifetime average, localStorage/sessionStorage and
-site-scoped IndexedDB are invisible to the service worker (the host
-supplies them in the export `extra` if it wants them to travel), and
-import replaces cookie jars wholesale without merging.
-
-## Phase 8 — 1.8 Telluride: fingerprinting resistance (shipped)
-
-Prompt item 14. One internally-consistent config object drives
-userAgent, platform, screen, timezone, language, hardwareConcurrency,
-deviceMemory, canvas and WebGL surfaces. Configurable by the host app;
-no per-session randomization, no contradictory values.
-
-Shipped as the 1.8 release: app/src/fingerprint.ts defines the
-FingerprintProfile as data - resolveProfile derives what the host
-omitted (platform from the UA) and refuses contradictory values
-instead of merging them - and compiles it (fingerprintScript) into a
-deterministic document init script: navigator (userAgent, appVersion,
-platform, language(s), hardwareConcurrency, deviceMemory),
-window.screen, a fixed-offset timezone (getTimezoneOffset, local Date
-getters, Intl.DateTimeFormat zone), canvas (toDataURL/toBlob/
-getImageData deterministically perturbed from a profile-seeded hash)
-and WebGL UNMASKED_VENDOR/RENDERER. The service worker prepends the
-compiled script to the window.__ZL first chunk of every rewritten
-document and mirrors the profile User-Agent and Accept-Language onto
-engine-initiated upstream requests (zl:fingerprint {profile} /
-{profile: null}). Honest limits: fixed offset, no DST simulation,
-Date toString zone text stays native, workers and OffscreenCanvas are
-not patched (documents only), timezoneName/utcOffsetMin consistency is
-the host's job (no tz database in the engine), and the default
-profile is deliberately a shared fixed fingerprint, not per-session
-randomness.
-
-## Phase 9 — 1.9 Fullerene: compat suite + scoreboard + recording/replay (shipped)
-
-Prompts items 15, 16, 17. Expand the probe suite to real browser
-behavior (HTML/CSS/JS, fetch, XHR, WebSocket, workers, storage, cookies,
-Cache API, redirects, SPA routing, iframes, blob/data, downloads, media,
-error handling). Structured JSON results and a per-capability
-scoreboard, no invented percentages. Deterministic recording of
-navigations, requests, responses, rewrite decisions, cookies and
-WebSocket messages, with a replay harness for regression testing engine
-changes against recorded sessions.
-
-Shipped as: a per-capability scoreboard (suite/capabilities.mjs) that
-runs against a deterministic local fixture origin (suite/fixtures.mjs)
-through the real engine path, writing structured JSON + Markdown
-(suite/capabilities.json/.md). Only proven-safe capabilities are gated
-(html-links, opaque-urls, js-serve, fetch-get, fetch-post); everything
-else is report-only so the scoreboard surfaces reality instead of
-pretending. Client-runtime rows (WebSocket bridge, workers, storage,
-Cache API, client cookies, SPA routing) are honestly marked
-client-runtime: a plain HTTP probe cannot execute page JavaScript, so
-they stay covered by the app unit suite. Deterministic session
-recording (app/src/recording.ts, zl:recordStart/zl:recordStop control
-messages) builds zlRecord artifacts: requests from the network ring,
-rewrite decisions from the tracing ring (tracing is force-enabled
-while recording), WebSocket lifecycle events (direction only, never
-payloads) and the cookie jar shape (names/scopes only, never values;
-URLs are secret-redacted). The replay harness (suite/replay.mjs)
-re-issues recorded destination URLs through the engine and compares
-the stable facts only: reachability, status class and unrewritten-URL
-absence. Bodies, headers and timings were never recorded and are
-honestly not compared. The checked-in fixture session
-(suite/sessions/fixture.session.json) uses a %FIXTURE% token so replay
-stays port-independent. The nightly compat job runs the scoreboard and
-replay; reaching the loopback fixture origin requires the explicit
-test-only ZL_TEST_ALLOW_PRIVATE_DESTS=1 policy escape hatch, and the
-default SSRF policy stays fully locked down.
-
-## Phase 10 — 2.0 Graphene: documentation + final hardening (shipped)
-
-Prompts items 22, 23. Docs rewritten to describe actual behavior with
-a per-feature support/limitation matrix (no claims beyond reality), full
-regression pass, performance audit (streaming preserved, long-running
-WebSocket memory, listener/worker cleanup) and security audit (origin,
-cookie and storage isolation, CSP, header injection, SSRF, open
-redirects).
-
-Shipped as: docs/matrix.md (every 1.x feature rated supported /
-partial / not supported with its real limits, nothing claimed beyond
-the code), docs/security.md (the SSRF policy's two-stage checks, the
-deliberate hostile-header surgery tradeoff, cookie/storage isolation,
-secrets handling, and the honestly open items: SameSite enforcement,
-host-side CSP responsibility, the test policy hatch) and
-docs/performance.md (measured bundle sizes from CI, the fixed-size
-rings, streaming preservation, cleanup paths, and suite wall-time
-facts). The regression pass is the CI suite itself: 28 vitest files
-(12 app unit + 16 extension runtime), tsc clean, cargo test/clippy
-clean, wasm builds, bootstrap 5093 bytes under the 5120 gate, all
-green on the 2.0 commit. The release is a major (cargo 2.0.0): the
-version identity moves to the Graphene family for the 2.x line; no
-API is removed in this release, the major marks the closing of the
-roadmap rather than a breaking change.
+- Full security re-audit against docs/security.md with the new surface
+  (redirect-hop cookies, SharedWorker bridge, merge-mode import).
+- Performance re-audit: bundle sizes, bootstrap under the 5120 gate,
+  memory of long-running WS + worker sessions.
+- Docs matrix refresh: every row re-rated against the code, limits
+  rewritten where 2.x closed them.
+- API freeze for the 3.x line; 3.0 marks the closing of this roadmap.
 
 ## Cross-cutting gates (every phase)
 
-- Architecture (item 19): LobsterBrowse -> Zeolite public API ->
-  Zeolite runtime -> rewrite/interception -> transport -> target. The
-  engine never depends on LobsterBrowse UI code; anything reusable
-  lives in the engine.
-- Performance (item 20): streaming always, tracing and verbose logging
-  opt-in, no duplicated response bodies, cleanup of listeners, workers
-  and WebSocket state.
-- Security (item 21): origin/cookie/storage isolation, no open proxy,
-  no XSS/CSP weakening, URL validation, header-injection and SSRF
-  guards.
-- No fake implementations (item 15 spirit): every feature either works
-  and is tested, or is documented as limited. Nothing pretends.
+- Architecture: LobsterBrowse -> Zeolite public API -> Zeolite runtime ->
+  rewrite/interception -> transport -> target. The engine never depends
+  on host UI code.
+- Performance: streaming always, tracing and verbose logging opt-in,
+  no duplicated response bodies, cleanup of listeners, workers and
+  WebSocket state.
+- Security: origin/cookie/storage isolation, no open proxy, no
+  XSS/CSP weakening, URL validation, header-injection and SSRF guards.
+- Honesty: every feature either works and is tested, or is documented
+  as limited. Nothing pretends. No phase ships while a known
+  page-load-breaking regression is open.
