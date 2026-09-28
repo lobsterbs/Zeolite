@@ -181,7 +181,7 @@ function siteKeys(store: Storage): string[] {
  );
  keep.push(name + "=" + val);
  cur = keep.join("; ");
- sy(s);
+ sy(v);
  },
  });
  sy();
