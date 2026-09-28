@@ -39,14 +39,14 @@ describe("unwrapDest", () => {
     expect(unwrapDest(wrapped)).toBe("https://target.dev/page#anchor");
   });
 
-  it("stops at the last decodable layer on a corrupt tail", () => {
-    const inner = "https://example.com" + encodeDest("https://real.dev/x");
-    // Second layer has a bad base64 tail: decodePath of that layer yields
-    // null, so unwrapDest returns the layer above instead of throwing.
-    const bad = "https://example.com/j/aGVsbG8~~~~~~";
-    const oneLayer = "https://example.com" + encodeDest(inner);
-    expect(unwrapDest(oneLayer)).toBe(inner);
-    expect(unwrapDest(bad)).toBe("https://example.com/j/aGVsbG8~~~~~~");
+  it("stops at the last decodable layer", () => {
+    // A layer that decodes to something that is not an http(s) URL stops
+    // the peel: the decoded value is returned as the final destination.
+    const bad = "https://example.com" + encodeDest("hello");
+    expect(unwrapDest(bad)).toBe("hello");
+    // A layer whose base64 tail cannot decode at all is left unchanged.
+    const undecodable = "https://example.com/j/aGVsbG8~~~~~~";
+    expect(unwrapDest(undecodable)).toBe(undecodable);
   });
 
   it("returns non-http input unchanged", () => {
