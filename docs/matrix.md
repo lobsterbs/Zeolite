@@ -14,10 +14,12 @@ the test suite, not what would be nice to have. Statuses:
 | Streaming CSS rewriting | supported | url() references rewritten; same streaming path. |
 | JS rewriting | partial | Rust/WASM JsRewriter exists and runs, but token-level rewriter decisions are not surfaced to tracing (documented tracing limit). |
 | Opaque URL passthrough | supported | blob:/data: hrefs are never rewritten; isOpaqueUrl guards the fetch path. |
+| Nested-route unwrap at decode | supported | A decoded destination that is itself an engine route (any host binding, stale double-wrap from old dists) is peeled to the innermost destination (bounded 8 layers) before transport. |
+| Escaped same-origin fetch reroute | partial | Same-origin non-asset requests from a rewritten page are rerouted against the origin recovered from the request referrer (issue #1 finding 3). No decodable referrer = passthrough; request bodies of escaped fetches are rerouted, so genuinely engine-local paths a page invents cannot be recovered. |
 | Wisp v2.1 transport | supported | All proxied traffic rides the same wisp hop; TLS terminates client-side in the vendored libcurl transport. |
 | Runtime WebSocket bridge | supported | Page WebSocket goes through the SW bridge to the transport; lifecycle + direction traced, payloads never recorded. |
 | ws:// WebSocket targets | not supported | Upgraded to wss:// by design before the transport sees the URL (traced). Plaintext WS never attempted. |
-| Virtual origins + per-origin cookie jars | partial | RFC 6265 parsing (Domain/Path/Secure/HttpOnly/SameSite), jar is the sole Cookie source for engine requests. Limits: SameSite is parsed but not enforced (no site context); Set-Cookie on intermediate redirect hops inside the transport is not captured. |
+| Virtual origins + per-origin cookie jars | partial | RFC 6265 parsing (Domain/Path/Secure/HttpOnly/SameSite), jar is the sole Cookie source for engine requests. Limits: SameSite is parsed but not enforced (no site context); Set-Cookie on intermediate redirect hops inside the transport is not captured. A 3xx surfaced by the transport has its Location mapped to an engine route so the follow cannot escape (issue #1 finding 1). |
 | document.cookie virtualization | partial | Per-origin, synced to the SW via a transferred port. Eventual consistency only: a cookie deleted directly by local JS is not detected (no local deletion signal). |
 | localStorage/sessionStorage scoping | supported | Scoped per virtual origin (same FNV1a36 id as cookie jars). |
 | IndexedDB virtualization | supported | Open/deleteDatabase names prefixed per virtual origin. databases() is absent by design (honest gap, see docs/storage.md). |
