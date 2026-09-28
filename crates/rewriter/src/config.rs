@@ -71,15 +71,15 @@ impl RewriteConfig {
     /// host bindings, so recognition accepts three forms: engine-origin-
     /// absolute, root-relative, and any-host path-prefixed. Iterative:
     /// a decoded layer that is itself a route is peeled again (bounded).
-    /// Returns None when the URL is not a decodable route of this codec.
+    /// Never returns None: a URL whose tail does not decode is itself
+    /// the final destination and is returned unchanged.
     pub fn unwrap_engine_route(&self, url: &str) -> Option<String> {
         let mut current = url.to_string();
         for _ in 0..8 {
-            let next = self.decode_engine_route(&current)?;
-            if next == current {
-                return Some(current);
+            match self.decode_engine_route(&current) {
+                Some(next) if next != current => current = next,
+                _ => return Some(current),
             }
-            current = next;
         }
         Some(current)
     }
@@ -89,22 +89,20 @@ impl RewriteConfig {
     /// ("https://target/zl/<b64>", the form the double-wrap loop
     /// produces). None when the URL carries no decodable route layer.
     pub fn decode_engine_route(&self, url: &str) -> Option<String> {
-        // Any-host form: scheme://host/prefix/<b64...>. The path must
-        // start with the codec prefix; a coincidental same-named path
-        // that does not decode to http(s) stays a normal URL.
-        let candidate = if let Some(i) = url.find("://") {
+        // Engine-origin-absolute routes strip the origin; any-host routes
+        // (https://target/zl/<b64>) drop their scheme://host authority
+        // and keep the path; root-relative routes are already local.
+        // Whatever remains must start with the codec prefix: a
+        // coincidental same-named path that does not decode stays a
+        // normal URL (None).
+        let local = if let Some(stripped) = url.strip_prefix(&self.origin) {
+            stripped
+        } else if let Some(i) = url.find("://") {
             let rest = &url[i + 3..];
             let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-            url.get(..(url.len() - rest.len() + end))?.to_string()
+            url.get(i + 3 + end..)?
         } else {
-            url.to_string()
-        };
-        let local = if self.origin.is_empty() {
-            candidate.as_str()
-        } else {
-            candidate
-                .strip_prefix(&self.origin)
-                .unwrap_or(candidate.as_str())
+            url
         };
         let rest = match &self.codec {
             Codec::Base64Url { prefix } => local.strip_prefix(prefix.as_str())?,
