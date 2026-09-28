@@ -107,3 +107,81 @@ export function isOpaqueUrl(u: URL): boolean {
 export function isWorkerDestination(d: string): boolean {
   return d === "worker" || d === "sharedworker";
 }
+
+/** Same-origin paths the engine serves itself and must never route or
+    reroute (finding 3: the referrer fallback must not capture them).
+    Mirrors the dist path gate in app/scripts/check-dist-paths.mjs. */
+export function isEngineAsset(path: string): boolean {
+  switch (path) {
+    case "/sw.js":
+    case "/bootstrap.js":
+    case "/prelude.js":
+    case "/worker-prelude.js":
+    case "/devtools.html":
+    case "/devtools.js":
+    case "/index.html":
+    case "/rewriter_wasm.js":
+    case "/rewriter_wasm_bg.wasm":
+    case "/wisp_wasm.js":
+    case "/wisp_wasm_bg.wasm":
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** Peel nested engine routes: older dists rewrapped bound routes on
+    every rewrite pass, so a decoded destination can itself be an
+    engine route on any host (the live Google 404 chain was 4+ layers
+    deep). Iterates until the current value stops looking like an
+    engine route, bounded to 8 hops. Non-route input is returned
+    unchanged; undecodable tail routes return the last decodable
+    value, never null. Mirrors unwrap_engine_route in config.rs. */
+export function unwrapDest(dest: string): string {
+  let cur = dest;
+  for (let hop = 0; hop < 8; hop++) {
+    if (!/^https?:\/\//.test(cur)) return cur;
+    let u: URL;
+    try {
+      u = new URL(cur);
+    } catch {
+      return cur;
+    }
+    if (!isEnginePath(u.pathname)) return cur;
+    const inner = decodePath(u.pathname);
+    if (!inner || inner === cur) return cur;
+    cur = inner;
+  }
+  return cur;
+}
+
+/** Recover the real home of an escaped same-origin fetch (finding 3).
+    A rewritten page is served from an engine route; a fetch that
+    escapes to the engine origin (relative URL the page could not know
+    was wrong) is rerouted against the origin of the page's own
+    destination, recovered from the request referrer. Returns the
+    recovered absolute URL, or null when the referrer is not a decodable
+    engine route. */
+export function referrerDest(referrer: string, path: string): string | null {
+  let ref: URL;
+  try {
+    ref = new URL(referrer);
+  } catch {
+    return null;
+  }
+  if (!isEnginePath(ref.pathname)) return null;
+  const pageDest = decodePath(ref.pathname);
+  if (!pageDest) return null;
+  let home: URL;
+  try {
+    home = new URL(pageDest);
+  } catch {
+    return null;
+  }
+  if (home.protocol !== "http:" && home.protocol !== "https:") return null;
+  try {
+    return new URL(path, home.origin).href;
+  } catch {
+    return null;
+  }
+}

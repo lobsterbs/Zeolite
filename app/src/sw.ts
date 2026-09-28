@@ -29,7 +29,7 @@
    wasm-pack build --target web -> copy into app/src/rewriter_wasm). */
 
 /// <reference lib="webworker" />
-import { decodePath, isEnginePath, isOpaqueUrl, isWorkerDestination, setScheme, currentPrefix } from "./codec";
+import { decodePath, encodeDest, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setScheme, unwrapDest, currentPrefix } from "./codec";
 import { decideTransport, refineWithContent, transitRecord, transitStats } from "./transit";
 import { ZL_WISP_URL } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
@@ -84,10 +84,27 @@ declare const self: ServiceWorkerGlobalScope;
    preload helper. Until the CI vendoring step runs, calls throw and
    the suite records transport-missing. */
 
+/* Finding 5 (SW half): when a core engine component fails to
+   initialize, record it once so zl:ping can report the degraded
+   state instead of a bare ok:true that hides the failure. Null =
+   fully operational. */
+let engineDegraded: string | null = null;
+
 let curlReady: Promise<void> | null = null;
 async function ensureCurl(): Promise<void> {
   if (!curlReady) {
-    curlReady = zlCurlInit({ websocket: ZL_WISP_URL });
+    curlReady = zlCurlInit({ websocket: ZL_WISP_URL }).catch((err) => {
+      engineDegraded = "libcurl transport: " + String(err);
+      curlReady = null; // allow retry on next request
+      DIAG.emit({
+        category: "TRANSPORT",
+        severity: "error",
+        message: "libcurl transport init failed",
+        technicalReason: String(err),
+        url: ZL_WISP_URL,
+      });
+      throw err;
+    });
   }
   return curlReady;
 }
@@ -148,7 +165,17 @@ function rewriter(): Promise<RewriterMod> {
         await mod.default(new URL("rewriter_wasm_bg.wasm", self.location.href));
       }
       return mod;
-    })();
+    })().catch((err) => {
+      engineDegraded = "rewriter wasm: " + String(err);
+      rewriterMod = null; // allow retry on next response
+      DIAG.emit({
+        category: "REWRITE",
+        severity: "error",
+        message: "rewriter wasm init failed",
+        technicalReason: String(err),
+      });
+      throw err;
+    });
   }
   return rewriterMod;
 }
@@ -671,12 +698,29 @@ self.addEventListener("fetch", (e: FetchEvent) => {
     );
     return;
   }
-  if (!isEnginePath(url.pathname)) return; // engine asset: passthrough
-
-  const dest0 = decodePath(url.pathname);
-  if (!dest0) {
-    e.respondWith(new Response("zeolite: bad route", { status: 404 }));
-    return;
+  /* Route computation. Two shapes reach the engine origin:
+     - engine routes (isEnginePath): decode, then unwrap nested routes
+       (the rewriter used to rewrap bound routes per pass, and older
+       dists still emit /zl/<b64> chains bound to the target host).
+     - everything else: engine assets pass through; other same-origin
+       paths are escaped fetches from a rewritten page (finding 3):
+       reroute them against the origin of the serving page, recovered
+       from the request referrer. No decodable referrer: passthrough. */
+  let dest0: string | null;
+  if (isEnginePath(url.pathname)) {
+    const raw = decodePath(url.pathname);
+    if (!raw) {
+      e.respondWith(new Response("zeolite: bad route", { status: 404 }));
+      return;
+    }
+    dest0 = unwrapDest(raw);
+  } else {
+    if (isEngineAsset(url.pathname)) return; // engine asset: passthrough
+    const refDest = e.request.referrer
+      ? referrerDest(e.request.referrer, url.pathname + url.search)
+      : null;
+    if (!refDest) return; // unknown same-origin path: passthrough
+    dest0 = refDest;
   }
   // Fragments are client-side only. The rewriter keeps them out of the
   // encoded target, but older bundles or hand-built routes may carry
@@ -925,6 +969,21 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         const rHeaders = WEBREQ.headersReceived(wrDetails, resp.status, headers);
         const outHeaders = rHeaders ?? headers;
         outHeaders.set("x-zl-proxy", "1");
+        /* Finding 1: when a transport surfaces a 3xx instead of following
+           it, the Location header is target-host-absolute and would escape
+           the engine (the browser then 404s on the target host). Map it
+           to an engine route so the follow stays inside the engine. The
+           hop's Set-Cookie was already captured above. */
+        if (resp.status >= 300 && resp.status < 400) {
+          const loc = outHeaders.get("location");
+          if (loc) {
+            try {
+              outHeaders.set("location", encodeDest(new URL(loc, finalDest ?? target).href));
+            } catch {
+              /* unreachable/relative Location: leave as-is */
+            }
+          }
+        }
         void applyOnResponse(plugins, target, resp.status, outHeaders);
         const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "");
         traceDecision({ subsystem: "transport", rule: dec.mode, original: target, result: dec.fallbackReason ?? dec.mode, resource: rtype, traceId });
@@ -1172,7 +1231,7 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
 
   switch (msg?.type) {
     case "zl:ping":
-      reply({ ok: true });
+      reply({ ok: true, version: ZEOLITE_VERSION, degraded: engineDegraded });
       break;
     case "zl:config":
       // Rotate the URL shape at runtime.
