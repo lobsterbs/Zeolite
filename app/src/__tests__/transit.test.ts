@@ -87,11 +87,14 @@ describe("transitRecord", () => {
     expect(s.fallbacks.length).toBeLessThanOrEqual(64);
     expect(s.fallbacks[s.fallbacks.length - 1].url).toBe("https://a.com/79");
   });
-  it("fallback emits a diag event (never silent)", async () => {
+  it("fallback decisions are network entries, not diag failures", async () => {
     const { DIAG } = await import("../diag");
     const before = DIAG.snapshot(0).events.length;
     transitRecord("t9", "https://a.com/", { mode: "RewriteFallback", fallbackReason: "CSS_URL_REWRITE_REQUIRED" });
-    const evs = DIAG.snapshot(0).events.slice(before);
-    expect(evs.some((e) => e.stage === "TRANSPORT_FALLBACK" && e.url === "https://a.com/")).toBe(true);
+    expect(DIAG.snapshot(0).events.length).toBe(before);
+    const s = transitStats();
+    expect(s.fallback).toBe(1);
+    expect(s.fallbacks[0].url).toBe("https://a.com/");
+    expect(s.fallbacks[0].reason).toBe("CSS_URL_REWRITE_REQUIRED");
   });
 });

@@ -11,8 +11,6 @@
    machine-readable reason. This module classifies and records only:
    no second network stack, no second cookie store. */
 
-import { DIAG } from "./diag";
-
 export type TransportMode = "NativeTransit" | "RewriteFallback";
 
 export type FallbackReason =
@@ -85,8 +83,13 @@ let nativeCount = 0;
 let fallbackCount = 0;
 const fallbacks: FallbackEvent[] = [];
 
-/** Record one request's final transport decision. Fallbacks are never
-    silent: each lands in the diag ring with its reason. */
+/** Record one request's final transport decision. A fallback decision
+    is expected-path network data, not a load failure: it lands in the
+    counters + fallback ring that zl:getNetLog serves, never in the
+    diag failure channel (issue #1 finding 5: hosts surfaced successful
+    CSS fallbacks as resfail entries while the CSS visibly loaded).
+    Genuine rewrite failures emit their own REWRITE diag events at the
+    rewrite site; the decision itself is not a failure. */
 export function transitRecord(traceId: string, url: string, dec: TransitDecision): void {
   if (dec.mode === "NativeTransit") {
     nativeCount++;
@@ -96,11 +99,6 @@ export function transitRecord(traceId: string, url: string, dec: TransitDecision
   const reason = dec.fallbackReason ?? "DOCUMENT_REWRITE_REQUIRED";
   fallbacks.push({ ts: Date.now(), url, reason, traceId });
   if (fallbacks.length > FALLBACK_LIMIT) fallbacks.shift();
-  DIAG.stage(traceId, "TRANSPORT_FALLBACK", {
-    url,
-    message: "rewrite fallback: " + reason,
-    category: "UNSUPPORTED",
-  });
 }
 
 /** Counters + recent fallbacks for zl:getNetLog consumers. */
