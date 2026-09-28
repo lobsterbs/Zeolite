@@ -361,7 +361,7 @@ mod tests {
             (
                 "HtTp://User:Pw@EXAMPLE.com:8080/PaTh",
                 b,
-                "http://user:pw@example.com:8080/PaTh",
+                "http://User:Pw@example.com:8080/PaTh",
             ),
             // Percent-sequences pass through untouched.
             ("a%20b.png", b, "https://example.com/a/b/a%20b.png"),
