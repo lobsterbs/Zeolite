@@ -1,0 +1,17 @@
+name: Mirror to GitLab
+
+on:
+  push:
+  create:
+  delete:
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push mirror to GitLab
+        run: |
+          git clone --mirror https://github.com/lobsterbs/Zeolite.git repo.git
+          cd repo.git
+          git push --mirror "https://oauth2:${{ secrets.GITLAB_PAT }}@gitlab.com/lobsterbs/Zeolite.git"
