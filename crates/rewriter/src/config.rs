@@ -61,19 +61,49 @@ impl RewriteConfig {
         }
     }
 
-    /// Decode an already-encoded engine route back to its destination:
-    /// root-relative ("/zl/<b64>") or engine-origin-absolute forms,
-    /// with optional query/fragment tail. None when the URL is not a
-    /// decodable route of this codec. The rewrite passes use this to
-    /// keep already-routed URLs untouched: re-encoding a route first
-    /// resolves it against the TARGET base, binding it to the target
-    /// host and nesting one more encoded layer per pass (the
-    /// double-wrap loop, issue #1 finding 4).
+    /// Recognize an already-encoded engine route and return the
+    /// INNERMOST destination it encodes, peeling every layer.
+    ///
+    /// Issue #1 finding 4 (live on google.com): a route can be bound to
+    /// the TARGET host (https://target/zl/<b64>) - the browser requests
+    /// it cross-origin and the target's 404 page answers - and every
+    /// rewrite pass adds one more layer. The loop must be killed for ALL
+    /// host bindings, so recognition accepts three forms: engine-origin-
+    /// absolute, root-relative, and any-host path-prefixed. Iterative:
+    /// a decoded layer that is itself a route is peeled again (bounded).
+    /// Returns None when the URL is not a decodable route of this codec.
+    pub fn unwrap_engine_route(&self, url: &str) -> Option<String> {
+        let mut current = url.to_string();
+        for _ in 0..8 {
+            let next = self.decode_engine_route(&current)?;
+            if next == current {
+                return Some(current);
+            }
+            current = next;
+        }
+        Some(current)
+    }
+
+    /// Decode ONE already-encoded engine route layer: root-relative
+    /// ("/zl/<b64>"), engine-origin-absolute, or bound to any host
+    /// ("https://target/zl/<b64>", the form the double-wrap loop
+    /// produces). None when the URL carries no decodable route layer.
     pub fn decode_engine_route(&self, url: &str) -> Option<String> {
-        let local = if self.origin.is_empty() {
-            url
+        // Any-host form: scheme://host/prefix/<b64...>. The path must
+        // start with the codec prefix; a coincidental same-named path
+        // that does not decode to http(s) stays a normal URL.
+        let candidate = if let Some(i) = url.find("://") {
+            let rest = &url[i + 3..];
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            url.get(..(url.len() - rest.len() + end))?
+                .to_string()
         } else {
-            url.strip_prefix(&self.origin).unwrap_or(url)
+            url.to_string()
+        };
+        let local = if self.origin.is_empty() {
+            candidate.as_str()
+        } else {
+            candidate.strip_prefix(&self.origin).unwrap_or(candidate.as_str())
         };
         let rest = match &self.codec {
             Codec::Base64Url { prefix } => local.strip_prefix(prefix.as_str())?,
@@ -129,5 +159,21 @@ mod tests {
         assert_eq!(c.decode_engine_route(&abs).as_deref(), Some(dest));
         // Other paths are not routes.
         assert_eq!(c.decode_engine_route("/other"), None);
+        // Target-host-bound form (the loop's output shape) decodes.
+        let bound = format!("https://chatgpt.com{}", route);
+        assert_eq!(c.decode_engine_route(&bound).as_deref(), Some(dest));
+        // Iterative unwrap peels every layer down to the innermost
+        // destination, whatever host each layer is bound to.
+        let dest2 = "https://www.google.com/search?q=hi";
+        let route2 = format!("/zl/{}", crate::encode::b64u_encode(dest2.as_bytes()));
+        let bound2 = format!("https://www.google.com{}", route2);
+        let nested = format!(
+            "/zl/{}",
+            crate::encode::b64u_encode(bound2.as_bytes())
+        );
+        assert_eq!(
+            c.unwrap_engine_route(&nested).as_deref(),
+            Some(dest2)
+        );
     }
 }

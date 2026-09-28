@@ -64,12 +64,18 @@ pub fn rewrite_css(css: String, origin: String, base: String, prefix: String) ->
         ..Default::default()
     };
     let enc = |u: &str| -> String {
-        // Already an engine route: keep as-is. Resolving a route against
-        // the CSS base binds it to the target host and re-encodes it one
-        // layer deeper per pass (issue #1 finding 4).
-        if let Some(dest) = cfg.decode_engine_route(u) {
-            if dest.starts_with("http://") || dest.starts_with("https://") {
-                return u.to_string();
+        // Already an engine route (any host binding): peel every layer
+        // and re-emit one proper engine route for the innermost
+        // destination (issue #1 finding 4).
+        if let Some(innermost) = cfg.unwrap_engine_route(u) {
+            if innermost.starts_with("http://") || innermost.starts_with("https://") {
+                let (bare, frag) = match innermost.split_once('#') {
+                    Some((b, f)) => (b.to_string(), format!("#{}", f)),
+                    None => (innermost, String::new()),
+                };
+                let mut out = cfg.encode_url(&bare);
+                out.push_str(&frag);
+                return out;
             }
         }
         let abs = crate::encode::resolve(u, &base);

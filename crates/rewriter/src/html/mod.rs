@@ -91,16 +91,23 @@ impl Rewriter {
         if !self.cfg.origin.is_empty() && url.starts_with(&self.cfg.origin) {
             return url.to_string();
         }
-        // Already-encoded engine route in root-relative form
-        // ("/prefix/<b64>"): keep as-is. resolve() would bind it to the
-        // TARGET host (https://target/prefix/<b64>, dead cross-origin)
-        // and encode_url would wrap the route once more per pass (the
-        // double-wrap loop, issue #1 finding 4). Only a decodable
-        // http(s) destination counts, so a target page that genuinely
-        // uses the prefix as a plain path still rewrites normally.
-        if let Some(dest) = self.cfg.decode_engine_route(url) {
-            if dest.starts_with("http://") || dest.starts_with("https://") {
-                return url.to_string();
+        // Already-encoded engine route (root-relative, engine-origin-
+        // absolute, or target-host-bound): never let resolve() bind a
+        // route to the target host and never add another wrap layer
+        // (the double-wrap loop, issue #1 finding 4). Unwrap ALL layers
+        // and re-emit ONE proper engine route for the innermost
+        // destination. Only a decodable http(s) destination counts, so a
+        // target page genuinely using the prefix as a plain path still
+        // rewrites normally.
+        if let Some(innermost) = self.cfg.unwrap_engine_route(url) {
+            if innermost.starts_with("http://") || innermost.starts_with("https://") {
+                let (bare, frag) = match innermost.split_once('#') {
+                    Some((b, f)) => (b.to_string(), format!("#{}", f)),
+                    None => (innermost, String::new()),
+                };
+                let mut out = self.cfg.encode_url(&bare);
+                out.push_str(&frag);
+                return out;
             }
         }
         let abs = resolve(url, &self.base);
@@ -735,5 +742,43 @@ mod tests {
             "no target-host binding: {}",
             out
         );
+    }
+        assert!(
+            !out.contains("https://chatgpt.com/zl/"),
+            "no target-host binding: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn target_host_bound_routes_unwrap_instead_of_rewrapping() {
+        // Issue #1 finding 4, live shape: the loop produces routes
+        // bound to the TARGET host (https://google.com/zl/<b64>) which
+        // the old guard did not recognize - each pass added another
+        // layer until the target's own 404 page answered. The rewriter
+        // must peel every layer and emit ONE engine route for the
+        // innermost destination.
+        let c = RewriteConfig {
+            origin: "https://proxy.example".into(),
+            codec: Codec::Base64Url {
+                prefix: "/zl/".into(),
+            },
+            ..cfg()
+        };
+        let dest = "https://www.google.com/search?q=hi";
+        let route = format!("/zl/{}", crate::encode::b64u_encode(dest.as_bytes()));
+        let bound = format!("https://www.google.com{}", route);
+        let nested = format!(
+            "/zl/{}",
+            crate::encode::b64u_encode(bound.as_bytes())
+        );
+        let mut r = Rewriter::new(c.clone());
+        r.set_base("https://www.google.com/");
+        let out = format!("{}{}", r.process(&format!("<a href=\"{}\">x</a>", nested)), r.finish());
+        let want = c.encode_url(dest);
+        assert!(out.contains(&format!("href=\"{}\"", want)), "unwrapped to one route: {}", out);
+        // Zero surviving layers: neither bound form appears at all.
+        assert!(!out.contains(&bound), "no target-host-bound route: {}", out);
+        assert!(!out.contains(&nested), "no nested route: {}", out);
     }
 }
