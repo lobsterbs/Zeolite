@@ -167,16 +167,27 @@ Closes the 1.6/1.8 limits.
   claiming a perf win without a gate, so first paint stays what it
   already was: measured by the scoreboard in the CI artifacts.
 
-## Phase 15 - 2.5 Iodide: scoreboard expansion + real-site probes
+## Phase 15 - 2.5 Iodide: scoreboard expansion + real-site probes (shipped)
 
-- Promote report-only scoreboard rows to gated as they become
-  CI-verifiable; never invent percentages.
-- A periodic (not per-push) probe pass against a small list of real
-  destinations through a real zeolite-server, results committed as
-  structured JSON only; failures open issues, they do not gate merges
-  (flaky external targets must not break CI).
-- Extend replay comparisons to WebSocket lifecycle and cookie jar shape
-  (both already recorded; never payloads or values).
+- The scoreboard basis was rebuilt rather than expanded: the 1.9 suite
+  probed a plain-HTTP surface zeolite-server never exposed, and its
+  first executed run was all-404. The 2.5 suite rides the real surface:
+  a wisp v2.1 CONNECT tunnel with raw HTTP/1.1 inside, and the
+  real-destination probes pass in CI (run 36479436783). Failures still
+  open issues instead of gating merges.
+- Replay comparisons now include the recorded WebSocket lifecycle and
+  cookie-jar shape (contract facts only; never payloads or values).
+- Promotion of client-runtime rows stays impossible without a browser
+  in CI (there is none, by design); those rows stay client-runtime and
+  honestly marked. No percentages invented.
+- The nightly compat job failed its first runs on a port collision
+  (46102/46103 in use); the fixed schedule (16102/16103) is pending its
+  first cron verification - workflow_dispatch is not available to the
+  automation account, so the wait is honest, not a choice.
+- The issue-tab backlog closed with this release: #4, #10, #12, #13,
+  #17, #18 fixed and gated; #5-#9 were harness false alarms, closed
+  with the analysis; #20 (mirror route scheme) wired and unit-gated,
+  real-site verification staying with the embedder's browser suite.
 
 ## Phase 16 - 3.0 Diamond: hardening release
 

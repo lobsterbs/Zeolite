@@ -1,4 +1,4 @@
-# Support and limitation matrix (2.4 Bromide)
+# Support and limitation matrix (2.5 Iodide)
 
 Every row states what actually ships, verified against the code and
 the test suite, not what would be nice to have. Statuses:
@@ -17,6 +17,7 @@ the test suite, not what would be nice to have. Statuses:
 | Opaque URL passthrough | supported | blob:/data: hrefs are never rewritten; isOpaqueUrl guards the fetch path. |
 | Nested-route unwrap at decode | supported | A decoded destination that is itself an engine route (any host binding, stale double-wrap from old dists) is peeled to the innermost destination (bounded 8 layers) before transport. |
 | Rotatable route scheme (b64u default, path-mirror) | partial | zl:config rotates prefix + scheme at runtime and the shape persists across SW restarts (issue #17); the wasm rewriter, worker prelude and module-worker specifier pass all encode in the live scheme (issue #20). Mirror routes carry the destination verbatim under /m/, so the destination query rides the route URL's search and is re-attached at fetch; per-layer queries of nested mirror routes cannot be distinguished (one query channel). Unit-gated only (Rust decode round trip, TS codec/worker tests); real-site verification stays with the embedder's browser suite because CI runs no browser by design. |
+| Range-aware page cache | supported | Stored 200 entries answer Range requests with a real 206 slice instead of replaying the full body (issues #13/#18); fragment-only hrefs keep their payload on decode (#12). |
 | Escaped same-origin fetch reroute | partial | Same-origin non-asset requests from a rewritten page are rerouted against the origin recovered from the request referrer (issue #1 finding 3). No decodable referrer = passthrough; request bodies of escaped fetches are rerouted, so genuinely engine-local paths a page invents cannot be recovered. |
 | Wisp v2.1 transport | supported | All proxied traffic rides the same wisp hop; TLS terminates client-side in the vendored libcurl transport. |
 | Runtime WebSocket bridge | supported | Page WebSocket goes through the SW bridge to the transport; lifecycle + direction traced, payloads never recorded. |
