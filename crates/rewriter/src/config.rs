@@ -139,7 +139,6 @@ impl RewriteConfig {
     }
 }
 
-
 /// Index of the "://" that ends a real scheme at the start of `url`.
 /// A mirror payload is itself a URL, so a root-relative mirror route
 /// (/m/https://host/...) carries "://" inside its own path; only a
