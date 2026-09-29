@@ -1,4 +1,4 @@
-name: transport diag (#11)
+name: transport-diag-11
 
 # One-shot diagnostic for issue #11: reproduce the libcurl.js
 # transport failure on craigslist's empty-body 302 and test whether
@@ -26,21 +26,22 @@ jobs:
         run: cargo build -p zeolite-server --release
       - name: Start zeolite-server
         run: |
-          PORT=6002 ./target/release/zeolite-server 2>&1 | tee server.log &
+          PORT=6002 ./target/release/zeolite-server > server.log 2>&1 &
           for i in $(seq 1 30); do
-            sleep 1
-            if (exec 3<>/dev/tcp/127.0.0.1/6002) 2>/dev/null; then
-              echo "server up after ${i}s"
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6002/)
+            if [ "$code" != "000" ]; then
+              echo "server up (http $code) after ${i}s"
               exit 0
             fi
+            sleep 1
           done
           echo "server never came up"
           cat server.log
           exit 1
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-      - name: Install transport (AGPL: npm-only, never committed)
+          node-version: "22"
+      - name: Install transport
         run: npm i @mercuryworkshop/libcurl-transport@2.0.5 ws
       - name: Run diagnostic
         run: node suite/transport-diag.mjs
