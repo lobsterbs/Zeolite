@@ -16,7 +16,7 @@ or **1.3 Carbide**.
   exported by the service worker as `ZEOLITE_VERSION`, and returned in the
   `zl:getNetLog` reply so tooling can pin and display it.
 
-Current release: **2.5 Iodide** (cargo `2.5.0`). The 2.x line opens a
+Current release: **3.0 Diamond** (cargo `3.0.0`). The 2.x line opened a
 new substance family; the roadmap's 1.x -ide sequence is complete.
 2.1 Halogen's gates landed with the 2.0 version string still in the
 code; no 2.1 release was cut, the string moved at 2.2 Arsenide.
@@ -47,3 +47,23 @@ path with unit gates (#20). Known honestly open: real-site mirror
 verification stays with the embedder's browser suite (CI runs no
 browser by design), and the nightly compat schedule's port fix is
 pending its first cron run.
+
+3.0 Diamond is the Phase 16 hardening release and closes the roadmap.
+The security audit was re-run against everything added since 2.0
+(redirect-hop cookie capture, the SameSite opt-in knob, merge-mode
+session import, the SharedWorker bridge, module-worker specifier
+rewriting, engine-route CORS surgery, the engine error page, the
+antiframe pass, the streaming CSS rewriter, scheme rotation and the
+mirror route scheme); stale 2.0-era findings were corrected in
+docs/security.md. The performance audit was refreshed at the 2.5-era
+artifact sizes (CI run 36530935953: rewriter wasm 72,242 bytes, wisp
+wasm 26,454 bytes, bootstrap 5,068 bytes minified, 2.17 kB gzip,
+under the 5120 gate). The matrix is re-rated at 3.0. The public API
+is frozen for the 3.x line: the zl: control plane, the ZeoliteEngine
+adapter, the rewriter wasm interface and the codec schemes (b64u,
+mirror) are the compatibility surface. Known honestly open at the
+cut: craigslist root navigation dies inside the upstream wasm
+transport (curl error 56 before response headers surface, issue #11,
+full analysis there). It predates this line and is not a regression
+of it; the redirect target on the same host loads fine and every
+other probed site loads.

@@ -189,15 +189,45 @@ Closes the 1.6/1.8 limits.
   with the analysis; #20 (mirror route scheme) wired and unit-gated,
   real-site verification staying with the embedder's browser suite.
 
-## Phase 16 - 3.0 Diamond: hardening release
+## Phase 16 - 3.0 Diamond: hardening release (shipped)
 
 - Full security re-audit against docs/security.md with the new surface
-  (redirect-hop cookies, SharedWorker bridge, merge-mode import).
-- Performance re-audit: bundle sizes, bootstrap under the 5120 gate,
-  memory of long-running WS + worker sessions.
-- Docs matrix refresh: every row re-rated against the code, limits
-  rewritten where 2.x closed them.
-- API freeze for the 3.x line; 3.0 marks the closing of this roadmap.
+  (redirect-hop cookies, SharedWorker bridge, merge-mode import):
+  DONE - docs/security.md re-audited at 3.0. Two 2.0-era findings were
+  stale and corrected: redirect-hop Set-Cookie capture and the
+  SameSite opt-in knob both shipped in 2.2 while the audit text still
+  listed them open. The surface added since 2.0 (merge-mode session
+  import, SharedWorker WebSocket bridge, module-worker specifier
+  rewriting, engine-route CORS surgery, the engine error page, the
+  antiframe pass, the streaming CSS rewriter, scheme rotation and
+  the mirror route scheme) was reviewed against the existing gates;
+  the destination policy remains the single SSRF gate and the jar
+  remains the sole Cookie source, so no new enforcement point was
+  needed.
+- Performance re-audit: DONE - docs/performance.md refreshed at the
+  2.5-era artifact sizes (CI run 36530935953: rewriter_wasm_bg.wasm
+  72,242 bytes, wisp_wasm_bg.wasm 26,454 bytes, bootstrap.js 5,068
+  bytes minified, 2.17 kB gzip, still under the 5120-byte gate). The
+  wasm growth since 2.0 (+9,258 bytes) is the 2.3-2.5 feature set
+  (antiframe, streaming CSS rewriter, mirror scheme encode paths);
+  long-running WS and worker session memory stays bounded by the
+  same fixed rings, no unbounded buffer was found.
+- Docs matrix refresh: DONE - every row re-rated against the code at
+  3.0, the title carries the release, and the known upstream-transport
+  limit (issue #11) is recorded on the wisp transport row instead of
+  being papered over.
+- API freeze for the 3.x line; 3.0 marks the closing of this roadmap:
+  DONE - the freeze is declared in docs/versioning.md. The
+  compatibility surface is the zl: control plane, the ZeoliteEngine
+  adapter, the rewriter wasm interface and the codec schemes.
+- Honest at the cut: issue #11 (craigslist root through the wasm
+  transport) remains open. It is an upstream-transport behavior (the
+  vendored libcurl layer dies with curl error 56 before response
+  headers surface on one site's empty-body root redirect; the
+  redirect target on the same host loads fine), not a regression of
+  this line. The analysis and the candidate mechanisms are in the
+  issue. The cross-cutting rule is read as applying to regressions of
+  the engine itself; none is open.
 
 ## Cross-cutting gates (every phase)
 

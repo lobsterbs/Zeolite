@@ -1,10 +1,12 @@
-# Performance audit (2.0 Graphene)
+# Performance audit (3.0 Diamond re-audit)
 
-Facts from the 2.0 codebase and CI run 36349912927 (green, at commit
-6da9bba). No benchmarks are invented; where a number is stated it is
+Facts from the codebase and CI run 36530935953 (artifact sizes
+measured at the 2.5 cut; the 3.0 release changes only version
+strings and docs on top, and every size gate re-runs in CI on each
+push). No benchmarks are invented; where a number is stated it is
 measured by CI.
 
-## Streaming everywhere (preserved through 2.0)
+## Streaming everywhere (preserved through 3.0)
 
 - HTML and CSS rewriting runs through a TransformStream chunk-by-
   chunk; responses are never fully buffered for rewriting.
@@ -18,11 +20,13 @@ measured by CI.
 - Tracing and diagnostics are opt-in and zero-allocation while off:
   the enabled-flag gate comes first in every entry point.
 
-## Measured sizes (CI job wasm, run 36349912927)
+## Measured sizes (CI job wasm, run 36530935953)
 
-- rewriter_wasm_bg.wasm: 62,984 bytes
-- wisp_wasm_bg.wasm: 26,454 bytes
-- bootstrap.js (built): 5,093 bytes minified (2.18 kB gzip), under
+- rewriter_wasm_bg.wasm: 72,242 bytes (62,984 at the 2.0 cut; the
+  +9,258 growth is the 2.3-2.5 feature set: the antiframe pass, the
+  streaming CSS rewriter and the mirror scheme encode paths).
+- wisp_wasm_bg.wasm: 26,454 bytes (unchanged since 2.0).
+- bootstrap.js (built): 5,068 bytes minified (2.17 kB gzip), under
   the 5120-byte gate enforced in CI. The bootstrap is byte-budgeted:
   any change to bootstrap.ts must be checked against the gate.
 
@@ -35,6 +39,9 @@ All long-lived buffers are fixed-size rings:
 - Diagnostics: 512 events, 256 trace references.
 - Recording slices are taken from these rings at zl:recordStop; a
   recording cannot grow unbounded.
+- WebSocket bridge and worker-prelude state hold only live
+  connections; the download tracker counts bytes through, it does
+  not buffer them.
 
 ## Cleanup paths
 
@@ -44,17 +51,13 @@ All long-lived buffers are fixed-size rings:
   (jarClear), resets rings and closes bridges.
 - Worker prelude routing adds no persistent state; swshim
   registrations are virtual records with no queued jobs.
-- Download registry entries are removed on completion/cancel; the
-  tracker counts bytes through, it does not buffer them.
+- Download registry entries are removed on completion/cancel.
 
-## Suite wall time (CI facts)
+## Suite wall time
 
-- The app job (npm install + build + full vitest + gates) runs in
-  roughly 4 minutes on the hosted runner; the vitest suite itself
-  completes in ~4 seconds (28 test files: 12 app unit, 16 extension
-  runtime).
-- A 300-second timeout guard kills a wedged vitest instead of
-  hanging the job for hours.
+- The 2.0-audit wall-time facts (app job ~4 minutes hosted, vitest
+  ~4 seconds, the 300-second wedged-vitest guard) were not
+  re-measured for this release; the guards are unchanged in CI.
 - The compat suite (probe, capability scoreboard, replay) runs only
   nightly; ordinary pushes pay nothing for it.
 

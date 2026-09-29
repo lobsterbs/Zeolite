@@ -1,10 +1,11 @@
-# Security audit (2.0 Graphene)
+# Security audit (3.0 Diamond re-audit)
 
-Scope: what was reviewed for this release and what it found. Findings
-reference real code seams; nothing here is claimed beyond what the
-code does.
+Scope: the 2.0 Graphene audit re-run at 3.0 against the surface added
+since, plus corrections of findings the 2.0 text listed as open but
+2.x has since closed. Findings reference real code seams; nothing is
+claimed beyond what the code does.
 
-## Destination policy (SSF) - one enforcement point
+## Destination policy (SSRF) - one enforcement point
 
 crates/zeolite-server/src/policy.rs is the single place that answers
 "may we reach this destination":
@@ -24,6 +25,10 @@ proxied. It is read only in the policy Default impl, exists solely
 for the compat suite, and must never be set in a production process.
 Local-name blocking stays on even with the hatch open.
 
+Re-audited at 3.0: unchanged, still the only gate. The engine has
+exactly one dial path (the policy-gated wisp hop); nothing added
+since 2.0 dials a destination outside it.
+
 ## Header surgery
 
 Two header paths, both deliberate and both in app/src/sw.ts:
@@ -32,8 +37,8 @@ Two header paths, both deliberate and both in app/src/sw.ts:
   CSP-report-only, X-Frame-Options, HSTS, COOP/COEP/CORP,
   Permissions-Policy, Set-Cookie and Set-Cookie2. This is the core
   tradeoff of an interception engine: the proxied page must run inside
-  the embedding application, so the origin's confinement headers cannot
-  survive. Consequences, stated honestly:
+  the embedding application, so the origin's confinement headers
+  cannot survive. Consequences, stated honestly:
   - The proxied page's CSP/XFO protections are gone; isolation of the
     proxied page from the host app is the HOST's responsibility (its
     own CSP, iframe sandboxing).
@@ -48,6 +53,13 @@ Two header paths, both deliberate and both in app/src/sw.ts:
   structurally prevented by header-name normalization; the hostile
   list is compared lowercase.
 
+Re-audited at 3.0: the engine-route CORS surgery (2.3, app/src/cors.ts)
+never reflects a request origin: engine routes state the engine's
+own CORS facts, credentialed responses get the engine origin, and
+arbitrary cross-origin consumers fail closed. The engine error page
+(2.3) is generated from the engine's own fixed markup, never from
+upstream bytes.
+
 ## Cookie and storage isolation
 
 - Per-origin jars keyed by the FNV1a36 virtual-origin id; the jar is
@@ -56,10 +68,19 @@ Two header paths, both deliberate and both in app/src/sw.ts:
   implemented.
 - localStorage/sessionStorage/IndexedDB/Cache API are scoped with the
   same id; Cache match only sees the origin's own entries.
-- Limits stated in the matrix: SameSite parsed but not enforced (no
-  site context exists at the SW seam); Set-Cookie on intermediate
-  redirect hops inside the transport is not captured (only the final
-  response surfaces).
+- 2.0 audit correction (closed in 2.2): Set-Cookie on intermediate
+  redirect hops IS captured. The SW follows the hop chain itself (the
+  transport surfaces 3xx) and applySetCookie runs against every hop;
+  a hop the SW cannot follow (307/308 with a stream body, the 10-hop
+  cap) still surfaces with its Location mapped to an engine route,
+  and its own Set-Cookie was captured first.
+- 2.0 audit correction (closed in 2.2): SameSite is enforced through
+  the opt-in zl:sameSite knob ("off" | "approx"), using approximate
+  site context recovered from the request referrer. It stays off by
+  default, honestly, because the SW seam has no true site context.
+- Merge-mode session import (2.2) takes per-cookie conflict rules and
+  writes only through the same jar path; it introduces no new
+  cookie source.
 
 ## Secrets handling
 
@@ -79,11 +100,15 @@ Two header paths, both deliberate and both in app/src/sw.ts:
   rule upgrade).
 - The bridge registry holds only live connections; zl:teardown closes
   all of them.
+- Re-audited at 3.0: the SharedWorker bridge (2.3) rides the same
+  relay rule (the engine is the relay parent, a page never becomes
+  one) and the same ws->wss upgrade.
 
-## Known open items (honest, not fixed by 2.0)
+## Known open items (honest, not fixed by 3.0)
 
-- SameSite enforcement would need site-for-sites context the SW does
-  not have; documented instead of faked.
+- SameSite approximation quality: referrer-derived site context is
+  approximate for engine-initiated subresource requests; the knob
+  stays opt-in.
 - CSP of the embedding application is the host's job; Zeolite cannot
   restore the proxied page's own confinement headers and still
   function.
@@ -91,3 +116,6 @@ Two header paths, both deliberate and both in app/src/sw.ts:
   never export ZL_TEST_ALLOW_PRIVATE_DESTS.
 - Fingerprinting resistance is spoofing, not anonymity: timing,
   font and other unprofiled surfaces remain measurable.
+- The vendored transport's craigslist behavior (issue #11) is not a
+  security issue: no data leaks, the failure is closed (error page),
+  and the target host is unaffected.
