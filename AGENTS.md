@@ -68,7 +68,7 @@ NativeTransit diagnostics must distinguish NativeTransit, RewriteFallback, fallb
 Check `app/src/extensions/compat.ts` before documenting WebExtension support. Partial/unsupported APIs must remain honestly documented; do not fake browser APIs.
 
 ## CI
-Do not weaken CI. Keep cargo fmt, clippy with warnings denied, cargo test, WASM checks, app builds, and extension tests green. The published dist bundle must be produced from a clean temporary checkout, and the AGPL libcurl transport package must not be committed to dist.
+Do not weaken CI. Keep cargo fmt, clippy with warnings denied, cargo test, WASM checks, app builds, and extension tests green. The published dist bundle must be produced from a clean temporary checkout, and the AGPL libcurl transport package must not be committed to dist. The vendored transport loads through app/src/libcurl-transport-vendored.ts, which patches libcurl.js 0.7.4's CurlSession.stream_response at load time (issue #11: close-delimited empty-body responses were discarded as curl error 56 with the full header set already received); the transport-gate workflow runs the real failing redirect through a local wisp relay on every push to main and fails if the seam regresses.
 
 ## Compatibility testing
 Transport/rewrite/cookie/WebSocket/worker/extension changes require real behavior tests covering navigation, SPA history, fetch/XHR, WebSockets including clean close, redirects, modules, iframes, workers, storage, cookies, large responses, MIME-sensitive resources and authentication.

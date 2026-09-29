@@ -1,23 +1,27 @@
-name: transport-diag-11
+name: transport-gate
 
-# One-shot diagnostic for issue #11: reproduce the libcurl.js
-# transport failure on craigslist's empty-body 302 and test whether
-# forcing HTTP/1.1 via the transport's request params JSON
-# (_libcurl_http_version, parsed by libcurl.js http.c
-# http_set_options) changes the outcome. Runs a local zeolite-server
-# as the wisp endpoint. Delete this workflow and
-# suite/transport-diag.mjs when #11 closes.
+# CI gate for the vendored libcurl transport seam (issue #11 and its
+# fix). CI runs no browser by design, so this is the only place the
+# wasm transport is exercised end to end: the real
+# @mercuryworkshop/libcurl-transport 2.0.5 bundle connects to a local
+# zeolite-server wisp endpoint. Unpatched, craigslist's close-delimited
+# empty-body 302 dies with curl error 56 before any response object
+# exists; with the engine's runtime patch
+# (app/src/libcurl-transport-vendored.ts) the 302 must surface. The run
+# fails if the seam regresses. Keep in sync with
+# suite/transport-diag.mjs.
 
 on:
   push:
-    paths:
-      - ".github/workflows/transport-diag.yml"
-      - "suite/transport-diag.mjs"
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   diag:
     runs-on: ubuntu-latest
+    # A wedged transport must fail in minutes, not hang the job for
+    # an hour behind emscripten's kept-alive event loop.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -43,5 +47,5 @@ jobs:
           node-version: "22"
       - name: Install transport
         run: npm i @mercuryworkshop/libcurl-transport@2.0.5 ws
-      - name: Run diagnostic
+      - name: Run transport gate
         run: node suite/transport-diag.mjs
