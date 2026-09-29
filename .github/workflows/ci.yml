@@ -209,12 +209,17 @@ jobs:
           git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/lobsterbs/Zeolite.git" HEAD:dist
 
   compat:
-    # Nightly plus on-demand (workflow_dispatch): needs a built engine.
+    # Needs a built engine. Runs on every push to main as well as the
+    # nightly schedule and workflow_dispatch: GitHub's scheduler dropped
+    # the 03:00 and 03:23 UTC crons (schedule runs exist only for Sep
+    # 26/27, and both were hours late), and workflow_dispatch is 403 for
+    # the automation account, so push is the only reliable trigger.
+    # Real-site probes are report-only since 2.5 Iodide - their
     # Real-site probes are report-only since 2.5 Iodide - their
     # failures open issues and never gate, because flaky external
     # targets must not break CI. The fixture-based capability gates
     # and the replay comparison stay hard gates.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # The first wisp-based run deadlocked for 36 minutes before being
     # cancelled by hand; a hung probe must fail loudly, not at 6 hours.
