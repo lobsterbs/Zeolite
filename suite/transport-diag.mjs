@@ -20,8 +20,9 @@
  * -s ENVIRONMENT=web,worker. In Node it must be made to take the
  * web path: alias window/self/location/document (the probes for the
  * web environment), hide the process global (the probe for the node
- * environment, which asserts at load) and provide a CloseEvent
- * fallback. Node 22 already ships every web API the transport
+ * environment, which asserts at load) and stub the few DOM methods
+ * the runtime touches (createEvent/dispatchEvent for the runtime
+ * "load" event). Node 22 already ships every web API the transport
  * actually uses: fetch, Request, Response, Headers, Blob, WebSocket. */
 
 globalThis.window = globalThis;
@@ -48,8 +49,12 @@ if (typeof globalThis.document === "undefined") {
       setAttribute() {},
       appendChild() {},
     }),
+    createEvent: () => ({ initEvent() {} }),
     addEventListener() {},
     removeEventListener() {},
+    dispatchEvent() {
+      return true;
+    },
   };
 }
 if (typeof globalThis.CloseEvent === "undefined") {
