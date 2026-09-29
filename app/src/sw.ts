@@ -143,6 +143,12 @@ const HOSTILE = [
   "permissions-policy",
   "set-cookie",
   "set-cookie2",
+  /* The transport delivers decoded bodies: a preserved upstream
+     content-encoding would make every fetch() consumer decode
+     plaintext a second time (corrupted bytes), and the rewritten
+     body never matches the upstream length. */
+  "content-encoding",
+  "content-length",
 ];
 
 function stripHostile(headers: Headers): Headers {
@@ -1086,12 +1092,50 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               ms: Date.now() - t0,
               bytes: Number(hit.headers.get("content-length") ?? -1),
               verdict: "cache",
+              rewritten:
+                hit.status === 200 && isHtml(hit)
+                  ? "html"
+                  : hit.status === 200 && isCss(hit)
+                    ? "css"
+                    : undefined,
               transport: dec.mode,
               fallbackReason: dec.fallbackReason,
               detail: mkDetail(hit),
             });
             WEBREQ.completed({ ...wrDetails, statusCode: hit.status });
-            return hit;
+            /* Range replies (206/416) own their header surgery (slice
+               length, content-range): serve them untouched. */
+            if (hit.status !== 200) return hit;
+            /* Legacy entries predate the content-encoding strip and
+               carry a stale upstream encoding over a decoded body:
+               fetch() consumers would decode plaintext a second time.
+               The served view is always identity. */
+            const hitHeaders = new Headers(hit.headers);
+            hitHeaders.delete("content-encoding");
+            hitHeaders.delete("content-length");
+            /* A stored document/stylesheet is the raw upstream body: a
+               cache hit must flow through the same streaming rewriter
+               as a fresh response, or every second visit serves an
+               unrewritten page (links escape the engine, no __ZL
+               bootstrap, no cookie/storage virtualization). */
+            if (isHtml(hit) && hit.body) {
+              const chRules = await siteRules();
+              const chRule = ruleFor(chRules, target);
+              const csInject = csInjectUrls(target, e.request);
+              return new Response(
+                rewriteStream(hit.body, target, chRule, csInject, () => {
+                  if (e.request.mode === "navigate") WEBNAV.completed(target);
+                }),
+                { status: hit.status, headers: hitHeaders },
+              );
+            }
+            if (isCss(hit) && hit.body) {
+              return new Response(cssRewriteStream(hit.body, target), {
+                status: hit.status,
+                headers: hitHeaders,
+              });
+            }
+            return new Response(hit.body, { status: hit.status, headers: hitHeaders });
           }
         }
         const rules = await siteRules();

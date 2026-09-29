@@ -23,7 +23,9 @@
      engine-initiated, so the site-for-sites context is an
      approximation built from the request referrer. SameSite=None
      without Secure is rejected regardless of the knob (spec rule).
-   - document.cookie is not virtualized yet (Phase 5 scope).
+   - document.cookie IS virtualized by the bootstrap (per-origin
+     view over the zl:docCookie channel; this jar stays authoritative
+     for engine-initiated requests).
    - The transport (libcurl) may hold cookies internally; this jar is
      the engine's authoritative Cookie source for requests it
      initiates.
