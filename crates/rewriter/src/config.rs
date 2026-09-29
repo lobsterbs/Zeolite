@@ -97,7 +97,7 @@ impl RewriteConfig {
         // normal URL (None).
         let local = if let Some(stripped) = url.strip_prefix(&self.origin) {
             stripped
-        } else if let Some(i) = url.find("://") {
+        } else if let Some(i) = absolute_scheme_end(url) {
             let rest = &url[i + 3..];
             let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
             url.get(i + 3 + end..)?
@@ -137,6 +137,16 @@ impl RewriteConfig {
             host == b || host.ends_with(&format!(".{}", b))
         })
     }
+}
+
+
+/// Index of the "://" that ends a real scheme at the start of `url`.
+/// A mirror payload is itself a URL, so a root-relative mirror route
+/// (/m/https://host/...) carries "://" inside its own path; only a
+/// scheme at the start makes a URL absolute (issue #20).
+fn absolute_scheme_end(url: &str) -> Option<usize> {
+    let i = url.find("://")?;
+    crate::encode::is_scheme(&url[..i]).then_some(i)
 }
 
 #[cfg(test)]
@@ -204,6 +214,9 @@ mod tests {
                 .as_deref(),
             Some("https://a.dev/p?q=1")
         );
+        // A plain destination URL is not a route, even though its
+        // own :// looks like an authority marker.
+        assert_eq!(c.decode_engine_route("https://plain.dev/p?q=1"), None);
         let bound = "https://b.dev/m/https://a.dev/p?q=1";
         let nested = c.encode_url(bound);
         assert_eq!(

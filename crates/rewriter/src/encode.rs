@@ -77,7 +77,7 @@ pub fn b64u_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 /// RFC 3986 scheme: ALPHA followed by ALPHA / DIGIT / "+" / "-" / ".".
-fn is_scheme(s: &str) -> bool {
+pub(crate) fn is_scheme(s: &str) -> bool {
     let mut b = s.bytes();
     match b.next() {
         Some(first) if first.is_ascii_alphabetic() => {}
