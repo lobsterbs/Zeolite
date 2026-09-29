@@ -15,8 +15,14 @@ async fn main() {
     let app = zeolite_server::build_app(zeolite_server::Shared::new(cfg));
 
     let addr = format!("0.0.0.0:{}", port);
-    tracing::info!("zeolite-server 2.4 Bromide listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
+    // Log the bound address, not the requested port: --port 0 lets the
+    // kernel pick a free port (fixed ports lost the AddrInUse lottery
+    // twice on hosted runners), and the compat suite parses this line
+    // to learn the real port.
+    let local = listener.local_addr().expect("local_addr");
+    let version = env!("CARGO_PKG_VERSION");
+    tracing::info!("zeolite-server {} listening on {}", version, local);
     axum::serve(listener, app)
         .with_graceful_shutdown(zeolite_server::shutdown_signal())
         .await

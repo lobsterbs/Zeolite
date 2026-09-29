@@ -45,14 +45,14 @@ const BASE = process.argv.includes("--base")
 /* Repo-root server binary, independent of the process CWD. */
 const SERVER = fileURLToPath(new URL("../target/release/zeolite-server", import.meta.url));
 
-/* ponytail: fixed ports instead of port 0 + stdout parsing; a real
-   collision still fails the row loudly, which is the honest outcome.
-   They must sit below the Linux ephemeral range (32768+): inside it
-   the runner's own outbound connections squat the ports and both
-   servers die on bind with AddrInUse before any row can run (proven
-   by run 36479436783). */
-const SSRF_PORT = 16102;
-const AUTH_PORT = 16103;
+/* Fixed ports lost the AddrInUse lottery twice on hosted runners:
+   46102/46103 inside the ephemeral range (run 36479436783), then
+   16102/16103 below it (run 36608692453, where nothing in the job
+   itself held either port - the host did). No fixed port is safe on
+   a shared host, so the servers now bind --port 0: the kernel picks
+   a free port atomically at bind time, main.rs logs the real local
+   address, and this harness parses it from stdout. */
+const LISTENING_RE = /listening on (\d+\.\d+\.\d+\.\d+):(\d+)/;
 
 const bareEnv = () => {
   const env = { ...process.env };
@@ -60,16 +60,35 @@ const bareEnv = () => {
   return env;
 };
 
-const startServer = (port, env) =>
+const startServer = (env) =>
   new Promise((resolve, reject) => {
-    const proc = spawn(SERVER, ["--port", String(port)], {
+    const proc = spawn(SERVER, ["--port", "0"], {
       env,
-      stdio: ["ignore", "ignore", "inherit"],
+      stdio: ["ignore", "pipe", "inherit"],
     });
-    proc.once("error", reject);
-    // Resolve after the current turn so a spawn error (bad binary path)
-    // rejects the promise instead of being swallowed by an early resolve.
-    setImmediate(() => resolve(proc));
+    let buf = "";
+    let settled = false;
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(arg);
+    };
+    // A server that never reports a port (or dies on bind) fails the
+    // row loudly instead of hanging the run.
+    const timer = setTimeout(
+      () => settle(reject, new Error("spawned server never printed its listening line")),
+      10000
+    );
+    proc.stdout.on("data", (c) => {
+      buf += c;
+      const m = buf.match(LISTENING_RE);
+      if (m) settle(resolve, { proc, port: Number(m[2]) });
+    });
+    proc.once("error", (e) => settle(reject, e));
+    proc.once("exit", (code) =>
+      settle(reject, new Error(`spawned server exited before listening (code ${code})`))
+    );
   });
 
 /* Wait for a spawned server to accept wisp sessions. The last error
@@ -214,9 +233,9 @@ session.close();
 /* SSRF: the spawned server has NO escape hatch; loopback CONNECT must
    be refused with close reason 0x48 (policy.rs resolve-then-validate,
    checked before any connect). */
-const ssrfServer = await startServer(SSRF_PORT, bareEnv());
+const ssrfServer = await startServer(bareEnv());
 await check("ssrf-private-blocked", true, async () => {
-  const s = await awaitServer(SSRF_PORT);
+  const s = await awaitServer(ssrfServer.port);
   try {
     const resp = await streamRequest(s, fxHost, fxPort, rawGet(fxHost, fxPort, "/page.html"), { timeoutMs: 8000 });
     return resp.bytes.length === 0 && resp.closeReason === CLOSE.BLOCKED
@@ -226,17 +245,17 @@ await check("ssrf-private-blocked", true, async () => {
     s.close();
   }
 });
-ssrfServer.kill();
+ssrfServer.proc.kill();
 
 /* Auth: a server with password auth configured must refuse a keyless
    v2 client during the handshake (close 0xc2). */
 const authEnv = bareEnv();
 authEnv.ZL_WISP_USER = "probe";
 authEnv.ZL_WISP_PASSWORD = "probe-pass";
-const authServer = await startServer(AUTH_PORT, authEnv);
+const authServer = await startServer(authEnv);
 await check("auth-required-refusal", true, async () => {
   try {
-    await awaitServer(AUTH_PORT, 3);
+    await awaitServer(authServer.port, 3);
     return { ok: false, note: "keyless session accepted; auth not enforced" };
   } catch (e) {
     return /AUTH_REQUIRED/.test(e.message)
@@ -244,7 +263,7 @@ await check("auth-required-refusal", true, async () => {
       : { ok: false, note: "wrong refusal: " + e.message };
   }
 });
-authServer.kill();
+authServer.proc.kill();
 
 /* Client-runtime capabilities: honestly not observable from a node
    probe (the wasm rewriters and the interception paths live in the
