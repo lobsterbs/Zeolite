@@ -9,6 +9,11 @@ on:
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    # GITLAB_PAT lives in the "lobster" environment's secrets, and
+    # environment secrets are only exposed to jobs that declare the
+    # environment (Zeolite#21: without this the token resolves empty and
+    # the push dies with authentication denied).
+    environment: lobster
     steps:
       - name: Push mirror to GitLab
         run: |
