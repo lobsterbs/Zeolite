@@ -45,13 +45,14 @@ const BASE = process.argv.includes("--base")
 /* Repo-root server binary, independent of the process CWD. */
 const SERVER = fileURLToPath(new URL("../target/release/zeolite-server", import.meta.url));
 
-/* Fixed ports lost the AddrInUse lottery twice on hosted runners:
-   46102/46103 inside the ephemeral range (run 36479436783), then
-   16102/16103 below it (run 36608692453, where nothing in the job
-   itself held either port - the host did). No fixed port is safe on
-   a shared host, so the servers now bind --port 0: the kernel picks
-   a free port atomically at bind time, main.rs logs the real local
-   address, and this harness parses it from stdout. */
+/* The --port flag was silently ignored by the server (Config is
+   env-only, PORT), so every fixture server bound the 6002 default
+   and died on bind with AddrInUse against the base server - three
+   CI runs blamed the runner for squatting the fixed ports before
+   anyone checked the flag. main.rs parses --port now; the servers
+   bind --port 0, the kernel picks a free port atomically at bind
+   time, and this harness reads the real port from the listening
+   line the server logs. */
 const LISTENING_RE = /listening on (\d+\.\d+\.\d+\.\d+):(\d+)/;
 
 const bareEnv = () => {

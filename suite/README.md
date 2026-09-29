@@ -58,10 +58,11 @@ Two extra servers are spawned from the repo-root
 target/release/zeolite-server binary on kernel-picked ports (--port
 0; the harness parses the listening line the server logs), each
 verifying a production-default behavior the main compat server cannot
-demonstrate because it runs with the loopback escape hatch. Fixed
-ports were tried twice and lost the AddrInUse lottery on hosted
-runners both times (46102/46103 inside the ephemeral range, then
-16102/16103 below it), so no fixed port is trusted:
+demonstrate because it runs with the loopback escape hatch. The
+--port flag was silently ignored by the server, so every fixture
+server bound the 6002 default and died on bind with AddrInUse
+against the base server; three CI runs blamed the runner for
+squatting fixed ports before the flag was checked:
 
 - ssrf-private-blocked: started WITHOUT
   ZL_TEST_ALLOW_PRIVATE_DESTS, a loopback CONNECT must be refused with
