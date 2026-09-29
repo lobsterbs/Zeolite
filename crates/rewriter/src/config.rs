@@ -108,14 +108,19 @@ impl RewriteConfig {
             Codec::Base64Url { prefix } => local.strip_prefix(prefix.as_str())?,
             Codec::PathMirror => local.strip_prefix("/m/")?,
         };
-        let end = rest.find(['?', '#']).unwrap_or(rest.len());
-        let rest = &rest[..end];
+        // Mirror tails carry the destination verbatim, query included:
+        // only a fragment ends that payload. b64u tails stop at the
+        // first '?' or '#' (issue #20).
         match &self.codec {
             Codec::Base64Url { .. } => {
-                let bytes = crate::encode::b64u_decode(rest)?;
+                let end = rest.find(['?', '#']).unwrap_or(rest.len());
+                let bytes = crate::encode::b64u_decode(&rest[..end])?;
                 String::from_utf8(bytes).ok()
             }
-            Codec::PathMirror => Some(rest.to_string()),
+            Codec::PathMirror => {
+                let end = rest.find('#').unwrap_or(rest.len());
+                Some(rest[..end].to_string())
+            }
         }
     }
 
@@ -168,5 +173,33 @@ mod tests {
         let bound2 = format!("https://www.google.com{}", route2);
         let nested = format!("/zl/{}", crate::encode::b64u_encode(bound2.as_bytes()));
         assert_eq!(c.unwrap_engine_route(&nested).as_deref(), Some(dest2));
+    }
+
+    /// Issue #20: mirror tails are the destination verbatim, so the
+    /// query is payload (only a fragment ends it), unlike b64u tails.
+    #[test]
+    fn mirror_scheme_routes_decode_for_the_rewrap_guard() {
+        let c = RewriteConfig {
+            origin: "https://proxy.example".into(),
+            codec: Codec::PathMirror,
+            ..Default::default()
+        };
+        let route = c.encode_url("https://a.dev/p?q=1");
+        assert_eq!(route, "https://proxy.example/m/https://a.dev/p?q=1");
+        assert_eq!(c.decode_engine_route(&route).as_deref(), Some("https://a.dev/p?q=1"));
+        let frag = format!("{}#f", route);
+        assert_eq!(c.decode_engine_route(&frag).as_deref(), Some("https://a.dev/p?q=1"));
+        assert_eq!(
+            c.decode_engine_route("/m/https://a.dev/p?q=1").as_deref(),
+            Some("https://a.dev/p?q=1")
+        );
+        assert_eq!(
+            c.decode_engine_route("https://b.dev/m/https://a.dev/p?q=1").as_deref(),
+            Some("https://a.dev/p?q=1")
+        );
+        let bound = "https://b.dev/m/https://a.dev/p?q=1";
+        let nested = c.encode_url(bound);
+        assert_eq!(c.unwrap_engine_route(&nested).as_deref(), Some("https://a.dev/p?q=1"));
+        assert_eq!(c.decode_engine_route("/other"), None);
     }
 }

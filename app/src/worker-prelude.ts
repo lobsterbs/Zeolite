@@ -1,7 +1,8 @@
 /* Zeolite worker prelude (Phase 6, 1.6 Hydride). The service worker
    prepends this to every classic/shared worker script it serves, with
-   two baked-in globals on the injected first line:
+   three baked-in globals on the injected first line:
      self.__ZL_PREFIX__      the live engine route prefix
+     self.__ZL_SCHEME__      the live route scheme (issue #20)
      self.__ZL_WORKER_URL__  the upstream worker script URL
 
    Inside the worker: importScripts() arguments and fetch() inputs are
@@ -37,7 +38,10 @@ export function routeWorkerUrl(
   }
   if (abs.origin === engineOrigin) return arg;
   if (abs.protocol !== "http:" && abs.protocol !== "https:") return arg;
-  setScheme(prefix);
+  /* The worker realm starts at codec defaults, so the live scheme is
+     baked beside the prefix: without it a mirror deployment encodes
+     b64u routes the SW can never decode (issue #20). */
+  setScheme(prefix, G.__ZL_SCHEME__);
   return encodeDest(abs.href);
 }
 
@@ -49,6 +53,7 @@ const G = globalThis as unknown as {
   importScripts?: (...args: string[]) => void;
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   __ZL_PREFIX__?: string;
+  __ZL_SCHEME__?: "b64u" | "mirror";
   __ZL_WORKER_URL__?: string;
   WebSocket?: new (u: string, p?: string | string[]) => WebSocket;
   postMessage?: (m: unknown, t?: Transferable[]) => void;

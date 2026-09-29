@@ -171,9 +171,9 @@ interface JsCssRewriter {
   finish(): string;
 }
 interface RewriterMod {
-  JsRewriter: new (origin: string, base: string, prefix: string) => JsRewriter;
-  JsCssRewriter: new (origin: string, base: string, prefix: string) => JsCssRewriter;
-  rewriteCss(css: string, origin: string, base: string, prefix: string): string;
+  JsRewriter: new (origin: string, base: string, prefix: string, scheme: string) => JsRewriter;
+  JsCssRewriter: new (origin: string, base: string, prefix: string, scheme: string) => JsCssRewriter;
+  rewriteCss(css: string, origin: string, base: string, prefix: string, scheme: string): string;
   /* wasm-pack --target web output: `default` is the async init that
      fetches and instantiates the .wasm binary. Without it every
      JsRewriter call dies on an unbound wasm table. */
@@ -253,7 +253,7 @@ function rewriteStream(
         // (e.g. a wasm 404) used to reject outside the try and kill every fresh
         // HTML response with no diag event and no console error.
         const mod = await modP;
-        const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix());
+        const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), currentScheme());
         for (const path of rule.inject ?? []) rw.add_injection(path);
         if (rule.block?.length) rw.set_blocked_hosts(rule.block);
         for (const u of csInject) rw.add_injection(u);
@@ -301,7 +301,7 @@ function cssRewriteStream(
     async start(controller) {
       try {
         const mod = await modP;
-        const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix());
+        const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix(), currentScheme());
         const reader = body.getReader();
         for (;;) {
           const { done, value } = await reader.read();
@@ -1308,6 +1308,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
             const head =
               "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) +
+              ";self.__ZL_SCHEME__=" + JSON.stringify(currentScheme()) +
               ";self.__ZL_WORKER_URL__=" + JSON.stringify(target) + ";\n" +
               (await workerPrelude()) +
               (fpWorkerScript ? "\n" + fpWorkerScript : "");
@@ -1324,6 +1325,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude" });
             const prelude =
               "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) +
+              ";self.__ZL_SCHEME__=" + JSON.stringify(currentScheme()) +
               ";self.__ZL_WORKER_URL__=" + JSON.stringify(target) + ";\n" +
               (await workerPrelude()) +
               (fpWorkerScript ? "\n" + fpWorkerScript : "");
@@ -1411,8 +1413,12 @@ function forwardedHeaders(req: Request): Headers {
     if (!skip.has(k.toLowerCase())) out.set(k, v);
   }
   if (req.referrer) {
-    const ref = decodePath(new URL(req.referrer, self.location.origin).pathname);
-    if (ref) out.set("referer", ref);
+    const refU = new URL(req.referrer, self.location.origin);
+    /* Mirror routes carry the page query in the route URL's search
+       (b64u encodes it inside the tail); the Referer must match what
+       direct browsing sends (issue #20). */
+    const ref = decodePath(refU.pathname);
+    if (ref) out.set("referer", ref + refU.search);
   }
   if (!out.has("accept-language")) out.set("accept-language", "en-US,en;q=0.9");
   /* 1.8 Telluride: while a profile is active, the wire surface must

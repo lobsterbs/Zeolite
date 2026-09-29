@@ -6,6 +6,18 @@ use crate::encode::Codec;
 use crate::html::Rewriter;
 use wasm_bindgen::prelude::*;
 
+/// Route scheme selector: "mirror" emits path-mirror routes (/m/...),
+/// anything else base64url under the configured prefix. The rewriter
+/// must emit routes in the scheme the SW decodes: a mirror deployment
+/// that gets b64u routes serves links the SW can never decode (#20).
+fn codec_for(prefix: String, scheme: String) -> Codec {
+    if scheme == "mirror" {
+        Codec::PathMirror
+    } else {
+        Codec::Base64Url { prefix }
+    }
+}
+
 #[wasm_bindgen]
 pub struct JsRewriter {
     inner: Rewriter,
@@ -16,11 +28,12 @@ impl JsRewriter {
     /// origin: engine origin, e.g. "https://jet.example.com"
     /// base: the real destination URL of the page being rewritten
     /// prefix: codec path prefix (default "/j/")
+    /// scheme: route scheme ("mirror" or the b64u default)
     #[wasm_bindgen(constructor)]
-    pub fn new(origin: String, base: String, prefix: String) -> JsRewriter {
+    pub fn new(origin: String, base: String, prefix: String, scheme: String) -> JsRewriter {
         let cfg = RewriteConfig {
             origin,
-            codec: Codec::Base64Url { prefix },
+            codec: codec_for(prefix, scheme),
             ..Default::default()
         };
         let mut inner = Rewriter::new(cfg);
@@ -78,10 +91,16 @@ fn css_enc(cfg: RewriteConfig, base: String) -> Box<dyn Fn(&str) -> String> {
 /// One-shot CSS pass for complete strings (style blocks). Standalone
 /// stylesheets use the streaming JsCssRewriter below instead.
 #[wasm_bindgen(js_name = "rewriteCss")]
-pub fn rewrite_css(css: String, origin: String, base: String, prefix: String) -> String {
+pub fn rewrite_css(
+    css: String,
+    origin: String,
+    base: String,
+    prefix: String,
+    scheme: String,
+) -> String {
     let cfg = RewriteConfig {
         origin,
-        codec: Codec::Base64Url { prefix },
+        codec: codec_for(prefix, scheme),
         ..Default::default()
     };
     let enc = css_enc(cfg, base);
@@ -100,10 +119,10 @@ pub struct JsCssRewriter {
 #[wasm_bindgen]
 impl JsCssRewriter {
     #[wasm_bindgen(constructor)]
-    pub fn new(origin: String, base: String, prefix: String) -> JsCssRewriter {
+    pub fn new(origin: String, base: String, prefix: String, scheme: String) -> JsCssRewriter {
         let cfg = RewriteConfig {
             origin,
-            codec: Codec::Base64Url { prefix },
+            codec: codec_for(prefix, scheme),
             ..Default::default()
         };
         Self {

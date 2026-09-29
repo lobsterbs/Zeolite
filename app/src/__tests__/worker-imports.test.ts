@@ -31,6 +31,12 @@ describe("routeModuleSpecifier", () => {
     expect(routeModuleSpecifier(P, W, E, "/j/abc")).toBe("/j/abc");
     expect(routeModuleSpecifier(P, W, E, "not a url")).toBe("not a url");
   });
+
+  it("encodes in the live mirror scheme (issue #20)", () => {
+    setScheme("/m/", "mirror");
+    const out = routeModuleSpecifier("/m/", W, E, "https://cdn.other/lib.js");
+    expect(out).toBe("/m/https://cdn.other/lib.js");
+  });
 });
 
 describe("rewriteModuleWorkerImports", () => {

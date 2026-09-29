@@ -111,3 +111,33 @@ describe("route symmetry after rotation", () => {
     expect(referrerDest(page, "/l.png")).toBe("https://target.dev/l.png");
   });
 });
+
+describe("mirror pathScheme (issue #20)", () => {
+  beforeEach(() => setScheme("/m/", "mirror"));
+
+  it("encodes and decodes the destination verbatim under /m/", () => {
+    const route = encodeDest("https://target.dev/p?q=1");
+    expect(route).toBe("/m/https://target.dev/p?q=1");
+    expect(decodePath(route)).toBe("https://target.dev/p?q=1");
+  });
+
+  it("isEnginePath follows the scheme, not the b64u prefix", () => {
+    expect(isEnginePath("/m/https://x.dev/")).toBe(true);
+    expect(isEnginePath("/j/abc")).toBe(false);
+  });
+
+  it("unwrapDest peels a mirror layer bound to the target host", () => {
+    /* The query rides the route URL's search (decodePath takes the
+       path only); the fetch flow re-attaches it to the final target. */
+    const wrapped = "https://example.com" + encodeDest("https://real.dev/x?y=2");
+    expect(unwrapDest(wrapped)).toBe("https://real.dev/x");
+  });
+
+  it("referrerDest recovers the page home from a mirror route", () => {
+    const page = "https://engine.dev" + encodeDest("https://target.dev/p");
+    expect(referrerDest(page, "/l.png")).toBe("https://target.dev/l.png");
+    /* A page query never changes the recovered origin. */
+    const q = "https://engine.dev" + encodeDest("https://target.dev/p?pg=2");
+    expect(referrerDest(q, "/l.png")).toBe("https://target.dev/l.png");
+  });
+});

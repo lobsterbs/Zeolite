@@ -48,6 +48,19 @@ describe("routeWorkerUrl (1.6: importScripts and worker fetch)", () => {
     setScheme(P);
     expect(decodePath(out)).toBe("https://api.site/api/data.json");
   });
+
+  it("routes in the baked mirror scheme (issue #20)", () => {
+    const G = globalThis as { __ZL_SCHEME__?: "b64u" | "mirror" };
+    G.__ZL_SCHEME__ = "mirror";
+    try {
+      const out = routeWorkerUrl("/m/", W, E, "lib.js");
+      expect(out).toBe("/m/https://api.site/lib.js");
+      expect(decodePath(out)).toBe("https://api.site/lib.js");
+    } finally {
+      delete G.__ZL_SCHEME__;
+      setScheme(P, "b64u");
+    }
+  });
 });
 
 describe("pickRelayPort (2.3 Selenide shared bridge)", () => {
