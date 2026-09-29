@@ -1,0 +1,46 @@
+name: transport diag (#11)
+
+# One-shot diagnostic for issue #11: reproduce the libcurl.js
+# transport failure on craigslist's empty-body 302 and test whether
+# forcing HTTP/1.1 via the transport's request params JSON
+# (_libcurl_http_version, parsed by libcurl.js http.c
+# http_set_options) changes the outcome. Runs a local zeolite-server
+# as the wisp endpoint. Delete this workflow and
+# suite/transport-diag.mjs when #11 closes.
+
+on:
+  push:
+    paths:
+      - ".github/workflows/transport-diag.yml"
+      - "suite/transport-diag.mjs"
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build zeolite-server
+        run: cargo build -p zeolite-server --release
+      - name: Start zeolite-server
+        run: |
+          PORT=6002 ./target/release/zeolite-server 2>&1 | tee server.log &
+          for i in $(seq 1 30); do
+            sleep 1
+            if (exec 3<>/dev/tcp/127.0.0.1/6002) 2>/dev/null; then
+              echo "server up after ${i}s"
+              exit 0
+            fi
+          done
+          echo "server never came up"
+          cat server.log
+          exit 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install transport (AGPL: npm-only, never committed)
+        run: npm i @mercuryworkshop/libcurl-transport@2.0.5 ws
+      - name: Run diagnostic
+        run: node suite/transport-diag.mjs
