@@ -14,7 +14,52 @@
  * (RECV_ERROR) on craigslist's 302 before any response object
  * exists. If the h1 variant returns a real 302, the failure is in
  * the h2 delivery path; if it fails identically, the fault is in
- * close-delimited EOF handling of the wisp socket layer. */
+ * close-delimited EOF handling of the wisp socket layer.
+ *
+ * Node note: libcurl.js's emscripten prelude throws "environment
+ * detection error" unless it sees a worker (importScripts) or a
+ * window. Node 22 already ships every web API the transport touches
+ * (fetch, Request, Response, Headers, Blob, WebSocket), so alias the
+ * globals the prelude probes instead of running a real browser. */
+
+globalThis.window = globalThis;
+globalThis.self = globalThis;
+if (typeof globalThis.location === "undefined") {
+  globalThis.location = {
+    href: "http://127.0.0.1/",
+    origin: "http://127.0.0.1",
+    protocol: "http:",
+    host: "127.0.0.1",
+    hostname: "127.0.0.1",
+    port: "",
+    pathname: "/",
+    search: "",
+    hash: "",
+  };
+}
+if (typeof globalThis.document === "undefined") {
+  globalThis.document = {
+    currentScript: { src: "http://127.0.0.1/" },
+    getElementsByTagName: () => [],
+    createElement: () => ({
+      style: {},
+      setAttribute() {},
+      appendChild() {},
+    }),
+    addEventListener() {},
+    removeEventListener() {},
+  };
+}
+if (typeof globalThis.CloseEvent === "undefined") {
+  globalThis.CloseEvent = class CloseEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.code = init.code ?? 1005;
+      this.reason = init.reason ?? "";
+      this.wasClean = init.wasClean ?? true;
+    }
+  };
+}
 
 const WISP = "ws://127.0.0.1:6002/wisp/";
 
