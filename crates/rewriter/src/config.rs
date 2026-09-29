@@ -186,20 +186,30 @@ mod tests {
         };
         let route = c.encode_url("https://a.dev/p?q=1");
         assert_eq!(route, "https://proxy.example/m/https://a.dev/p?q=1");
-        assert_eq!(c.decode_engine_route(&route).as_deref(), Some("https://a.dev/p?q=1"));
+        assert_eq!(
+            c.decode_engine_route(&route).as_deref(),
+            Some("https://a.dev/p?q=1")
+        );
         let frag = format!("{}#f", route);
-        assert_eq!(c.decode_engine_route(&frag).as_deref(), Some("https://a.dev/p?q=1"));
+        assert_eq!(
+            c.decode_engine_route(&frag).as_deref(),
+            Some("https://a.dev/p?q=1")
+        );
         assert_eq!(
             c.decode_engine_route("/m/https://a.dev/p?q=1").as_deref(),
             Some("https://a.dev/p?q=1")
         );
         assert_eq!(
-            c.decode_engine_route("https://b.dev/m/https://a.dev/p?q=1").as_deref(),
+            c.decode_engine_route("https://b.dev/m/https://a.dev/p?q=1")
+                .as_deref(),
             Some("https://a.dev/p?q=1")
         );
         let bound = "https://b.dev/m/https://a.dev/p?q=1";
         let nested = c.encode_url(bound);
-        assert_eq!(c.unwrap_engine_route(&nested).as_deref(), Some("https://a.dev/p?q=1"));
+        assert_eq!(
+            c.unwrap_engine_route(&nested).as_deref(),
+            Some("https://a.dev/p?q=1")
+        );
         assert_eq!(c.decode_engine_route("/other"), None);
     }
 }
