@@ -16,11 +16,13 @@
  * the h2 delivery path; if it fails identically, the fault is in
  * close-delimited EOF handling of the wisp socket layer.
  *
- * Node note: libcurl.js's emscripten prelude throws "environment
- * detection error" unless it sees a worker (importScripts) or a
- * window. Node 22 already ships every web API the transport touches
- * (fetch, Request, Response, Headers, Blob, WebSocket), so alias the
- * globals the prelude probes instead of running a real browser. */
+ * Node note: the bundled libcurl.js is an emscripten build with
+ * -s ENVIRONMENT=web,worker. In Node it must be made to take the
+ * web path: alias window/self/location/document (the probes for the
+ * web environment), hide the process global (the probe for the node
+ * environment, which asserts at load) and provide a CloseEvent
+ * fallback. Node 22 already ships every web API the transport
+ * actually uses: fetch, Request, Response, Headers, Blob, WebSocket. */
 
 globalThis.window = globalThis;
 globalThis.self = globalThis;
@@ -61,62 +63,75 @@ if (typeof globalThis.CloseEvent === "undefined") {
   };
 }
 
-const WISP = "ws://127.0.0.1:6002/wisp/";
-
-if (typeof WebSocket === "undefined") {
-  const ws = await import("ws");
-  globalThis.WebSocket = ws.WebSocket ?? ws.default;
+/* Emscripten's node-environment probe asserts when the build has no
+   node support. Hide it for the whole run; nothing in the web path
+   or this script needs the process global binding. */
+const savedProcess = globalThis.process;
+try {
+  globalThis.process = undefined;
+  await runDiag();
+} finally {
+  globalThis.process = savedProcess;
 }
 
-const { LibcurlClient } = await import(
-  "@mercuryworkshop/libcurl-transport"
-);
-const client = new LibcurlClient({ wisp: WISP });
-await client.init();
+async function runDiag() {
+  const WISP = "ws://127.0.0.1:6002/wisp/";
 
-const UA =
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like " +
-  "Gecko) Chrome/131.0.0.0 Safari/537.36";
+  if (typeof WebSocket === "undefined") {
+    const ws = await import("ws");
+    globalThis.WebSocket = ws.WebSocket ?? ws.default;
+  }
 
-const targets = [
-  "https://en.wikipedia.org/", // control: 301, empty body
-  "https://news.ycombinator.com/", // control: plain 200
-  "https://www.craigslist.org/", // the failing 302 from #11
-];
+  const { LibcurlClient } = await import(
+    "@mercuryworkshop/libcurl-transport"
+  );
+  const client = new LibcurlClient({ wisp: WISP });
+  await client.init();
 
-const variants = {
-  default: {},
-  h1: { _libcurl_http_version: 1.1, _libcurl_verbose: 1 },
-};
+  const UA =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like " +
+    "Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-for (const target of targets) {
-  for (const [variant, extra] of Object.entries(variants)) {
-    const t0 = Date.now();
-    try {
-      const res = await client.session.fetch(target, {
-        method: "GET",
-        headers: { "User-Agent": UA },
-        redirect: "manual",
-        ...extra,
-      });
-      console.log(
-        JSON.stringify({
-          target,
-          variant,
-          ms: Date.now() - t0,
-          status: res.status,
-          headers: (res.raw_headers ?? []).slice(0, 12),
-        })
-      );
-    } catch (err) {
-      console.log(
-        JSON.stringify({
-          target,
-          variant,
-          ms: Date.now() - t0,
-          error: String(err),
-        })
-      );
+  const targets = [
+    "https://en.wikipedia.org/", // control: 301, empty body
+    "https://news.ycombinator.com/", // control: plain 200
+    "https://www.craigslist.org/", // the failing 302 from #11
+  ];
+
+  const variants = {
+    default: {},
+    h1: { _libcurl_http_version: 1.1, _libcurl_verbose: 1 },
+  };
+
+  for (const target of targets) {
+    for (const [variant, extra] of Object.entries(variants)) {
+      const t0 = Date.now();
+      try {
+        const res = await client.session.fetch(target, {
+          method: "GET",
+          headers: { "User-Agent": UA },
+          redirect: "manual",
+          ...extra,
+        });
+        console.log(
+          JSON.stringify({
+            target,
+            variant,
+            ms: Date.now() - t0,
+            status: res.status,
+            headers: (res.raw_headers ?? []).slice(0, 12),
+          })
+        );
+      } catch (err) {
+        console.log(
+          JSON.stringify({
+            target,
+            variant,
+            ms: Date.now() - t0,
+            error: String(err),
+          })
+        );
+      }
     }
   }
 }
