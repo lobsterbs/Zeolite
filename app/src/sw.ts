@@ -67,6 +67,7 @@ import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket } from "./libcu
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
+import { virtualOriginHeaders } from "./origin";
 import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
 import { fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
@@ -1157,7 +1158,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         const plugins = rule.plugins;
         try {
           DIAG.stage(traceId, "UPSTREAM_REQUEST", { url: target });
-          const fwd = forwardedHeaders(e.request);
+          const fwd = forwardedHeaders(e.request, target, initiator);
           /* webRequest.onBeforeSendHeaders: blocking listeners may
              replace the outgoing header set (validated pairs only). */
           const replaced = WEBREQ.beforeSendHeaders(wrDetails, fwd);
@@ -1472,9 +1473,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
 
 /** Per-request header surgery: drop hop-by-hop + engine-origin leaks,
     restore the real destination as Referer. */
-function forwardedHeaders(req: Request): Headers {
+function forwardedHeaders(req: Request, target: string, initiator?: string): Headers {
   const out = new Headers();
-  const skip = new Set(["host", "connection", "referer", "origin", "cookie"]);
+  const skip = new Set(["host", "connection", "referer", "origin", "cookie", "sec-fetch-site"]);
   for (const [k, v] of req.headers) {
     if (!skip.has(k.toLowerCase())) out.set(k, v);
   }
@@ -1486,6 +1487,14 @@ function forwardedHeaders(req: Request): Headers {
     const ref = decodePath(refU.pathname);
     if (ref) out.set("referer", ref + refU.search);
   }
+  /* Issue #23: the virtual origin. Every request the page makes is
+     same-origin on the engine side, so the browser Origin and
+     Sec-Fetch-Site carry engine facts upstream sites never issued;
+     strict-origin checks reject those POSTs (chatgpt.com). Recompute
+     both from the virtual initiator; unknown initiator sends none. */
+  const vo = virtualOriginHeaders(initiator, target, req.method, req.mode);
+  if (vo.origin) out.set("origin", vo.origin);
+  if (vo.secFetchSite) out.set("sec-fetch-site", vo.secFetchSite);
   if (!out.has("accept-language")) out.set("accept-language", "en-US,en;q=0.9");
   /* 1.8 Telluride: while a profile is active, the wire surface must
      match the document surface, so its UA and languages win over
