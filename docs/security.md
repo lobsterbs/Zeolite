@@ -133,9 +133,9 @@ Residuals, stated honestly:
   bypass both the property and setAttribute hooks; the parser has no
   script-visible seam.
 - Cross-origin subresource requests (fetch/XHR) from controlled pages
-  do reach the SW and are passed through to the browser (logged with
-  a passthrough verdict since #30); routing them through the engine
-  is an open policy decision, deliberately not made silently.
+  are routed through the engine since #34 (see the browser-direct
+  HTTP(S) escape section); what remains here is the navigation class
+  only.
 
 ## Page-visible destination leakage (issue #32)
 
@@ -179,11 +179,64 @@ Honest bounds:
 - Location and referrer surfaces are routes by construction (the
   rewriter maps them through encodeDest; referrers are b64u routes).
   SW-constructed Responses have an empty Response.url. Cross-origin
-  subresource passthrough (issue #30) still shows page-chosen URLs
-  in resource timing; that is the passthrough class, not an engine
-  leak.
+  subresource requests route through the engine since #34, so no
+  browser-network request carries the page-chosen URL; the URL string
+  still appears in resource timing entries the page itself created
+  (they are page-side objects, not network facts).
 - Browser-level assertions over these properties are deferred to the
   real-Chromium harness (issue #35); CI runs no browser by design.
+
+## Browser-direct HTTP(S) escapes (issue #34)
+
+Before #34 the SW declined every foreign-origin http(s) request from
+a controlled page and the browser went direct: every runtime-built
+fetch/XHR, EventSource, sendBeacon, image, stylesheet, script, media
+or worker URL that named a real origin exposed the client's IP and
+the target hostname to the browser and the network. The right seam
+is the fetch event itself: subresource requests from controlled
+clients all reach the SW whatever origin they name, only navigations
+are scope-bound. Routing there covers parser-inserted markup, CSS
+url() and srcset too, surfaces no page-side hook can reach.
+
+The policy (app/src/foreign.ts, pure code, unit-tested):
+
+- route: the requesting client is a proxied document - its own URL
+  decodes to an engine destination, or it holds a #33 virtual context
+  (a proxied page or a worker the engine itself served; a worker's
+  script URL may be foreign or a blob URL, so the URL alone is not
+  the whole truth). The full request URL becomes the destination and
+  the existing pipeline serves it: SSRF policy, header surgery, the
+  per-origin cookie jar, transport, rewriter and netLog all apply
+  unchanged, so no browser-direct request ever leaves.
+- preflight: a CORS preflight (OPTIONS + access-control-request-method)
+  from a proxied document is answered by the engine locally, for
+  exactly the method and headers the page asked for, credentials
+  honored. The target's own CORS policy never applied to
+  engine-routed responses anyway (applyEngineCors states the
+  engine's CORS facts on every response), so a local answer is the
+  consistent one; the actual request that follows routes like any
+  other.
+- passthrough: requests from clients that are not proxied documents
+  (the embedder app's own pages, or a client the SW cannot resolve)
+  keep the direct browser path with the #30 escape telemetry. Failing
+  open here is deliberate: the host app's cross-origin traffic is its
+  own business, and an unknown client is far more likely a host page
+  than a proxied one.
+
+netLog: routed foreign requests carry the full target URL as their
+engine-local path, preflight rows carry transport "engine" (answered
+locally, no transport touch), and passthrough rows keep the #30 shape
+and are now host-app and unattributable traffic only.
+
+Residuals, stated honestly:
+
+- location.href navigations are the #28 class: navigations never
+  reach the fetch handler (SW interception is scope-bound), so the
+  nav guard is the only defense and its residuals stand.
+- Workers a page created from blob: URLs have neither a decodable
+  client URL nor a #33 context; their foreign fetches passthrough.
+  Opaque (data:, blob:) request URLs passthrough by construction.
+- WebSocket is already bridged and never browser-direct; unchanged.
 
 ## Known open items (honest, not fixed by 3.0)
 
@@ -206,3 +259,6 @@ Honest bounds:
 - Page-identity opacity is obfuscation (issue #32): base64url routes
   are reversible by anyone who holds them; see the destination
   leakage section.
+- Browser-direct escape residuals (issue #34): blob-worker fetches
+  and opaque request URLs passthrough; navigations are the #28
+  class. See the browser-direct HTTP(S) escape section.

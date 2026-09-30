@@ -59,6 +59,7 @@
 
 /// <reference lib="webworker" />
 import { b64uDecode, decodePath, encodeDest, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { classifyForeign, preflightHeaders } from "./foreign";
 import { NAV } from "./bootstrap/navguard";
 import { initScript } from "./pageload";
 import { planRange, ZL_RANGE_MAX } from "./range";
@@ -376,7 +377,8 @@ export interface NetEntry {
   seq: number;
   ts: number;
   method: string;
-  /** Engine-local request path. */
+  /** Engine-local request path (the full URL for foreign-origin
+      requests the engine routes, #34). */
   path: string;
   /** Real destination URL. */
   dest: string;
@@ -398,8 +400,10 @@ export interface NetEntry {
   traceId?: string;
   /** Transport mode decision (NativeTransit Alpha / RewriteFallback), or
       "browser" for a cross-origin passthrough the engine declines
-      (issue #30: escape telemetry, not proxied traffic). */
-  transport?: "NativeTransit" | "RewriteFallback" | "browser";
+      (issue #30: escape telemetry, not proxied traffic), or "engine"
+      for an engine-answered request that never touched the transport
+      (the #34 CORS preflight). */
+  transport?: "NativeTransit" | "RewriteFallback" | "browser" | "engine";
   /** Machine-readable reason when the decision was RewriteFallback. */
   fallbackReason?: string;
   /** Final destination after redirects, when the transport exposed it. */
@@ -425,6 +429,10 @@ export interface NetDetail {
   respHeaders?: Record<string, string>;
   /** Set-Cookie names seen on the response (values never stored). */
   cookies?: string[];
+  /** True when the request arrived on a foreign origin and the engine
+      routed it through the transport instead of letting the browser
+      go direct (issue #34). */
+  crossOrigin?: boolean;
 }
 
 const NET_LIMIT = 256;
@@ -886,51 +894,40 @@ async function persistRoute(prefix: string): Promise<void> {
 
 self.addEventListener("fetch", (e: FetchEvent) => {
   const url = new URL(e.request.url);
-  if (url.origin !== self.location.origin) {
-    /* Issue #30: escape telemetry. Cross-origin requests from controlled
-       pages are declined here and the browser handles them directly; the
-       row below makes the escape class from #28 observable in the
-       inspector. status 0 with ms/bytes -1: the engine never sees the
-       response and claims no timing for it. */
-    let initiator: string | undefined;
-    try {
-      if (e.request.referrer) initiator = decodePath(new URL(e.request.referrer).pathname) || undefined;
-    } catch {
-      /* initiator stays unknown */
-    }
-    netLogPush({
-      method: e.request.method,
-      traceId: DIAG.trace(),
-      path: url.pathname + url.search,
-      dest: e.request.url,
-      status: 0,
-      rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
-      ms: -1,
-      bytes: -1,
-      verdict: "passthrough: cross-origin",
-      transport: "browser",
-      detail: { internalUrl: url.pathname + url.search, ttfb: -1, initiator },
-    });
-    return; // not ours: browser handles it
-  }
   /* 1.5 Silicide: opaque schemes (blob:, data:, about:) are browser-native
      and never engine routes: createObjectURL media, blob workers and
-     generated downloads pass through untouched. */
+     generated downloads pass through untouched. Checked before the
+     origin test: their origin is "null" or a foreign blob origin, and
+     they stay browser-owned in every case. */
   if (isOpaqueUrl(url)) return;
-  if (url.pathname.startsWith("/wisp/")) return; // transport endpoint: passthrough
-  /* Extension routes: web-accessible resources (/zl-ext/) and the
-     content-script bridge + declared script files (/zl-cs/). */
-  if (url.pathname.startsWith(EXT_ROUTE) || url.pathname.startsWith(CS_ROUTE)) {
-    e.respondWith(
-      serveExtensionAsset(e.request, url).catch(
-        (err) =>
-          new Response("zeolite: extension asset failed: " + String(err), {
-            status: 500,
-            headers: { "content-type": "text/plain" },
-          }),
-      ),
-    );
-    return;
+  /* Issue #34: cross-origin http(s) requests from controlled pages are
+     engine work, not browser work. Every subresource a controlled page
+     issues reaches this handler - only navigations are scope-bound, and
+     those escapes are the #28 class - so answering the request here
+     closes the whole browser-direct class (parser-inserted markup,
+     CSS url(), srcset, runtime element properties, fetch/XHR,
+     EventSource, sendBeacon, workers) with no page-side hook at all.
+     The pipeline below serves the request through the transport, so
+     the browser never talks to the target. Only requests from proxied
+     documents are engine work; the embedder app's own pages keep the
+     direct passthrough (see classifyForeign). */
+  const foreign = url.origin !== self.location.origin;
+  if (!foreign) {
+    if (url.pathname.startsWith("/wisp/")) return; // transport endpoint: passthrough
+    /* Extension routes: web-accessible resources (/zl-ext/) and the
+       content-script bridge + declared script files (/zl-cs/). */
+    if (url.pathname.startsWith(EXT_ROUTE) || url.pathname.startsWith(CS_ROUTE)) {
+      e.respondWith(
+        serveExtensionAsset(e.request, url).catch(
+          (err) =>
+            new Response("zeolite: extension asset failed: " + String(err), {
+              status: 500,
+              headers: { "content-type": "text/plain" },
+            }),
+        ),
+      );
+      return;
+    }
   }
   /* Issue #17: the route classification below depends on the restored
      route shape, so it runs after routeReady. respondWith is armed
@@ -940,7 +937,13 @@ self.addEventListener("fetch", (e: FetchEvent) => {
   e.respondWith(
     (async () => {
       await routeReady;
-      /* Route computation. Two shapes reach the engine origin:
+      /* Route computation. Three shapes reach this handler:
+         - foreign-origin http(s) requests (#34): the whole URL is the
+           destination. Only requests from proxied documents are
+           engine work (classifyForeign gates on the requesting
+           client's own URL); host-app traffic keeps the direct
+           passthrough with the #30 telemetry row, and CORS preflights
+           are answered by the engine for exactly what the page asked.
          - engine routes (isEnginePath): decode, then unwrap nested routes
            (the rewriter used to rewrap bound routes per pass, and older
            dists still emit /zl/<b64> chains bound to the target host).
@@ -951,7 +954,84 @@ self.addEventListener("fetch", (e: FetchEvent) => {
            referrer decode survives as the compat fallback only. Neither
            resolves: passthrough. */
       let dest0: string | null;
-      if (url.pathname === NAV) {
+      if (foreign) {
+        /* Issue #34. The client lookup is the only async part; the
+           policy itself is pure and unit-tested. */
+        let clientUrl: string | undefined;
+        try {
+          if (e.clientId) {
+            const client = await self.clients.get(e.clientId);
+            if (client) clientUrl = client.url;
+          }
+        } catch {
+          /* lookup unavailable: the classifier fails closed */
+        }
+        const policy = classifyForeign({
+          requestUrl: e.request.url,
+          engineOrigin: self.location.origin,
+          method: e.request.method,
+          preflight: e.request.headers.has("access-control-request-method"),
+          clientUrl,
+          hasContext: !!contextOf(VCTX, e.clientId),
+        });
+        if (policy === "passthrough") {
+          /* #30 escape telemetry, now scoped to host-app traffic (and
+             honest residuals like blob workers): the browser handles
+             it directly. status 0 with ms/bytes -1: the engine never
+             sees the response and claims no timing for it. */
+          let initiator: string | undefined;
+          try {
+            if (e.request.referrer) initiator = decodePath(new URL(e.request.referrer).pathname) || undefined;
+          } catch {
+            /* initiator stays unknown */
+          }
+          netLogPush({
+            method: e.request.method,
+            traceId: DIAG.trace(),
+            path: url.pathname + url.search,
+            dest: e.request.url,
+            status: 0,
+            rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
+            ms: -1,
+            bytes: -1,
+            verdict: "passthrough: cross-origin",
+            transport: "browser",
+            detail: { internalUrl: e.request.url, ttfb: -1, initiator },
+          });
+          return fetch(e.request);
+        }
+        if (policy === "preflight") {
+          /* The engine answers the preflight locally; the actual
+             request routes through the pipeline below it. */
+          const h = preflightHeaders({
+            requestMethod: e.request.headers.get("access-control-request-method"),
+            requestHeaders: e.request.headers.get("access-control-request-headers"),
+            credentials: e.request.credentials,
+            engineOrigin: self.location.origin,
+          });
+          let pfInitiator: string | undefined;
+          try {
+            if (clientUrl) pfInitiator = decodePath(new URL(clientUrl, self.location.origin).pathname) || undefined;
+          } catch {
+            /* initiator stays unknown */
+          }
+          netLogPush({
+            method: "OPTIONS",
+            traceId: DIAG.trace(),
+            path: url.href,
+            dest: url.href,
+            status: 204,
+            rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
+            ms: 0,
+            bytes: 0,
+            verdict: "cors-preflight: answered by engine",
+            transport: "engine",
+            detail: { internalUrl: url.href, ttfb: 0, initiator: pfInitiator },
+          });
+          return new Response(null, { status: 204, headers: h });
+        }
+        dest0 = url.href;
+      } else if (url.pathname === NAV) {
         /* Issue #28: the bootstrap nav guard rewrites absolute
            cross-origin URLs (window.open, anchor/area/iframe/form/link
            property and setAttribute assignments) to this marker route,
@@ -1021,7 +1101,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         const t0 = Date.now();
         const traceId = DIAG.trace();
         DIAG.stage(traceId, "REQUEST_INTERCEPTED", { url: target });
-        const internalUrl = url.pathname + url.search;
+        /* Issue #34: a foreign-origin request has no engine-local path;
+           the full URL is its internal identity (and the netLog path). */
+        const internalUrl = foreign ? url.href : url.pathname + url.search;
         /* Initiator: the controlling page destination. Issue #33: the
            client's own virtual context is the primary source (right
            even with an empty referrer); the client URL decode remains
@@ -1046,6 +1128,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             initiator,
             reqHeaders: flatRed(e.request.headers),
           };
+          if (foreign) d.crossOrigin = true;
           if (resp) {
             d.respHeaders = flatRed(resp.headers);
             /* Issue #10: set-cookie never survives Response construction
@@ -1090,7 +1173,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           transitRecord(traceId, target, decision);
           netLogPush({
             method: e.request.method, traceId,
-            path: url.pathname + url.search,
+            path: internalUrl,
             dest: target,
             status: 403,
             rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
@@ -1160,7 +1243,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           transitRecord(traceId, target, decision);
           netLogPush({
             method: e.request.method, traceId,
-            path: url.pathname + url.search,
+            path: internalUrl,
             dest: target,
             status: 403,
             rtype: rtype.toUpperCase(),
@@ -1194,7 +1277,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             }
             netLogPush({
               method: e.request.method, traceId,
-              path: url.pathname + url.search,
+              path: internalUrl,
               dest: target,
               status: hit.status,
               rtype: classifyRtype(
@@ -1277,10 +1360,14 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              Navigations are top-level for lax purposes. */
           const initCtx = contextOf(VCTX, e.clientId);
           const reqCtx: CookieRequestContext = {
+            /* Issue #34: a foreign-origin request's initiator is the
+               requesting page itself; the same-origin referrer fallback
+               (path resolved against the page home) must not be applied
+               to a foreign path - the page home suffices. */
             initiator:
               initCtx?.currentUrl ??
               (e.request.referrer
-                ? referrerDest(e.request.referrer, url.pathname + url.search) ?? undefined
+                ? referrerDest(e.request.referrer, foreign ? "/" : url.pathname + url.search) ?? undefined
                 : undefined),
             navigation: (e.request.headers.get("sec-fetch-dest") ?? "") === "document",
           };
@@ -1383,7 +1470,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           transitRecord(traceId, target, dec);
           netLogPush({
             method: e.request.method, traceId,
-            path: url.pathname + url.search,
+            path: internalUrl,
             dest: target,
             status: resp.status,
             ms: Date.now() - t0,
@@ -1539,7 +1626,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           transitRecord(traceId, target, decision);
           netLogPush({
             method: e.request.method, traceId,
-            path: url.pathname + url.search,
+            path: internalUrl,
             dest: target,
             status: 0,
             rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),

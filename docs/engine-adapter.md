@@ -85,6 +85,10 @@ find bar.
 
 - Storage: proxied site data is namespaced `zl:<sitehash>:` per site;
   engine-origin storage is never exposed to page code.
+- Host-app traffic is untouched by #34: the SW routes foreign-origin
+  requests only for proxied clients (client URL decodes to an engine
+  route, or a #33 virtual context exists). The embedding app's own
+  cross-origin calls keep the direct browser path.
 - SW state: `teardown()` unregisters `/sw.js` and deletes every cache
   it owned, so switching engines leaves no interception active.
 - Session export/import is NOT implemented. The 1.7 `zl:exportSession`
