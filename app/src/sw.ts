@@ -377,8 +377,10 @@ export interface NetEntry {
   err?: string;
   /** Diagnostics trace identifier, joinable with zl:getDiag events. */
   traceId?: string;
-  /** Transport mode decision (NativeTransit Alpha / RewriteFallback). */
-  transport?: "NativeTransit" | "RewriteFallback";
+  /** Transport mode decision (NativeTransit Alpha / RewriteFallback), or
+      "browser" for a cross-origin passthrough the engine declines
+      (issue #30: escape telemetry, not proxied traffic). */
+  transport?: "NativeTransit" | "RewriteFallback" | "browser";
   /** Machine-readable reason when the decision was RewriteFallback. */
   fallbackReason?: string;
   /** Final destination after redirects, when the transport exposed it. */
@@ -863,7 +865,33 @@ async function persistRoute(prefix: string, scheme: "b64u" | "mirror"): Promise<
 
 self.addEventListener("fetch", (e: FetchEvent) => {
   const url = new URL(e.request.url);
-  if (url.origin !== self.location.origin) return; // not ours: browser handles it
+  if (url.origin !== self.location.origin) {
+    /* Issue #30: escape telemetry. Cross-origin requests from controlled
+       pages are declined here and the browser handles them directly; the
+       row below makes the escape class from #28 observable in the
+       inspector. status 0 with ms/bytes -1: the engine never sees the
+       response and claims no timing for it. */
+    let initiator: string | undefined;
+    try {
+      if (e.request.referrer) initiator = decodePath(new URL(e.request.referrer).pathname) || undefined;
+    } catch {
+      /* initiator stays unknown */
+    }
+    netLogPush({
+      method: e.request.method,
+      traceId: DIAG.trace(),
+      path: url.pathname + url.search,
+      dest: e.request.url,
+      status: 0,
+      rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
+      ms: -1,
+      bytes: -1,
+      verdict: "passthrough: cross-origin",
+      transport: "browser",
+      detail: { internalUrl: url.pathname + url.search, ttfb: -1, initiator },
+    });
+    return; // not ours: browser handles it
+  }
   /* 1.5 Silicide: opaque schemes (blob:, data:, about:) are browser-native
      and never engine routes: createObjectURL media, blob workers and
      generated downloads pass through untouched. */

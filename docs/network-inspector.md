@@ -9,7 +9,10 @@ so it talks to the engine through the SW control plane.
 1. The SW keeps a fixed-size ring buffer (256 entries) of every proxied
    request: timestamp, method, engine-local path, real destination,
    status, time-to-response-headers in ms, and the error string when
-   the upstream fetch failed.
+   the upstream fetch failed. Cross-origin passthroughs the engine
+   declines are logged too (status 0, verdict "passthrough:
+   cross-origin", transport "browser"): they are the observable
+   escape class from issue #28, not proxied traffic.
 2. The page polls `{ type: "zl:getNetLog" }` once per second over a
    MessageChannel and renders a sortable table. Polling (not push) is
    deliberate: no extra SW message fan-out, and a page that sleeps

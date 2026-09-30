@@ -48,9 +48,11 @@ past every restored id).
   ordinary response; the browser may still save it, but Zeolite does
   not claim to track it.
 - Speed is a whole-lifetime average, not a rolling window.
-- The ring is bounded (200 entries): old entries are dropped, not
-  invented. Since 2.2 the ring persists across SW restarts; before
-  2.2 it was in memory only.
+- The ring is bounded (200 entries): eviction picks the oldest idle
+  entry, never a live stream, so an all-active ring honestly runs
+  over capacity instead of losing a running download (#25). Since
+  2.2 the ring persists across SW restarts; before 2.2 it was in
+  memory only.
 - Resuming a partial download is not implemented; cancelling is. A
   persisted `error/interrupted` entry is a record, not a resume
   promise.
