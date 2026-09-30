@@ -8,7 +8,9 @@
    Rewritten absolute URLs become engine-local NAV marker routes,
    which the SW decodes and proxies like any engine route
    (cross-origin navigations would otherwise never reach the fetch
-   handler at all).
+   handler at all). Issue #32: the marker encodes the target
+   base64url, so no plaintext destination reaches the DOM value, the
+   address bar or history.
 
    Honest limits, by design:
    - location is LegacyUnforgeable: location.href = "..." cannot be
@@ -28,9 +30,36 @@
 
 export const NAV = "/__zl_nav__";
 
-/** Absolute destination URL -> engine-local marker route. */
+/* Opaque marker encoding (issue #32): the marker carries the target
+   base64url-encoded - the same opacity level as every other engine
+   route - so no plaintext destination appears in a DOM attribute, the
+   address bar or history. Not encryption: as reversible as the /j/
+   routes themselves; what it removes is the plaintext URL from every
+   browser-visible surface. Local copy of the codec alphabet: the
+   bootstrap bundle stays independent of codec.ts (size gate). */
+const B64URL =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+function navB64u(s: string): string {
+  const bytes = new TextEncoder().encode(s);
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i];
+    const b1 = bytes[i + 1];
+    const b2 = bytes[i + 2];
+    const n = (b0 << 16) | ((b1 ?? 0) << 8) | (b2 ?? 0);
+    out += B64URL[(n >> 18) & 63];
+    out += B64URL[(n >> 12) & 63];
+    if (i + 1 < bytes.length) out += B64URL[(n >> 6) & 63];
+    if (i + 2 < bytes.length) out += B64URL[n & 63];
+  }
+  return out;
+}
+
+/** Absolute destination URL -> engine-local marker route. The SW
+    decodes the marker with the shared codec alphabet (b64uDecode). */
 export function navEncode(u: string): string {
-  return NAV + "/" + encodeURIComponent(u);
+  return NAV + "/" + navB64u(u);
 }
 
 type AnyRecord = Record<string, any>;

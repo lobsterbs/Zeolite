@@ -7,8 +7,12 @@ data, and neither ever touches the engine's own storage.
 ## What is partitioned, and how
 
 Everything is keyed by the same stable site hash the bootstrap has
-used since 1.0: `zl:<fnv1a36>:` derived from the target origin
-(`window.__ZL.dest`'s origin, set by the rewriter at injection time).
+used since 1.0: `zl:<fnv1a36>:` derived from an opaque per-site token
+(`window.__ZL.site`, set by the rewriter at injection time). The
+service worker computes the same token from the destination it holds
+privately, so the real origin never reaches the page (#32); an
+unrewritten document falls back to hashing the origin of its own
+baseURI, which keeps storage scoped and every shim native.
 
 - **localStorage / sessionStorage**: engine-origin keys are prefixed
   with `zl:<site>:`, via a patched `Storage` object installed on both

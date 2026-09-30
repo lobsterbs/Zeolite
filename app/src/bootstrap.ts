@@ -19,9 +19,12 @@
    for the navigation guard: a deliberate decision, recorded in the
    workflow file, never creep.
 
-   Page-global contract (set by the rewriter at injection time):
-   window.__ZL = { dest: "https://real.site/page" }
-   falls back to document.baseURI when absent. */
+   Page-global contract (set by the rewriter at injection time,
+   issue #32): window.__ZL = { site: "<opaque token>" } - a stable
+   per-site identity the engine computes from the real destination,
+   which itself never reaches the page. Absent (an unrewritten
+   document): the identity falls back to hashing document.baseURI,
+   so storage stays scoped and every shim stays native. */
 
 import { fnv1a, pageOrigin } from "./bootstrap/siteid";
 import { applyStorage } from "./bootstrap/storage";
@@ -32,17 +35,18 @@ import { applyNavGuard } from "./bootstrap/navguard";
 import { applyFindLoad } from "./bootstrap/findload";
 
 const w = window as unknown as Record<string, unknown>;
-const ZL = ((w.__ZL as { dest: string } | undefined) ??
-  { dest: document.baseURI }) as { dest: string };
+const loc = w.location as Location;
+const ZL = (w.__ZL as { site?: string } | undefined) ?? {};
+const site = ZL.site || fnv1a(pageOrigin(document.baseURI) || "unknown");
 
-/* "" when the destination is unparseable: the storage prefix falls
-   back to "unknown" and the cookie / serviceWorker shims stay native. */
-const ORIGIN = pageOrigin(ZL.dest);
-const P = "zl:" + fnv1a(ORIGIN || "unknown") + ":";
+/* "zl:" + opaque per-site token + ":": same scoping as before #32,
+   now derived from the engine-computed token instead of a page-held
+   real origin. */
+const P = "zl:" + site + ":";
 
 applyStorage(w, P);
-applyCookie(ORIGIN);
-applyRelay(w, ORIGIN, ZL.dest);
-applyWs(w, ORIGIN);
-applyNavGuard(w, (w.location as Location).href, (w.location as Location).origin);
+applyCookie(site);
+applyRelay(w, site, loc.href);
+applyWs(w);
+applyNavGuard(w, loc.href, loc.origin);
 applyFindLoad(w);

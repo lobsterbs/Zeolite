@@ -23,27 +23,34 @@ describe("classifyFailure (issue #3 categories)", () => {
 describe("errorPage", () => {
   const page = errorPage({
     route: "/j/aHR0cHM6Ly90YXJnZXQuZGV2L3A",
-    target: "https://target.dev/p?q=<script>",
     category: "dns",
     engineVersion: "2.3 Selenide",
   });
 
   it("carries the machine-readable zl-error payload", () => {
     expect(page).toContain('name="zl-error"');
-    expect(page).toContain("https://target.dev/p?q=&lt;script&gt;");
     expect(page).toContain("&quot;category&quot;:&quot;dns&quot;");
     expect(page).toContain("&quot;version&quot;:&quot;2.3 Selenide&quot;");
   });
 
-  it("escapes hostile targets instead of reflecting them", () => {
-    expect(page).not.toContain("<script>");
-    expect(page).not.toContain("onerror=");
+  it("never prints a destination URL (issue #32)", () => {
+    expect(page).not.toContain("target.dev");
+    expect(page).not.toContain("https://");
+  });
+
+  it("escapes hostile route input instead of reflecting it", () => {
+    const p = errorPage({
+      route: "/j/x\" onerror=\"alert(1)",
+      category: "dns",
+      engineVersion: "v",
+    });
+    expect(p).not.toContain("<script>");
+    expect(p).not.toContain("onerror=\"alert");
   });
 
   it("is deterministic, minimal and theme-aware", () => {
     const again = errorPage({
       route: "/j/aHR0cHM6Ly90YXJnZXQuZGV2L3A",
-      target: "https://target.dev/p?q=<script>",
       category: "dns",
       engineVersion: "2.3 Selenide",
     });
@@ -61,7 +68,7 @@ describe("errorPage", () => {
       ["blocked", "blocked by policy"],
       ["stream", "interrupted"],
     ] as const) {
-      const p = errorPage({ route: "/j/x", target: "https://t.dev/", category: cat, engineVersion: "v" });
+      const p = errorPage({ route: "/j/x", category: cat, engineVersion: "v" });
       expect(p).toContain(text);
       expect(p).not.toContain("stack");
     }

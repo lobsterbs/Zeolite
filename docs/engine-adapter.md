@@ -41,7 +41,7 @@ export interface ZeoliteEngine {
 
 interface EngineConfig {
   wispUrl?: string;                       // default wss(s)://<origin>/wisp/
-  pathScheme?: "b64u" | "mirror";        // codec rotation, default "b64u"
+  pathScheme?: "b64u";                       // fixed since #32, mirror removed
   pathPrefix?: string;                    // default "/j/"
   profile?: string;                       // cookie jar profile, default "default"
 }
@@ -56,13 +56,13 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 | message | payload | effect |
 | --- | --- | --- |
 | `zl:ping` | - | liveness probe (echoes version, degraded, route shape) |
-| `zl:config` | `prefix`, `scheme` | rotate the URL shape at runtime |
+| `zl:config` | `prefix` | rotate the route prefix at runtime; the scheme is fixed to `"b64u"` since #32, any other `scheme` value is rejected |
 | `zl:adblock` | `enabled` | global toggle for the /rules.json block lists |
 | `zl:rules` | `ua`, `rules` (`host`, `adblock`, `ua`) | host-app per-site adblock + User-Agent overrides (rules.ts) |
 | `zl:jarProfile` | `profile` (or null) | switch the cookie jar to a throwaway session profile (incognito; cookies.ts) |
 | `zl:siteRoute` | `site`, `enabled` | per-site interception toggle (403 when disabled) |
 | `zl:teardown` | - | drop all SW caches, `unregister()` |
-| `zl:find` | `dest`, `cmd` (`find`/`next`/`prev`/`clear`), `pattern`, `options` (`caseSensitive`, `wholeWord`, `wrap`) | in-page find in the addressed proxied document (#29): the page-side finder replies `{ ok, matches, ordinal (1-based), highlight }`; open shadow roots searched, CSS Custom Highlight API where available (`highlight: "none"` = counts only) |
+| `zl:find` | `dest`, `cmd` (`find`/`next`/`prev`/`clear`), `pattern`, `options` (`caseSensitive`, `wholeWord`, `wrap`) | in-page find in the addressed proxied document (#29): the page-side finder replies `{ ok, matches, ordinal (1-based), highlight }`; open shadow roots searched, CSS Custom Highlight API where available (`highlight: "none"` = counts only). Addressing is controller-side: `dest` selects the client SW-side and the findLoad message posted to the page carries no destination (#32) |
 
 Page-internal messages (sent by the injected bootstrap, not the host
 app): `zl:wsOpen` (`url`, `protocols`, optional `origin`) bridges a

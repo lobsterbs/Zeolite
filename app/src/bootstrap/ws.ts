@@ -1,10 +1,14 @@
 /* WebSocket bridge: ws(s):// is routed through the engine controller
-   (zl:wsOpen) with native event semantics. Split out of the bootstrap
-   entry; the body is unchanged. */
+   (zl:wsOpen) with native event semantics. Split out of the
+   bootstrap entry. Issue #32: the shim no longer knows (or holds) the
+   real site origin - a same-origin ws URL stays engine-local on the
+   page side, and the SW retargets it via the sender's own virtual
+   context (#33). The page's ws.url property and message event origins
+   therefore report engine-origin URLs as written, never the target. */
 
 import { swc } from "./siteid";
 
-export function applyWs(w: Record<string, unknown>, ORIGIN: string): void {
+export function applyWs(w: Record<string, unknown>): void {
 /* ---- WebSocket ---------------------------------------------------- */
 /* The SW cannot intercept WebSocket upgrades, so ws(s):// URLs are
    bridged: this shim posts zl:wsOpen to the controlling SW with a
@@ -28,18 +32,6 @@ export function applyWs(w: Record<string, unknown>, ORIGIN: string): void {
       }
       if (!/^wss?:$/.test(u.protocol)) {
         return new OWS(url, protocols);
-      }
-      /* Issue #4: a same-origin ws from a proxied page means the
-         virtual origin. The engine host serves no ws endpoints, so
-         wss://<engine host>/x would fail; retarget to the site. */
-      if (ORIGIN && u.origin === (w.location as { origin: string }).origin) {
-        try {
-          const vp = u.protocol;
-          u = new URL(u.pathname + u.search, ORIGIN);
-          u.protocol = vp;
-        } catch {
-          /* unparseable virtual origin: keep engine-local */
-        }
       }
       const es = new EventTarget() as unknown as WebSocket;
       let wsState = 0;
@@ -105,8 +97,9 @@ const disp = (e: Event) => {
         ctl.postMessage(
           {
             type: "zl:wsOpen",
-            /* u.href, not the original string: a same-origin URL may
-               have been retargeted to the virtual origin above. */
+            /* The URL as written: engine-local for same-origin sockets
+               (the SW retargets it), the page's own cross-origin
+               choice otherwise. */
             url: u.href,
             protocols: ([] as string[]).concat(protocols ?? []),
           },

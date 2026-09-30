@@ -1,18 +1,28 @@
 /* Engine-owned navigation error page (issue #3).
 
    A navigation that fails inside the transport answers with a minimal
-   HTML page the engine owns: the target URL, a one-line failure
-   category, one retry action, prefers-color-scheme aware, plus a
-   machine-readable zl-error meta payload embedders and DevTools can
-   read. No stacks, no header dumps, no secrets: the structured rings
-   (DiagEvent / trace / netLog) stay the real diagnostics channel, and
-   the page carries only what a user needs to act on. Subresource
-   failures keep the honest 502 text/plain body - no UI.
+   HTML page the engine owns: one-line failure category, one retry
+   action, prefers-color-scheme aware, plus a machine-readable
+   zl-error meta payload embedders and DevTools can read. No stacks,
+   no header dumps, no secrets: the structured rings (DiagEvent /
+   trace / netLog) stay the real diagnostics channel, and the page
+   carries only what a user needs to act on. Subresource failures keep
+   the honest 502 text/plain body - no UI.
+
+   Issue #32: the page no longer prints the target URL. The address
+   bar already shows the opaque engine route of the failed navigation;
+   printing the plaintext destination on an engine-origin document
+   would expose it to any script (or iframe embedding) on that origin,
+   which is exactly the leak class #32 closes. The real destination
+   stays visible in the privileged surfaces only: the netLog /
+   diagnostics rings and the embedder's own devtools. The retry link
+   still navigates the same engine route, so recovery is unchanged.
 
    The no-control case (a browser hits an engine route with no
    controlling worker) cannot be answered by the engine at all: with
    no worker scoped to the route, nothing of the engine runs. The
-   embedder serves a documented snippet there; see docs/error-pages.md. */
+   embedder serves a documented snippet there; see
+   docs/error-pages.md. */
 
 export type ErrorCategory = "dns" | "tls" | "timeout" | "blocked" | "stream";
 
@@ -55,8 +65,6 @@ function esc(s: string): string {
 export interface ErrorPageInput {
   /** The engine route path (+ query) the retry action navigates to. */
   route: string;
-  /** The decoded destination URL, shown to the user. */
-  target: string;
   category: ErrorCategory;
   engineVersion: string;
 }
@@ -65,7 +73,6 @@ export interface ErrorPageInput {
     input, byte-identical HTML out. */
 export function errorPage(input: ErrorPageInput): string {
   const meta = JSON.stringify({
-    target: input.target,
     category: input.category,
     version: input.engineVersion,
   });
@@ -82,7 +89,6 @@ body { margin: 0; min-height: 100vh; display: grid; place-items: center;
   font: 16px/1.5 system-ui, sans-serif; }
 main { max-width: 34em; padding: 1.5em; }
 h1 { font-size: 1.1em; margin: 0 0 .5em; }
-code { overflow-wrap: anywhere; }
 a { display: inline-block; margin-top: 1em; padding: .5em 1.25em;
   border-radius: .5em; background: #0b57d0; color: #fff;
   text-decoration: none; }
@@ -91,7 +97,6 @@ a { display: inline-block; margin-top: 1em; padding: .5em 1.25em;
 <body>
 <main>
 <h1>Could not load this page</h1>
-<p><code>${esc(input.target)}</code></p>
 <p>${esc(CATEGORY_TEXT[input.category])}</p>
 <p><a href="${esc(input.route)}">Retry</a></p>
 </main>

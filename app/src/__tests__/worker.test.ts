@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { decodePath, isWorkerDestination, setScheme } from "../codec";
-import { fireHandler, pickRelayPort, routeWorkerUrl } from "../worker-prelude";
+import { decodePath, encodeDest, isWorkerDestination, setScheme } from "../codec";
+import { fireHandler, installWorkerPrelude, pickRelayPort, routeWorkerUrl } from "../worker-prelude";
 import { swShimApply, swShimGet, swShimRegister } from "../swshim";
 
 describe("worker destinations (1.6)", () => {
@@ -49,16 +49,37 @@ describe("routeWorkerUrl (1.6: importScripts and worker fetch)", () => {
     expect(decodePath(out)).toBe("https://api.site/api/data.json");
   });
 
-  it("routes in the baked mirror scheme (issue #20)", () => {
-    const G = globalThis as { __ZL_SCHEME__?: "b64u" | "mirror" };
-    G.__ZL_SCHEME__ = "mirror";
+  it("installWorkerPrelude keeps the worker URL in the closure (issue #32)", () => {
+    const G = globalThis as unknown as {
+      __ZL_PREFIX__?: string;
+      __ZL_WORKER_URL__?: string;
+      importScripts?: unknown;
+    };
+    const savedIS = G.importScripts;
+    const calls: string[][] = [];
+    G.importScripts = (...args: string[]) => {
+      calls.push(args);
+    };
+    G.__ZL_PREFIX__ = "/j/";
     try {
-      const out = routeWorkerUrl("/m/", W, E, "lib.js");
-      expect(out).toBe("/m/https://api.site/lib.js");
-      expect(decodePath(out)).toBe("https://api.site/lib.js");
+      setScheme("/j/");
+      installWorkerPrelude(encodeDest("https://api.site/worker.js"));
+      (globalThis as { importScripts: (...a: string[]) => void }).importScripts("lib.js");
+      expect(calls.length).toBe(1);
+      setScheme("/j/");
+      expect(decodePath(calls[0][0])).toBe("https://api.site/lib.js");
+      expect(calls[0][0].startsWith("/j/")).toBe(true);
+      /* No global ever carries the upstream URL (#32). */
+      expect("__ZL_WORKER_URL__" in (globalThis as Record<string, unknown>)).toBe(false);
+      expect((G as Record<string, unknown>).__ZL_WORKER_URL__).toBeUndefined();
+      /* Idempotent: a second init line keeps the first wiring. */
+      const wrapped = (globalThis as { importScripts: unknown }).importScripts;
+      installWorkerPrelude(encodeDest("https://other.site/w.js"));
+      expect((globalThis as { importScripts: unknown }).importScripts).toBe(wrapped);
     } finally {
-      delete G.__ZL_SCHEME__;
-      setScheme(P, "b64u");
+      delete G.__ZL_PREFIX__;
+      if (savedIS === undefined) delete G.importScripts; else G.importScripts = savedIS;
+      setScheme("/j/");
     }
   });
 });

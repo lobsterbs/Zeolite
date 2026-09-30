@@ -11,7 +11,9 @@
    -coded here while decoding used the rotated prefix).
 
    Phase 2 control plane (postMessage from the engine adapter):
-     { type: "zl:config", prefix, scheme }   rotate the URL shape
+     { type: "zl:config", prefix }          rotate the route prefix
+                                             (scheme fixed "b64u" since
+                                             #32; other values rejected)
      { type: "zl:rules", ua, rules }         host-app per-site overrides
                                              (host, adblock, ua)
      { type: "zl:jarProfile", profile }     switch the cookie jar to a
@@ -56,8 +58,9 @@
    wasm-pack build --target web -> copy into app/src/rewriter_wasm). */
 
 /// <reference lib="webworker" />
-import { decodePath, encodeDest, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setScheme, unwrapDest, currentPrefix, currentScheme } from "./codec";
+import { b64uDecode, decodePath, encodeDest, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setScheme, unwrapDest, currentPrefix } from "./codec";
 import { NAV } from "./bootstrap/navguard";
+import { initScript } from "./pageload";
 import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage } from "./errorpage";
@@ -260,8 +263,9 @@ function isCss(resp: Response): boolean {
 }
 
 /** HTML bodies: pipe response chunks through the wasm rewriter. The
-    bootstrap needs the page's real destination on window.__ZL, so we
-    emit a tiny inline script before the first rewritten chunk.
+    bootstrap needs a per-site identity on window.__ZL (an opaque
+    token since #32; the real destination never enters the page), so
+    we emit a tiny inline script before the first rewritten chunk.
     SiteConfig per-site rules are applied to this rewriter instance:
     injections (Phase 3 hooks) and blocked hosts (ad stripping). */
 function rewriteStream(
@@ -274,10 +278,10 @@ function rewriteStream(
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   const modP = rewriter();
-  const ljInit =
-    /* 1.8 Telluride: an active fingerprint profile rides the same
-       first chunk as the __ZL init script. */
-    `<script>window.__ZL=${JSON.stringify({ dest: base })};</script>` + (fpScript ? `<script>${fpScript}</script>` : "");
+  /* Issue #32: the injected contract is { site: <opaque token> },
+    computed SW-side from the destination; an active fingerprint
+    profile rides the same first chunk (1.8 Telluride). */
+  const ljInit = initScript(base, fpScript);
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       controller.enqueue(encoder.encode(ljInit));
@@ -287,7 +291,7 @@ function rewriteStream(
         // (e.g. a wasm 404) used to reject outside the try and kill every fresh
         // HTML response with no diag event and no console error.
         const mod = await modP;
-        const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), currentScheme());
+        const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u"); // scheme fixed since #32 (mirror removed)
         for (const path of rule.inject ?? []) rw.add_injection(path);
         if (rule.block?.length) rw.set_blocked_hosts(rule.block);
         for (const u of csInject) rw.add_injection(u);
@@ -335,7 +339,7 @@ function cssRewriteStream(
     async start(controller) {
       try {
         const mod = await modP;
-        const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix(), currentScheme());
+        const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix(), "b64u"); // scheme fixed since #32 (mirror removed)
         const reader = body.getReader();
         for (;;) {
           const { done, value } = await reader.read();
@@ -859,19 +863,21 @@ const routeReady: Promise<void> = (async () => {
   try {
     const hit = await (await caches.open(ZL_ROUTE_CACHE)).match(ZL_ROUTE_KEY);
     if (hit) {
-      const cfg = (await hit.json()) as { prefix?: string; scheme?: "b64u" | "mirror" };
-      setScheme(cfg.prefix ?? "/j/", cfg.scheme === "mirror" ? "mirror" : "b64u");
+      const cfg = (await hit.json()) as { prefix?: string; scheme?: string };
+      /* A pre-#32 deployment may have persisted scheme "mirror": it
+         coerces to the default (mirror routes are gone, #32). */
+      setScheme(cfg.prefix ?? "/j/");
     }
   } catch {
     /* storage unavailable: defaults stay until the next zl:config */
   }
 })();
 
-async function persistRoute(prefix: string, scheme: "b64u" | "mirror"): Promise<void> {
+async function persistRoute(prefix: string): Promise<void> {
   try {
     await (await caches.open(ZL_ROUTE_CACHE)).put(
       ZL_ROUTE_KEY,
-      new Response(JSON.stringify({ prefix, scheme })),
+      new Response(JSON.stringify({ prefix })),
     );
   } catch {
     /* storage unavailable: the in-memory rotation still works */
@@ -952,14 +958,13 @@ self.addEventListener("fetch", (e: FetchEvent) => {
            so the load or navigation reaches the engine instead of the
            browser going direct (cross-origin navigations never reach
            the fetch handler otherwise: SW interception is scope-bound).
-           The target travels percent-encoded in the path; only http(s)
-           targets are accepted, anything else is a bad route. */
-        let nav: string | null = null;
-        try {
-          nav = decodeURIComponent(url.pathname.slice(NAV.length)) || null;
-        } catch {
-          nav = null;
-        }
+           Issue #32: the target travels base64url-encoded in the path
+           (same opacity level as every other engine route), so no
+           plaintext destination appears in a DOM value, the address
+           bar or history; only http(s) targets are accepted, anything
+           else is a bad route. */
+        const navBytes = b64uDecode(url.pathname.slice(NAV.length + 1));
+        const nav = navBytes ? new TextDecoder().decode(navBytes) : null;
         if (!nav || !/^https?:\/\//.test(nav)) return new Response("zeolite: bad route", { status: 404 });
         dest0 = nav;
       } else if (isEnginePath(url.pathname)) {
@@ -1470,11 +1475,14 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "module worker specifier pass" });
             traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
             const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
+            /* Issue #32: no __ZL_WORKER_URL__ global (it handed the
+               upstream URL to any worker script); the worker's own
+               engine route is passed to the prelude init line and
+               decoded inside its closure. */
             const head =
-              "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) +
-              ";self.__ZL_SCHEME__=" + JSON.stringify(currentScheme()) +
-              ";self.__ZL_WORKER_URL__=" + JSON.stringify(target) + ";\n" +
+              "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
               (await workerPrelude()) +
+              "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDest(target)) + ");\n" +
               (fpWorkerScript ? "\n" + fpWorkerScript : "");
             WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
             return new Response(head + src, { status: resp.status, headers: outHeaders });
@@ -1488,10 +1496,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
                preserved: everything prepended is one extra first chunk. */
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude" });
             const prelude =
-              "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) +
-              ";self.__ZL_SCHEME__=" + JSON.stringify(currentScheme()) +
-              ";self.__ZL_WORKER_URL__=" + JSON.stringify(target) + ";\n" +
+              "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
               (await workerPrelude()) +
+              "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDest(target)) + ");\n" +
               (fpWorkerScript ? "\n" + fpWorkerScript : "");
             const body = new ReadableStream<Uint8Array>({
               async start(c) {
@@ -1544,14 +1551,16 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             detail: mkDetail(),
           });
           /* Issue #3: failed navigations answer with the engine-owned
-             error page (target, one honest category line, retry, zl-error
-             meta). Every other destination keeps the honest 502 plain
-             text body - subresources get no UI. */
+             error page (one honest category line, retry, zl-error
+             meta). Issue #32: the target URL is not printed - it
+             lives in the privileged rings (netLog / diagnostics) and
+             the embedder's devtools only. Every other destination
+             keeps the honest 502 plain text body - subresources get
+             no UI. */
           if (e.request.mode === "navigate") {
             return new Response(
               errorPage({
                 route: url.pathname + url.search,
-                target,
                 category: classifyFailure(String(err)),
                 engineVersion: ZEOLITE_VERSION,
               }),
@@ -1640,7 +1649,9 @@ interface ControlMessage {
   extId?: string;
   msg?: unknown;
   prefix?: string;
-  scheme?: "b64u" | "mirror";
+  /** zl:config route scheme. Fixed "b64u" since #32; any other value
+      is rejected (mirror removed). Kept optional for old embedders. */
+  scheme?: string;
   /** zl:rules: default outgoing user-agent for hosts without an
       override (null/absent keeps the browser's own UA). */
   ua?: string | null;
@@ -1684,9 +1695,10 @@ interface ControlMessage {
   bytes?: Uint8Array;
   /** zl:installExtFiles: unpacked directory listing, path -> bytes. */
   files?: Array<[string, Uint8Array]>;
-  /** zl:find (#29): destination of the addressed page, matched exactly
-      against the page's own __ZL.dest, like every page-targeted
-      engine message. */
+  /** zl:find (#29): destination of the addressed page, matched
+      SW-side against the client whose route decodes to it. The
+      findLoad message posted to the page carries no destination
+      (#32: no page-visible surface echoes the target). */
   dest?: string;
   /** zl:find command: search, step or clear. */
   cmd?: "find" | "next" | "prev" | "clear";
@@ -1743,17 +1755,26 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
         version: ZEOLITE_VERSION,
         degraded: engineDegraded,
         prefix: currentPrefix(),
-        scheme: currentScheme(),
+        /* Fixed shape since #32 (mirror removed); kept in the reply so
+           old embedder probes that compare it stay compatible. */
+        scheme: "b64u",
         profile: jarProfileState(),
       });
       break;
     case "zl:config": {
       // Rotate the URL shape at runtime.
-      const scheme = msg.scheme === "mirror" ? "mirror" : "b64u";
-      setScheme(msg.prefix ?? "/j/", scheme);
+      /* Issue #32: the mirror scheme is gone (it placed the real
+         destination inside every browser-visible route string);
+         a non-default scheme is rejected so an embedder learns
+         immediately instead of silently degrading. */
+      if (typeof msg.scheme === "string" && msg.scheme !== "b64u") {
+        reply({ ok: false, error: "scheme removed: routes are b64u only (#32)" });
+        break;
+      }
+      setScheme(msg.prefix ?? "/j/");
       /* Issue #17: persist so a worker restart keeps the shape. */
-      void persistRoute(currentPrefix(), scheme);
-      reply({ ok: true, prefix: currentPrefix(), scheme });
+      void persistRoute(currentPrefix());
+      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u" });
       break;
     }
     case "zl:adblock":
@@ -1839,10 +1860,41 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
          sockets resolve to their page the same way. Unknown sender
          means no Origin header, honest absence. */
       let wsOrigin: string | null = senderOrigin(e);
-      const wsHeaders = wsIdentityHeaders(wsOrigin, msg.url, {
+      /* Issue #32: the page shim no longer retargets same-origin ws
+         URLs (it never sees the real origin). An engine-origin ws URL
+         carries no destination: the sender's own virtual context
+         (#33) supplies the target; the sender's client route decodes
+         as the restart fallback; an unknown sender fails closed.
+         Cross-origin URLs pass through: the page named that host
+         itself. Worker-relayed sockets arrive via their page's relay,
+         so they resolve against the page context, same as before. */
+      let wsUrl = msg.url;
+      try {
+        const u = new URL(msg.url);
+        if (u.origin === self.location.origin) {
+          let home = contextOf(VCTX, e.clientId)?.targetOrigin ?? null;
+          if (!home) {
+            const client = e.source;
+            const cu = client && "url" in client ? decodePath(new URL((client as { url: string }).url, self.location.origin).pathname) : null;
+            home = cu ? new URL(cu).origin : null;
+          }
+          if (!home) {
+            port.postMessage({ ev: "error", error: "unknown ws context" });
+            port.postMessage({ ev: "close", code: 1006, clean: false });
+            port.close();
+            break;
+          }
+          const t = new URL(u.pathname + u.search, home);
+          t.protocol = u.protocol;
+          wsUrl = t.href;
+        }
+      } catch {
+        /* unparseable URL: the wss?: validation already answered */
+      }
+      const wsHeaders = wsIdentityHeaders(wsOrigin, wsUrl, {
         profile: fpProfile,
       });
-      wsBridge.open(port as unknown as PortLike, msg.url, Array.isArray(msg.protocols) ? msg.protocols : [], wsHeaders);
+      wsBridge.open(port as unknown as PortLike, wsUrl, Array.isArray(msg.protocols) ? msg.protocols : [], wsHeaders);
       break;
     }
     case "zl:docCookie": {
@@ -1913,9 +1965,10 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
     }
     case "zl:find": {
       /* #29: in-page find. The SW cannot touch page DOM, so the
-         command is forwarded to the page whose destination matches
-         msg.dest exactly (the same addressing the content-script
-         bridges use); that page runs the compiled finder, whose
+         command is forwarded to the page whose client route decodes
+         to msg.dest exactly (addressing is fully SW-side; the
+         findLoad message itself carries no destination, #32); that
+         page runs the compiled finder, whose
          source is attached to the message and evaluated once per
          document by the bootstrap loader. Replies flow back on the
          transferred port; a page that never answers - no proxied
@@ -1984,7 +2037,7 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
             return;
           }
           target.postMessage(
-            { type: "zl:findLoad", dest: msg.dest, cmd: msg.cmd, pattern: msg.pattern, options: msg.options, code },
+            { type: "zl:findLoad", cmd: msg.cmd, pattern: msg.pattern, options: msg.options, code },
             [mc.port2],
           );
         })(),

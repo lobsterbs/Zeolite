@@ -1,8 +1,15 @@
 /* URL codec (TS side mirrors crates/rewriter/src/encode.rs).
    Destination encoded as base64url under a configurable prefix. The
-   scheme is swappable so the URL shape can rotate (Phase 2): the SW
-   accepts an zl:config message to change prefix/scheme at runtime, so a
+   prefix is swappable so the URL shape can rotate (Phase 2): the SW
+   accepts an zl:config message to change the prefix at runtime, so a
    deployment can rotate its path shape without a client rebuild.
+
+   Issue #32 removed the "mirror" scheme (encode the destination
+   verbatim under /m/): it placed the real upstream URL in the
+   address bar, history and every page-visible route string, which is
+   the exact leak class #32 closes. setScheme now takes a prefix
+   only; a persisted mirror config coerces to the default scheme on
+   restore, and zl:config rejects a scheme field other than "b64u".
 
    Bug-scout note: the SW previously hard-coded "/j/" in its route
    check, the JsRewriter ctor and rewriteCss calls while decoding used
@@ -12,29 +19,22 @@
 const B64URL =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-/* Runtime-configurable scheme state. Defaults must match
+/* Runtime-configurable route prefix. The default must match
    crates/rewriter/src/config.rs (RewriteConfig::default). */
 let prefix = "/j/";
-let scheme: "b64u" | "mirror" = "b64u";
 
-export function setScheme(p: string, s: "b64u" | "mirror" = "b64u"): void {
+export function setScheme(p: string): void {
   prefix = p.endsWith("/") || p === "" ? p : p + "/";
-  scheme = s;
 }
 
 export function currentPrefix(): string {
   return prefix;
 }
 
-export function currentScheme(): "b64u" | "mirror" {
-  return scheme;
-}
-
 /** True when a same-origin request path belongs to the engine (as
     opposed to engine assets like /sw.js, /bootstrap.js, /devtools.html).
     Must stay in lockstep with decodePath. */
 export function isEnginePath(path: string): boolean {
-  if (scheme === "mirror") return path === "/m/" || path.startsWith("/m/");
   return path === prefix || path.startsWith(prefix);
 }
 
@@ -75,16 +75,11 @@ const DEC = new TextDecoder();
 
 /** Absolute destination URL -> engine-local path. */
 export function encodeDest(dest: string): string {
-  if (scheme === "mirror") return "/m/" + dest;
   return prefix + b64uEncode(ENC.encode(dest));
 }
 
 /** Engine-local path -> destination URL, or null if not ours. */
 export function decodePath(path: string): string | null {
-  if (scheme === "mirror") {
-    const rest = path.startsWith("/m/") ? path.slice(3) : null;
-    return rest && rest.length > 0 ? rest : null;
-  }
   const i = path.indexOf(prefix);
   if (i < 0) return null;
   const b64 = path.slice(i + prefix.length).split(/[?#]/)[0];
@@ -161,7 +156,8 @@ export function unwrapDest(dest: string): string {
     was wrong) is rerouted against the origin of the page's own
     destination, recovered from the request referrer. Returns the
     recovered absolute URL, or null when the referrer is not a decodable
-    engine route. */
+    engine route. Compat fallback only since #33: the requesting
+    client's virtual context resolves first. */
 export function referrerDest(referrer: string, path: string): string | null {
   let ref: URL;
   try {

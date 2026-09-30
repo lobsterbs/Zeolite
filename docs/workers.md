@@ -7,11 +7,18 @@ ever hacking around browser security limits.
 
 The service worker intercepts worker script loads (request destination
 `worker` / `sharedworker`). For those responses it prepends one chunk
-- the compiled `worker-prelude.js` - before the upstream body, with two
-globals baked into the injected first line:
+- the compiled `worker-prelude.js` - before the upstream body, with
+the live route prefix baked as a global and one init line appended
+after the module source:
 
-- `self.__ZL_PREFIX__`: the live route prefix (rotations included),
-- `self.__ZL_WORKER_URL__`: the upstream worker script URL.
+- `self.__ZL_PREFIX__`: the live route prefix (rotations included);
+- `self.__zlPreludeInit(<route>)`: called once with the worker's own
+  engine route (encodeDest of the upstream script URL).
+
+The prelude decodes that route and keeps the real worker URL in a
+closure: since #32 no `__ZL_WORKER_URL__` global exists, so no worker
+script can read the upstream URL it was loaded from. The prefix stays
+a global - it is the engine's own route shape, not a secret.
 
 The prelude then:
 

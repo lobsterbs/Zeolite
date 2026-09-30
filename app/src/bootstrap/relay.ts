@@ -1,19 +1,20 @@
 /* Worker WebSocket relay, SharedWorker port hook and the
-   navigator.serviceWorker shim. Split out of the bootstrap entry;
-   the bodies are unchanged, the virtual destination replaces the
-   former module-global ZL.dest. */
+   navigator.serviceWorker shim. Split out of the bootstrap entry.
+   Issue #32: the entry passes an opaque site token (the virtualization
+   gate) and the page's own engine URL (the shim's base), never the
+   real destination. */
 
 import { swShimApply } from "../swshim";
 import { swc } from "./siteid";
 
-export function applyRelay(w: Record<string, unknown>, ORIGIN: string, dest: string): void {
+export function applyRelay(w: Record<string, unknown>, site: string, pageUrl: string): void {
 /* ---- worker WebSocket relay + serviceWorker shim ------------------- */
 /* 1.6 Hydride: workers have no direct channel to the service worker.
  The worker prelude posts its zl:wsOpen to the parent page; this relay
  forwards it (with the transferred port) to the engine controller.
  2.3 Selenide: shared workers have no parent-page postMessage, so
- their prelude posts the same message on its newest connect port -
- the SharedWorker wrapper below hooks that port into this same relay. */
+ their prelude posts the same message on its newest connect port - the
+ SharedWorker wrapper below hooks that port into this same relay. */
 
 const relay = (e: MessageEvent) => {
  const d = e.data as { zl?: string; msg?: unknown };
@@ -57,14 +58,16 @@ addEventListener("message", relay);
 
 /* navigator.serviceWorker shim: per-origin virtual registrations in
  the site-scoped localStorage. No script ever runs - the engine owns
- the only real scope (browser security, documented not hacked). */
+ the only real scope (browser security, documented not hacked).
+ Issue #32: the shim base is the page's own engine URL, so the stored
+ records contain engine-local strings, never the real destination. */
 
 {
  const NS = (navigator as { serviceWorker?: unknown }).serviceWorker;
- if (NS && ORIGIN) {
+ if (NS && site) {
   const LS = w.localStorage as unknown as Storage;
   const K = "swreg";
-  swShimApply(NS as object, { get: () => LS.getItem(K), set: (v: string) => LS.setItem(K, v), clear: () => LS.removeItem(K) }, dest);
+  swShimApply(NS as object, { get: () => LS.getItem(K), set: (v: string) => LS.setItem(K, v), clear: () => LS.removeItem(K) }, pageUrl);
  }
 }
 

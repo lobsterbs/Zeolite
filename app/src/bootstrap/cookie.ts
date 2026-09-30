@@ -1,22 +1,25 @@
 /* document.cookie virtualization, per-origin: the authoritative jar
    lives in the service worker, the page keeps an optimistic local
-   copy. Split out of the bootstrap entry; the body is unchanged. */
+   copy. Split out of the bootstrap entry. Issue #32: the gate is the
+   opaque site token (a truthy virtualization identity), not the real
+   origin; the jar origin is recovered SW-side from the sender's own
+   client route, never from a page-supplied string. */
 
 import { swc } from "./siteid";
 
-export function applyCookie(ORIGIN: string): void {
+export function applyCookie(site: string): void {
 /* ---- document.cookie (virtual, per-origin) ------------------------ */
-/* The getter must be synchronous, the authoritative jar lives in the
- service worker: the page keeps an optimistic local copy, every read
- refreshes it asynchronously from the jar, every write applies locally
- first (read-after-write works) and is forwarded for RFC 6265
+/* The getter must be synchronous, the authoritative jar lives in
+ the service worker: the page keeps an optimistic local copy, every
+ read refreshes it asynchronously from the jar, every write applies
+ locally first (read-after-write works) and is forwarded for RFC 6265
  admission. Eventually consistent across windows; exact at the jar.
  Deletion (max-age=0 or a past Expires) is not detected optimistically;
  the jar reply corrects the copy within milliseconds. */
 
 {
  const ctl = swc();
- if (ctl && ORIGIN) {
+ if (ctl && site) {
  let cur = "";
  /* One channel lives for the page's lifetime: the SW keeps the far
     end and answers every message with the authoritative jar view. */

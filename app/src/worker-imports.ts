@@ -25,7 +25,7 @@
    The body is buffered for the pass (worker scripts are not
    first-paint documents); classic workers keep their streaming path. */
 
-import { currentScheme, encodeDest, isEnginePath, setScheme } from "./codec";
+import { encodeDest, isEnginePath, setScheme } from "./codec";
 
 const SPEC_RE =
   /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+[^;'"]*?\bfrom\s*|\bimport\s*)(['"])([^'"]+)\2/g;
@@ -57,10 +57,10 @@ export function routeModuleSpecifier(
   }
   if (passthrough(abs, engineOrigin)) return spec;
   if (isEnginePath(abs.pathname)) return spec; // already a route: decode peels
-  /* Encode in the LIVE scheme: this pass runs in the SW realm, where a
-     zl:config rotation may have selected mirror; resetting to the b64u
-     default here would flip every later encode (issue #20). */
-  setScheme(prefix, currentScheme());
+  /* Encode in the LIVE prefix: this pass runs in the SW realm, where a
+     zl:config rotation may have changed the shape; resetting to the
+     default prefix here would flip every later encode (issue #20). */
+  setScheme(prefix);
   return encodeDest(abs.href);
 }
 

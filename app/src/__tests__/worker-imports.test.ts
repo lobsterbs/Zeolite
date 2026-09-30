@@ -9,7 +9,7 @@ const P = "/j/";
 const W = "https://api.site/worker.js";
 const E = "https://engine.host";
 
-beforeEach(() => setScheme(P, "b64u"));
+beforeEach(() => setScheme(P));
 
 describe("routeModuleSpecifier", () => {
   it("routes absolute http(s) specifiers through the engine codec", () => {
@@ -32,11 +32,6 @@ describe("routeModuleSpecifier", () => {
     expect(routeModuleSpecifier(P, W, E, "not a url")).toBe("not a url");
   });
 
-  it("encodes in the live mirror scheme (issue #20)", () => {
-    setScheme("/m/", "mirror");
-    const out = routeModuleSpecifier("/m/", W, E, "https://cdn.other/lib.js");
-    expect(out).toBe("/m/https://cdn.other/lib.js");
-  });
 });
 
 describe("rewriteModuleWorkerImports", () => {
@@ -68,7 +63,7 @@ describe("rewriteModuleWorkerImports", () => {
   });
 
   it("follows the rotated prefix", () => {
-    setScheme("/zl/", "b64u");
+    setScheme("/zl/");
     const out = rewriteModuleWorkerImports("/zl/", W, E, 'import "./a.js";');
     expect(out).toContain("/zl/");
     expect(decodePath(out.match(/"([^"]+)"/)![1])).toBe("https://api.site/a.js");

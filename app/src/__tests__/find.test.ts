@@ -92,7 +92,7 @@ describe("applyFindLoad", () => {
     return { w, evals, forwarded, fire, ctl };
   }
 
-  const MSG = { type: "zl:findLoad", dest: "https://real.site/", cmd: "find", pattern: "x", code: "..." };
+  const MSG = { type: "zl:findLoad", cmd: "find", pattern: "x", code: "..." };
 
   it("evaluates the attached code once and forwards the message", () => {
     const e = makeEnv();

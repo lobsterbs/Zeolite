@@ -6,8 +6,12 @@
    the bootstrap loader (src/bootstrap/findload.ts) evaluates it
    once per document. The service worker cannot walk page DOM, so
    the client find bar drives the search through the zl:find control
-   message (dest-addressed, like the content-script bridges) and the
-   results flow back on the transferred MessageChannel port.
+   message and the results flow back on the transferred MessageChannel
+   port. Addressing is fully SW-side: the SW picks the client whose
+   route decodes to the destination the devtools named, and the
+   findLoad message carries no destination at all (issue #32: no
+   page-visible surface may echo the target URL; findload.ts still
+   accepts only the controlling worker as the message source).
 
    Coverage, honestly: text nodes of the document plus every OPEN
    shadow root (closed roots are unreachable from script by
@@ -25,7 +29,6 @@ import { buildRegex, matchPositions, stepOrdinal } from "./find-core";
 
 interface FindLoadMessage {
   type: "zl:findLoad";
-  dest: string;
   cmd: "find" | "next" | "prev" | "clear";
   pattern?: string;
   options?: { caseSensitive?: boolean; wholeWord?: boolean; wrap?: boolean };
@@ -177,11 +180,11 @@ if (typeof G.__zlFind !== "function") {
 
   G.__zlFind = (ev: MessageEvent): void => {
     const m = ev.data as FindLoadMessage;
-    if (!m || m.type !== "zl:findLoad" || typeof m.dest !== "string") return;
-    /* Same addressing rule as every page-targeted engine message:
-       only the document the client named. */
-    const own = ((G.__ZL as { dest?: string } | undefined)?.dest as string | undefined) ?? document.baseURI;
-    if (m.dest !== own) return;
+    if (!m || m.type !== "zl:findLoad") return;
+    /* No destination check (#32): the SW selected this client by its
+       decoded route, and findload accepted only the controlling
+       worker as source - a page-visible dest echo would leak the
+       target URL for no additional trust. */
     const port = ev.ports && ev.ports[0];
     if (!port) return;
     const fail = (error: string): FindReply => ({ ok: false, matches: 0, ordinal: 0, highlight: canPaint ? "css-highlights" : "none", error });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applyNavGuard, navEncode, NAV } from "../bootstrap/navguard";
+import { b64uDecode } from "../codec";
 
 const LOC = "https://engine.host/j/abc";
 const ENGINE = "https://engine.host";
@@ -74,7 +75,15 @@ describe("navEncode", () => {
     const u = "https://real.site/a b?c=1&d=%20";
     const m = navEncode(u);
     expect(m.startsWith(NAV + "/")).toBe(true);
-    expect(decodeURIComponent(m.slice(NAV.length + 1))).toBe(u);
+    const b64 = m.slice(NAV.length + 1);
+    expect(b64).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(new TextDecoder().decode(b64uDecode(b64)!)).toBe(u);
+  });
+
+  it("never carries the plaintext destination (issue #32)", () => {
+    const m = navEncode("https://real.site/x");
+    expect(m).not.toContain("real.site");
+    expect(m).not.toContain("https");
   });
 });
 

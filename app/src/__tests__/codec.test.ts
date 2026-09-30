@@ -9,9 +9,9 @@ import {
   unwrapDest,
 } from "../codec";
 
-/* codec keeps rotatable module state (prefix/scheme): reset between
+/* codec keeps rotatable module state (prefix): reset between
    tests so an order-dependent rotation leak cannot hide a defect. */
-beforeEach(() => setScheme("/j/", "b64u"));
+beforeEach(() => setScheme("/j/"));
 
 describe("unwrapDest", () => {
   it("returns plain destinations unchanged", () => {
@@ -103,7 +103,7 @@ describe("isEngineAsset", () => {
 
 describe("route symmetry after rotation", () => {
   it("unwrap and referrer follow a rotated prefix", () => {
-    setScheme("/zl/", "b64u");
+    setScheme("/zl/");
     expect(isEnginePath("/j/abc")).toBe(false);
     const wrapped = "https://example.com" + encodeDest("https://real.dev/x");
     expect(unwrapDest(wrapped)).toBe("https://real.dev/x");
@@ -112,32 +112,19 @@ describe("route symmetry after rotation", () => {
   });
 });
 
-describe("mirror pathScheme (issue #20)", () => {
-  beforeEach(() => setScheme("/m/", "mirror"));
+describe("mirror scheme removal (issue #32)", () => {
+  beforeEach(() => setScheme("/j/"));
 
-  it("encodes and decodes the destination verbatim under /m/", () => {
-    const route = encodeDest("https://target.dev/p?q=1");
-    expect(route).toBe("/m/https://target.dev/p?q=1");
-    expect(decodePath(route)).toBe("https://target.dev/p?q=1");
+  it("a /m/ path is not an engine route and does not decode", () => {
+    expect(isEnginePath("/m/https://x.dev/")).toBe(false);
+    expect(decodePath("/m/https://x.dev/")).toBeNull();
   });
 
-  it("isEnginePath follows the scheme, not the b64u prefix", () => {
-    expect(isEnginePath("/m/https://x.dev/")).toBe(true);
-    expect(isEnginePath("/j/abc")).toBe(false);
-  });
-
-  it("unwrapDest peels a mirror layer bound to the target host", () => {
-    /* The query rides the route URL's search (decodePath takes the
-       path only); the fetch flow re-attaches it to the final target. */
-    const wrapped = "https://example.com" + encodeDest("https://real.dev/x?y=2");
-    expect(unwrapDest(wrapped)).toBe("https://real.dev/x");
-  });
-
-  it("referrerDest recovers the page home from a mirror route", () => {
-    const page = "https://engine.dev" + encodeDest("https://target.dev/p");
-    expect(referrerDest(page, "/l.png")).toBe("https://target.dev/l.png");
-    /* A page query never changes the recovered origin. */
-    const q = "https://engine.dev" + encodeDest("https://target.dev/p?pg=2");
-    expect(referrerDest(q, "/l.png")).toBe("https://target.dev/l.png");
+  it("a route never carries the destination verbatim", () => {
+    const dest = "https://target.dev/p?q=1";
+    const route = encodeDest(dest);
+    expect(route).not.toContain("target.dev");
+    expect(route).toMatch(/^\/j\//);
+    expect(decodePath(route)).toBe(dest);
   });
 });

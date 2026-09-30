@@ -112,8 +112,9 @@ act on them directly: window.open, the href/src/action properties and
 setAttribute on anchor, area, iframe, form and link elements, and
 form submit/requestSubmit (the static rewriter already covers
 server-provided markup, including form action and formaction).
-Rewritten URLs travel to the /__zl_nav__/ marker route, which the SW
-decodes and proxies like any engine route: cross-origin navigations
+Rewritten URLs travel to the /__zl_nav__/<b64u> marker route (the
+target base64url-encoded, opaque since #32), which the SW decodes
+and proxies like any engine route: cross-origin navigations
 otherwise never reach the fetch handler at all (SW interception is
 scope-bound), which is what made them both unpreventable and
 invisible. RTCPeerConnection is removed outright: WebRTC connects
@@ -136,6 +137,54 @@ Residuals, stated honestly:
   a passthrough verdict since #30); routing them through the engine
   is an open policy decision, deliberately not made silently.
 
+## Page-visible destination leakage (issue #32)
+
+Before #32 the engine put the real destination in places a page (or
+anyone reading the DOM, the address bar, history or resource timing)
+could inspect. The known classes, all closed:
+
+- `window.__ZL` no longer carries the destination. The rewriter
+  injects `window.__ZL = { site: "<token>" }`: a stable opaque
+  per-site identity (the fnv1a of the target origin, computed
+  SW-side from the destination the engine already holds privately).
+  Storage scoping, the cookie, relay and serviceWorker shims and
+  the ws bridge all key off the token; an unrewritten document falls
+  back to hashing the origin of its own baseURI.
+- The mirror route scheme (`/m/https://real.site/...`) is removed:
+  routes are b64u only. A persisted mirror config coerces to the
+  default shape on restore, zl:config rejects any other scheme
+  value, and decodePath no longer recognizes /m/ shapes, so the
+  address bar, history and every page-visible route string carry
+  only base64url.
+- The navigation guard marker route encodes the target base64url
+  instead of percent-encoded plaintext (see the #28 section).
+- The engine error page no longer prints the target URL
+  (docs/error-pages.md); its meta payload carries category and
+  engine version only.
+- The worker prelude keeps the upstream worker URL in a closure: the
+  `__ZL_WORKER_URL__` global is gone, only the route prefix stays a
+  global (it is the engine's own shape, not a secret).
+- WebSocket retargeting moved SW-side: a same-origin ws URL stays
+  engine-local on the page side and the SW retargets it through the
+  sender's virtual context (#33), so `ws.url` and event origins
+  report engine-origin URLs as written. The findLoad message posted
+  to the page carries no destination echo.
+
+Honest bounds:
+
+- b64u is obfuscation, not encryption. decodePath is public and the
+  route shape is documented: #32 removes the plaintext from
+  page-visible surfaces, it does not make the target secret from
+  whoever already holds the route.
+- Location and referrer surfaces are routes by construction (the
+  rewriter maps them through encodeDest; referrers are b64u routes).
+  SW-constructed Responses have an empty Response.url. Cross-origin
+  subresource passthrough (issue #30) still shows page-chosen URLs
+  in resource timing; that is the passthrough class, not an engine
+  leak.
+- Browser-level assertions over these properties are deferred to the
+  real-Chromium harness (issue #35); CI runs no browser by design.
+
 ## Known open items (honest, not fixed by 3.0)
 
 - SameSite approximation quality: referrer-derived site context is
@@ -154,3 +203,6 @@ Residuals, stated honestly:
 - Runtime navigation residuals (issue #28): location.href assignments
   and HTML-parser-inserted URLs (innerHTML, document.write) still
   escape to the browser; see the runtime navigation escape section.
+- Page-identity opacity is obfuscation (issue #32): base64url routes
+  are reversible by anyone who holds them; see the destination
+  leakage section.
