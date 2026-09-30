@@ -14,6 +14,9 @@
      { type: "zl:config", prefix, scheme }   rotate the URL shape
      { type: "zl:rules", ua, rules }         host-app per-site overrides
                                              (host, adblock, ua)
+     { type: "zl:jarProfile", profile }     switch the cookie jar to a
+                                             throwaway session profile
+                                             (incognito; in-memory only)
      { type: "zl:siteRoute", site, enabled } per-site interception toggle
      { type: "zl:teardown" }                 unregister + drop caches
    Phase 4 control plane:
@@ -60,7 +63,7 @@ import { beginRecording, finishRecording, type RecordingState } from "./recordin
 import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket } from "./libcurl-transport-vendored";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
-import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarHeaders, jarLoad, jarMerge, jarReplace, jarSnapshot, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
+import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
 import { fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
 import { decryptSession, encryptSession } from "./session";
@@ -1491,6 +1494,7 @@ interface ControlMessage {
   type:
     | "zl:config"
     | "zl:rules"
+    | "zl:jarProfile"
     | "zl:siteRoute"
     | "zl:teardown"
     | "zl:ping"
@@ -1581,6 +1585,7 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
         degraded: engineDegraded,
         prefix: currentPrefix(),
         scheme: currentScheme(),
+        profile: jarProfileState(),
       });
       break;
     case "zl:config": {
@@ -1605,6 +1610,15 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
          request against the target host (rules.ts). Ephemeral like
          zl:adblock: resets on SW restart, the host re-sends on boot. */
       reply({ ok: true, count: setSiteOverrides(msg.rules, msg.ua) });
+      break;
+    case "zl:jarProfile":
+      /* Host-app jar identity (incognito): switch the whole cookie
+         jar between the durable default profile and a throwaway
+         session profile. Session cookies never touch IndexedDB and
+         are dropped on the switch back (cookies.ts). Resets to
+         default on SW restart; the host re-sends on boot, on the
+         incognito toggle, and on controllerchange. */
+      reply(setJarProfile(msg.profile));
       break;
     case "zl:tracing":
       /* 1.2 Halide: opt-in rewrite tracing ring. Off by default;

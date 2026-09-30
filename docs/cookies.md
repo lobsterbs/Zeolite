@@ -84,6 +84,39 @@ one-shot stream body cannot replay, a hop past the cap (10), or a 3xx
 without a resolvable Location is surfaced to the page with its
 Location mapped to an engine route (its Set-Cookie is still captured).
 
+## Jar profiles (zl:jarProfile)
+
+The host app can switch the whole jar between the durable `default`
+profile and a throwaway session profile (incognito isolation, the
+client-side equivalent of the server engine's per-sid `lb_inc` jar):
+
+```
+{ type: "zl:jarProfile", profile: "inc:<session-id>" }   // switch
+{ type: "zl:jarProfile", profile: null }                 // back to default
+```
+
+- Session-profile cookies are in-memory only: they are never written
+  to IndexedDB, and they are dropped the moment the host switches
+  back to the default profile (or any other profile).
+- Admission, request assembly, `document.cookie` reads/writes, the
+  session-export snapshot and import (replace and merge) all operate
+  on the active profile only; the export format is unchanged (records
+  stay keyed by bare origin id).
+- The profile is SW runtime state: it resets to `default` on SW
+  restart, and `zl:ping` echoes it (`profile`) so the host can detect
+  a revert and re-push. A restart while a session profile is active
+  can briefly admit cookies into the default jar until the host's
+  re-push lands — the host re-sends on boot, on the incognito toggle
+  and on `controllerchange`.
+- Malformed profile input (non-string, empty, over 64 chars, or
+  containing the key separator) falls back to `default`, and the
+  reply reports the effective profile.
+- One engine origin serves one host app instance: the profile is
+  global SW state, so two app windows in different incognito states
+  cannot hold different profiles at the same time (last push wins).
+  The engine's page cache is also shared across profiles (cookies
+  never are).
+
 ## Session import modes (2.2 Arsenide)
 
 `zl:importSession` accepts `mode: "replace"` (default, the 1.7
@@ -128,9 +161,9 @@ it: cookies do not survive an engine switch.
   `Set-Cookie` is captured before that.
 - SameSite is enforced only through the opt-in knob, and the site
   context is an approximation (see the knob section).
-- `document.cookie` is not virtualized yet: page scripts read and
-  write the engine-origin cookie store, not this jar. That is Phase
-  5 (storage virtualization) scope.
+- `document.cookie` IS virtualized by the bootstrap: page scripts read
+  and write a per-origin view over the `zl:docCookie` channel, backed
+  by this jar (the page never touches the engine-origin cookie store).
 - The transport (libcurl) may hold cookies internally; this jar is
   the engine's authoritative Cookie source for requests it initiates,
   and the session-export seam (`docs/engine-adapter.md`) still probes
@@ -139,7 +172,10 @@ it: cookies do not survive an engine switch.
 ## Status
 
 Implemented (1.4 Boride; SameSite knob, hop capture and merge-mode
-import added in 2.2 Arsenide). Tested in
+import added in 2.2 Arsenide; jar profiles added on the
+deep-integration line). Tested in
 `app/src/__tests__/cookies.test.ts` (admission, matching, deletion,
-isolation, ordering, persistence, SameSite knob, merge mode).
+isolation, ordering, persistence, SameSite knob, merge mode) and
+`app/src/__tests__/jar-profiles.test.ts` (profile isolation,
+persistence, document.cookie, import scoping).
 

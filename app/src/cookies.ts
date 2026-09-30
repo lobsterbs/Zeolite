@@ -32,7 +32,12 @@
 
    Persistence: IndexedDB (service workers have no localStorage),
    reusing the extension subsystem's idb helper; the whole jar is one
-   record, rewritten (debounced) after mutations. */
+   record, rewritten (debounced) after mutations.
+
+   Jar profiles: the host app can switch the active jar to a throwaway
+   session profile (zl:jarProfile, incognito isolation). Session-
+   profile cookies are in-memory only and are dropped on switch-away
+   or SW restart; the host re-sends its profile on boot. */
 
 import { encodeDest } from "./codec";
 import { DIAG } from "./diag";
@@ -134,6 +139,52 @@ export function registerOrigin(origin: string): VirtualOrigin {
 
 /** jar key = virtual-origin id of the origin the cookie was SET from. */
 const jars = new Map<string, Cookie[]>();
+
+/* ---- jar profiles (host app, zl:jarProfile) --------------------------
+   One engine origin serves one host app instance; the host can switch
+   the whole jar between the durable "default" profile and a throwaway
+   session profile (incognito). Session-profile cookies are in-memory
+   only (never persisted to IndexedDB) and are dropped the moment the
+   host switches away. Same semantics as the server engine's per-sid
+   jar with lb_inc. */
+
+const PROFILE_DEFAULT = "default";
+const SEP = "\u0000";
+let profile = PROFILE_DEFAULT;
+
+/** Internal jar map key for the active profile. */
+function jarKey(originId: string): string {
+  return profile === PROFILE_DEFAULT ? originId : profile + SEP + originId;
+}
+
+/** True when a stored jar-map key belongs to the active profile
+    (default-profile keys are bare origin ids, predating profiles). */
+function inProfile(key: string): boolean {
+  return profile === PROFILE_DEFAULT ? !key.includes(SEP) : key.startsWith(profile + SEP);
+}
+
+/** Switch the active jar profile (zl:jarProfile control message). A
+    null, empty or malformed profile means "default". Leaving a
+    session profile drops its cookies immediately (incognito
+    semantics). The effective profile is returned so the caller can
+    report it. */
+export function setJarProfile(p: unknown): { ok: boolean; profile: string } {
+  const next =
+    typeof p === "string" && p.length > 0 && p.length <= 64 && !p.includes(SEP)
+      ? p
+      : PROFILE_DEFAULT;
+  const prev = profile;
+  if (prev !== PROFILE_DEFAULT && prev !== next) {
+    for (const key of [...jars.keys()]) if (key.startsWith(prev + SEP)) jars.delete(key);
+  }
+  profile = next;
+  return { ok: true, profile };
+}
+
+/** Active profile name (zl:ping echo, drift detection). */
+export function jarProfileState(): string {
+  return profile;
+}
 
 interface ParsedUrl {
   origin: string;
@@ -303,7 +354,7 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
   const isDeletion = (maxAge !== null && maxAge <= 0) || (hasExpires && expires <= now);
   const expiry = maxAge !== null ? now + maxAge * 1000 : expires;
 
-  const key = registerOrigin(u.origin).id;
+  const key = jarKey(registerOrigin(u.origin).id);
   const jar = jars.get(key) ?? [];
   const sameCookie = (c: Cookie) => c.name === name && c.domain === domain && c.hostOnly === hostOnly && c.path === path;
 
@@ -384,7 +435,8 @@ export function cookieHeaderFor(requestUrl: string, ctx?: CookieRequestContext):
   }
   if (purged) schedulePersist();
   const matched: Cookie[] = [];
-  for (const list of jars.values()) {
+  for (const [key, list] of jars) {
+    if (!inProfile(key)) continue;
     for (const c of list) {
       const domainOk = c.hostOnly ? u.host === c.domain : domainMatch(u.host, c.domain);
       if (domainOk && (!c.secure || u.secure) && pathMatch(u.path, c.path) && sameSiteAllows(c, u, ctx)) {
@@ -406,7 +458,8 @@ export function documentCookieRead(pageUrl: string): string {
   if (!u) return "";
   const now = Date.now();
   const matched: Cookie[] = [];
-  for (const list of jars.values()) {
+  for (const [key, list] of jars) {
+    if (!inProfile(key)) continue;
     for (const c of list) {
       if (c.httpOnly || (c.expires !== 0 && c.expires <= now)) continue;
       const domainOk = c.hostOnly ? u.host === c.domain : domainMatch(u.host, c.domain);
@@ -424,10 +477,16 @@ export function documentCookieWrite(pageUrl: string, cookie: string): SetCookieR
   return admitCookie(pageUrl, cookie.replace(/;\s*httponly\b/gi, ""));
 }
 
-/** Jar contents per virtual-origin id, for tests and inspection. */
+/** Jar contents per virtual-origin id, for tests and inspection. The
+    view is the active profile only, keyed by the bare origin id (the
+    session-export format is unchanged by profiles). */
 export function jarSnapshot(): Map<string, Cookie[]> {
   const out = new Map<string, Cookie[]>();
-  for (const [k, v] of jars) out.set(k, v.map((c) => ({ ...c })));
+  for (const [k, v] of jars) {
+    if (!inProfile(k)) continue;
+    const id = k.includes(SEP) ? k.slice(k.indexOf(SEP) + 1) : k;
+    out.set(id, v.map((c) => ({ ...c })));
+  }
   return out;
 }
 
@@ -443,12 +502,13 @@ function schedulePersist(): void {
   }, 1000);
 }
 
-/** Write the whole jar as one record (debounced via schedulePersist;
-    exported for hosts and tests that want a forced flush). */
+/** Write the durable jar as one record (debounced via schedulePersist;
+    exported for hosts and tests that want a forced flush). Session
+    profiles are in-memory only: they never touch IndexedDB. */
 export async function jarPersist(): Promise<void> {
   const db = await openDb();
   const entries: Array<[string, Cookie[]]> = [];
-  for (const [k, v] of jars) entries.push([k, v]);
+  for (const [k, v] of jars) if (!k.includes(SEP)) entries.push([k, v]);
   await idbPut(db, STORE_COOKIES, "jar", entries);
 }
 
@@ -471,21 +531,22 @@ export async function jarLoad(): Promise<void> {
   }
 }
 
-/** Session import seam (1.7 Sulfide): replace the whole jar with the
-    given records after shape checks. Malformed records are dropped,
-    never admitted. The jar is persisted right away. */
+/** Session import seam (1.7 Sulfide): replace the active profile's jar
+    with the given records after shape checks (other profiles are
+    untouched). Malformed records are dropped, never admitted. The jar
+    is persisted right away. */
 export function jarReplace(entries: Array<[string, unknown[]]>): void {
-  jars.clear();
+  for (const key of [...jars.keys()]) if (inProfile(key)) jars.delete(key);
   for (const entry of entries) {
     if (Array.isArray(entry) && typeof entry[0] === "string" && Array.isArray(entry[1])) {
-      jars.set(entry[0], entry[1] as Cookie[]);
+      jars.set(jarKey(entry[0]), entry[1] as Cookie[]);
     }
   }
   jarPersist().catch(() => undefined);
 }
 
 /** Session import merge mode (2.2 Arsenide): merge records into the
-    live jars instead of replacing them. Cookie identity is the same
+    active profile's jars instead of replacing them. Cookie identity is the same
     one admission uses (name+domain+hostOnly+path); a conflict is
     resolved by the rule. Malformed records are dropped, never
     admitted. Returns honest counts for the reply. */
@@ -499,7 +560,7 @@ export function jarMerge(
   for (const entry of entries) {
     if (!Array.isArray(entry) || typeof entry[0] !== "string" || !Array.isArray(entry[1])) continue;
     const key = entry[0];
-    const jar = jars.get(key) ?? [];
+    const jar = jars.get(jarKey(key)) ?? [];
     let touched = false;
     for (const raw of entry[1]) {
       const c = raw as Partial<Cookie>;
@@ -528,7 +589,7 @@ export function jarMerge(
       touched = true;
     }
     if (touched) {
-      jars.set(key, jar);
+      jars.set(jarKey(key), jar);
       jarsTouched++;
     }
   }
@@ -552,4 +613,5 @@ export function cookiesResetForTests(): void {
   jars.clear();
   registry.clear();
   sameSitePolicy = "off";
+  profile = PROFILE_DEFAULT;
 }

@@ -59,6 +59,7 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 | `zl:config` | `prefix`, `scheme` | rotate the URL shape at runtime |
 | `zl:adblock` | `enabled` | global toggle for the /rules.json block lists |
 | `zl:rules` | `ua`, `rules` (`host`, `adblock`, `ua`) | host-app per-site adblock + User-Agent overrides (rules.ts) |
+| `zl:jarProfile` | `profile` (or null) | switch the cookie jar to a throwaway session profile (incognito; cookies.ts) |
 | `zl:siteRoute` | `site`, `enabled` | per-site interception toggle (403 when disabled) |
 | `zl:teardown` | - | drop all SW caches, `unregister()` |
 
