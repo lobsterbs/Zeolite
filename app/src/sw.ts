@@ -76,6 +76,7 @@ import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
 import { senderVirtualOrigin, virtualOriginHeaders } from "./origin";
+import { capContexts, contextOf, establishContext, resolveRelative, type VirtualContext } from "./vctx";
 import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
 import { fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
@@ -107,6 +108,15 @@ import type { ExtensionStorageArea } from "./extensions/storage";
 import type { UiTab } from "./extensions/tabs";
 
 declare const self: ServiceWorkerGlobalScope;
+
+/* ---- Per-client virtual contexts (issue #33) ------------------------ */
+
+/* Keyed by FetchEvent clientId. Serving a client's document or worker
+   script from a decodable engine route establishes that client's
+   context; escaped same-origin paths resolve against it before the
+   referrer compat fallback. Memory-only by design: a restarted SW
+   starts empty and re-establishes per client (see ./vctx.ts). */
+const VCTX = new Map<string, VirtualContext>();
 
 /* ---- HTTP over wisp ----------------------------------------------- */
 /* Phase 1: libcurl wasm transport (BareMux-compatible), the same proven
@@ -930,8 +940,10 @@ self.addEventListener("fetch", (e: FetchEvent) => {
            dists still emit /zl/<b64> chains bound to the target host).
          - everything else: engine assets pass through; other same-origin
            paths are escaped fetches from a rewritten page (finding 3):
-           reroute them against the origin of the serving page, recovered
-           from the request referrer. No decodable referrer: passthrough. */
+           reroute them against the origin of the serving page. Issue #33:
+           the requesting client's virtual context resolves first; the
+           referrer decode survives as the compat fallback only. Neither
+           resolves: passthrough. */
       let dest0: string | null;
       if (url.pathname === NAV) {
         /* Issue #28: the bootstrap nav guard rewrites absolute
@@ -956,11 +968,20 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         dest0 = unwrapDest(raw);
       } else {
         if (isEngineAsset(url.pathname)) return fetch(e.request); // engine asset: passthrough
-        const refDest = e.request.referrer
-          ? referrerDest(e.request.referrer, url.pathname + url.search)
-          : null;
-        if (!refDest) return fetch(e.request); // unknown same-origin path: passthrough
-        dest0 = refDest;
+        /* Issue #33: the requesting client's own virtual context is the
+           primary recovery for an escaped same-origin path (right even
+           with Referrer-Policy: no-referrer); referrer decoding
+           survives only as the compat fallback. */
+        const ctxDest = resolveRelative(VCTX, e.clientId, url.pathname + url.search);
+        if (ctxDest) {
+          dest0 = ctxDest;
+        } else {
+          const refDest = e.request.referrer
+            ? referrerDest(e.request.referrer, url.pathname + url.search)
+            : null;
+          if (!refDest) return fetch(e.request); // unknown same-origin path: passthrough
+          dest0 = refDest;
+        }
       }
       // Fragments are client-side only. The rewriter keeps them out of the
       // encoded target, but older bundles or hand-built routes may carry
@@ -979,21 +1000,39 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         });
       }
 
+      /* Issue #33: serving a document or worker script from a decodable
+         engine route establishes the new client's virtual context
+         atomically (built whole, one Map.set: rule 6). Navigations record
+         under resultingClientId (the new document client); worker script
+         loads record under the worker's own reserved client, so worker
+         requests inherit an explicit context, never a page referrer
+         (rule 5). Subresource routes never touch the entry. */
+      if (e.request.mode === "navigate" || isWorkerDestination(e.request.destination)) {
+        const newClient = e.resultingClientId || e.clientId;
+        if (newClient && establishContext(VCTX, newClient, target)) capContexts(VCTX, VCTX_CAP);
+      }
+
       return (async () => {
         const t0 = Date.now();
         const traceId = DIAG.trace();
         DIAG.stage(traceId, "REQUEST_INTERCEPTED", { url: target });
         const internalUrl = url.pathname + url.search;
-        /* Initiator: the controlling page destination, when the SW can
-           resolve the client (unknown after a restart, for instance). */
+        /* Initiator: the controlling page destination. Issue #33: the
+           client's own virtual context is the primary source (right
+           even with an empty referrer); the client URL decode remains
+           the fallback (unknown after a restart, for instance). */
         let initiator: string | undefined;
-        try {
-          if (e.clientId) {
-            const client = await self.clients.get(e.clientId);
-            if (client) initiator = decodePath(new URL(client.url, self.location.origin).pathname) || undefined;
+        const ctx = contextOf(VCTX, e.clientId);
+        if (ctx) initiator = ctx.currentUrl;
+        if (initiator === undefined) {
+          try {
+            if (e.clientId) {
+              const client = await self.clients.get(e.clientId);
+              if (client) initiator = decodePath(new URL(client.url, self.location.origin).pathname) || undefined;
+            }
+          } catch {
+            /* initiator stays unknown */
           }
-        } catch {
-          /* initiator stays unknown */
         }
         const mkDetail = (resp?: Response): NetDetail => {
           const d: NetDetail = {
@@ -1227,12 +1266,17 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           const ruleUa = siteUaFor(target);
           if (ruleUa && !fpProfile) sendHeaders.set("user-agent", ruleUa);
           /* 2.2 Arsenide: initiator context for the opt-in SameSite
-             policy. The referrer is an engine route; referrerDest decodes
-             it. Navigations are top-level for lax purposes. */
+             policy. Issue #33: the initiator comes from the client's own
+             virtual context first (a SW-assigned key, not a page-supplied
+             string); the referrer decode is the compat fallback.
+             Navigations are top-level for lax purposes. */
+          const initCtx = contextOf(VCTX, e.clientId);
           const reqCtx: CookieRequestContext = {
-            initiator: e.request.referrer
-              ? referrerDest(e.request.referrer, url.pathname + url.search) ?? undefined
-              : undefined,
+            initiator:
+              initCtx?.currentUrl ??
+              (e.request.referrer
+                ? referrerDest(e.request.referrer, url.pathname + url.search) ?? undefined
+                : undefined),
             navigation: (e.request.headers.get("sec-fetch-dest") ?? "") === "document",
           };
           /* 1.4 Boride: the jar is the authoritative Cookie source for
