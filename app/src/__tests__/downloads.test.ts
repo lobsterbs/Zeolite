@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { DownloadTracker, downloadFilename } from "../downloads";
-import { openDb, idbClear, idbGetAllKeys, STORE_DOWNLOADS } from "../extensions/idb";
+import { openDb, idbClear, idbGetAllKeys, idbPut, STORE_DOWNLOADS } from "../extensions/idb";
 
 function headers(h: Record<string, string>): Headers {
   return new Headers(h);
@@ -124,6 +124,30 @@ describe("DownloadTracker", () => {
     expect(snap[0].status).toBe("error");
     expect(snap[0].error).toBe("stream failed");
   });
+
+  it("ring overflow keeps live streams registered and drops idle entries instead (#25)", async () => {
+    const t = new DownloadTracker();
+    const live = new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        ctrl.enqueue(new Uint8Array(4));
+      },
+    });
+    const liveId = t.begin("https://x.test/live", headers({ "content-disposition": "attachment" }), "a", -1);
+    const reader = t.wrap(liveId, live).getReader();
+    await reader.read(); /* one chunk in, stream still open */
+    for (let i = 1; i < 200; i++) {
+      t.begin("https://x.test/idle" + i, headers({ "content-disposition": "attachment" }), "a", -1);
+    }
+    const lastId = t.begin("https://x.test/last", headers({ "content-disposition": "attachment" }), "a", -1);
+    const snap = t.snapshot();
+    expect(snap).toHaveLength(200);
+    expect(snap.some((e) => e.id === liveId)).toBe(true);
+    expect(snap.some((e) => e.id === "dl2")).toBe(false); /* oldest idle evicted */
+    expect(snap.some((e) => e.id === lastId)).toBe(true);
+    t.cancel(liveId); /* sever so pipeTo settles */
+    await new Promise((r) => setTimeout(r, 0));
+    t.reset();
+  });
 });
 
 describe("download registry persistence (2.2)", () => {
@@ -187,5 +211,23 @@ describe("download registry persistence (2.2)", () => {
     const keys = await idbGetAllKeys(db, STORE_DOWNLOADS);
     expect(keys.sort()).toEqual(["site:https://one.test", "site:https://two.test"]);
     a.reset();
+  });
+
+  it("skips corrupted stored entries instead of poisoning the registry (#26)", async () => {
+    const db = await openDb();
+    await idbPut(db, STORE_DOWNLOADS, "site:https://bad.test", [
+      { id: "dl1", source: "https://bad.test/x", startedAt: "not-a-number", status: "invalid" },
+      { id: 42, source: "https://bad.test/y", status: "done" },
+    ]);
+    await idbPut(db, STORE_DOWNLOADS, "site:https://good.test", [
+      { id: "dl2", filename: "g.bin", mime: "application/octet-stream", size: 5, received: 5, startedAt: Date.now(), endedAt: Date.now(), status: "done", source: "https://good.test/g", speed: 0 },
+    ]);
+    const t = new DownloadTracker();
+    await t.load();
+    const snap = t.snapshot();
+    expect(snap).toHaveLength(1);
+    expect(snap[0].id).toBe("dl2");
+    expect(Number.isFinite(snap[0].speed)).toBe(true);
+    t.reset();
   });
 });

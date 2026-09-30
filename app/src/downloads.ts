@@ -62,6 +62,29 @@ export function downloadFilename(source: string, headers: Headers): string {
   return "download";
 }
 
+/** #26: a record straight out of IndexedDB is untrusted. One corrupted
+    field would poison snapshot()'s speed math or the UI's status
+    rendering, so every field is checked before an entry is restored. */
+function isValidEntry(e: unknown): e is DownloadEntry {
+  if (typeof e !== "object" || e === null) return false;
+  const r = e as Record<string, unknown>;
+  return (
+    typeof r.id === "string" &&
+    typeof r.filename === "string" &&
+    typeof r.mime === "string" &&
+    typeof r.source === "string" &&
+    Number.isFinite(r.size) &&
+    Number.isFinite(r.received) &&
+    Number.isFinite(r.startedAt) &&
+    Number.isFinite(r.endedAt) &&
+    (r.status === "active" ||
+      r.status === "done" ||
+      r.status === "error" ||
+      r.status === "cancelled") &&
+    (r.error === undefined || typeof r.error === "string")
+  );
+}
+
 const RING = 200;
 
 export class DownloadTracker {
@@ -89,7 +112,14 @@ export class DownloadTracker {
       source,
       speed: 0,
     });
-    if (this.entries.length > RING) this.entries.shift();
+    /* #25: never evict an entry whose stream is still delivering bytes
+       (its chunks update the entry and its completion persists it):
+       drop the oldest idle entry instead, and honestly run over
+       capacity when every slot is live. */
+    if (this.entries.length > RING) {
+      const i = this.entries.findIndex((e) => !this.streams.has(e.id));
+      if (i >= 0) this.entries.splice(i, 1);
+    }
     this.schedulePersist();
     return id;
   }
@@ -129,7 +159,16 @@ export class DownloadTracker {
     for (const k of await idbGetAllKeys(db, STORE_DOWNLOADS)) {
       if (!bySite.has(k)) bySite.set(k, []); /* drop sites that emptied */
     }
-    await Promise.all([...bySite].map(([k, list]) => idbPut(db, STORE_DOWNLOADS, k, list)));
+    /* #27: one site's quota error must not lose the other sites'
+       writes: settle every put independently and surface the count
+       instead of swallowing it. */
+    const settled = await Promise.allSettled(
+      [...bySite].map(([k, list]) => idbPut(db, STORE_DOWNLOADS, k, list)),
+    );
+    const failed = settled.filter((r) => r.status === "rejected").length;
+    if (failed > 0) {
+      console.warn(`download registry: ${failed}/${settled.length} site writes failed`);
+    }
   }
 
   /** Restore the persisted ring (SW activate). Entries that were active
@@ -139,17 +178,24 @@ export class DownloadTracker {
     const db = await openDb();
     const keys = await idbGetAllKeys(db, STORE_DOWNLOADS);
     const restored: DownloadEntry[] = [];
+    let skipped = 0;
     for (const k of keys) {
       const rec = (await idbGet(db, STORE_DOWNLOADS, k)) as DownloadEntry[] | undefined;
       if (!Array.isArray(rec)) continue;
       for (const e of rec) {
-        if (typeof e?.id !== "string" || typeof e?.source !== "string") continue;
+        if (!isValidEntry(e)) {
+          skipped++;
+          continue;
+        }
         restored.push(
           e.status === "active"
             ? { ...e, status: "error", endedAt: Date.now(), error: "interrupted: worker restarted" }
             : e,
         );
       }
+    }
+    if (skipped > 0) {
+      console.warn(`download registry: skipped ${skipped} corrupted stored entries`);
     }
     restored.sort((a, b) => a.startedAt - b.startedAt);
     this.entries.length = 0;
