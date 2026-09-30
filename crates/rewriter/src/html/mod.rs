@@ -1238,7 +1238,11 @@ mod tests {
         );
         let out = r.enc("https://proxy.example.evil.com/x");
         assert_ne!(out, "https://proxy.example.evil.com/x");
-        assert!(out.starts_with("/zl/"), "rewritten to a route: {}", out);
+        let expected = format!(
+            "https://proxy.example/zl/{}",
+            crate::encode::b64u_encode(b"https://proxy.example.evil.com/x")
+        );
+        assert_eq!(out, expected, "rewritten to a route: {}", out);
     }
 
     #[test]
