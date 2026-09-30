@@ -33,6 +33,10 @@
      { type: "zl:fingerprint", profile }   document surface spoofing (1.8)
      { type: "zl:recordStart", recId }     deterministic session recording (1.9)
      { type: "zl:recordStop" }             build the zlRecord artifact
+     { type: "zl:find", dest, cmd, pattern, options }  in-page find in the
+                                            addressed page (#29; replies
+                                            { ok, matches, ordinal,
+                                            highlight })
    2.1 Halogen control plane:
      { type: "zl:ping" }                    version handshake (replies
                                              { ok, version, degraded,
@@ -1587,7 +1591,8 @@ interface ControlMessage {
     | "zl:sameSite"
     | "zl:fingerprint"
     | "zl:recordStart"
-    | "zl:recordStop";
+    | "zl:recordStop"
+    | "zl:find";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -1635,6 +1640,31 @@ interface ControlMessage {
   bytes?: Uint8Array;
   /** zl:installExtFiles: unpacked directory listing, path -> bytes. */
   files?: Array<[string, Uint8Array]>;
+  /** zl:find (#29): destination of the addressed page, matched exactly
+      against the page's own __ZL.dest, like every page-targeted
+      engine message. */
+  dest?: string;
+  /** zl:find command: search, step or clear. */
+  cmd?: "find" | "next" | "prev" | "clear";
+  /** zl:find search pattern (cmd "find"). */
+  pattern?: string;
+  /** zl:find options: caseSensitive, wholeWord and wrap (default
+      true), passed through to the page-side finder. */
+  options?: { caseSensitive?: boolean; wholeWord?: boolean; wrap?: boolean };
+}
+
+/* #29 (zl:find): the compiled page-side finder ships to the page
+   inside the findLoad message. The bundle is a sibling artifact of
+   this worker (finder.js, built from src/finder.ts), fetched once
+   per SW instance - worker-own fetches never re-enter this fetch
+   handler - and cached in the closure. An unavailable bundle answers
+   the find command honestly instead of pretending. */
+let finderSource: Promise<string | null> | null = null;
+function loadFinderSource(): Promise<string | null> {
+  finderSource ??= fetch(new URL("finder.js", self.location.href))
+    .then((r) => (r.ok ? r.text() : null))
+    .catch(() => null);
+  return finderSource;
 }
 
 /* Bug-scout fix: control-plane messages used to trust msg.origin, so
@@ -1835,6 +1865,86 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       });
       setTracing(r.tracingWasEnabled);
       reply({ ok: true, record });
+      break;
+    }
+    case "zl:find": {
+      /* #29: in-page find. The SW cannot touch page DOM, so the
+         command is forwarded to the page whose destination matches
+         msg.dest exactly (the same addressing the content-script
+         bridges use); that page runs the compiled finder, whose
+         source is attached to the message and evaluated once per
+         document by the bootstrap loader. Replies flow back on the
+         transferred port; a page that never answers - no proxied
+         document at dest, or one without the bootstrap - fails
+         honestly on the timeout instead of hanging the find bar. */
+      if (
+        !port ||
+        typeof msg.dest !== "string" ||
+        (msg.cmd !== "find" && msg.cmd !== "next" && msg.cmd !== "prev" && msg.cmd !== "clear") ||
+        (msg.cmd === "find" && typeof msg.pattern !== "string")
+      ) {
+        reply({ ok: false, error: "bad zl:find" });
+        break;
+      }
+      e.waitUntil(
+        (async () => {
+          const code = await loadFinderSource();
+          if (code === null) {
+            reply({ ok: false, error: "finder bundle unavailable" });
+            return;
+          }
+          const mc = new MessageChannel();
+          let done = false;
+          let timer: ReturnType<typeof setTimeout>;
+          const finish = (payload: {
+            ok: boolean;
+            error?: string;
+            matches?: number;
+            ordinal?: number;
+            highlight?: string;
+          }) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            reply(payload);
+            mc.port1.close();
+          };
+          timer = setTimeout(() => finish({ ok: false, error: "find: page did not answer" }), 10000);
+          mc.port1.onmessage = (ev) => {
+            const d = ev.data as {
+              ok?: boolean;
+              error?: string;
+              matches?: number;
+              ordinal?: number;
+              highlight?: string;
+            };
+            finish(
+              d && typeof d.ok === "boolean"
+                ? { ok: d.ok, error: d.error, matches: d.matches, ordinal: d.ordinal, highlight: d.highlight }
+                : { ok: false, error: "bad find reply" },
+            );
+          };
+          const cs = await self.clients.matchAll({ type: "window" });
+          let target: Client | null = null;
+          for (const c of cs) {
+            try {
+              const cu = new URL(c.url, self.location.origin);
+              if (decodePath(cu.pathname) + cu.search === msg.dest) {
+                target = c;
+                break;
+              }
+            } catch { /* not a routable client URL: skip */ }
+          }
+          if (!target) {
+            finish({ ok: false, error: "find: no proxied page at dest" });
+            return;
+          }
+          target.postMessage(
+            { type: "zl:findLoad", dest: msg.dest, cmd: msg.cmd, pattern: msg.pattern, options: msg.options, code },
+            [mc.port2],
+          );
+        })(),
+      );
       break;
     }
     case "zl:downloads":

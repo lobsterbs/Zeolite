@@ -15,15 +15,17 @@ export default defineConfig({
      assets sit, under any mount path. */
   base: "./",
   build: {
-    // The SW, the bootstrap and the devtools page must live at known
-    // absolute paths with no hashed filenames: registration, HTML
-    // injection and navigation reference them.
+    // The SW, the bootstrap, the finder and the devtools page must
+    // live at known absolute paths with no hashed filenames:
+    // registration, HTML injection, the SW's sibling-fetch of the
+    // finder bundle (#29) and navigation reference them.
     rollupOptions: {
       input: {
         main: "index.html",
         devtools: "devtools.html",
         sw: "src/sw.ts",
         bootstrap: "src/bootstrap.ts",
+        finder: "src/finder.ts",
         prelude: "src/worker-prelude.ts",
       },
       output: {

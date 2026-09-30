@@ -4,7 +4,8 @@
    It only patches behavior: storage scoping, storage/cookie
    virtualization, the shared-worker port relay, WebSocket routing,
    the worker WebSocket relay, the navigator.serviceWorker shim and
-   the navigation guard (issue #28). URL-level fetch/XHR need no
+   the navigation guard (issue #28) and the on-demand find loader
+   (issue #29). URL-level fetch/XHR need no
    patch: pages navigate within engine-local paths that the service
    worker intercepts natively.
 
@@ -28,6 +29,7 @@ import { applyCookie } from "./bootstrap/cookie";
 import { applyRelay } from "./bootstrap/relay";
 import { applyWs } from "./bootstrap/ws";
 import { applyNavGuard } from "./bootstrap/navguard";
+import { applyFindLoad } from "./bootstrap/findload";
 
 const w = window as unknown as Record<string, unknown>;
 const ZL = ((w.__ZL as { dest: string } | undefined) ??
@@ -43,3 +45,4 @@ applyCookie(ORIGIN);
 applyRelay(w, ORIGIN, ZL.dest);
 applyWs(w, ORIGIN);
 applyNavGuard(w, (w.location as Location).href, (w.location as Location).origin);
+applyFindLoad(w);

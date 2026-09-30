@@ -62,6 +62,7 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 | `zl:jarProfile` | `profile` (or null) | switch the cookie jar to a throwaway session profile (incognito; cookies.ts) |
 | `zl:siteRoute` | `site`, `enabled` | per-site interception toggle (403 when disabled) |
 | `zl:teardown` | - | drop all SW caches, `unregister()` |
+| `zl:find` | `dest`, `cmd` (`find`/`next`/`prev`/`clear`), `pattern`, `options` (`caseSensitive`, `wholeWord`, `wrap`) | in-page find in the addressed proxied document (#29): the page-side finder replies `{ ok, matches, ordinal (1-based), highlight }`; open shadow roots searched, CSS Custom Highlight API where available (`highlight: "none"` = counts only) |
 
 Page-internal messages (sent by the injected bootstrap, not the host
 app): `zl:wsOpen` (`url`, `protocols`, optional `origin`) bridges a
@@ -72,6 +73,13 @@ origin is the message field when present, else recovered from the
 controlling client's route (worker-relayed sockets included).
 `zl:docCookie` (`origin`, `set`) is the per-origin document.cookie
 channel.
+
+`zl:findLoad` is the SW-to-page half of `zl:find`: the bootstrap
+evaluates the attached finder source (finder.js) once per document
+and the finder answers on the transferred port. A page that never
+answers - no bootstrap, a CSP that blocks eval, a hostile context -
+fails the command honestly after 10 seconds instead of hanging the
+find bar.
 
 ## Isolation guarantees (Phase 2 acceptance)
 

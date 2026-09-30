@@ -165,6 +165,16 @@ jobs:
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
           if [ "$SIZE" -ge 6656 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 6656)"; exit 1; fi
+      - name: Finder size budget (must stay under 4 KiB minified)
+        # #29: dist/finder.js is shipped into the page inside the
+        # first zl:findLoad message, so its size is a per-command
+        # payload. Deliberate own gate: the finder never competes with
+        # the bootstrap budget - the bootstrap only carries the
+        # loader (bootstrap/findload.ts).
+        run: |
+          SIZE=$(wc -c < app/dist/finder.js)
+          echo "finder.js: $SIZE bytes"
+          if [ "$SIZE" -ge 4096 ]; then echo "::error::FINDER $SIZE bytes (budget 4096)"; exit 1; fi
       - name: Subpath-alias build gate (2.1 Halogen)
         # The adapter serves the DEFAULT-base dist bundle under the
         # /zlsw/ path. An asset URL frozen to the origin root 404s there
