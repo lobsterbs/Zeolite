@@ -63,20 +63,23 @@ function fakeFactory(): {
   handlers: FakeHandlers[];
   sent: unknown[];
   closed: number[];
+  headerSets: Array<Array<[string, string]>>;
 } {
   const handlers: FakeHandlers[] = [];
   const sent: unknown[] = [];
   const closed: number[] = [];
+  const headerSets: Array<Array<[string, string]>> = [];
   const factory: WsFactory = {
-    open: (url, protocols, h) => {
+    open: (url, protocols, h, headers) => {
       handlers.push({ url, protocols, h });
+      headerSets.push(headers ?? []);
       return {
         send: (d: unknown) => sent.push(d),
         close: (code: number) => closed.push(code),
       };
     },
   };
-  return { factory, handlers, sent, closed };
+  return { factory, handlers, sent, closed, headerSets };
 }
 
 describe("WsBridge", () => {
@@ -156,6 +159,25 @@ describe("WsBridge", () => {
     expect(b.size).toBe(0);
     expect((rec.closes as Array<{ code: number }>)[0]).toMatchObject({ code: 1006, clean: false });
     expect(p.posted).toContainEqual({ ev: "close", code: 1006, clean: false, reason: "refused" });
+  });
+
+  it("passes the per-origin handshake identity headers through (item 4)", () => {
+    const { hooks } = fakeHooks();
+    const { factory, handlers, headerSets } = fakeFactory();
+    const b = new WsBridge(factory, hooks);
+    const p = fakePort();
+    const identity: Array<[string, string]> = [
+      ["origin", "https://page.example"],
+      ["cookie", "sid=1"],
+    ];
+    b.open(p, "wss://auth.example/ws", ["chat"], identity);
+    expect(handlers[0].url).toBe("wss://auth.example/ws");
+    expect(headerSets[0]).toEqual(identity);
+    /* Absent headers degrade to the empty set: the transport default,
+       the pre-item-4 single bridge identity. */
+    const p2 = fakePort();
+    b.open(p2, "wss://plain.example/", []);
+    expect(headerSets[1]).toEqual([]);
   });
 
   it("closeAll closes and forgets every live connection", () => {

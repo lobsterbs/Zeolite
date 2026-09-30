@@ -24,6 +24,10 @@ export interface WsFactory {
       onclose(code: number, reason: string): void;
       onerror(error: string): void;
     },
+    /** Handshake request headers (per-origin virtual WS identity,
+        deep-integration item 4; empty = transport default, the
+        pre-item-4 single bridge identity). */
+    headers?: Array<[string, string]>,
   ): WsHandle;
 }
 
@@ -85,7 +89,7 @@ export class WsBridge {
     return this.conns.size;
   }
 
-  open(port: PortLike, url: string, protocols: string[]): void {
+  open(port: PortLike, url: string, protocols: string[], headers?: Array<[string, string]>): void {
     const upgraded = url.startsWith("ws://");
     const target = upgraded ? "wss://" + url.slice("ws://".length) : url;
     if (upgraded) {
@@ -160,7 +164,7 @@ export class WsBridge {
              close that may never come. */
           if (!conn.ready) this.end(port, 1006, false, String(err));
         },
-      });
+      }, headers ?? []);
     } catch (err) {
       this.conns.delete(port);
       port.onmessage = null;

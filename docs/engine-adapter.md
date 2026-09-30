@@ -63,6 +63,16 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 | `zl:siteRoute` | `site`, `enabled` | per-site interception toggle (403 when disabled) |
 | `zl:teardown` | - | drop all SW caches, `unregister()` |
 
+Page-internal messages (sent by the injected bootstrap, not the host
+app): `zl:wsOpen` (`url`, `protocols`, optional `origin`) bridges a
+page WebSocket through the transport; since deep-integration item 4
+the handshake carries the per-origin identity (Origin + jar cookies +
+per-site UA, a fingerprint profile still winning) - the initiator
+origin is the message field when present, else recovered from the
+controlling client's route (worker-relayed sockets included).
+`zl:docCookie` (`origin`, `set`) is the per-origin document.cookie
+channel.
+
 ## Isolation guarantees (Phase 2 acceptance)
 
 - Storage: proxied site data is namespaced `zl:<sitehash>:` per site;

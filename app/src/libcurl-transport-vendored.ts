@@ -340,12 +340,17 @@ export interface WsHandle {
   send(data: Blob | ArrayBuffer | string): void;
   close(code: number, reason: string): void;
 }
-export function openWebSocket(url: string, protocols: string[], h: WsHandlers): WsHandle {
+export function openWebSocket(
+  url: string,
+  protocols: string[],
+  h: WsHandlers,
+  requestHeaders: RawHeaders = [],
+): WsHandle {
   if (!client) throw new Error(MISSING);
   const [send, close] = client.connect(
     new URL(url),
     protocols,
-    [],
+    requestHeaders,
     (protocol) => h.onopen(protocol),
     (data) => h.onmessage(data),
     (code, reason) => h.onclose(code, reason),

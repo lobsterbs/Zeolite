@@ -22,7 +22,10 @@
    Phase 4 control plane:
      { type: "zl:getNetLog" }                snapshot of the request log
      { type: "zl:tracing", enabled }          opt-in rewrite tracing ring (1.2)
-     { type: "zl:wsOpen", url, protocols }   page WebSocket bridge (1.3)
+     { type: "zl:wsOpen", url, protocols [, origin] }  page WS bridge (1.3;
+                                            optional origin + client-route
+                                            recovery feed the per-origin
+                                            handshake identity, item 4)
      { type: "zl:docCookie", origin, set }  per-origin document.cookie (1.5)
      { type: "zl:fingerprint", profile }   document surface spoofing (1.8)
      { type: "zl:recordStart", recId }     deterministic session recording (1.9)
@@ -63,6 +66,7 @@ import { beginRecording, finishRecording, type RecordingState } from "./recordin
 import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket } from "./libcurl-transport-vendored";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
+import { wsIdentityHeaders } from "./wsidentity";
 import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
 import { fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
@@ -423,13 +427,18 @@ function flatRed(headers: Headers): Record<string, string> {
 
 const wsBridge = new WsBridge(
   {
-    open: (url, protocols, h) =>
-      openWebSocket(url, protocols, {
-        onopen: (p) => h.onopen(p),
-        onmessage: (d) => h.onmessage(d),
-        onclose: (c, r) => h.onclose(c, r),
-        onerror: (e) => h.onerror(e),
-      }),
+    open: (url, protocols, h, headers) =>
+      openWebSocket(
+        url,
+        protocols,
+        {
+          onopen: (p) => h.onopen(p),
+          onmessage: (d) => h.onmessage(d),
+          onclose: (c, r) => h.onclose(c, r),
+          onerror: (e) => h.onerror(e),
+        },
+        headers,
+      ),
   },
   {
     attempt: (url, upgraded) => ({
@@ -1539,7 +1548,8 @@ interface ControlMessage {
   /** zl:wsOpen: page WebSocket bridge destination + protocols. */
   url?: string;
   protocols?: string[];
-  /** zl:docCookie: page origin + optional document.cookie write. */
+  /** zl:docCookie page origin; zl:wsOpen initiator origin (the
+      per-origin handshake identity, item 4). */
   origin?: string;
   set?: string;
   /** zl:cancelDownload: registry entry id. */
@@ -1663,7 +1673,33 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
         port.close();
         break;
       }
-      wsBridge.open(port as unknown as PortLike, msg.url, Array.isArray(msg.protocols) ? msg.protocols : []);
+      /* Deep-integration item 4: per-origin virtual WS identities. The
+         handshake carries the initiator's virtual origin, the jar's
+         cookies for the target and the per-site UA (an active
+         fingerprint profile still wins), instead of the single
+         bridge identity every proxied site used to share. The origin
+         is an explicit message field when the sender knows it, else
+         recovered from the controlling client's route - the same
+         initiator recovery the fetch path uses (works for
+         worker-relayed sockets too, since the relay runs in the page
+         context). Headers are engine-built only: a page can never
+         smuggle handshake headers onto the transport. */
+      let wsOrigin: string | null = typeof msg.origin === "string" ? msg.origin : null;
+      if (!wsOrigin) {
+        try {
+          if (e.clientId) {
+            const client = await self.clients.get(e.clientId);
+            const dest = client ? decodePath(new URL(client.url, self.location.origin).pathname) : null;
+            if (dest) wsOrigin = new URL(dest).origin;
+          }
+        } catch {
+          /* initiator stays unknown: no Origin header, honest absence */
+        }
+      }
+      const wsHeaders = wsIdentityHeaders(wsOrigin, msg.url, {
+        profile: fpProfile,
+      });
+      wsBridge.open(port as unknown as PortLike, msg.url, Array.isArray(msg.protocols) ? msg.protocols : [], wsHeaders);
       break;
     }
     case "zl:docCookie": {
