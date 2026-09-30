@@ -611,8 +611,21 @@ async function pageCacheMatch(req: Request): Promise<Response | null> {
   if (Date.now() - at >= ttl) {
     /* Stale: serve it now, refresh in the background. */
     try {
-      const fresh = await wispFetchCacheBypass(req);
-      if (fresh.ok) await pageCacheStore(req, fresh);
+      /* #35: a background refresh fetches the RAW upstream body. For
+         serve-time-transformed JS (worker/script destinations) the
+         composed copy is built on the fetch path, which this refresh
+         bypasses - storing raw here would regress the entry. Drop the
+         stale entry instead: this hit serves from memory, the next
+         request re-fetches and re-transforms. */
+      const jsServe =
+        isWorkerDestination(req.destination) ||
+        (req.destination === "script" && isJs(hit));
+      if (jsServe) {
+        await (await caches.open(ZL_PAGES)).delete(req);
+      } else {
+        const fresh = await wispFetchCacheBypass(req);
+        if (fresh.ok) await pageCacheStore(req, fresh);
+      }
     } catch {
       /* offline: the stale copy stays served */
     }
@@ -1527,7 +1540,18 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               });
             }
           }
-          if (e.request.method === "GET") void pageCacheStore(e.request, resp.clone());
+          /* #35 (browser E2E): script/worker JS bodies flow through a
+             serve-time transform below (specifier pass, worker
+             prelude), and each of those branches stores its TRANSFORMED
+             copy itself. Storing the raw body here as well would race
+             the transformed put and could serve an unrewritten second
+             visit, so the raw store skips exactly the union of the
+             transformed branches. Documents and stylesheets keep the
+             raw store: their cache hits re-run the streaming
+             rewriter. */
+          const workerServe = isWorkerDestination(e.request.destination) && !!resp.body;
+          const scriptServe = e.request.destination === "script" && isJs(resp) && !!resp.body;
+          if (e.request.method === "GET" && !workerServe && !scriptServe) void pageCacheStore(e.request, resp.clone());
           if (isHtml(resp) && resp.body) {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
             traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });
@@ -1588,7 +1612,12 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDest(target)) + ");\n" +
               (fpWorkerScript ? "\n" + fpWorkerScript : "");
             WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-            return new Response(head + src, { status: resp.status, headers: outHeaders });
+            /* #35: the page cache holds the composed copy (specifiers
+               rewritten, prelude prepended); a stored raw body would
+               serve a second visit unrewritten. */
+            const out = new Response(head + src, { status: resp.status, headers: outHeaders });
+            if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());
+            return out;
           }
           if (isWorkerDestination(e.request.destination) && resp.body) {
             /* 1.6 Hydride: classic/shared worker scripts get the prelude
@@ -1616,7 +1645,12 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               },
             });
             WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-            return new Response(body, { status: resp.status, headers: outHeaders });
+            /* #35: clone() tees the composed stream, so the browser
+               keeps its streaming path while the cache consumes the
+               other fork. */
+            const out = new Response(body, { status: resp.status, headers: outHeaders });
+            if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());
+            return out;
           }
           /* #35 (browser E2E): page <script type="module"> bodies. An
              external module script folds its import specifiers against
@@ -1634,7 +1668,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
             const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
             WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-            return new Response(src, { status: resp.status, headers: outHeaders });
+            const out = new Response(src, { status: resp.status, headers: outHeaders });
+            if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());
+            return out;
           }
           WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
           /* 1.7 Sulfide: attachment responses join the download
