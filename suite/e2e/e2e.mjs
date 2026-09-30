@@ -812,6 +812,101 @@ async function main() {
     return "isolated";
   });
 
+  /* ---- isolation beyond storage (#37) ------------------------------ */
+
+  await check("isolation: window.name is scoped per virtual site and survives reloads (#37)", async () => {
+    /* sessionStorage (the scoping store) is per-tab, so the whole
+       check runs in ONE tab navigated between virtual sites. */
+    const a = await openProxied(ORIGIN_A + "/dir/page.html");
+    const n1 = await evalIn(a.frame, "set name A", `() => {
+      window.name = "zl-name-a";
+      return window.name;
+    }`);
+    eq(n1, "zl-name-a", "window.name round-trips on the same site");
+    await a.page.reload();
+    const fa = await waitFor("frame after reload", 45000, () => frameWith(a.page, "#zl-marker"));
+    eq(await evalIn(fa, "name after reload", `() => window.name`), "zl-name-a", "name survives a reload on the same site");
+    await a.page.goto(ENGINE + "/?url=" + encodeURIComponent(ORIGIN_B + "/dir/page.html"));
+    const fb = await waitFor("B frame", 45000, () => frameWith(a.page, "#zl-marker"));
+    eq(await evalIn(fb, "name on B", `() => window.name`), "", "another virtual site starts from an empty name");
+    const n2 = await evalIn(fb, "set name B", `() => {
+      window.name = "zl-name-b";
+      return window.name;
+    }`);
+    eq(n2, "zl-name-b", "B round-trips its own name");
+    await a.page.goto(ENGINE + "/?url=" + encodeURIComponent(ORIGIN_A + "/dir/page.html"));
+    const fa2 = await waitFor("A frame again", 45000, () => frameWith(a.page, "#zl-marker"));
+    eq(await evalIn(fa2, "name back on A", `() => window.name`), "zl-name-a", "site A keeps its name across the B visit");
+    return "scoped";
+  });
+
+  await check("isolation: BroadcastChannel stays same-site and .name keeps the page spelling (#37)", async () => {
+    const a1 = await openProxied(ORIGIN_A + "/dir/page.html");
+    const a2 = await openProxied(ORIGIN_A + "/dir/page.html");
+    const b = await openProxied(ORIGIN_B + "/dir/page.html");
+    const nm = await evalIn(a1.frame, "arm BC", `() => {
+      window.__zlBc = [];
+      const ch = new BroadcastChannel("zl-e2e-bc");
+      ch.addEventListener("message", (e) => window.__zlBc.push(String(e.data)));
+      return ch.name;
+    }`);
+    eq(nm, "zl-e2e-bc", ".name keeps the page's spelling, not the prefixed real channel");
+    await evalIn(a2.frame, "same-site post", `() => {
+      new BroadcastChannel("zl-e2e-bc").postMessage("same");
+      return true;
+    }`);
+    await waitFor("same-site BroadcastChannel message", 5000, async () => {
+      const s = await evalIn(a1.frame, "read BC", `() => JSON.stringify(window.__zlBc)`);
+      return JSON.parse(s).includes("same") ? s : null;
+    });
+    await evalIn(b.frame, "cross-site post", `() => {
+      new BroadcastChannel("zl-e2e-bc").postMessage("cross");
+      return true;
+    }`);
+    await sleep(700);
+    const got = JSON.parse(await evalIn(a1.frame, "read BC again", `() => JSON.stringify(window.__zlBc)`));
+    eq(got.length, 1, "BroadcastChannel leaked across virtual sites: " + JSON.stringify(got));
+    eq(got[0], "same", "same-site delivery");
+    return "same-site only";
+  });
+
+  await check("isolation: storage events deliver same-site with stripped keys only (#37)", async () => {
+    const a1 = await openProxied(ORIGIN_A + "/dir/page.html");
+    const a2 = await openProxied(ORIGIN_A + "/dir/page.html");
+    const b = await openProxied(ORIGIN_B + "/dir/page.html");
+    await evalIn(a1.frame, "arm storage", `() => {
+      window.__zlEv = [];
+      window.addEventListener("storage", (e) => window.__zlEv.push({ key: e.key, nv: e.newValue, area: e.storageArea === localStorage }));
+      return true;
+    }`);
+    await evalIn(a2.frame, "same-site write", `() => {
+      localStorage.setItem("zl-se", "fromA2");
+      return true;
+    }`);
+    await waitFor("same-site storage event", 5000, async () => {
+      const s = await evalIn(a1.frame, "read events", `() => JSON.stringify(window.__zlEv)`);
+      return JSON.parse(s).length >= 1 ? s : null;
+    });
+    await evalIn(b.frame, "cross-site write", `() => {
+      localStorage.setItem("zl-se", "fromB");
+      return true;
+    }`);
+    await sleep(700);
+    const evs = JSON.parse(await evalIn(a1.frame, "read events again", `() => JSON.stringify(window.__zlEv)`));
+    eq(evs.length, 1, "storage event leaked across virtual sites: " + JSON.stringify(evs));
+    eq(evs[0].key, "zl-se", "key arrives prefix-stripped");
+    eq(evs[0].nv, "fromA2", "newValue carried");
+    eq(evs[0].area, true, "storageArea points at the page's scoped localStorage");
+    return "same-site only";
+  });
+
+  await check("isolation: cookieStore is absent, not faked (#37)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const t = await evalIn(frame, "cookieStore type", `() => typeof window.cookieStore`);
+    eq(t, "undefined", "cookieStore must be removed (documented absence), not faked");
+    return "absent";
+  });
+
   await check("privacy: no browser-direct fixture request in the network capture (#34)", async () => {
     const fx = [];
     for (const rec of recorders) {

@@ -32,6 +32,11 @@ fixture pages through `/?url=<target>` and asserts:
 - Privacy (#32/#34): window.__ZL carries no plaintext destination, page
   surfaces show only engine routes, two virtual contexts stay isolated
   (storage, cookie jar, Cache API names).
+- Isolation (#37): window.name is scoped per virtual site (survives a
+  reload, empties on the other site, restores on return),
+  BroadcastChannel delivers same-site only while .name keeps the
+  page's spelling, storage events deliver same-site with
+  prefix-stripped keys, cookieStore is absent (removed, not faked).
 
 ## How a browser-direct escape is distinguished from an engine request
 
