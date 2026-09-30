@@ -1,0 +1,133 @@
+/* Runtime navigation guard + WebRTC gate (issue #28).
+
+   The service worker only intercepts navigations inside its own
+   scope: a cross-origin navigation (window.open, an anchor href, a
+   form action) goes straight from the page to the real origin,
+   exposing the client IP and hostname. The rewriter covers URLs in
+   server-provided markup; this module covers the runtime DOM seams.
+   Rewritten absolute URLs become engine-local NAV marker routes,
+   which the SW decodes and proxies like any engine route
+   (cross-origin navigations would otherwise never reach the fetch
+   handler at all).
+
+   Honest limits, by design:
+   - location is LegacyUnforgeable: location.href = "..." cannot be
+     hooked by any page script, so a deliberate self-navigation to a
+     real origin still escapes. No service-worker engine can close
+     that class; it needs a real browser extension.
+   - URLs inserted through the HTML parser (innerHTML, document.write)
+     bypass both the property and setAttribute hooks; the parser has
+     no script-visible seam.
+   - Engine-origin, relative and opaque URLs pass through untouched:
+     those requests stay inside the SW scope and it reroutes them
+     natively. <base href> is deliberately left alone (rewriting it
+     would break relative resolution for the whole page).
+   - RTCPeerConnection is removed, not shimmed: WebRTC connects
+     directly, cannot be routed through the engine, and leaving a
+     constructible-looking API would be a fake feature. */
+
+export const NAV = "/__zl_nav__";
+
+/** Absolute destination URL -> engine-local marker route. */
+export function navEncode(u: string): string {
+  return NAV + "/" + encodeURIComponent(u);
+}
+
+type AnyRecord = Record<string, any>;
+
+export function applyNavGuard(
+  w: Record<string, unknown>,
+  loc: string,
+  engineOrigin: string,
+): void {
+  /* Absolute http(s) URLs off the engine origin become marker routes;
+     everything else (relative, opaque scheme, engine-local, already
+     routed) passes through unchanged. */
+  const rewire = (v: string): string => {
+    let u: URL;
+    try {
+      u = new URL(String(v), loc);
+    } catch {
+      return String(v);
+    }
+    if (u.protocol !== "https:" && u.protocol !== "http:") return String(v);
+    if (u.origin === engineOrigin) return String(v);
+    return navEncode(u.href);
+  };
+  /* Reads must return what the page wrote: frameworks compare href
+     values, so the raw string is kept per element and the marker only
+     reaches the browser. */
+  const raw = new WeakMap<object, string>();
+  const guardProp = (proto: AnyRecord, prop: string): void => {
+    const d = Object.getOwnPropertyDescriptor(proto, prop);
+    if (!d || !d.set || !d.get) return;
+    Object.defineProperty(proto, prop, {
+      configurable: true,
+      enumerable: true,
+      get(this: AnyRecord) {
+        return raw.get(this) ?? d.get!.call(this);
+      },
+      set(this: AnyRecord, v: string) {
+        raw.set(this, String(v));
+        d.set!.call(this, rewire(String(v)));
+      },
+    });
+  };
+  const guardAttr = (proto: AnyRecord, attr: string): void => {
+    const O = proto.setAttribute;
+    if (typeof O !== "function") return;
+    proto.setAttribute = function (this: AnyRecord, n: string, v: string) {
+      return O.call(this, n, n === attr ? rewire(String(v)) : v);
+    };
+  };
+  /* A read-only prototype must not abort the remaining hooks. */
+  const safe = (f: () => void) => {
+    try {
+      f();
+    } catch {
+      /* hook stays native */
+    }
+  };
+  const table: Array<[AnyRecord | undefined, string]> = [
+    [w.HTMLAnchorElement as AnyRecord, "href"],
+    [w.HTMLAreaElement as AnyRecord, "href"],
+    [w.HTMLIFrameElement as AnyRecord, "src"],
+    [w.HTMLFormElement as AnyRecord, "action"],
+    [w.HTMLLinkElement as AnyRecord, "href"],
+  ];
+  for (const [C, prop] of table) {
+    if (!C) continue;
+    const proto = C.prototype;
+    safe(() => guardProp(proto, prop));
+    safe(() => guardAttr(proto, prop));
+  }
+  const OW = w.open;
+  if (typeof OW === "function") {
+    safe(() => {
+      w.open = function (this: AnyRecord, u?: string | URL, t?: string, f?: string) {
+        const s = u == null ? undefined : typeof u === "string" ? u : u.href;
+        return (OW as AnyRecord).call(this, s == null ? u : rewire(s), t, f);
+      };
+    });
+  }
+  /* A form whose action was set through a bypassing path can still be
+     submitted programmatically: rewrite the action attribute in place
+     first (the marker stores like any engine route). */
+  const F = w.HTMLFormElement as AnyRecord;
+  if (F) {
+    for (const m of ["submit", "requestSubmit"]) {
+      const O = F.prototype[m];
+      if (typeof O !== "function") continue;
+      safe(() => {
+        F.prototype[m] = function (this: AnyRecord) {
+          const a = String(this.action);
+          const r = rewire(a);
+          if (r !== a) this.setAttribute("action", r);
+          return O.apply(this, arguments);
+        };
+      });
+    }
+  }
+  /* WebRTC connects directly; presence would be a fake feature. */
+  delete w.RTCPeerConnection;
+}

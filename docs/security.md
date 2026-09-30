@@ -104,6 +104,38 @@ upstream bytes.
   relay rule (the engine is the relay parent, a page never becomes
   one) and the same ws->wss upgrade.
 
+## Runtime navigation escapes (issue #28)
+
+The bootstrap navigation guard (app/src/bootstrap/navguard.ts)
+rewrites absolute cross-origin URL assignments before the browser can
+act on them directly: window.open, the href/src/action properties and
+setAttribute on anchor, area, iframe, form and link elements, and
+form submit/requestSubmit (the static rewriter already covers
+server-provided markup, including form action and formaction).
+Rewritten URLs travel to the /__zl_nav__/ marker route, which the SW
+decodes and proxies like any engine route: cross-origin navigations
+otherwise never reach the fetch handler at all (SW interception is
+scope-bound), which is what made them both unpreventable and
+invisible. RTCPeerConnection is removed outright: WebRTC connects
+directly, cannot be routed through the engine, and leaving a
+constructible-looking API would be a fake feature.
+
+Residuals, stated honestly:
+
+- location and all its properties are LegacyUnforgeable: no page
+  script, including the bootstrap, can hook location.href = "...", so
+  a deliberate self-navigation to a real origin still escapes to the
+  browser. No service-worker engine can close this class; it needs a
+  real browser extension (declarativeNetRequest navigation
+  redirects).
+- URLs inserted through the HTML parser (innerHTML, document.write)
+  bypass both the property and setAttribute hooks; the parser has no
+  script-visible seam.
+- Cross-origin subresource requests (fetch/XHR) from controlled pages
+  do reach the SW and are passed through to the browser (logged with
+  a passthrough verdict since #30); routing them through the engine
+  is an open policy decision, deliberately not made silently.
+
 ## Known open items (honest, not fixed by 3.0)
 
 - SameSite approximation quality: referrer-derived site context is
@@ -119,3 +151,6 @@ upstream bytes.
 - The vendored transport's craigslist behavior (issue #11) is not a
   security issue: no data leaks, the failure is closed (error page),
   and the target host is unaffected.
+- Runtime navigation residuals (issue #28): location.href assignments
+  and HTML-parser-inserted URLs (innerHTML, document.write) still
+  escape to the browser; see the runtime navigation escape section.

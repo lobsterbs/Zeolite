@@ -155,11 +155,16 @@ jobs:
           fi
       - name: Verify vendored transport made it into the build
         run: test -f app/dist/libcurl/index.mjs
-      - name: Bootstrap size budget (must stay under 5 KB minified)
+      - name: Bootstrap size budget (must stay under 6.5 KiB minified)
+        # Raised from 5120 for the #28 navigation guard (window.open,
+        # anchor/area/iframe/form/link URL property + setAttribute
+        # rewrites, form submit paths, WebRTC removal) and the module
+        # split. Raises are deliberate decisions recorded here, never
+        # quiet accommodations; CI prints the measured size.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 5120 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 5120)"; exit 1; fi
+          if [ "$SIZE" -ge 6656 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 6656)"; exit 1; fi
       - name: Subpath-alias build gate (2.1 Halogen)
         # The adapter serves the DEFAULT-base dist bundle under the
         # /zlsw/ path. An asset URL frozen to the origin root 404s there

@@ -53,6 +53,7 @@
 
 /// <reference lib="webworker" />
 import { decodePath, encodeDest, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setScheme, unwrapDest, currentPrefix, currentScheme } from "./codec";
+import { NAV } from "./bootstrap/navguard";
 import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage } from "./errorpage";
@@ -928,7 +929,24 @@ self.addEventListener("fetch", (e: FetchEvent) => {
            reroute them against the origin of the serving page, recovered
            from the request referrer. No decodable referrer: passthrough. */
       let dest0: string | null;
-      if (isEnginePath(url.pathname)) {
+      if (url.pathname === NAV) {
+        /* Issue #28: the bootstrap nav guard rewrites absolute
+           cross-origin URLs (window.open, anchor/area/iframe/form/link
+           property and setAttribute assignments) to this marker route,
+           so the load or navigation reaches the engine instead of the
+           browser going direct (cross-origin navigations never reach
+           the fetch handler otherwise: SW interception is scope-bound).
+           The target travels percent-encoded in the path; only http(s)
+           targets are accepted, anything else is a bad route. */
+        let nav: string | null = null;
+        try {
+          nav = decodeURIComponent(url.pathname.slice(NAV.length)) || null;
+        } catch {
+          nav = null;
+        }
+        if (!nav || !/^https?:\/\//.test(nav)) return new Response("zeolite: bad route", { status: 404 });
+        dest0 = nav;
+      } else if (isEnginePath(url.pathname)) {
         const raw = decodePath(url.pathname);
         if (!raw) return new Response("zeolite: bad route", { status: 404 });
         dest0 = unwrapDest(raw);
