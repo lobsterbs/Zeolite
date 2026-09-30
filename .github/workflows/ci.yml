@@ -323,3 +323,50 @@ jobs:
           git add scoreboard.* capabilities.* || git add scoreboard.*
           git commit -m "scoreboard: nightly compat run ${GITHUB_RUN_ID}"
           git push -f origin HEAD:scoreboard
+
+  browser:
+    # Issue #35: a genuine Chromium browser job. The transport-level
+    # compat suite cannot see SW interception, the bootstrap shims,
+    # the rewriter's page seams or the #32/#34 privacy properties, so
+    # browser-only failures survived CI. Fixtures-only (no third-party
+    # sites) on purpose; the harness fails loudly with the engine
+    # server's output tail. Skipped on PRs to keep them fast; runs on
+    # every push to main, nightly and dispatch, like compat.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: wasm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: zeolite-wasm
+          path: app/src/
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Vendor libcurl transport (same pin as the app job)
+        run: |
+          npm install --prefix .vendor @mercuryworkshop/libcurl-transport@2.0.5
+          mkdir -p app/public/libcurl
+          cp -r .vendor/node_modules/@mercuryworkshop/libcurl-transport/dist/. app/public/libcurl/
+      - name: Build engine bundle
+        run: |
+          cd app
+          npm install
+          npm run build
+      - name: Build zeolite-server
+        run: cargo build -p zeolite-server --release
+      - name: Install Playwright Chromium
+        run: |
+          cd suite/e2e
+          npm install
+          npx playwright install --with-deps chromium
+      - name: Browser E2E suite (issue #35)
+        run: |
+          node suite/e2e/e2e.mjs 2>&1 | tee browser.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\[FAIL\]|HARNESS-ERROR" browser.out | head -20 | while IFS= read -r l; do echo "::error::E2E $l"; done
+            exit 1
+          fi

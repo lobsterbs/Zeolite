@@ -1,0 +1,9 @@
+{
+  "name": "zeolite-browser-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Real-Chromium E2E harness for the Zeolite browser runtime (issue #35). Run: npx playwright install chromium, then node e2e.mjs from the repo root.",
+  "dependencies": {
+    "playwright": "1.49.1"
+  }
+}
