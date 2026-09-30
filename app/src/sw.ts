@@ -76,7 +76,7 @@ import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
 import { senderVirtualOrigin, virtualOriginHeaders } from "./origin";
-import { capContexts, contextOf, establishContext, resolveRelative, type VirtualContext } from "./vctx";
+import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP, type VirtualContext } from "./vctx";
 import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
 import { fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
