@@ -1,26 +1,22 @@
-# Temporary read-out tooling on a scratch branch (never main): the
-# agent session's raw-fetch path truncates at 32 KiB, so this prints
-# the file named in env READ_PATH in base64 chunks through job logs
-# for byte-perfect reconstruction. The branch is deleted after use.
 name: fileread-tmp
 on:
   push:
     branches: [tmp-fileread]
 env:
-  READ_PATH: crates/rewriter/src/html/mod.rs
-  READ_SIZE: "5982"
+  READ_PATH: app/src/sw.ts
+  READ_SIZE: "8000"
 jobs:
   chunk:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        n: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        n: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@v4
       - name: print chunk
         run: |
-          split -b "$READ_SIZE" -d -a 1 "$READ_PATH" part
-          f="part${{ matrix.n }}"
+          split -b "$READ_SIZE" -d -a 2 "$READ_PATH" part
+          f=$(printf 'part%02d' ${{ matrix.n }})
           if [ ! -f "$f" ]; then echo "ZLEMPTY"; exit 0; fi
           echo "ZLCHUNK${{ matrix.n }}BEGIN"
           base64 -w 0 "$f"
