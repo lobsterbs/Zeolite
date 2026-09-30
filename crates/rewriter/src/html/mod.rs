@@ -334,6 +334,13 @@ impl Rewriter {
             let lower = attr_name.to_ascii_lowercase();
             match attr_value {
                 Some(v) => {
+                    // Attribute values reach the DOM entity-decoded; the
+                    // tokenizer hands over raw source text. Decode before
+                    // any resolve or encode pass (issue #24: a stylesheet
+                    // href's "&amp;" reached the upstream request line
+                    // verbatim and load.php saw "amp;modules" params);
+                    // format_attr re-escapes on emit.
+                    let v = decode_entities(&v);
                     if url_attrs::is_url_attr(&name, &lower) && first_url.is_none() {
                         // Remember the first URL for the block decision.
                         first_url = Some(resolve(&v, &self.base));
@@ -505,10 +512,95 @@ fn next_attr(s: &str) -> Option<Attr> {
     })
 }
 
+/// Entities the HTML serializer emits in attribute values, plus the
+/// two apostrophe spellings. Anything else is left for the browser.
+const NAMED_ENTITIES: &[(&str, char)] = &[
+    ("&amp;", '&'),
+    ("&lt;", '<'),
+    ("&gt;", '>'),
+    ("&quot;", '"'),
+    ("&#39;", '\''),
+    ("&apos;", '\''),
+];
+
+/// Decode one numeric character reference at the start of s
+/// ("&#38;" / "&#x26;"): the character and the bytes it consumed.
+fn decode_numeric(s: &str) -> Option<(char, usize)> {
+    let b = s.as_bytes();
+    if b.len() < 4 || b[0] != b'&' || b[1] != b'#' {
+        return None;
+    }
+    let (radix, start) = if b[2] == b'x' || b[2] == b'X' {
+        (16, 3)
+    } else {
+        (10, 2)
+    };
+    let hex = radix == 16;
+    let mut end = start;
+    while end < b.len() && (b[end].is_ascii_digit() || (hex && b[end].is_ascii_hexdigit())) {
+        end += 1;
+    }
+    if end == start || end >= b.len() || b[end] != b';' {
+        return None;
+    }
+    let cp = u32::from_str_radix(&s[start..end], radix).ok()?;
+    Some((char::from_u32(cp)?, end + 1))
+}
+
+/// Decode the entities an attribute value may carry so resolve and
+/// encode see the text the browser's HTML parser hands the DOM;
+/// format_attr re-escapes the decoded value on emit, so the round
+/// trip is stable. Issue #24: a stylesheet href's "&amp;" separators
+/// reached the upstream request line verbatim, load.php saw params
+/// named "amp;modules" and answered its error page instead of CSS.
+fn decode_entities(s: &str) -> String {
+    let Some(first) = s.find('&') else {
+        return s.to_string();
+    };
+    let mut out = String::with_capacity(s.len());
+    out.push_str(&s[..first]);
+    let mut rest = &s[first..];
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let mut consumed: Option<usize> = None;
+        for (ent, ch) in NAMED_ENTITIES {
+            if let Some(after) = tail.strip_prefix(ent) {
+                out.push(*ch);
+                consumed = Some(ent.len());
+                break;
+            }
+        }
+        if consumed.is_none() {
+            if let Some((ch, len)) = decode_numeric(tail) {
+                out.push(ch);
+                consumed = Some(len);
+            }
+        }
+        match consumed {
+            Some(len) => rest = &tail[len..],
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Re-emit an attribute, preserving the original quoting style so the
 /// output stays byte-close to the input.
 fn format_attr(name: &str, value: &str, quote: Option<char>) -> String {
     let name = name.trim_end();
+    // Entity decoding can put whitespace or quotes into a value the
+    // source emitted unquoted; quote those or the attribute would
+    // swallow the rest of the tag.
+    let quote = match quote {
+        Some(q) => Some(q),
+        None if value.chars().any(|c| c.is_ascii_whitespace() || c == '"') => Some('"'),
+        None => None,
+    };
     match quote {
         Some('"') => format!(
             "{}=\"{}\"",
@@ -810,5 +902,79 @@ mod tests {
         // Zero surviving layers: neither bound form appears at all.
         assert!(!out.contains(&bound), "no target-host-bound route: {}", out);
         assert!(!out.contains(&nested), "no nested route: {}", out);
+    }
+
+    #[test]
+    fn entity_decoding_basics() {
+        assert_eq!(decode_entities("plain"), "plain");
+        assert_eq!(decode_entities("a&amp;b&#38;c&#x26;d"), "a&b&c&d");
+        assert_eq!(decode_entities("&lt;tag&gt;"), "<tag>");
+        // Unknown or malformed references pass through untouched.
+        assert_eq!(decode_entities("&nbsp;&unknown;&#"), "&nbsp;&unknown;&#");
+    }
+
+    #[test]
+    fn entity_encoded_urls_decode_before_encoding() {
+        // Issue #24: <link href> values carry "&amp;" separators in the
+        // source; the DOM sees real "&". Encoding the raw source sent
+        // "amp;modules=..." params upstream and load.php answered its
+        // error page instead of CSS.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://en.wikipedia.org/wiki/Zeolite");
+        let out = format!(
+            "{}{}",
+            r.process(
+                "<link rel=\"stylesheet\" href=\"/w/load.php?lang=en&amp;modules=site.styles&amp;only=styles\">"
+            ),
+            r.finish()
+        );
+        let decoded = out
+            .split("href=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .and_then(|route| route.rsplit('/').next())
+            .and_then(crate::encode::b64u_decode)
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default();
+        assert_eq!(
+            decoded,
+            "https://en.wikipedia.org/w/load.php?lang=en&modules=site.styles&only=styles"
+        );
+    }
+
+    #[test]
+    fn numeric_entities_decode_in_urls() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/dir/page");
+        let out = format!(
+            "{}{}",
+            r.process("<a href=\"/x?q=1&#38;p=2\">l</a>"),
+            r.finish()
+        );
+        let decoded = out
+            .split("href=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .and_then(|route| route.rsplit('/').next())
+            .and_then(crate::encode::b64u_decode)
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default();
+        assert_eq!(decoded, "https://example.com/x?q=1&p=2");
+    }
+
+    #[test]
+    fn pass_through_values_not_double_escaped() {
+        // The DOM value of title="Rock &amp; Roll" is "Rock & Roll"; the
+        // emit must re-escape it exactly once, not stack a second
+        // escape on the raw source text.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}",
+            r.process("<span title=\"Rock &amp; Roll\">t</span>"),
+            r.finish()
+        );
+        assert!(out.contains("title=\"Rock &amp; Roll\""), "got: {}", out);
+        assert!(!out.contains("&amp;amp;"), "got: {}", out);
     }
 }
