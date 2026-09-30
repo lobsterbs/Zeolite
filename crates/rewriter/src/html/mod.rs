@@ -565,7 +565,7 @@ fn decode_entities(s: &str) -> String {
         let tail = &rest[i..];
         let mut consumed: Option<usize> = None;
         for (ent, ch) in NAMED_ENTITIES {
-            if let Some(after) = tail.strip_prefix(ent) {
+            if tail.strip_prefix(ent).is_some() {
                 out.push(*ch);
                 consumed = Some(ent.len());
                 break;
