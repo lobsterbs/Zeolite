@@ -1,0 +1,32 @@
+# Temporary read-out tooling on a scratch branch (never main): the
+# agent session's raw-fetch path truncates at 32 KiB, so this prints a
+# named file in base64 chunks through job logs for byte-perfect
+# reconstruction. The branch is deleted when the session is done.
+name: fileread-tmp
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: repo-relative file to print
+        required: true
+      size:
+        description: chunk size in bytes
+        required: false
+        default: "5982"
+jobs:
+  chunk:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - uses: actions/checkout@v4
+      - name: print chunk
+        run: |
+          split -b "${{ inputs.size }}" -d -a 1 "${{ inputs.path }}" part
+          f="part${{ matrix.n }}"
+          if [ ! -f "$f" ]; then echo "ZLEMPTY"; exit 0; fi
+          echo "ZLCHUNK${{ matrix.n }}BEGIN"
+          base64 -w 0 "$f"
+          echo
+          echo "ZLCHUNK${{ matrix.n }}END"
