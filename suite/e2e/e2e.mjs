@@ -332,6 +332,31 @@ async function main() {
     return out;
   });
 
+  await check("routing: a query-bearing fetch keeps its query exactly once (#38)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const out = await evalIn(frame, "query fetch", `async () => {
+      const probe = async (url) => {
+        try {
+          const r = await fetch(url);
+          return (await r.json()).url;
+        } catch (e) { return "CORS-ERROR " + e; }
+      };
+      /* Cross-origin takes the #34 foreign path (the whole URL is the
+         destination); same-origin takes an engine route (query outside
+         the encoded destination). The #38 bug appended url.search to a
+         foreign URL that already carried its query, so the fixture saw
+         the query twice joined by a literal "?". */
+      return JSON.stringify({
+        cross: await probe("${ORIGIN_B}/api/echo?x=1&y=2"),
+        same: await probe("/api/echo?x=1"),
+      });
+    }`);
+    const o = JSON.parse(out);
+    eq(o.cross, "/api/echo?x=1&y=2", "cross-origin query forwarded wrong (doubled or dropped): " + out);
+    eq(o.same, "/api/echo?x=1", "same-origin query forwarded wrong (doubled or dropped): " + out);
+    return out;
+  });
+
   await check("api: cross-origin XHR to the no-CORS fixture is engine-served", async () => {
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "xhr", `() => new Promise((resolve) => {

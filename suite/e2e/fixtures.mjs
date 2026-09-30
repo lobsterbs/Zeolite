@@ -117,6 +117,10 @@ export function startFixture(port) {
       } else if (path === "/api/data") {
         /* No CORS headers: the #34 canary. Browser-direct = unreadable. */
         send(res, "application/json", `{"zl":"api"}`);
+      } else if (path === "/api/echo") {
+        /* #38: echoes the request line the engine actually forwarded - a
+           doubled or dropped query is visible in req.url. */
+        send(res, "application/json", JSON.stringify({ zl: "echo", url: req.url }));
       } else if (path === "/data.json") {
         send(res, "application/json", `{"zl":"root"}`);
       } else if (path === "/sse") {

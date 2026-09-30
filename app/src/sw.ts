@@ -693,7 +693,14 @@ async function pageCacheStore(req: Request, resp: Response): Promise<void> {
     transport adapter ignores the fetch redirect option (3xx responses
     surface to the caller), so no redirect hint is passed. */
 async function wispFetchCacheBypass(req: Request): Promise<Response> {
-  const dest = decodePath(new URL(req.url).pathname) + new URL(req.url).search;
+  /* Issue #38: engine routes keep the query outside the encoded
+     destination; a foreign (#34) cached entry is keyed by the full
+     target URL, and its pathname is not a decodable route. Compose
+     the destination per shape - the old form glued a null decode of
+     a foreign path onto its query. */
+  const u = new URL(req.url);
+  const route = decodePath(u.pathname);
+  const dest = route ? route + u.search : u.href;
   /* 1.4 Boride: cache refreshes carry the jar's Cookie header too. */
   const headers = new Headers();
   const jarCookie = cookieHeaderFor(dest);
@@ -971,6 +978,15 @@ self.addEventListener("fetch", (e: FetchEvent) => {
            referrer decode survives as the compat fallback only. Neither
            resolves: passthrough. */
       let dest0: string | null;
+      /* Issue #38: only an engine route encodes its destination
+         WITHOUT the query (the query travels as the request's own
+         search string). Every other shape - a foreign request's full
+         URL, the nav marker target, a same-origin path resolved
+         against the client's virtual context - is already a complete
+         URL that carries its query. Appending url.search onto a
+         complete URL doubled the query (the Anubis pass-challenge
+         fetch carried it twice, joined by a literal "?"). */
+      let routeCarriesQuery = false;
       if (foreign) {
         /* Issue #34. The client lookup is the only async part; the
            policy itself is pure and unit-tested. */
@@ -1068,6 +1084,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         const raw = decodePath(url.pathname);
         if (!raw) return new Response("zeolite: bad route", { status: 404 });
         dest0 = unwrapDest(raw);
+        routeCarriesQuery = true;
       } else {
         if (isEngineAsset(url.pathname)) return fetch(e.request); // engine asset: passthrough
         /* Issue #33: the requesting client's own virtual context is the
@@ -1092,8 +1109,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
       const bareDest = dest0.startsWith("http")
         ? dest0.split("#", 1)[0] || dest0
         : dest0;
-      // Query string travels outside the encoded destination.
-      let target = url.search ? bareDest + url.search : bareDest;
+      // Query string travels outside the encoded destination - engine
+      // routes only (see routeCarriesQuery above).
+      let target = routeCarriesQuery && url.search ? bareDest + url.search : bareDest;
 
       if (siteDisabled(target)) {
         return new Response("zeolite: site disabled for this engine", {
