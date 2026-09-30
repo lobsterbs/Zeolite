@@ -130,8 +130,10 @@ pub fn rewrite_srcset(srcset: &str, enc: &dyn Fn(&str) -> String) -> String {
                 collect_descs = !u.is_empty();
             }
         }
-        // Descriptors: whitespace-separated tokens until one ends
-        // with a comma or the input ends.
+        // Descriptors: whitespace-separated tokens. A comma anywhere
+        // in a descriptor token finalizes the candidate (consumed by
+        // the spec's descriptor parser); the non-whitespace run right
+        // after it starts the next candidate's URL.
         if collect_descs {
             loop {
                 let u = rest.trim_start();
@@ -141,9 +143,15 @@ pub fn rewrite_srcset(srcset: &str, enc: &dyn Fn(&str) -> String) -> String {
                 let te = u.find(|c: char| c.is_ascii_whitespace()).unwrap_or(u.len());
                 let dtok = &u[..te];
                 rest = &u[te..];
-                match dtok.strip_suffix(',') {
-                    Some(d) => {
-                        descs.push(d);
+                match dtok.find(',') {
+                    Some(ci) => {
+                        if ci > 0 {
+                            descs.push(&dtok[..ci]);
+                        }
+                        // From right after the comma the next URL run
+                        // starts (up to the same whitespace that ended
+                        // this token, or the end of input).
+                        rest = &u[ci + 1..];
                         break;
                     }
                     None => descs.push(dtok),

@@ -432,7 +432,7 @@ impl Rewriter {
             let mut scan = rest;
             let mut found = false;
             while let Some(a) = next_attr(scan) {
-                if a.name.to_ascii_lowercase() == "http-equiv"
+                if a.name.eq_ignore_ascii_case("http-equiv")
                     && a.value
                         .as_deref()
                         .is_some_and(|val| val.trim().eq_ignore_ascii_case("refresh"))
@@ -1463,7 +1463,7 @@ mod tests {
             let needle = format!("{}={}", name, q);
             if let Some(seg) = out.split(&needle).nth(1) {
                 let raw = seg.split(q).next().unwrap_or("");
-                let route = raw.trim_end_matches(|c| c == '\'' || c == '"');
+                let route = raw.trim_end_matches(['\'', '"']);
                 return route
                     .rsplit('/')
                     .next()
