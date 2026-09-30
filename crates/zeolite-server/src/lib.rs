@@ -1399,10 +1399,8 @@ mod tests {
             let mut input_rx = input_rx;
             let mut buf = vec![0u8; 4096];
             loop {
-                if w.get() == 0 {
-                    if !drain_until_credited(&w, &mut input_rx, &mut wr, &la).await {
-                        break;
-                    }
+                if w.get() == 0 && !drain_until_credited(&w, &mut input_rx, &mut wr, &la).await {
+                    break;
                 }
                 tokio::select! {
                     r = rd.read(&mut buf) => match r {
