@@ -26,16 +26,23 @@ baseURI, which keeps storage scoped and every shim native.
   inside the site scope; absent when the host factory lacks it, never
   faked). `databases()` is deliberately absent on the shim (an honest
   unimplemented API beats wrapping it and risking a leak of
-  engine-own database names). The engine's own databases (the
-  extension runtime's `idb` store, the cookie jar's `cookies` store,
-  the download registry's `downloads` store) live in the service
-  worker context and are unreachable from pages.
+  engine-own database names). The shim is installed with
+  `Object.defineProperty`, not assignment: the Window property is
+  accessor-only and the bootstrap is a classic sloppy-mode bundle, so
+  the old plain assignment failed silently and left the raw unscoped
+  factory in place (caught by the browser E2E suite, #35). The
+  engine's own databases (the extension runtime's `idb` store, the
+  cookie jar's `cookies` store, the download registry's `downloads`
+  store) live in the service worker context and are unreachable from
+  pages.
 
 - **Cache API**: `caches.open/delete/has` are prefixed the same way;
   `keys()` lists only the site's own caches, un-prefixed; `match()`
   searches only the site's own caches (so a page can never match
-  another site's cached responses). The engine's own page cache is
-  opened by the service worker directly and is invisible to pages.
+  another site's cached responses). Installed via `defineProperty`
+  for the same reason as IndexedDB above (#35). The engine's own page
+  cache is opened by the service worker directly and is invisible to
+  pages.
 
 - **document.cookie**: virtualized against the 1.4 cookie jars. The
   bootstrap patches `document.cookie` on the document instance:
@@ -55,6 +62,11 @@ therefore keeps an optimistic local copy:
 - a read triggers an asynchronous jar refresh that replaces the copy;
 - a write applies to the copy immediately (so read-after-write works),
   then forwards the write; the jar reply corrects the copy.
+- a Set-Cookie admitted on a proxied response (fetch/XHR reply or a
+  redirect hop) is pushed, not polled: the service worker posts the
+  fresh jar view to the requesting client's `zl:docCookie` port right
+  after admission, so a fetch-received cookie is visible to the page's
+  next read without waiting for that read's own refresh (#35).
 - deletion (`max-age=0` or a past `Expires`) is not detected locally:
   the copy keeps the stale pair until the next jar reply corrects it
   (milliseconds).

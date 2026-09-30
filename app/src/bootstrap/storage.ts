@@ -44,6 +44,13 @@ function siteKeys(store: Storage): string[] {
  proxied sites never share a database or a cache, and neither ever
  touches an engine-own one (the engine's IndexedDB and Cache usage
  lives in the service worker, not the page). */
+/* #35 (browser E2E): the shims install via Object.defineProperty,
+ not assignment. On the Window prototype indexedDB/caches are
+ accessor-only (no setter), and the bootstrap is a classic sloppy-mode
+ bundle, so the old plain assignment failed SILENTLY and the raw
+ unscoped globals stayed in place - the E2E virtual-context isolation
+ check caught it. defineProperty either installs or throws into the
+ honest fallback; it cannot fail quietly. */
 
 {
  const IDB = w.indexedDB as IDBFactory | undefined;
@@ -64,7 +71,7 @@ function siteKeys(store: Storage): string[] {
  shim.cmp = (a: string, b: string) => CMP(pre(a), pre(b));
  }
  try {
- (w as Record<string, unknown>).indexedDB = shim;
+ Object.defineProperty(w, "indexedDB", { value: shim, configurable: true });
  } catch { /* read-only: stays unscoped */ }
  }
 }
@@ -92,7 +99,7 @@ function siteKeys(store: Storage): string[] {
  },
  };
  try {
- (w as Record<string, unknown>).caches = shim;
+ Object.defineProperty(w, "caches", { value: shim, configurable: true });
  } catch { /* read-only: stays unscoped */ }
  }
 }

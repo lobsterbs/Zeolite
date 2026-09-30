@@ -15,9 +15,11 @@
       so any fixture hit whose Referer mentions the engine origin or a
       /j/ route was sent browser-direct.
    3. CDP: the network capture must show no fixture-origin request that
-      failed or was served with fromServiceWorker !== true. The gate
-      fails only on positive evidence of a non-SW request; SW-served
-      entries (fromServiceWorker) and unattributable entries pass.
+      was served with fromServiceWorker !== true, or that failed with
+      no response at all. A request whose SW-served stream the page
+      aborted afterwards (EventSource close) reports loadingFailed WITH
+      its 200: the response did come from the engine, so it is not an
+      escape. The gate fails only on positive evidence.
 
    Honest gaps (documented, not faked): WebSocket targets are skipped
       (the engine upgrades ws to wss by design; the local fixture is
@@ -82,8 +84,10 @@ async function waitFor(label, timeoutMs, fn) {
 }
 
 /* CDP recorder: fails only on positive evidence of a browser-direct
-   fixture request (loadingFailed, or a response that was NOT served
-   by the service worker). */
+   fixture request (a response NOT served by the service worker, or a
+   failure that never received any response - status 0). An SW-served
+   stream the page later aborts (es.close()) reports loadingFailed
+   alongside its 200: served by the engine, not an escape (#34). */
 function attachRecorder(pg) {
   const rec = { requests: [] };
   (async () => {
@@ -498,20 +502,26 @@ async function main() {
   await check("rewriter: HTML img + srcset + CSS url() (file + inline) resolve inside the engine", async () => {
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "assets", `async () => {
-      await new Promise((r) => {
-        const i = document.getElementById("img1");
+      const one = (id) => new Promise((r) => {
+        const i = document.getElementById(id);
         if (i.complete && i.naturalWidth) r();
         else { i.onload = () => r(); i.onerror = () => r(); }
       });
+      /* Both images, not just img1: the first harness run read
+         ss.naturalWidth right after img1's load, before the srcset
+         candidate had necessarily decoded - a race that reported a
+         rewriter failure the rewriter did not have. */
+      await Promise.all([one("img1"), one("ss")]);
       const img1 = document.getElementById("img1").naturalWidth;
       const ss = document.getElementById("ss").naturalWidth;
+      const ssSrc = document.getElementById("ss").currentSrc;
       const bg = getComputedStyle(document.getElementById("cssbg")).backgroundImage;
       const inl = getComputedStyle(document.getElementById("inlbg")).backgroundImage;
-      return JSON.stringify({ img1, ss, bg, inl });
+      return JSON.stringify({ img1, ss, ssSrc, bg, inl });
     }`);
     const o = JSON.parse(out);
     assert(o.img1 > 0, "src img did not decode (naturalWidth 0)");
-    assert(o.ss > 0, "srcset img did not decode (naturalWidth 0)");
+    assert(o.ss > 0, "srcset img did not decode (naturalWidth 0; currentSrc " + o.ssSrc + ")");
     for (const k of ["bg", "inl"]) {
       assert(!String(o[k]).includes("7101"), k + " leaks the fixture origin: " + o[k]);
     }
@@ -598,8 +608,8 @@ async function main() {
         if (r.url.includes(":7101") || r.url.includes(":7102")) fx.push(r);
       }
     }
-    const bad = fx.filter((r) => r.failed || r.fromSW === false);
-    assert(bad.length === 0, "browser-direct fixture requests (failed or not SW-served): " + JSON.stringify(bad.slice(0, 6)));
+    const bad = fx.filter((r) => r.fromSW === false || (r.failed && r.status === 0));
+    assert(bad.length === 0, "browser-direct fixture requests (not SW-served, or failed with no response): " + JSON.stringify(bad.slice(0, 6)));
     return fx.length + " fixture-URL entries observed, none browser-direct";
   });
 

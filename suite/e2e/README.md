@@ -35,9 +35,11 @@ fixture pages through `/?url=<target>` and asserts:
    (forwardedHeaders), so a fixture hit whose Referer mentions the
    engine origin or a `/j/` route was sent browser-direct.
 3. CDP: the network capture must show no fixture-origin request that
-   failed or was served with `fromServiceWorker !== true` (the gate
-   fails only on positive evidence, so SW-served entries reported
-   without the flag do not false-fail).
+   was served with `fromServiceWorker !== true`, or that failed with
+   no response at all (status 0). An SW-served stream the page later
+   aborts (EventSource close) reports `loadingFailed` together with its
+   200 - the response did come from the engine, so it is not an
+   escape (the gate fails only on positive evidence).
 
 ## Honest gaps (not faked)
 

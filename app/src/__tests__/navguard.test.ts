@@ -166,6 +166,30 @@ describe("applyNavGuard", () => {
     expect("RTCPeerConnection" in e.w).toBe(false);
   });
 
+  it("overrides document.referrer to the empty string (#32/#35)", () => {
+    /* The proxied frame's referrer is the embedder URL with the
+       plaintext ?url= destination; the guard empties the DOM surface. */
+    const doc: Record<string, any> = {};
+    Object.defineProperty(doc, "referrer", {
+      configurable: true,
+      get: () => "https://embedder.host/?url=" + encodeURIComponent(REAL),
+    });
+    const w: Record<string, any> = { document: doc, open() { return 1; } };
+    applyNavGuard(w, LOC, ENGINE);
+    expect(doc.referrer).toBe("");
+  });
+
+  it("keeps a sealed document's referrer native (safe fallback)", () => {
+    const doc: Record<string, any> = {};
+    Object.defineProperty(doc, "referrer", {
+      configurable: false,
+      get: () => "https://embedder.host/?url=x",
+    });
+    const w: Record<string, any> = { document: doc, open() { return 1; } };
+    applyNavGuard(w, LOC, ENGINE);
+    expect(doc.referrer).toBe("https://embedder.host/?url=x");
+  });
+
   it("survives a non-configurable prototype: other hooks still install", () => {
     const frozen = makeClass("href");
     const d = Object.getOwnPropertyDescriptor(frozen.proto, "href")!;

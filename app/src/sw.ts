@@ -262,6 +262,10 @@ function isHtml(resp: Response): boolean {
 function isCss(resp: Response): boolean {
   return (resp.headers.get("content-type") ?? "").toLowerCase().includes("text/css");
 }
+function isJs(resp: Response): boolean {
+  const ct = (resp.headers.get("content-type") ?? "").toLowerCase();
+  return ct.includes("javascript") || ct.includes("ecmascript");
+}
 
 /** HTML bodies: pipe response chunks through the wasm rewriter. The
     bootstrap needs a per-site identity on window.__ZL (an opaque
@@ -1393,8 +1397,12 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             : e.request.body;
           let resp = await wispFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
           for (let hops = 0; resp.status >= 300 && resp.status < 400 && hops < MAX_REDIRECT_HOPS; hops++) {
-            /* Capture this hop's Set-Cookie against the URL it came from. */
-            applySetCookie(hopUrl, jarHeaders(resp));
+            /* Capture this hop's Set-Cookie against the URL it came from.
+               #35: any admission also pushes the jar view to the
+               requesting client's docCookie port (see the main capture
+               below). */
+            const hopAdmitted = applySetCookie(hopUrl, jarHeaders(resp));
+            if (hopAdmitted.some((r) => r.stored || r.deleted)) void pushDocCookieView(e.clientId);
             const loc = resp.headers.get("location");
             if (!loc) break; /* 3xx without Location: surface as-is */
             let next: string;
@@ -1433,7 +1441,15 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              hostile-header surgery strips it from the page view. A 3xx
              that surfaced (hop cap, unresolvable or unreplayable hop)
              still lands here, captured against its own hop URL. */
-          applySetCookie(finalDest ?? hopUrl, jarHeaders(resp));
+          const admitted = applySetCookie(finalDest ?? hopUrl, jarHeaders(resp));
+          /* #35 (browser E2E): the page's document.cookie getter is
+             synchronous, so the bootstrap keeps an optimistic copy; a
+             Set-Cookie admitted on this fetch/XHR response was invisible
+             to the page until its NEXT read. Push the fresh jar view to
+             the requesting client's docCookie port right after
+             admission, so the copy corrects itself. Unknown client
+             (SW-initiated fetch, navigation) is a no-op inside. */
+          if (admitted.some((r) => r.stored || r.deleted)) void pushDocCookieView(e.clientId);
           const headers = stripHostile(resp.headers);
           /* Issue #2: engine routes serve their own origin. The preserved
              target ACAO (e.g. "https://excalidraw.com") fails the CORS
@@ -1601,6 +1617,24 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             });
             WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
             return new Response(body, { status: resp.status, headers: outHeaders });
+          }
+          /* #35 (browser E2E): page <script type="module"> bodies. An
+             external module script folds its import specifiers against
+             the document URL before any script runs, so "./mapi.js" in
+             a proxied page resolved against the opaque engine route,
+             missed the route table and 404'd. The same serve-time text
+             pass the module workers get (2.3 Selenide) rewrites the
+             specifiers here; dynamic import() in a classic script
+             resolves the same way, so every script-destination JS body
+             takes the pass (a no-op for bodies without specifiers).
+             Inline module scripts are a rewriter gap (#36): the parser
+             path, not this seam. */
+          if (e.request.destination === "script" && isJs(resp) && resp.body) {
+            DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier pass" });
+            traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
+            const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
+            WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            return new Response(src, { status: resp.status, headers: outHeaders });
           }
           WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
           /* 1.7 Sulfide: attachment responses join the download
@@ -1824,6 +1858,28 @@ function senderOrigin(e: ExtendableMessageEvent): string | null {
   return null;
 }
 
+/* #35 (browser E2E): docCookie port registry. The page's synchronous
+   document.cookie getter serves an optimistic copy refreshed over the
+   zl:docCookie port; a Set-Cookie admitted on a proxied fetch/XHR
+   response used to stay invisible until the page's next read. The
+   fetch path pushes the fresh jar view over the same port right after
+   admission. Keyed by client id; capped so a page that keeps
+   re-opening docCookie channels cannot grow the map without bound
+   (the oldest entry is dropped, its port simply stops receiving
+   pushes - reads still refresh on demand). */
+const docCookiePorts = new Map<string, { port: MessagePort; page: string }>();
+const DOC_COOKIE_PORTS_CAP = 128;
+function pushDocCookieView(clientId: string): void {
+  const entry = clientId ? docCookiePorts.get(clientId) : undefined;
+  if (!entry) return;
+  try {
+    entry.port.postMessage({ ok: true, cookie: documentCookieRead(entry.page) });
+  } catch {
+    /* port closed: the page is gone, stop tracking it */
+    docCookiePorts.delete(clientId);
+  }
+}
+
 self.addEventListener("message", async (e: ExtendableMessageEvent) => {
   /* Issue #17: the restored route shape settles asynchronously; a
      cold-start ping must not report the default shape mid-restore. */
@@ -2005,6 +2061,19 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       };
       handle(msg.set);
       port.onmessage = (ev) => handle((ev.data as { set?: unknown }).set);
+      /* #35: keep the port so the fetch path can push jar updates
+         (Set-Cookie on a proxied response) into this client's
+         optimistic document.cookie copy. Same origin-trust rule as the
+         reads above: the jar was fixed by senderOrigin, the page can
+         claim nothing. */
+      const cid = (e.source as { id?: string } | null)?.id;
+      if (cid) {
+        if (docCookiePorts.size >= DOC_COOKIE_PORTS_CAP && !docCookiePorts.has(cid)) {
+          const oldest = docCookiePorts.keys().next();
+          if (!oldest.done && oldest.value !== undefined) docCookiePorts.delete(oldest.value);
+        }
+        docCookiePorts.set(cid, { port, page: origin });
+      }
       break;
     }
     case "zl:fingerprint":

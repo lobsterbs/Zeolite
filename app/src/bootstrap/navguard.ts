@@ -157,6 +157,15 @@ export function applyNavGuard(
       });
     }
   }
+  /* #32/#35: document.referrer of the proxied frame is the embedder
+     URL (the browser stamps it from the embed navigation), so it
+     carries the plaintext ?url= destination onto a page surface - the
+     browser E2E caught it. Override the DOM surface to the empty
+     string; the wire Referer for subresources is re-stamped by the
+     engine from the real destination, so referrer-based fallbacks
+     upstream keep working. A sealed document stays native (safe). */
+  const D = w.document as Document | undefined;
+  if (D) safe(() => Object.defineProperty(D, "referrer", { get: () => "", configurable: true }));
   /* WebRTC connects directly; presence would be a fake feature. */
   delete w.RTCPeerConnection;
 }
