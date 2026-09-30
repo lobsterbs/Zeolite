@@ -12,6 +12,8 @@
 
    Phase 2 control plane (postMessage from the engine adapter):
      { type: "zl:config", prefix, scheme }   rotate the URL shape
+     { type: "zl:rules", ua, rules }         host-app per-site overrides
+                                             (host, adblock, ua)
      { type: "zl:siteRoute", site, enabled } per-site interception toggle
      { type: "zl:teardown" }                 unregister + drop caches
    Phase 4 control plane:
@@ -50,7 +52,7 @@ import { decideTransport, refineWithContent, transitRecord, transitStats } from 
 import { ZL_WISP_URL } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
-import { applyRules, loadRules, setRulesEnabled, type ResourceType } from "./rules";
+import { applyRules, loadRules, setRulesEnabled, setSiteOverrides, siteUaFor, type ResourceType } from "./rules";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
 import { DIAG, redactSecrets } from "./diag";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
@@ -1150,6 +1152,14 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           const sendHeaders = replaced ?? fwd;
           await applyOnRequest(plugins, target, sendHeaders);
           for (const [k, v] of Object.entries(extraHeaders)) sendHeaders.set(k, v);
+          /* Per-site rules (zl:rules): the UA override lands on the
+             outgoing header set the SW itself builds for the wisp
+             transport (user-agent is a forbidden header for a browser
+             fetch, but this request is engine-built). An active
+             fingerprint profile still wins: the wire surface must match
+             the spoofed document surface (1.8 Telluride). */
+          const ruleUa = siteUaFor(target);
+          if (ruleUa && !fpProfile) sendHeaders.set("user-agent", ruleUa);
           /* 2.2 Arsenide: initiator context for the opt-in SameSite
              policy. The referrer is an engine route; referrerDest decodes
              it. Navigations are top-level for lax purposes. */
@@ -1480,6 +1490,7 @@ function forwardedHeaders(req: Request): Headers {
 interface ControlMessage {
   type:
     | "zl:config"
+    | "zl:rules"
     | "zl:siteRoute"
     | "zl:teardown"
     | "zl:ping"
@@ -1510,6 +1521,11 @@ interface ControlMessage {
   msg?: unknown;
   prefix?: string;
   scheme?: "b64u" | "mirror";
+  /** zl:rules: default outgoing user-agent for hosts without an
+      override (null/absent keeps the browser's own UA). */
+  ua?: string | null;
+  /** zl:rules: host-app per-site overrides, longest host suffix wins. */
+  rules?: Array<{ host: string; adblock?: boolean; ua?: string | null }>;
   site?: string;
   enabled?: boolean;
   /** UI -> SW authoritative tab sync payload. */
@@ -1582,6 +1598,13 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
          no-ops while disabled. Resets to enabled on SW restart. */
       setRulesEnabled(msg.enabled !== false);
       reply({ ok: true });
+      break;
+    case "zl:rules":
+      /* Host-app per-site rules (the rules chip / per-site settings):
+         a host-scoped adblock override plus UA strings, evaluated per
+         request against the target host (rules.ts). Ephemeral like
+         zl:adblock: resets on SW restart, the host re-sends on boot. */
+      reply({ ok: true, count: setSiteOverrides(msg.rules, msg.ua) });
       break;
     case "zl:tracing":
       /* 1.2 Halide: opt-in rewrite tracing ring. Off by default;

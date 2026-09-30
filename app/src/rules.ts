@@ -15,8 +15,9 @@
    Host matching follows the siteconfig grammar: exact hostname or
    any parent domain. allow beats block (captcha hosts must never be
    stripped). The host app toggles the compiled data via the
-   zl:adblock control message; disabled rules are a no-op, the data
-   stays loaded. See docs/interception.md. */
+   zl:adblock control message and pushes per-site overrides (host,
+   adblock, user-agent) via zl:rules; disabled rules are a no-op, the
+   data stays loaded. See docs/interception.md. */
 
 export type ResourceType =
   | "document"
@@ -145,7 +146,10 @@ export function applyRules(r: CompiledRules, url: string, rtype: ResourceType): 
       break;
     }
   }
-  if (dec.action !== "allow") {
+  /* A per-site override with adblock false (zl:rules) spares this
+     host's requests from the block list; the allow list and the
+     rewrite/modify passes are unchanged. */
+  if (dec.action !== "allow" && siteOverrideFor(url)?.adblock !== false) {
     for (const e of r.block) {
       if (matchesHost(e, host) && typeOk(e.types, rtype)) {
         dec.action = "block";
@@ -188,8 +192,71 @@ export function loadRules(): Promise<CompiledRules> {
   return cached;
 }
 
+/* ---- Runtime per-site overrides (host app, zl:rules) --------------
+   The host app pushes per-site decisions at runtime, beside the
+   static /rules.json data: a host-scoped adblock override and a
+   User-Agent string (plus a default UA for hosts without an
+   override). Same host grammar as the static lists: exact hostname
+   or any parent domain, longest suffix wins. Ephemeral like the
+   zl:adblock toggle - the SW resets on restart and the host re-sends
+   on boot. */
+
+export interface SiteOverrideEntry {
+  host: string;
+  /** false = the block list never matches this host (allow still wins). */
+  adblock?: boolean;
+  /** Outgoing user-agent for this host; omitted inherits the default. */
+  ua?: string | null;
+}
+
+let overrides: SiteOverrideEntry[] = [];
+let defaultUa: string | null = null;
+
+/** Replace the override set (and the default UA). Returns the stored
+    entry count; non-array input means "no overrides", never a crash. */
+export function setSiteOverrides(
+  list: SiteOverrideEntry[] | null | undefined,
+  ua?: unknown,
+): number {
+  const l = Array.isArray(list) ? list : [];
+  overrides = l
+    .filter((e) => typeof e?.host === "string" && e.host.length > 0)
+    .map((e) => ({
+      host: e.host.toLowerCase().replace(/^\*\./, ""),
+      adblock: typeof e.adblock === "boolean" ? e.adblock : undefined,
+      ua: typeof e.ua === "string" && e.ua.length > 0 ? e.ua : undefined,
+    }));
+  defaultUa = typeof ua === "string" && ua.length > 0 ? ua : null;
+  return overrides.length;
+}
+
+/** Longest host-suffix override for a target URL, or null. */
+export function siteOverrideFor(url: string): SiteOverrideEntry | null {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  let best: SiteOverrideEntry | null = null;
+  for (const o of overrides) {
+    if (host === o.host || host.endsWith("." + o.host)) {
+      if (!best || o.host.length > best.host.length) best = o;
+    }
+  }
+  return best;
+}
+
+/** Effective outgoing user-agent for a target URL, or null for the
+    browser default. A matching override wins over the default UA. */
+export function siteUaFor(url: string): string | null {
+  return siteOverrideFor(url)?.ua ?? defaultUa;
+}
+
 /** Tests only: drop the memoized rules and re-enable. */
 export function rulesResetForTests(): void {
   cached = null;
   rulesEnabled = true;
+  overrides = [];
+  defaultUa = null;
 }

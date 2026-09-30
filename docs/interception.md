@@ -29,6 +29,31 @@ The host toggles the compiled data with the zl:adblock control message
 no-op; the data stays loaded. The flag resets to enabled on SW
 restart, so the host re-sends it on boot.
 
+## Per-site overrides (zl:rules)
+
+The host app pushes per-site decisions at runtime with the zl:rules
+control message:
+
+```
+{ type: "zl:rules",
+  ua: "<default user-agent, optional>",
+  rules: [ { host: "example.com", adblock: false, ua: "Mozilla/5.0 ..." } ] }
+```
+
+- adblock false spares that host (and every subdomain, longest host
+  suffix wins) from the block list; the allow list still applies, and
+  rewrite/modify passes are unchanged. The global zl:adblock disable
+  still wins over any override.
+- ua is the outgoing User-Agent for that host; the message-level ua is
+  the default for hosts without an override. The SW applies it to the
+  request headers it builds itself for the wisp transport (User-Agent
+  is a forbidden header for a browser fetch, but these requests are
+  engine-built). An active fingerprint profile wins over both: the
+  wire surface must match the spoofed document surface (1.8).
+
+Like zl:adblock, the overrides are ephemeral: the SW resets them on
+restart and the host re-sends on boot and on change.
+
 ## Interception API (app/src/intercept.ts)
 
 ```ts
@@ -52,8 +77,8 @@ Kinds:
 
 Semantics: any blocking handler blocks; the first URL rewrite wins;
 header maps merge with later handlers winning per key. A throwing
-handler is skipped and never breaks a request. Handlers run inside
-the SW: no DOM, no page globals.
+handler is skipped and never breaks a request. Handlers run inside the
+SW: no DOM, no page globals.
 
 ## Streaming guarantees
 
@@ -71,7 +96,8 @@ the SW: no DOM, no page globals.
 
 - siteconfig.json stays the per-site compatibility seam (inject,
   rewrite-time blocked hosts, plugins). rules.json is the global
-  policy seam.
+  policy seam; the runtime per-site overrides (zl:rules) are the
+  host-app policy seam.
 - The WebExtension webRequest runtime stays the extension-compat
   surface; it runs before the rules engine in the request path.
 - Plugin hooks (docs/plugins.md) stay per-site header/decision points;
@@ -80,7 +106,8 @@ the SW: no DOM, no page globals.
 
 ## Status
 
-Implemented (1.1 Oxide). Honest limits: rules.json is global
-(per-site compatibility stays in siteconfig.json); the host's
-per-site adblock overrides apply only to the server-side engine;
-transformed responses are not page-cached.
+Implemented (1.1 Oxide; zl:rules per-site overrides added on the
+deep-integration line). Honest limits: rules.json stays global
+(per-site compatibility stays in siteconfig.json; per-site adblock and
+UA arrive at runtime via zl:rules); transformed responses are not
+page-cached.

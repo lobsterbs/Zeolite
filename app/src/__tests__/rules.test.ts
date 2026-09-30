@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { applyRules, compileRules, loadRules, rulesResetForTests, setRulesEnabled } from "../rules";
+import {
+  applyRules,
+  compileRules,
+  loadRules,
+  rulesResetForTests,
+  setRulesEnabled,
+  setSiteOverrides,
+  siteUaFor,
+} from "../rules";
 
 const RULES = compileRules({
   block: [
@@ -87,5 +95,55 @@ describe("loadRules", () => {
     const r = await loadRules();
     expect(applyRules(r, "https://sub.block.example/x", "fetch").action).toBe("block");
     globalThis.fetch = orig;
+  });
+});
+
+describe("site overrides (zl:rules)", () => {
+  it("adblock false spares the host and its subdomains only", () => {
+    setSiteOverrides([{ host: "doubleclick.net", adblock: false }]);
+    expect(applyRules(RULES, "https://ad.doubleclick.net/x.js", "script").action).toBe("pass");
+    expect(applyRules(RULES, "https://doubleclick.net/", "document").action).toBe("pass");
+    expect(applyRules(RULES, "https://ads.example/a.js", "script").action).toBe("block");
+  });
+
+  it("the allow list still wins over an adblock override", () => {
+    setSiteOverrides([{ host: "captcha.example", adblock: false }]);
+    expect(applyRules(RULES, "https://captcha.example/widget", "script").action).toBe("allow");
+  });
+
+  it("rewrite and modify still run for an overridden host", () => {
+    setSiteOverrides([{ host: "insecure.example", adblock: false }]);
+    const d = applyRules(RULES, "http://insecure.example/page", "document");
+    expect(d.action).toBe("pass");
+    expect(d.url).toBe("https://insecure.example/page");
+  });
+
+  it("the global disable still wins over per-site overrides", () => {
+    setSiteOverrides([{ host: "doubleclick.net", adblock: true }]);
+    setRulesEnabled(false);
+    expect(applyRules(RULES, "https://doubleclick.net/x", "script").action).toBe("pass");
+  });
+
+  it("longest host suffix wins", () => {
+    setSiteOverrides([{ host: "example", ua: "UA-A" }, { host: "sub.example", ua: "UA-B" }]);
+    expect(siteUaFor("https://x.sub.example/")).toBe("UA-B");
+    expect(siteUaFor("https://other.example/")).toBe("UA-A");
+  });
+
+  it("siteUaFor falls back to the default ua, then null", () => {
+    setSiteOverrides([{ host: "example", ua: "UA-A" }], "UA-DEF");
+    expect(siteUaFor("https://example/")).toBe("UA-A");
+    expect(siteUaFor("https://other.org/")).toBe("UA-DEF");
+    setSiteOverrides(null, "");
+    expect(siteUaFor("https://example/")).toBeNull();
+  });
+
+  it("tolerates garbage input", () => {
+    expect(setSiteOverrides("junk" as never, 42 as never)).toBe(0);
+    expect(
+      setSiteOverrides([{ host: "" }, { host: "ok.example", adblock: "yes" as never, ua: "" }]),
+    ).toBe(1);
+    expect(applyRules(RULES, "https://ok.example/", "document").action).toBe("pass");
+    expect(siteUaFor("https://sub.ok.example/")).toBeNull();
   });
 });

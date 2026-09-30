@@ -34,7 +34,7 @@ export interface ZeoliteEngine {
   /** Enable/disable interception for one site (per-site toggle),
    *  acknowledged by the SW and persisted across SW restarts. */
   setSiteRoute(site: string, enabled: boolean): Promise<void>;
-  /** Uninstall the SW, drop its caches, clear adapter state. Called
+  /** Uninstall the SW, drop all caches, clear adapter state. Called
    *  when the user switches engines so nothing leaks. */
   teardown(): Promise<void>;
 }
@@ -50,12 +50,15 @@ interface EngineConfig {
 ## Control plane (SW postMessage protocol)
 
 Messages carry a `MessageChannel` reply port; every operation is
-acknowledged, never fire-and-forget:
+acknowledged, never fire-and-forget. The full live list is documented
+in `app/src/sw.ts`; the adapter-relevant subset:
 
 | message | payload | effect |
 | --- | --- | --- |
-| `zl:ping` | - | liveness probe |
+| `zl:ping` | - | liveness probe (echoes version, degraded, route shape) |
 | `zl:config` | `prefix`, `scheme` | rotate the URL shape at runtime |
+| `zl:adblock` | `enabled` | global toggle for the /rules.json block lists |
+| `zl:rules` | `ua`, `rules` (`host`, `adblock`, `ua`) | host-app per-site adblock + User-Agent overrides (rules.ts) |
 | `zl:siteRoute` | `site`, `enabled` | per-site interception toggle (403 when disabled) |
 | `zl:teardown` | - | drop all SW caches, `unregister()` |
 
