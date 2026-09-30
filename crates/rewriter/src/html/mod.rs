@@ -433,8 +433,7 @@ impl Rewriter {
             let mut found = false;
             while let Some(a) = next_attr(scan) {
                 if a.name.to_ascii_lowercase() == "http-equiv"
-                    && a
-                        .value
+                    && a.value
                         .as_deref()
                         .is_some_and(|val| val.trim().eq_ignore_ascii_case("refresh"))
                 {
@@ -1633,7 +1632,10 @@ mod tests {
             r.finish()
         );
         assert!(
-            out.contains(&format!("href=\"{}\"", enc("https://cdn.example.com/assets/"))),
+            out.contains(&format!(
+                "href=\"{}\"",
+                enc("https://cdn.example.com/assets/")
+            )),
             "base href rewritten: {}",
             out
         );
@@ -1792,9 +1794,7 @@ mod tests {
         r.set_base(base);
         let out = format!(
             "{}{}",
-            r.process(
-                "<img srcset=\"data:image/png;base64,iVBORw0KGgoAAA 1x, b.png 2x\">"
-            ),
+            r.process("<img srcset=\"data:image/png;base64,iVBORw0KGgoAAA 1x, b.png 2x\">"),
             r.finish()
         );
         assert!(

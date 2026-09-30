@@ -16,7 +16,10 @@ pub fn is_url_attr(tag: &str, attr: &str) -> bool {
         // href="lib.js">` in SVG2 markup); an HTML `<script>` carrying
         // href is already invalid, so rewriting it cannot break a
         // working page.
-        "href" => matches!(tag, "a" | "area" | "link" | "base" | "use" | "image" | "script"),
+        "href" => matches!(
+            tag,
+            "a" | "area" | "link" | "base" | "use" | "image" | "script"
+        ),
         // SVG 1.1 spelling of the same references.
         "xlink:href" => matches!(tag, "use" | "image" | "a" | "script"),
         "src" => matches!(
@@ -109,9 +112,7 @@ pub fn rewrite_srcset(srcset: &str, enc: &dyn Fn(&str) -> String) -> String {
         }
         // The URL is a maximal run of non-whitespace characters,
         // commas included. Only a trailing comma ends it.
-        let tok_end = t
-            .find(|c: char| c.is_ascii_whitespace())
-            .unwrap_or(t.len());
+        let tok_end = t.find(|c: char| c.is_ascii_whitespace()).unwrap_or(t.len());
         let mut url = &t[..tok_end];
         rest = &t[tok_end..];
         // A trailing comma on the URL token separates it from its
@@ -137,9 +138,7 @@ pub fn rewrite_srcset(srcset: &str, enc: &dyn Fn(&str) -> String) -> String {
                 if u.is_empty() {
                     break;
                 }
-                let te = u
-                    .find(|c: char| c.is_ascii_whitespace())
-                    .unwrap_or(u.len());
+                let te = u.find(|c: char| c.is_ascii_whitespace()).unwrap_or(u.len());
                 let dtok = &u[..te];
                 rest = &u[te..];
                 match dtok.strip_suffix(',') {
@@ -198,14 +197,10 @@ mod tests {
         // "candidates" "data:image/png;base64,iVBORw0KGgoAAA 1x" and
         // "b.png 2x" with the data URL's tail mangled into a
         // descriptor. The spec keeps the whole non-whitespace run.
-        let out = rewrite_srcset(
-            "data:image/png;base64,iVBORw0KGgoAAA 1x, b.png 2x",
-            &|u| format!("[{}]", u),
-        );
-        assert_eq!(
-            out,
-            "[data:image/png;base64,iVBORw0KGgoAAA] 1x, [b.png] 2x"
-        );
+        let out = rewrite_srcset("data:image/png;base64,iVBORw0KGgoAAA 1x, b.png 2x", &|u| {
+            format!("[{}]", u)
+        });
+        assert_eq!(out, "[data:image/png;base64,iVBORw0KGgoAAA] 1x, [b.png] 2x");
     }
 
     #[test]

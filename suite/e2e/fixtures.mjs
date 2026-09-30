@@ -52,6 +52,8 @@ function pageHtml(origin) {
 <img id="img1" src="img.png" alt="i">
 <img id="ss" srcset="img.png 1x, img.png 2x" alt="s">
 <iframe id="inner" src="inner.html"></iframe>
+<img id="ssd" srcset="data:image/png;base64,${PNG.toString("base64")} 1x, img.png 2x" alt="d">
+<iframe id="doc" srcdoc="<p id='zl-srcdoc'>sd</p><img id='sdi' src='img.png'>"></iframe>
 </body></html>`;
 }
 
@@ -77,6 +79,18 @@ export function startFixture(port) {
         send(res, "text/html; charset=utf-8", pageHtml(origin));
       } else if (path === "/dir/landing.html") {
         send(res, "text/html; charset=utf-8", `<!doctype html><p id="zl-landing">zl-landing</p>`);
+      } else if (path === "/dir/refresh.html") {
+        /* #36: the meta refresh target must be rewritten to an engine
+           route, otherwise the refresh navigates the proxied frame
+           browser-direct and escapes the engine entirely. */
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><head><meta http-equiv="refresh" content="0; url=landing.html"></head><body>refreshing</body></html>`);
+      } else if (path === "/dir/based.html") {
+        /* #36: <base href> must fold later relative URLs. The SVG has
+           an intrinsic width of 7 and only exists under /sub/, so only
+           a base-folded load can ever produce naturalWidth 7. */
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><head><base href="/sub/"></head><body><p id="zl-based">based</p><img id="bi" src="logo.svg" alt="b"></body></html>`);
+      } else if (path === "/sub/logo.svg") {
+        send(res, "image/svg+xml", `<svg xmlns="http://www.w3.org/2000/svg" width="7" height="7"><rect width="7" height="7" fill="#333"/></svg>`);
       } else if (path === "/dir/inner.html") {
         send(res, "text/html; charset=utf-8", `<!doctype html><p id="zl-inner-marker">zl-inner</p>`);
       } else if (path === "/dir/style.css") {

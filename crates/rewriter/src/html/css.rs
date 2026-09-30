@@ -73,7 +73,10 @@ impl CssRewriter {
 /// What scanning a `url(` token found. `end` is relative to the start
 /// of the token (one past the `)`).
 enum UrlTok<'a> {
-    Complete { inner: &'a str, end: usize },
+    Complete {
+        inner: &'a str,
+        end: usize,
+    },
     /// `url(` opened but not closed yet (or an escape ran off the end).
     Open,
 }
@@ -133,7 +136,9 @@ fn scan(data: &str, enc: &dyn Fn(&str) -> String, final_scan: bool) -> (String, 
             let rest = &data[i..];
             if !final_scan
                 && rest.len() < 7
-                && rest.as_bytes().eq_ignore_ascii_case(&b"@import"[..rest.len()])
+                && rest
+                    .as_bytes()
+                    .eq_ignore_ascii_case(&b"@import"[..rest.len()])
             {
                 return (out, Some(i));
             }
@@ -225,10 +230,9 @@ fn scan_url(s: &str) -> UrlTok<'_> {
         let inner = &s[start..k - 1];
         // ws/comments, then the close paren.
         match skip_ws_comments(s, k) {
-            Some(k2) if k2 < s.len() && s.as_bytes()[k2] == b')' => UrlTok::Complete {
-                inner,
-                end: k2 + 1,
-            },
+            Some(k2) if k2 < s.len() && s.as_bytes()[k2] == b')' => {
+                UrlTok::Complete { inner, end: k2 + 1 }
+            }
             _ => UrlTok::Open,
         }
     } else {
@@ -339,9 +343,7 @@ fn push_url(out: &mut String, original: &str, inner: &str, enc: &dyn Fn(&str) ->
     // Documented fallbacks, emitted verbatim: empty url(), a comment
     // embedded in the middle of the value, and url(url(...)) nesting
     // (never valid CSS - rewriting it would emit a mangled URL).
-    if trimmed.is_empty()
-        || trimmed.contains("/*")
-        || trimmed.to_ascii_lowercase().contains("url(")
+    if trimmed.is_empty() || trimmed.contains("/*") || trimmed.to_ascii_lowercase().contains("url(")
     {
         out.push_str(original);
         return;

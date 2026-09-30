@@ -24,9 +24,13 @@
    Honest gaps (documented, not faked): WebSocket targets are skipped
       (the engine upgrades ws to wss by design; the local fixture is
       plain HTTP, so the bridge cannot be exercised against loopback
-      without a TLS fixture), the SW-restart group and the #36 rewriter
-      constructs (meta refresh, srcdoc, base, SVG, srcset edge
-      parsing) are not covered yet - see suite/e2e/README.md.
+      without a TLS fixture) and the SW-restart group is not covered -
+      see suite/e2e/README.md. The #36 rewriter constructs have
+      real-Chromium checks below (meta refresh, iframe srcdoc, base
+      href, srcset data URL candidates); SVG paint url() attributes
+      are covered by the rewriter's Rust unit tests instead (a
+      computed-style check would only observe the unresolvable-
+      reference fallback, not the rewrite itself).
 
    Run: node suite/e2e/e2e.mjs   (from the repo root, after
    `cargo build -p zeolite-server --release`, an app/dist build with
@@ -540,6 +544,79 @@ async function main() {
     });
     eq(await inner.locator("#zl-inner-marker").textContent(), "zl-inner", "inner marker");
     return inner.url().slice(0, 44);
+  });
+
+  await check("rewriter: meta http-equiv=refresh navigates inside the engine (#36)", async () => {
+    const pg = await context.newPage();
+    attachRecorder(pg);
+    await pg.goto(ENGINE + "/?url=" + encodeURIComponent(ORIGIN_A + "/dir/refresh.html"));
+    const landing = await waitFor("post-refresh landing frame", 30000, () => frameWith(pg, "#zl-landing"));
+    assert(landing.url().startsWith(ENGINE + "/j/"), "post-refresh URL is not an engine route: " + landing.url());
+    eq(await landing.locator("#zl-landing").textContent(), "zl-landing", "landing marker");
+    return landing.url().slice(0, 44);
+  });
+
+  await check("rewriter: iframe srcdoc URLs are rewritten in the nested document (#36)", async () => {
+    const pg = (await openProxied(ORIGIN_A + "/dir/page.html")).page;
+    const doc = await waitFor("srcdoc frame", 30000, async () => {
+      for (const f of pg.frames()) {
+        try {
+          if ((await f.locator("#zl-srcdoc").count()) > 0) return f;
+        } catch {}
+      }
+      return null;
+    });
+    const out = await evalIn(doc, "srcdoc img", `async () => {
+      const img = document.getElementById("sdi");
+      for (let i = 0; i < 100; i++) {
+        if (img.complete && img.naturalWidth) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return JSON.stringify({ w: img.naturalWidth, src: img.src });
+    }`, 20000);
+    const o = JSON.parse(out);
+    assert(o.w > 0, "srcdoc image did not decode (srcdoc not rewritten?): " + out);
+    assert(!String(o.src).includes("7101"), "srcdoc img src leaks the fixture origin: " + o.src);
+    return o.src.slice(0, 44);
+  });
+
+  await check("rewriter: base href folds later relative URLs (#36)", async () => {
+    const pg = await context.newPage();
+    attachRecorder(pg);
+    await pg.goto(ENGINE + "/?url=" + encodeURIComponent(ORIGIN_A + "/dir/based.html"));
+    const frame = await waitFor("based frame", 45000, () => frameWith(pg, "#zl-based"));
+    const out = await evalIn(frame, "base fold", `async () => {
+      const img = document.getElementById("bi");
+      for (let i = 0; i < 100; i++) {
+        if (img.complete && img.naturalWidth) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return JSON.stringify({ w: img.naturalWidth, src: img.src });
+    }`, 20000);
+    const o = JSON.parse(out);
+    eq(o.w, 7, "base-folded SVG did not decode at its intrinsic width (base not folded?): " + out);
+    await sleep(500);
+    const hits = await fixtureHits(fixtureA, "/sub/logo.svg");
+    assert(hits.length >= 1, "no engine-side hit for /sub/logo.svg (base not folded)");
+    return o.src.slice(0, 44);
+  });
+
+  await check("rewriter: srcset data URL candidate stays intact, other candidates routed (#36)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const out = await evalIn(frame, "srcset data url", `async () => {
+      const img = document.getElementById("ssd");
+      for (let i = 0; i < 100; i++) {
+        if (img.complete && img.naturalWidth) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return JSON.stringify({ w: img.naturalWidth, cur: img.currentSrc, set: img.srcset });
+    }`, 20000);
+    const o = JSON.parse(out);
+    assert(o.w > 0, "data URL srcset candidate did not decode (split on its payload comma?): " + out);
+    assert(String(o.cur).startsWith("data:image/png"), "currentSrc is not the intact data URL: " + o.cur);
+    assert(String(o.set).includes("base64,iVBORw0KGgo"), "data URL candidate was split on its payload comma: " + o.set);
+    assert(String(o.set).includes("/j/"), "second candidate not routed: " + o.set);
+    return String(o.cur).slice(0, 32);
   });
 
   await check("rewriter: module script import specifiers resolve through the engine", async () => {

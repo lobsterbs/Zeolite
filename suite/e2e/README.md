@@ -20,8 +20,10 @@ fixture pages through `/?url=<target>` and asserts:
   (prelude, importScripts), localStorage/sessionStorage, document.cookie
   (jar round-trip and upstream Set-Cookie capture), IndexedDB, Cache
   API, the navigator.serviceWorker shim.
-- Rewriter: img/src/srcset, CSS url() in a linked stylesheet and an
-  inline style block, iframe src, module-script import specifiers.
+- Rewriter: img/src/srcset (including a data URL candidate), CSS url()
+  in a linked stylesheet and an inline style block, iframe src, iframe
+  srcdoc, base href folding, meta refresh navigation, module-script
+  import specifiers.
 - Privacy (#32/#34): window.__ZL carries no plaintext destination, page
   surfaces show only engine routes, two virtual contexts stay isolated
   (storage, cookie jar, Cache API names).
@@ -46,10 +48,11 @@ fixture pages through `/?url=<target>` and asserts:
 - WebSocket bridge: skipped. The engine upgrades ws to wss by design
   and the fixture origins are plain HTTP, so the bridge cannot be
   exercised against loopback without a TLS fixture.
-- SW restart, meta refresh, iframe srcdoc, base href, SVG URL
-  attributes, srcset edge parsing (data URLs, commas): not covered
-  yet; the srcset/base/srcdoc constructs belong to the rewriter
-  coverage issue and land there.
+- SW restart: not covered yet.
+- SVG paint url() attributes (fill/stroke/filter/...): covered by the
+  rewriter's Rust unit tests (#36), not here - a browser-side
+  computed-style check would only observe the unresolvable-reference
+  fallback for an external sprite, not the rewrite itself.
 - Real-site behavior: this suite is fixtures-only, on purpose; CI must
   not depend on third-party sites.
 
