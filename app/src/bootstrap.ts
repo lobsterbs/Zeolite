@@ -46,13 +46,22 @@ const SITE = "zl:" + fnv1a(ORIGIN || "unknown");
 const P = SITE + ":";
 const pre = (n: string) => P + n;
 
+/* One controller lookup for the three SW seams (cookie jar, relay,
+   ws bridge): the transpiled optional chain is the minified bundle's
+   most expensive idiom, a shared helper keeps the size gate fed. */
+const swc = (): ServiceWorker | undefined => {
+  const sw = (navigator as { serviceWorker?: { controller?: ServiceWorker } })
+    .serviceWorker;
+  return sw && sw.controller;
+};
+
 /* One scanner for clear/key/length: keeps the scoped Storage cheap
  and the minified bootstrap inside its CI size budget. */
 function siteKeys(store: Storage): string[] {
  const ks: string[] = [];
  for (let i = 0; i < store.length; i++) {
  const k = store.key(i);
- if (k?.startsWith(P)) ks.push(k);
+ if (k && k.startsWith(P)) ks.push(k);
  }
  return ks;
 }
@@ -147,9 +156,7 @@ function siteKeys(store: Storage): string[] {
  the jar reply corrects the copy within milliseconds. */
 
 {
- const ctl =
- (navigator as { serviceWorker?: { controller?: ServiceWorker } })
- .serviceWorker?.controller;
+ const ctl = swc();
  if (ctl && ORIGIN) {
  let cur = "";
  /* One channel lives for the page's lifetime: the SW keeps the far
@@ -197,8 +204,8 @@ function siteKeys(store: Storage): string[] {
 
 const relay = (e: MessageEvent) => {
  const d = e.data as { zl?: string; msg?: unknown };
- if (d?.zl === "ws") {
- const ctl = (navigator as { serviceWorker?: { controller?: { postMessage: (m: unknown, p?: MessagePort[]) => void } } }).serviceWorker?.controller;
+ if (d && d.zl === "ws") {
+    const ctl = swc();
  if (ctl) ctl.postMessage(d.msg, e.ports as unknown as MessagePort[]);
  else {
  /* No controller: the page shim fails closed; the relay must too, or
@@ -290,11 +297,24 @@ addEventListener("message", relay);
       let proto = "";
       const ch = new MessageChannel();
       let q = Promise.resolve();
-      const disp = (e: Event) => {
-        q = q.then(() => {
-          es.dispatchEvent(e);
-        });
-      };
+      /* The EventTarget has no native on* event-handler slots, so the
+   raw property handlers fire after the registered listeners
+   (native interleaves in registration order), contained so a
+   throwing handler cannot kill the event queue. */
+const fire = (e: Event) => {
+  es.dispatchEvent(e);
+  const h = (es as unknown as Record<string, unknown>)["on" + e.type] as
+    | ((ev: Event) => void)
+    | undefined;
+  try {
+    if (h) h.call(es, e);
+  } catch { /* contained, like a native listener */ }
+};
+const disp = (e: Event) => {
+  q = q.then(() => {
+    fire(e);
+  });
+};
       ch.port1.onmessage = (ev) => {
         /* This port is dedicated to the bridge: every message on it
            comes from the engine and always carries the fields its ev
@@ -316,7 +336,7 @@ addEventListener("message", relay);
             if (binType === "arraybuffer" && data instanceof Blob) {
               data = await data.arrayBuffer();
             }
-            es.dispatchEvent(new MessageEvent("message", { data, origin: u.origin }));
+            fire(new MessageEvent("message", { data, origin: u.origin }));
           });
         } else if (m.ev === "error") {
           disp(new Event("error"));
@@ -325,7 +345,7 @@ addEventListener("message", relay);
           disp(new CloseEvent("close", { code: m.code, wasClean: m.clean }));
         }
       };
-      const ctl = navigator.serviceWorker?.controller;
+      const ctl = swc();
       if (!ctl) {
         /* No controller: fail the way a dead ws endpoint would. */
         wsState = 3;

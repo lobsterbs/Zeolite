@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decodePath, isWorkerDestination, setScheme } from "../codec";
-import { pickRelayPort, routeWorkerUrl } from "../worker-prelude";
+import { fireHandler, pickRelayPort, routeWorkerUrl } from "../worker-prelude";
 import { swShimApply, swShimGet, swShimRegister } from "../swshim";
 
 describe("worker destinations (1.6)", () => {
@@ -73,6 +73,32 @@ describe("pickRelayPort (2.3 Selenide shared bridge)", () => {
 
   it("null with no connected port: the shim fails closed, never native", () => {
     expect(pickRelayPort<MessagePort>([])).toBeNull();
+  });
+});
+
+describe("fireHandler (raw on* property parity, both ws shims)", () => {
+  it("invokes the on* property with the target as this", () => {
+    const t: Record<string, unknown> = {};
+    const seen: unknown[] = [];
+    t.onopen = function (this: unknown, e: Event) {
+      seen.push(e, this);
+    };
+    const ev = { type: "open" } as Event;
+    fireHandler(t, ev);
+    expect(seen[0]).toBe(ev);
+    expect(seen[1]).toBe(t);
+  });
+
+  it("contains a throwing handler", () => {
+    const t: Record<string, unknown> = {};
+    t.onerror = () => {
+      throw new Error("boom");
+    };
+    expect(() => fireHandler(t, { type: "error" } as Event)).not.toThrow();
+  });
+
+  it("is a no-op without a handler", () => {
+    expect(() => fireHandler({}, { type: "close" } as Event)).not.toThrow();
   });
 });
 

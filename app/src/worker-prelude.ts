@@ -115,6 +115,21 @@ export function pickRelayPort<T>(ports: T[]): T | null {
   return ports.length ? ports[ports.length - 1] : null;
 }
 
+/** Invoke a raw "on"+type event-handler property on a shim target.
+    The shims' EventTarget has no native event-handler slots, so the
+    dispatch seam calls this after the registered listeners (native
+    interleaves in registration order); a throwing handler is
+    contained so it cannot kill the event queue. Exported so
+    worker.test.ts pins the contract. */
+export function fireHandler(t: object, e: Event): void {
+  const h = (t as Record<string, unknown>)["on" + e.type] as
+    | ((ev: Event) => unknown)
+    | undefined;
+  try {
+    if (h) h.call(t, e);
+  } catch { /* contained, like a native listener */ }
+}
+
 if ((typeof G.postMessage === "function" || SHARED) && typeof G.WebSocket === "function") {
   const OWS = G.WebSocket;
   const LJWS = function (url: string, protocols?: string | string[]) {
@@ -133,8 +148,14 @@ if ((typeof G.postMessage === "function" || SHARED) && typeof G.WebSocket === "f
     let proto = "";
     const ch = new MessageChannel();
     let q = Promise.resolve();
+    /* Same contract as the page shim: raw on* handlers fire after
+       the registered listeners, contained. */
+    const fire = (e: Event) => {
+      es.dispatchEvent(e);
+      fireHandler(es, e);
+    };
     const disp = (e: Event) => {
-      q = q.then(() => void es.dispatchEvent(e));
+      q = q.then(() => void fire(e));
     };
     const fail = () => {
       wsState = 3;
@@ -159,7 +180,7 @@ if ((typeof G.postMessage === "function" || SHARED) && typeof G.WebSocket === "f
           if (binType === "arraybuffer" && data instanceof Blob) {
             data = await data.arrayBuffer();
           }
-          es.dispatchEvent(new MessageEvent("message", { data, origin: u.origin }));
+                    fire(new MessageEvent("message", { data, origin: u.origin }));
         });
       } else if (m?.ev === "error") {
         disp(new Event("error"));
