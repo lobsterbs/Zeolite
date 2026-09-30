@@ -85,6 +85,30 @@ all work natively. Static `blob:`/`data:` URLs in rewritten HTML are
 left untouched by the rewriter; they have no cross-origin meaning at
 page scope anyway.
 
+## Cross-site channels beyond storage (#37)
+
+The engine serves every virtual site from one real origin, so any
+engine-origin-wide channel leaks across sites unless it is scoped
+(bootstrap/isolation.ts):
+
+- **storage events**: one real `storage` listener re-dispatches only
+  this site's events to page handlers, prefix stripped,
+  `storageArea` pointing at the page's scoped Storage. Another
+  site's writes and engine-own keys never reach a page listener.
+  `addEventListener("storage")` and `onstorage` are both covered; on
+  a context where the interception cannot install, the native
+  delivery (prefixed keys) stays, documented in docs/matrix.md.
+- **BroadcastChannel**: channels silently move onto a site-prefixed
+  real name; the page-visible `.name` keeps the page's spelling, so
+  two virtual sites never hear each other.
+- **window.name**: scoped through the site-scoped sessionStorage;
+  same-site reloads keep it, another virtual site starts empty.
+- **cookieStore**: it reads the real engine-origin cookie jar, not
+  the virtual per-site jar, and its async/change-event semantics
+  cannot be built on the jar without faking. It is removed at
+  runtime (feature detection falls back to the virtual
+  `document.cookie`) - honest absence, never a fake.
+
 ## Persistence
 
 Site-scoped `localStorage` keys, prefixed IndexedDB databases and

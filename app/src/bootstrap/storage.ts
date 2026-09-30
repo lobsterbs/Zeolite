@@ -2,9 +2,26 @@
    hash of the site origin, so engine-origin storage is never touched
    by a proxied site and two proxied sites never see each other's
    data. Split out of the bootstrap entry; the bodies are unchanged,
-   they take the page global and the site prefix as parameters. */
+   they take the page global and the site prefix as parameters.
 
-export function applyStorage(w: Record<string, unknown>, P: string): void {
+   #37: the scoped stores are handed back to the caller so
+   applyIsolation can hand storage events and window.name a reference
+   to the page's own scoped Storage, and tell (via installed) whether
+   prefixing actually took. */
+
+export interface ScopedStorages {
+  scopedLocal?: Storage;
+  scopedSession?: Storage;
+  realLocal?: Storage;
+  realSession?: Storage;
+  installed: boolean;
+}
+
+export function applyStorage(
+  w: Record<string, unknown>,
+  P: string,
+): ScopedStorages {
+  const st: ScopedStorages = { installed: true };
   const pre = (n: string) => P + n;
 /* One scanner for clear/key/length: keeps the scoped Storage cheap
  and the minified bootstrap inside its CI size budget. */
@@ -20,7 +37,7 @@ function siteKeys(store: Storage): string[] {
 {
  for (const name of ["localStorage", "sessionStorage"] as const) {
  const LS = w[name] as Storage | undefined;
- if (!LS) continue;
+ if (!LS) { st.installed = false; continue; }
  const scoped = {
  getItem: (k: string) => LS.getItem(pre(k)),
  setItem: (k: string, v: string) => LS.setItem(pre(k), v),
@@ -35,7 +52,18 @@ function siteKeys(store: Storage): string[] {
  } as Storage;
  try {
  Object.defineProperty(w, name, { value: scoped, configurable: true });
- } catch { /* read-only context: storage then stays unscoped */ }
+ } catch {
+ /* read-only context: storage then stays unscoped */
+ st.installed = false;
+ continue;
+ }
+ if (name === "localStorage") {
+ st.scopedLocal = scoped;
+ st.realLocal = LS;
+ } else {
+ st.scopedSession = scoped;
+ st.realSession = LS;
+ }
  }
 }
 
@@ -105,4 +133,5 @@ function siteKeys(store: Storage): string[] {
 }
 
 
+return st;
 }

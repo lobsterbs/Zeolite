@@ -5,7 +5,9 @@
    virtualization, the shared-worker port relay, WebSocket routing,
    the worker WebSocket relay, the navigator.serviceWorker shim and
    the navigation guard (issue #28) and the on-demand find loader
-   (issue #29). URL-level fetch/XHR need no
+   (issue #29). #37 adds the cross-site channel isolation: storage
+   events, BroadcastChannel names, window.name scoping, and honest
+   cookieStore removal. URL-level fetch/XHR need no
    patch: pages navigate within engine-local paths that the service
    worker intercepts natively.
 
@@ -15,12 +17,15 @@
    loading would leave an unpatched window). The CI size gate covers
    the built artifact.
 
-   Budget: under 8 KiB minified (CI enforces). 5 KiB originally,
+   Budget: under 10 KiB minified (CI enforces). 5 KiB originally,
    6.5 for the #28 navigation guard, 8 when the artifact became the
    single classic file the browser run demanded (issue #35): what
    used to ride in shared chunks (the nav guard, the codec helpers)
-   now bundles into the one file the page loads. Deliberate raises,
-   recorded in the workflow file, never creep.
+   now bundles into the one file the page loads. 10 for #37: the
+   cross-site channel isolation (storage events, BroadcastChannel,
+   window.name, cookieStore removal) is per-page correctness, not
+   optional payload. Deliberate raises, recorded in the workflow
+   file, never creep.
 
    Page-global contract (set by the rewriter at injection time,
    issue #32): window.__ZL = { site: "<opaque token>" } - a stable
@@ -31,6 +36,7 @@
 
 import { fnv1a, pageOrigin } from "./bootstrap/siteid";
 import { applyStorage } from "./bootstrap/storage";
+import { applyIsolation } from "./bootstrap/isolation";
 import { applyCookie } from "./bootstrap/cookie";
 import { applyRelay } from "./bootstrap/relay";
 import { applyWs } from "./bootstrap/ws";
@@ -47,9 +53,10 @@ const site = ZL.site || fnv1a(pageOrigin(document.baseURI) || "unknown");
    real origin. */
 const P = "zl:" + site + ":";
 
-applyStorage(w, P);
+const st = applyStorage(w, P);
 applyCookie(site);
 applyRelay(w, site, loc.href);
 applyWs(w);
+applyIsolation(w, P, st);
 applyNavGuard(w, loc.href, loc.origin);
 applyFindLoad(w);
