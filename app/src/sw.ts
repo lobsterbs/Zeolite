@@ -64,7 +64,7 @@ import { NAV } from "./bootstrap/navguard";
 import { initScript } from "./pageload";
 import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
-import { classifyFailure, errorPage } from "./errorpage";
+import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, refineWithContent, transitRecord, transitStats } from "./transit";
 import { ZL_WISP_URL } from "./config";
@@ -916,6 +916,31 @@ async function persistRoute(prefix: string): Promise<void> {
   }
 }
 
+/* Issue #31: an in-engine navigation must land on the engine-owned
+   error page, never on a bare text/plain strand. Route decode
+   failures, disabled sites and policy blocks are all
+   navigation-capable; subresources keep the honest short text body
+   (no UI, per issue #3). */
+function navOutcome(
+  e: FetchEvent,
+  url: URL,
+  status: number,
+  category: ErrorCategory,
+  text: string,
+): Response {
+  if (e.request.mode === "navigate") {
+    return new Response(
+      errorPage({
+        route: url.pathname + url.search,
+        category,
+        engineVersion: ZEOLITE_VERSION,
+      }),
+      { status, headers: { "content-type": "text/html; charset=utf-8" } },
+    );
+  }
+  return new Response(text, { status, headers: { "content-type": "text/plain" } });
+}
+
 self.addEventListener("fetch", (e: FetchEvent) => {
   const url = new URL(e.request.url);
   /* 1.5 Silicide: opaque schemes (blob:, data:, about:) are browser-native
@@ -1078,11 +1103,15 @@ self.addEventListener("fetch", (e: FetchEvent) => {
            else is a bad route. */
         const navBytes = b64uDecode(url.pathname.slice(NAV.length + 1));
         const nav = navBytes ? new TextDecoder().decode(navBytes) : null;
-        if (!nav || !/^https?:\/\//.test(nav)) return new Response("zeolite: bad route", { status: 404 });
+        /* #31: a bad marker target is a navigation strand - the error
+           page replaces the bare 404 text for navigations. */
+        if (!nav || !/^https?:\/\//.test(nav)) return navOutcome(e, url, 404, "route", "zeolite: bad route");
         dest0 = nav;
       } else if (isEnginePath(url.pathname)) {
         const raw = decodePath(url.pathname);
-        if (!raw) return new Response("zeolite: bad route", { status: 404 });
+        /* #31: an undecodable engine route answers the error page for
+           navigations (bad route), the short text for subresources. */
+        if (!raw) return navOutcome(e, url, 404, "route", "zeolite: bad route");
         dest0 = unwrapDest(raw);
         routeCarriesQuery = true;
       } else {
@@ -1114,10 +1143,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
       let target = routeCarriesQuery && url.search ? bareDest + url.search : bareDest;
 
       if (siteDisabled(target)) {
-        return new Response("zeolite: site disabled for this engine", {
-          status: 403,
-          headers: { "content-type": "text/plain" },
-        });
+        /* #31: a disabled-site navigation lands on the error page
+           ("blocked"), not a bare 403 strand. */
+        return navOutcome(e, url, 403, "blocked", "zeolite: site disabled for this engine");
       }
 
       /* Issue #33: serving a document or worker script from a decodable
@@ -1219,10 +1247,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             fallbackReason: decision.fallbackReason,
             detail: mkDetail(),
           });
-          return new Response("zeolite: request blocked by extension", {
-            status: 403,
-            headers: { "content-type": "text/plain" },
-          });
+          return navOutcome(e, url, 403, "blocked", "zeolite: request blocked by extension");
         }
         /* Phase 1 (1.1 Oxide): rules engine + interception API. Data
            rules first, then programmatic handlers; a block from either
@@ -1289,10 +1314,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             fallbackReason: decision.fallbackReason,
             detail: mkDetail(),
           });
-          return new Response("zeolite: request blocked", {
-            status: 403,
-            headers: { "content-type": "text/plain" },
-          });
+          return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
         }
         if (ruleDec.url || ic.url) target = ic.url ?? ruleDec.url ?? target;
 

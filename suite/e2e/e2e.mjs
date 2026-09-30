@@ -308,6 +308,61 @@ async function main() {
     return frame.url().slice(0, 44);
   });
 
+  /* ---- recovery (#31) --------------------------------------------- */
+
+  await check("recovery: a malformed engine route answers the engine error page, never a bare strand (#31)", async () => {
+    const pg = await context.newPage();
+    attachRecorder(pg);
+    /* "@@" is not in the base64url alphabet: decodePath returns null and
+       the route is a bad route. As a navigation it must answer the
+       engine-owned error page, not a bare text/plain 404. */
+    const resp = await pg.goto(ENGINE + "/j/@@");
+    const o = await pg.evaluate(() => ({
+      href: location.href,
+      meta: document.querySelector('meta[name="zl-error"]')?.getAttribute("content") ?? null,
+      h1: document.querySelector("h1")?.textContent ?? "",
+      text: (document.body?.textContent ?? "").trim().slice(0, 60),
+    }));
+    assert(o.meta, "no zl-error meta - the bad route answered a bare strand: " + JSON.stringify(o));
+    const meta = JSON.parse(o.meta);
+    eq(meta.category, "route", "bad-route category");
+    eq(o.h1, "Could not load this page", "engine error page heading");
+    eq(resp.status(), 404, "bad-route status");
+    eq(o.href, ENGINE + "/j/@", "the URL stayed the engine route (no redirect/strand)");
+    return "category " + meta.category;
+  });
+
+  await check("recovery: an unroutable unlisted-site navigation lands on the engine error page (#31)", async () => {
+    const pg = await context.newPage();
+    attachRecorder(pg);
+    /* An unlisted site (no siteconfig rules anywhere in this harness)
+       on a loopback port with nothing listening: the transport fails
+       and the navigation must answer the engine-owned error page while
+       staying on the engine origin - never a blank page, never a
+       browser-direct navigation. The SPA-flow regression for unlisted
+       sites is the pushState check above (the fixtures are unlisted). */
+    const dest = "http://127.0.0.1:7999/dir/page.html";
+    const tail = Buffer.from(dest).toString("base64url");
+    const resp = await pg.goto(ENGINE + "/j/" + tail);
+    const o = await pg.evaluate(() => ({
+      href: location.href,
+      meta: document.querySelector('meta[name="zl-error"]')?.getAttribute("content") ?? null,
+      h1: document.querySelector("h1")?.textContent ?? "",
+      retry: document.querySelector("a")?.getAttribute("href") ?? "",
+    }));
+    assert(o.meta, "no zl-error meta - the failed navigation was a bare strand: " + JSON.stringify(o));
+    const meta = JSON.parse(o.meta);
+    assert(
+      ["dns", "tls", "timeout", "blocked", "stream"].includes(meta.category),
+      "unexpected failure category: " + o.meta,
+    );
+    eq(o.h1, "Could not load this page", "engine error page heading");
+    eq(o.retry, "/j/" + tail, "retry link points at the same engine route");
+    eq(resp.status(), 502, "transport failure status");
+    assert(o.href.startsWith(ENGINE + "/j/"), "navigation left the engine origin: " + o.href);
+    return "category " + meta.category;
+  });
+
   /* ---- browser APIs ---------------------------------------------- */
 
   await check("api: same-origin (engine-path) fetch is rerouted to the fixture", async () => {

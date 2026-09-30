@@ -18,13 +18,27 @@
    diagnostics rings and the embedder's own devtools. The retry link
    still navigates the same engine route, so recovery is unchanged.
 
+   Issue #31: the page is also the answer for engine-side navigation
+   strands, not only transport failures. A malformed engine route
+   (decode failure, non-http(s) nav marker target), a disabled site
+   and a policy block are all navigation-capable outcomes; they used
+   to answer with a bare text/plain 403/404 - a dead-end page. They
+   now land here (category "route" / "blocked") so no in-engine
+   navigation outcome is a silent strand.
+
    The no-control case (a browser hits an engine route with no
    controlling worker) cannot be answered by the engine at all: with
    no worker scoped to the route, nothing of the engine runs. The
    embedder serves a documented snippet there; see
    docs/error-pages.md. */
 
-export type ErrorCategory = "dns" | "tls" | "timeout" | "blocked" | "stream";
+export type ErrorCategory =
+  | "dns"
+  | "tls"
+  | "timeout"
+  | "blocked"
+  | "stream"
+  | "route";
 
 /** Map a transport failure to one honest category from the issue #3
     contract. Unrecognized failures are "stream" (the transport stream
@@ -52,6 +66,7 @@ const CATEGORY_TEXT: Record<ErrorCategory, string> = {
   timeout: "The site took too long to answer.",
   blocked: "The request was blocked by policy.",
   stream: "The connection was interrupted mid-response.",
+  route: "The engine route for this page is malformed.",
 };
 
 /** Escape a string for safe embedding in HTML text or attribute

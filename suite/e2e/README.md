@@ -14,7 +14,12 @@ two deterministic fixture origins on 127.0.0.1:7101/7102, then loads
 fixture pages through `/?url=<target>` and asserts:
 
 - Routing: absolute and relative links, 302 redirects, SPA pushState
-  with rerouted API fetches, reload.
+  with rerouted API fetches, reload, query-bearing fetches keep their
+  query exactly once (#38).
+- Recovery (#31): a malformed engine route and an unroutable unlisted
+  target answer navigations with the engine-owned error page, never a
+  bare text strand; the SPA and recovery checks all run against
+  unlisted sites (no siteconfig rules in this harness).
 - Browser APIs: fetch/XHR (same-origin reroute and cross-origin #34
   routing), EventSource, sendBeacon, classic and shared workers
   (prelude, importScripts), localStorage/sessionStorage, document.cookie
