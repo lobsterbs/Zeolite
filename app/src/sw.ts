@@ -1687,9 +1687,13 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       let wsOrigin: string | null = typeof msg.origin === "string" ? msg.origin : null;
       if (!wsOrigin) {
         try {
-          if (e.clientId) {
-            const client = await self.clients.get(e.clientId);
-            const dest = client ? decodePath(new URL(client.url, self.location.origin).pathname) : null;
+          /* e.source is the sending client (the controlling page; the
+             worker relay runs in the page context, so worker sockets
+             resolve to their page too). ExtendableMessageEvent has no
+             clientId in the TS lib, so source is the typed path. */
+          const client = e.source;
+          if (client && "url" in client) {
+            const dest = decodePath(new URL(client.url, self.location.origin).pathname);
             if (dest) wsOrigin = new URL(dest).origin;
           }
         } catch {
