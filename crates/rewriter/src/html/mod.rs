@@ -55,6 +55,13 @@ pub struct Rewriter {
     /// content and close tag must be swallowed, not emitted.
     drop_raw: bool,
     injected: bool,
+    /// A <base href> has been seen: per HTML only the FIRST base
+    /// element with a non-empty href folds, later ones are ignored
+    /// (issue #36).
+    base_seen: bool,
+    /// srcdoc nesting depth: recursive sub-document rewrites are
+    /// depth-capped so pathological input cannot recurse unbounded.
+    depth: u8,
 }
 
 impl Rewriter {
@@ -67,6 +74,8 @@ impl Rewriter {
             cur_tag: String::new(),
             drop_raw: false,
             injected: false,
+            base_seen: false,
+            depth: 0,
         }
     }
 
@@ -131,6 +140,22 @@ impl Rewriter {
         if abs.is_empty() || abs.starts_with('#') {
             return abs;
         }
+        // Opaque absolute URLs (data:, blob:, about:, javascript:,
+        // mailto:, tel:, or any non-http(s) scheme) never route
+        // through the engine: the upstream fetcher cannot honor them
+        // and their payload is client-side anyway. resolve() already
+        // passes them through; keep them unwrapped so the DOM sees
+        // the original value (issue #36: opaque URLs are not
+        // double-wrapped).
+        if let Some(ci) = abs.find(':') {
+            let sch = &abs[..ci];
+            if crate::encode::is_scheme(sch)
+                && !sch.eq_ignore_ascii_case("http")
+                && !sch.eq_ignore_ascii_case("https")
+            {
+                return abs;
+            }
+        }
         // Fragments are client-side only (SVG sprite symbol selection,
         // in-page anchors). They must never become part of the encoded
         // request target: every "#symbol" variant of one sprite is the
@@ -143,6 +168,62 @@ impl Rewriter {
         let mut out = self.cfg.encode_url(&bare);
         out.push_str(&frag);
         out
+    }
+
+    /// Rewrite an iframe srcdoc document (issue #36). The attribute
+    /// value reaches the DOM entity-decoded, so the decoded value IS
+    /// an HTML document: rewrite it as a nested sub-document with the
+    /// same config and the same page base, and let format_attr
+    /// re-escape the result on emit. Depth-capped: a srcdoc inside a
+    /// srcdoc inside... grows superlinearly, so pathological input
+    /// cannot recurse without bound. The sub-document inherits the
+    /// bootstrap injection config, which is correct: an about:srcdoc
+    /// document is a fresh browsing context that otherwise runs none
+    /// of the engine runtime.
+    fn rewrite_srcdoc(&self, v: &str) -> String {
+        const MAX_SRCDOC_DEPTH: u8 = 4;
+        if self.depth >= MAX_SRCDOC_DEPTH {
+            return v.to_string();
+        }
+        let mut sub = Rewriter::new(self.cfg.clone());
+        sub.depth = self.depth + 1;
+        sub.set_base(&self.base);
+        format!("{}{}", sub.process(v), sub.finish())
+    }
+
+    /// Rewrite the content attribute of <meta http-equiv=refresh>
+    /// (issue #36). Supported forms: "5" (plain reload: untouched),
+    /// "5; url=/x", "5;,url=/x", "0; url='x'" (quoted target,
+    /// either quote). Anything without a url= part passes through
+    /// unchanged; the delay part is preserved as written.
+    fn rewrite_refresh_content(&self, v: &str) -> String {
+        let Some((delay, tail)) = v.split_once(';') else {
+            return v.to_string();
+        };
+        let t = tail.trim_start();
+        let t = t.strip_prefix(',').unwrap_or(t).trim_start();
+        if !t.to_ascii_lowercase().starts_with("url") {
+            return v.to_string();
+        }
+        let after = t[3..].trim_start();
+        let Some(u) = after.strip_prefix('=') else {
+            return v.to_string();
+        };
+        let u = u.trim();
+        let (quote, inner) = match u.as_bytes().first() {
+            Some(&b'"') if u.len() > 1 && u.ends_with('"') => (Some('"'), &u[1..u.len() - 1]),
+            Some(&b'\'') if u.len() > 1 && u.ends_with('\'') => (Some('\''), &u[1..u.len() - 1]),
+            _ => (None, u),
+        };
+        let inner = inner.trim();
+        if inner.is_empty() {
+            return v.to_string();
+        }
+        let new = self.enc(inner);
+        match quote {
+            Some(q) => format!("{}; url={}{}{}", delay.trim(), q, new, q),
+            None => format!("{}; url={}", delay.trim(), new),
+        }
     }
 
     /// Emit bootstrap + injections. Called once, right after <head>
@@ -214,10 +295,16 @@ impl Rewriter {
                 }
                 St::Tag => {
                     // Need the full tag before rewriting attributes.
-                    match self.try_rewrite_tag(&self.buf) {
+                    // Hold the buffer in a local so rewriting a tag
+                    // can mutate self (<base href> switches the
+                    // folding base, issue #36) without borrowing buf.
+                    let mut buf = std::mem::take(&mut self.buf);
+                    let matched = self.try_rewrite_tag(&buf);
+                    match matched {
                         Some((end, rewritten)) => {
                             out.push_str(&rewritten);
-                            self.buf.drain(..end);
+                            buf.drain(..end);
+                            self.buf = buf;
                             let raw = is_raw_tag(&self.cur_tag);
                             // Inject bootstrap + per-site hooks right after
                             // the opening <head> (fallback: <html>) so they
@@ -235,7 +322,10 @@ impl Rewriter {
                                 self.cur_tag.clear();
                             }
                         }
-                        None => break, // incomplete tag: wait for more input
+                        None => {
+                            self.buf = buf;
+                            break; // incomplete tag: wait for more input
+                        }
                     }
                 }
                 St::Raw => {
@@ -288,7 +378,7 @@ impl Rewriter {
 
     /// Try to fully parse + rewrite the tag at the start of buf.
     /// Returns (bytes consumed, rewritten tag) if the tag is complete.
-    fn try_rewrite_tag(&self, buf: &str) -> Option<(usize, String)> {
+    fn try_rewrite_tag(&mut self, buf: &str) -> Option<(usize, String)> {
         // Find the '>' that closes the tag, respecting quoted attr values.
         let bytes = buf.as_bytes();
         let mut i = 1; // past '<'
@@ -324,7 +414,7 @@ impl Rewriter {
 
     /// Rewrite one complete, well-formed tag string. Returns an empty
     /// string when the tag is dropped (blocked host).
-    fn rewrite_single_tag(&self, raw: &str) -> String {
+    fn rewrite_single_tag(&mut self, raw: &str) -> String {
         let name_end = raw[1..]
             .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
             .map(|i| i + 1)
@@ -334,6 +424,28 @@ impl Rewriter {
         out.push('<');
         out.push_str(&raw[1..name_end]);
         let mut rest = &raw[name_end..];
+        // <meta http-equiv=refresh> carries its navigation target in
+        // the content attribute (issue #36): "5; url=/next". The
+        // http-equiv attribute can appear before or after content,
+        // so decide with a pre-scan before rewriting any value.
+        let is_refresh = if name == "meta" {
+            let mut scan = rest;
+            let mut found = false;
+            while let Some(a) = next_attr(scan) {
+                if a.name.to_ascii_lowercase() == "http-equiv"
+                    && a
+                        .value
+                        .as_deref()
+                        .is_some_and(|val| val.trim().eq_ignore_ascii_case("refresh"))
+                {
+                    found = true;
+                }
+                scan = &scan[a.consumed..];
+            }
+            found
+        } else {
+            false
+        };
         let mut first_url: Option<String> = None;
         while let Some(attr) = next_attr(rest) {
             let Attr {
@@ -359,10 +471,44 @@ impl Rewriter {
                     }
                     let newv = if lower == "srcset" || lower == "imagesrcset" {
                         Some(url_attrs::rewrite_srcset(&v, &|u| self.enc(u)))
+                    } else if lower == "srcdoc" && name == "iframe" {
+                        Some(self.rewrite_srcdoc(&v))
+                    } else if name == "meta" && lower == "content" && is_refresh {
+                        Some(self.rewrite_refresh_content(&v))
+                    } else if lower == "ping" && (name == "a" || name == "area") {
+                        // ping is a space-separated URL list.
+                        Some(
+                            v.split_whitespace()
+                                .map(|u| self.enc(u))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        )
+                    } else if url_attrs::is_svg_paint_attr(&name, &lower) {
+                        Some(url_attrs::rewrite_svg_paint(&v, &|u| self.enc(u)))
                     } else if lower == "style" && self.cfg.rewrite_css {
                         Some(css::rewrite_stylesheet(&v, &|u| self.enc(u)))
                     } else if url_attrs::is_url_attr(&name, &lower) {
-                        Some(self.enc(&v))
+                        let e = self.enc(&v);
+                        // <base href> switches the folding base for
+                        // every later relative URL (issue #36). Per
+                        // HTML only the first base with a non-empty
+                        // href counts, and the base's own href is
+                        // resolved against the page base BEFORE it
+                        // takes effect. An already-encoded route
+                        // folds against its innermost destination,
+                        // never the host the route text is bound to.
+                        if name == "base" && lower == "href" && !self.base_seen {
+                            let folded = resolve(&v, &self.base);
+                            let folded = match self.cfg.decode_engine_route(&folded) {
+                                Some(inner) => inner,
+                                None => folded,
+                            };
+                            if folded.starts_with("http://") || folded.starts_with("https://") {
+                                self.base = folded;
+                                self.base_seen = true;
+                            }
+                        }
+                        Some(e)
                     } else if is_event_attr(&lower) && self.cfg.rewrite_js_literals {
                         Some(crate::js::antiframe(&crate::js::rewrite_inline(&v, &|u| {
                             self.enc(u)
@@ -1308,5 +1454,356 @@ mod tests {
         );
         assert!(out.contains("title=\"Rock &amp; Roll\""), "got: {}", out);
         assert!(!out.contains("&amp;amp;"), "got: {}", out);
+    }
+
+    /// Decode the route out of the first `name="..."`/`name='...'`
+    /// attribute value in `out` and return the destination URL it
+    /// encodes.
+    fn decoded_attr(out: &str, name: &str) -> String {
+        for q in ['"', '\''] {
+            let needle = format!("{}={}", name, q);
+            if let Some(seg) = out.split(&needle).nth(1) {
+                let raw = seg.split(q).next().unwrap_or("");
+                let route = raw.trim_end_matches(|c| c == '\'' || c == '"');
+                return route
+                    .rsplit('/')
+                    .next()
+                    .and_then(crate::encode::b64u_decode)
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .unwrap_or_default();
+            }
+        }
+        String::new()
+    }
+
+    #[test]
+    fn meta_refresh_content_url_rewritten() {
+        // Issue #36: the refresh target is a navigation - without the
+        // rewrite the meta refresh escapes the engine entirely.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/dir/page.html");
+        let out = format!(
+            "{}{}",
+            r.process("<meta http-equiv=\"refresh\" content=\"5; url=next.html\">"),
+            r.finish()
+        );
+        assert_eq!(
+            decoded_attr(&out, "content"),
+            "https://example.com/dir/next.html",
+            "got: {}",
+            out
+        );
+        assert!(out.contains("5; url="), "delay preserved: {}", out);
+    }
+
+    #[test]
+    fn meta_refresh_shapes() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/dir/page.html");
+        // Quoted target, either quote char; quoted absolute URL.
+        let out = format!(
+            "{}{}",
+            r.process("<meta http-equiv=\"refresh\" content=\"0; url='top.html'\">"),
+            r.finish()
+        );
+        assert_eq!(
+            decoded_attr(&out, "content"),
+            "https://example.com/dir/top.html",
+            "got: {}",
+            out
+        );
+        // Plain delay: no url= part, nothing to rewrite.
+        let out = format!(
+            "{}{}",
+            r.process("<meta http-equiv=\"refresh\" content=\"5\">"),
+            r.finish()
+        );
+        assert!(out.contains("content=\"5\""), "got: {}", out);
+        // http-equiv (not refresh) content stays untouched.
+        let out = format!(
+            "{}{}",
+            r.process("<meta http-equiv=\"content-type\" content=\"5; url=x.html\">"),
+            r.finish()
+        );
+        assert!(out.contains("content=\"5; url=x.html\""), "got: {}", out);
+        // Attribute order: content BEFORE http-equiv still rewrites.
+        let out = format!(
+            "{}{}",
+            r.process("<meta content=\"2;url=up.html\" http-equiv=\"REFRESH\">"),
+            r.finish()
+        );
+        assert_eq!(
+            decoded_attr(&out, "content"),
+            "https://example.com/dir/up.html",
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn meta_refresh_survives_chunk_boundaries() {
+        // The tag is split mid-content-value: the tokenizer must hold
+        // the incomplete tag and rewrite once it completes.
+        let one_shot = {
+            let mut r = Rewriter::new(cfg());
+            r.set_base("https://example.com/dir/page.html");
+            format!(
+                "{}{}",
+                r.process("<meta http-equiv=\"refresh\" content=\"5; url=next.html\">"),
+                r.finish()
+            )
+        };
+        let chunked = {
+            let mut r = Rewriter::new(cfg());
+            r.set_base("https://example.com/dir/page.html");
+            let a = r.process("<meta http-equiv=\"ref");
+            let b = r.process("resh\" content=\"5; url=ne");
+            let c = r.process("xt.html\">tail");
+            format!("{}{}{}{}", a, b, c, r.finish())
+        };
+        assert_eq!(chunked, one_shot);
+    }
+
+    #[test]
+    fn iframe_srcdoc_rewritten_as_nested_document() {
+        // Issue #36: srcdoc is a full HTML document in an attribute;
+        // its URLs must be routed like any other markup.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/dir/page.html");
+        let out = format!(
+            "{}{}",
+            r.process("<iframe srcdoc=\"<p><img src='x.png'></p>\"></iframe>"),
+            r.finish()
+        );
+        let srcdoc_val = out
+            .split("srcdoc=\"")
+            .nth(1)
+            .and_then(|s| s.split("\">").next())
+            .unwrap_or_default();
+        // format_attr re-escaped the nested quotes as &quot;: decode
+        // the attribute value back to its DOM form before searching.
+        assert_eq!(
+            decoded_attr(&decode_entities(srcdoc_val), "src"),
+            "https://example.com/dir/x.png",
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn iframe_srcdoc_entity_roundtrip_is_dom_stable() {
+        // The srcdoc value arrives entity-decoded; after the nested
+        // rewrite the emitted value must decode back to the same DOM
+        // value (byte shape may differ, the document must not).
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}",
+            r.process("<iframe srcdoc=\"&lt;p&gt;hi &amp; bye&lt;/p&gt;\"></iframe>"),
+            r.finish()
+        );
+        let srcdoc_val = out
+            .split("srcdoc=\"")
+            .nth(1)
+            .and_then(|s| s.split("\">").next())
+            .unwrap_or_default();
+        assert_eq!(
+            decode_entities(srcdoc_val),
+            decode_entities("&lt;p&gt;hi &amp; bye&lt;/p&gt;"),
+            "got: {}",
+            out
+        );
+        assert_eq!(decode_entities(srcdoc_val), "<p>hi & bye</p>");
+    }
+
+    #[test]
+    fn base_href_switches_the_folding_base() {
+        // Issue #36: after <base href>, relative URLs fold against
+        // the base, not the document URL. The base href itself is
+        // rewritten, and only the first base counts.
+        let base = "https://example.com/dir/page.html";
+        let enc = |u: &str| cfg().encode_url(&resolve(u, "https://cdn.example.com/assets/"));
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let out = format!(
+            "{}{}",
+            r.process(
+                "<head><base href=\"https://cdn.example.com/assets/\"><base href=\"https://ignored.example.com/\"></head><img src=\"x.png\">"
+            ),
+            r.finish()
+        );
+        assert!(
+            out.contains(&format!("href=\"{}\"", enc("https://cdn.example.com/assets/"))),
+            "base href rewritten: {}",
+            out
+        );
+        assert!(
+            out.contains(&format!("src=\"{}\"", enc("x.png"))),
+            "x.png folds against the base: {}",
+            out
+        );
+        // Only the FIRST base folds: if the second one had won, x.png
+        // would have been encoded against ignored.example.com instead.
+    }
+
+    #[test]
+    fn base_href_folds_across_chunk_boundaries() {
+        // The base tag arrives in chunk 1, the img in chunk 2: the
+        // folding base must survive the boundary.
+        let one_shot = {
+            let mut r = Rewriter::new(cfg());
+            r.set_base("https://example.com/dir/page.html");
+            format!(
+                "{}{}",
+                r.process("<base href=\"https://cdn.example.com/assets/\"><img src=\"x.png\">"),
+                r.finish()
+            )
+        };
+        let chunked = {
+            let mut r = Rewriter::new(cfg());
+            r.set_base("https://example.com/dir/page.html");
+            let a = r.process("<base href=\"https://cdn.example.com/as");
+            let b = r.process("sets/\"><img src=\"x.png\">");
+            format!("{}{}{}", a, b, r.finish())
+        };
+        assert_eq!(chunked, one_shot);
+    }
+
+    #[test]
+    fn base_href_fragment_and_empty_ignored() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/dir/page.html");
+        let out = format!(
+            "{}{}",
+            r.process("<base href=\"#frag\"><base href=\"\"><img src=\"x.png\">"),
+            r.finish()
+        );
+        assert_eq!(
+            decoded_attr(&out, "src"),
+            "https://example.com/dir/x.png",
+            "folding base unchanged: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn svg_paint_attributes_routed() {
+        // Issue #36: SVG presentation attributes carry url() paint
+        // references; fragment-only references stay client-side.
+        let base = "https://example.com/app/page.html";
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let out = format!(
+            "{}{}",
+            r.process(
+                "<svg><path fill=\"url(#grad)\"><path fill=\"url(sprites.svg#icon)\"><path filter=\"url(https://cdn.example.net/f.svg#f)\"><path fill=\"url(#a) #333\"></svg>"
+            ),
+            r.finish()
+        );
+        assert!(out.contains("fill=\"url(#grad)\""), "got: {}", out);
+        assert!(out.contains("fill=\"url(#a) #333\""), "got: {}", out);
+        assert!(
+            out.contains(&format!(
+                "fill=\"url('{}#icon')\"",
+                cfg().encode_url("https://example.com/app/sprites.svg")
+            )),
+            "sprite reference routed: {}",
+            out
+        );
+        assert!(
+            out.contains(&format!(
+                "filter=\"url('{}#f')\"",
+                cfg().encode_url("https://cdn.example.net/f.svg")
+            )),
+            "external filter routed: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn ping_attribute_urls_routed() {
+        let base = "https://example.com/a.html";
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let out = format!(
+            "{}{}",
+            r.process("<a href=\"next.html\" ping=\"/px1 https://other.example/px2\">x</a>"),
+            r.finish()
+        );
+        let ping = out
+            .split("ping=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or_default();
+        let urls: Vec<String> = ping
+            .split_whitespace()
+            .map(|route| {
+                route
+                    .rsplit('/')
+                    .next()
+                    .and_then(crate::encode::b64u_decode)
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/px1".to_string(),
+                "https://other.example/px2".to_string()
+            ],
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn opaque_urls_pass_through_unwrapped() {
+        // Issue #36: data:, blob:, about:, javascript: and other
+        // opaque URLs are client-side payloads the engine cannot
+        // fetch; they must survive unwrapped, commas and all.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}",
+            r.process(
+                "<img src=\"data:image/png;base64,iVBORw0KGgoAAA,foo\"><iframe src=\"about:blank\"></iframe><a href=\"javascript:void(0)\">j</a><a href=\"mailto:a@b.c\">m</a>"
+            ),
+            r.finish()
+        );
+        assert!(
+            out.contains("src=\"data:image/png;base64,iVBORw0KGgoAAA,foo\""),
+            "got: {}",
+            out
+        );
+        assert!(out.contains("src=\"about:blank\""), "got: {}", out);
+        assert!(out.contains("href=\"javascript:void(0)\""), "got: {}", out);
+        assert!(out.contains("href=\"mailto:a@b.c\""), "got: {}", out);
+    }
+
+    #[test]
+    fn srcset_data_url_intact() {
+        // Issue #36: srcset with a data URL candidate - the naive
+        // comma split destroyed both candidates; the WHATWG parser
+        // keeps the data URL (commas included) and still routes the
+        // normal one.
+        let base = "https://example.com/dir/page.html";
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let out = format!(
+            "{}{}",
+            r.process(
+                "<img srcset=\"data:image/png;base64,iVBORw0KGgoAAA 1x, b.png 2x\">"
+            ),
+            r.finish()
+        );
+        assert!(
+            out.contains("data:image/png;base64,iVBORw0KGgoAAA 1x"),
+            "data URL candidate intact: {}",
+            out
+        );
+        assert!(out.contains(" 2x"), "descriptor kept: {}", out);
+        let routed = cfg().encode_url("https://example.com/dir/b.png");
+        assert!(out.contains(&routed), "b.png routed: {}", out);
     }
 }
