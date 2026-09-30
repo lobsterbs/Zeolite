@@ -128,7 +128,7 @@ async function frameWith(pg, sel) {
 
 async function openProxied(target) {
   const pg = await context.newPage();
-  attachRecorder(pg);
+  const rec = attachRecorder(pg);
   await pg.goto(ENGINE + "/?url=" + encodeURIComponent(target));
   let frame = null;
   try {
@@ -165,7 +165,7 @@ async function openProxied(target) {
       e.message + "; embedder status: " + status + "; registration probe: " + JSON.stringify(probe) + "; url: " + pg.url(),
     );
   }
-  return { page: pg, frame };
+  return { page: pg, frame, rec };
 }
 
 async function evalIn(frame, label, js, timeoutMs = 15000) {
@@ -504,31 +504,50 @@ async function main() {
   /* ---- rewriter ---------------------------------------------------- */
 
   await check("rewriter: HTML img + srcset + CSS url() (file + inline) resolve inside the engine", async () => {
-    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
-    const out = await evalIn(frame, "assets", `async () => {
+    const { frame, rec } = await openProxied(ORIGIN_A + "/dir/page.html");
+    /* Failure forensics: the CDP recorder shows whether a stuck image
+       request ever got a response from the SW at all. */
+    const dump = () => {
+      const rs = rec.requests
+        .filter((r) => r.url.includes("img.png") || r.url.includes("style.css"))
+        .map((r) => ({ url: r.url.slice(-40), fromSW: r.fromSW, status: r.status, failed: r.failed }));
+      console.log("  [assets-rec] " + JSON.stringify(rs));
+    };
+    let out;
+    try {
+      out = await evalIn(frame, "assets", `async () => {
+      /* The wait resolves on ANY settled state (complete, load, error
+         or 12s) and reports it: a complete-but-zero image used to
+         hang this promise forever, reporting a timeout that hid the
+         real state from the failure message. */
       const one = (id) => new Promise((r) => {
         const i = document.getElementById(id);
-        if (i.complete && i.naturalWidth) r();
-        else { i.onload = () => r(); i.onerror = () => r(); }
+        const st = (extra) => r({ id, complete: i.complete, w: i.naturalWidth, src: i.currentSrc ?? i.src ?? "", ...extra });
+        if (!i) { r({ id, missing: true }); return; }
+        if (i.complete) { st(); return; }
+        i.onload = () => st();
+        i.onerror = () => st({ error: true });
+        setTimeout(() => st({ timeout: true }), 12000);
       });
-      /* Both images, not just img1: the first harness run read
-         ss.naturalWidth right after img1's load, before the srcset
-         candidate had necessarily decoded - a race that reported a
-         rewriter failure the rewriter did not have. */
-      await Promise.all([one("img1"), one("ss")]);
-      const img1 = document.getElementById("img1").naturalWidth;
-      const ss = document.getElementById("ss").naturalWidth;
-      const ssSrc = document.getElementById("ss").currentSrc;
+      const st = await Promise.all([one("img1"), one("ss")]);
+      const img1 = document.getElementById("img1")?.naturalWidth ?? -1;
+      const ss = document.getElementById("ss")?.naturalWidth ?? -1;
+      const ssSrc = document.getElementById("ss")?.currentSrc ?? "";
       const bg = getComputedStyle(document.getElementById("cssbg")).backgroundImage;
       const inl = getComputedStyle(document.getElementById("inlbg")).backgroundImage;
-      return JSON.stringify({ img1, ss, ssSrc, bg, inl });
+      return JSON.stringify({ st, img1, ss, ssSrc, bg, inl });
     }`);
+    } catch (e) {
+      dump();
+      throw e;
+    }
     const o = JSON.parse(out);
-    assert(o.img1 > 0, "src img did not decode (naturalWidth 0)");
-    assert(o.ss > 0, "srcset img did not decode (naturalWidth 0; currentSrc " + o.ssSrc + ")");
+    assert(o.img1 > 0, "src img did not decode: " + out);
+    assert(o.ss > 0, "srcset img did not decode: " + out);
     for (const k of ["bg", "inl"]) {
       assert(!String(o[k]).includes("7101"), k + " leaks the fixture origin: " + o[k]);
     }
+    if (o.img1 <= 0 || o.ss <= 0) dump();
     return "img " + o.img1 + "px, bg " + o.bg.slice(0, 40);
   });
 
@@ -557,7 +576,7 @@ async function main() {
   });
 
   await check("rewriter: iframe srcdoc URLs are rewritten in the nested document (#36)", async () => {
-    const pg = (await openProxied(ORIGIN_A + "/dir/page.html")).page;
+    const { page: pg, rec } = await openProxied(ORIGIN_A + "/dir/page.html");
     const doc = await waitFor("srcdoc frame", 30000, async () => {
       for (const f of pg.frames()) {
         try {
@@ -566,15 +585,31 @@ async function main() {
       }
       return null;
     });
+    /* The img poll reports complete/error state instead of only the
+       width, and a raced in-frame fetch of the same engine route says
+       whether the SW answers the request at all (status + body bytes)
+       or never responds. */
     const out = await evalIn(doc, "srcdoc img", `async () => {
       const img = document.getElementById("sdi");
       for (let i = 0; i < 100; i++) {
         if (img.complete && img.naturalWidth) break;
         await new Promise((r) => setTimeout(r, 100));
       }
-      return JSON.stringify({ w: img.naturalWidth, src: img.src });
-    }`, 20000);
+      const probe = await Promise.race([
+        fetch(img.src)
+          .then(async (r) => [r.status, r.headers.get("content-type"), (await r.arrayBuffer()).byteLength])
+          .catch((e) => ["FETCH-ERR", String(e)]),
+        new Promise((r) => setTimeout(() => r(["FETCH-HUNG"]), 8000)),
+      ]);
+      return JSON.stringify({ w: img.naturalWidth, complete: img.complete, src: img.src, probe });
+    }`, 25000);
     const o = JSON.parse(out);
+    if (o.w <= 0) {
+      const rs = rec.requests
+        .filter((r) => r.url.includes("img.png"))
+        .map((r) => ({ url: r.url.slice(-40), fromSW: r.fromSW, status: r.status, failed: r.failed }));
+      console.log("  [srcdoc-rec] " + JSON.stringify(rs));
+    }
     assert(o.w > 0, "srcdoc image did not decode (srcdoc not rewritten?): " + out);
     assert(!String(o.src).includes("7101"), "srcdoc img src leaks the fixture origin: " + o.src);
     return o.src.slice(0, 44);

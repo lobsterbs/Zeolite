@@ -1548,7 +1548,7 @@ mod tests {
             r.set_base("https://example.com/dir/page.html");
             format!(
                 "{}{}",
-                r.process("<meta http-equiv=\"refresh\" content=\"5; url=next.html\">"),
+                r.process("<meta http-equiv=\"refresh\" content=\"5; url=next.html\">tail"),
                 r.finish()
             )
         };

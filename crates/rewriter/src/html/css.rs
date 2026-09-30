@@ -555,9 +555,12 @@ mod tests {
         assert_eq!(out, "@import '[y.css]' screen;");
         let out = rewrite_stylesheet("@import url(z.css) print;", &enc);
         assert_eq!(out, "@import url('[z.css]') print;");
-        // Escape inside an import string.
+        // Escape inside an import string. The re-emitted string keeps
+        // the escaped quote: a raw \" inside a CSS string token would
+        // terminate it early, so the escape is preserved exactly like
+        // the url() string pass does.
         let out = rewrite_stylesheet("@import \"a\\\"b.css\";", &enc);
-        assert_eq!(out, "@import \"[a\"b.css]\";");
+        assert_eq!(out, "@import \"[a\\\"b.css]\";");
     }
 
     #[test]
