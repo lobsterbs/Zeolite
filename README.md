@@ -34,7 +34,7 @@ Zeolite is not a full browser engine. Some WebExtension APIs, true isolated exte
 - app/src/fingerprint.ts — fingerprint profiles (consistent UA/platform/screen/timezone/canvas/WebGL spoofing)
 - app/src/recording.ts — deterministic session recording (zlRecord artifacts)
 - app/src/finder.ts — in-page find module (zl:find; find-core.ts holds the tested logic)
-- suite — compatibility probes, capability scoreboard, replay harness
+- suite — compatibility probes, capability scoreboard, replay harness, Chromium E2E (suite/e2e)
 - docs — architecture/versioning/roadmap
 ## Diagnostics
 Current bounds: 512 diagnostic events, 256 trace references and 512 tracing decisions, with one trace ID per request. Secrets are redacted on entry.

@@ -175,6 +175,27 @@ jobs:
           SIZE=$(wc -c < app/dist/finder.js)
           echo "finder.js: $SIZE bytes"
           if [ "$SIZE" -ge 4096 ]; then echo "::error::FINDER $SIZE bytes (budget 4096)"; exit 1; fi
+      - name: Classic-artifact gate (browser-runtime bundle formats)
+        # The bootstrap is injected as a classic <script src>, the
+        # worker prelude is prepended to classic worker scripts and the
+        # finder is eval'd in the page: none of these contexts can
+        # parse ESM syntax. The first real-browser run (issue #35)
+        # failed on exactly this: every artifact was emitted as an ES
+        # module, so the SW never evaluated, the bootstrap never
+        # loaded and workers died on an injected import statement.
+        # sw.js is the deliberate exception: it is registered with
+        # type: "module" (src/engine.ts).
+        run: |
+          cd app
+          for f in dist/bootstrap.js dist/worker-prelude.js dist/finder.js; do
+            if [ ! -f "$f" ]; then echo "::error::CLASSIC missing artifact $f"; exit 1; fi
+            BAD=$(grep -nE '(^|[;}])(import|export)[ { ]' "$f" | head -3 || true)
+            if [ -n "$BAD" ]; then
+              echo "$BAD" | while IFS= read -r l; do echo "::error::CLASSIC ESM statement in $f: $l"; done
+              exit 1
+            fi
+          done
+          echo "classic artifacts: import/export-free"
       - name: Subpath-alias build gate (2.1 Halogen)
         # The adapter serves the DEFAULT-base dist bundle under the
         # /zlsw/ path. An asset URL frozen to the origin root 404s there

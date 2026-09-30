@@ -4,11 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "vite build",
+    "build": "vite build && esbuild src/bootstrap.ts --bundle --minify --format=iife --outfile=dist/bootstrap.js && esbuild src/worker-prelude.ts --bundle --minify --format=iife --outfile=dist/worker-prelude.js && esbuild src/finder.ts --bundle --minify --format=iife --outfile=dist/finder.js",
     "check": "tsc --noEmit",
     "test": "vitest run"
   },
   "devDependencies": {
+    "esbuild": "^0.21.3",
     "fake-indexeddb": "^6.0.0",
     "typescript": "^5.5.0",
     "vite": "^5.4.0",

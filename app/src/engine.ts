@@ -42,7 +42,12 @@ export class ZeoliteEngine {
        compatibility). */
     setScheme(this.config.pathPrefix);
 
-    const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    /* Module service worker: the bundler emits sw.js as an ES module
+       (it shares chunks with main.js), so a classic registration
+       dies at script evaluation and nothing below register() ever
+       runs - invisible to every Node-level test, caught only by the
+       browser suite (issue #35). Chromium 91+. */
+    const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/", type: "module" });
     await navigator.serviceWorker.ready;
 
     let tries = 0;

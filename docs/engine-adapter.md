@@ -20,6 +20,19 @@ persisted per-site toggles, and navigates the frame to the encoded
 route. No changes to LobsterBrowse are needed to present the choice:
 both engines are just embed URLs.
 
+One contract detail an embedder must keep: the engine's service worker
+is registered as a module worker
+(`navigator.serviceWorker.register("/sw.js", { scope: "/", type: "module" })`).
+The bundle emits `sw.js` as an ES module (it shares chunks with
+`main.js`), so a classic registration fails at script evaluation with
+nothing surfaced below the `register()` call, and Chromium 91+ is
+required. An embedder that registers the worker itself must pass the
+same `type`. The page- and worker-facing artifacts (`bootstrap.js`,
+`worker-prelude.js`, `finder.js`) are the opposite: they are built as
+classic single-file scripts, because a `<script src>` without
+`type="module"`, a classic worker script and page `eval` cannot parse
+ESM syntax.
+
 ## JS adapter
 
 Implemented in `app/src/engine.ts` (class `ZeoliteEngine`). Field-for-field with the sketch:

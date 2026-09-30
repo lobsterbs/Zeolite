@@ -129,7 +129,33 @@ async function openProxied(target) {
     const status = await pg
       .evaluate(() => document.getElementById("zl-status")?.textContent ?? "(no status node)")
       .catch(() => "(page evaluate failed)");
-    throw new Error(e.message + "; embedder status: " + status + "; url: " + pg.url());
+    /* Registration probe: when the embed fails, say which registration
+       forms the running Chromium accepts. The first browser run of
+       this suite (30 Sep 2026) failed everything on one line: the SW
+       bundle is an ES module and the embedder registered it as a
+       classic script, so evaluation died and every later check timed
+       out on a frame that could never exist. */
+    const probe = await pg
+      .evaluate(async () => {
+        const out = {};
+        try {
+          await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+          out.classic = "registered";
+        } catch (err) {
+          out.classic = String(err?.message ?? err);
+        }
+        try {
+          await navigator.serviceWorker.register("/sw.js", { scope: "/", type: "module" });
+          out.module = "registered";
+        } catch (err) {
+          out.module = String(err?.message ?? err);
+        }
+        return out;
+      })
+      .catch(() => "(probe failed)");
+    throw new Error(
+      e.message + "; embedder status: " + status + "; registration probe: " + JSON.stringify(probe) + "; url: " + pg.url(),
+    );
   }
   return { page: pg, frame };
 }
@@ -209,6 +235,18 @@ async function main() {
     assert(page.url().startsWith(ENGINE), "embed URL");
     return "frame " + frame.url().slice(0, 44);
   });
+
+  /* Fail fast: every later check opens the same proxied frame, so a
+     broken embed would just burn its 45s timeout twenty-seven more
+     times and the log would say nothing new. */
+  if (results[results.length - 1].ok !== true) {
+    console.log("");
+    console.log("[HARNESS] embed failed; skipping the remaining checks (all of them need a proxied frame).");
+    console.log("engine server output tail:");
+    console.log(engineErr.join("").split("\n").slice(-30).join("\n"));
+    process.exitCode = 1;
+    return;
+  }
 
   await check("routing: an absolute cross-origin link navigates through the engine", async () => {
     const { page } = await openProxied(ORIGIN_A + "/dir/page.html");

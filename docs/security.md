@@ -183,8 +183,11 @@ Honest bounds:
   browser-network request carries the page-chosen URL; the URL string
   still appears in resource timing entries the page itself created
   (they are page-side objects, not network facts).
-- Browser-level assertions over these properties are deferred to the
-  real-Chromium harness (issue #35); CI runs no browser by design.
+- Browser-level assertions over these properties run in the real-Chromium
+  browser job (issue #35, suite/e2e): the suite asserts no plaintext
+  destination in window.__ZL and on page surfaces, and that two virtual
+  contexts stay isolated in localStorage, the cookie jar and the Cache
+  API.
 
 ## Browser-direct HTTP(S) escapes (issue #34)
 

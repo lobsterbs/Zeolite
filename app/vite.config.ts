@@ -15,18 +15,21 @@ export default defineConfig({
      assets sit, under any mount path. */
   base: "./",
   build: {
-    // The SW, the bootstrap, the finder and the devtools page must
-    // live at known absolute paths with no hashed filenames:
-    // registration, HTML injection, the SW's sibling-fetch of the
-    // finder bundle (#29) and navigation reference them.
+    // ESM entries only: the SW (a module service worker, see
+    // src/engine.ts) and the two HTML entries. The three
+    // page/worker-facing artifacts - bootstrap.js (injected as a
+    // classic <script src>), worker-prelude.js (prepended to classic
+    // worker scripts) and finder.js (eval'd in the page) - cannot
+    // carry ESM syntax, and Vite cannot emit per-entry IIFE in one
+    // build, so package.json builds them with esbuild after this
+    // pass. They must keep their exact filenames: the rewriter
+    // injects /bootstrap.js, the SW sibling-fetches worker-prelude.js
+    // and finder.js. No hashed filenames anywhere.
     rollupOptions: {
       input: {
         main: "index.html",
         devtools: "devtools.html",
         sw: "src/sw.ts",
-        bootstrap: "src/bootstrap.ts",
-        finder: "src/finder.ts",
-        prelude: "src/worker-prelude.ts",
       },
       output: {
         entryFileNames: "[name].js",
