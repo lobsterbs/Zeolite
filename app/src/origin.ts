@@ -14,6 +14,8 @@
    turns those into the header decisions a real browser would have made.
    Pure code: no self.location, no fetch, trivially testable. */
 
+import { decodePath } from "./codec";
+
 export interface VirtualOriginHeaders {
   /** Origin value to send; absent = send none. */
   origin?: string;
@@ -61,4 +63,38 @@ export function virtualOriginHeaders(
   out.secFetchSite =
     ii.origin === ti.origin ? "same-origin" : sameSite(ii.hostname, ti.hostname) ? "same-site" : "cross-site";
   return out;
+}
+
+/** Virtual origin of a control-message sender (bug-scout fix).
+    zl:docCookie and zl:wsOpen used to trust an origin field in the
+    message itself, so any proxied page could claim another site's
+    origin and read or write that site's jar cookies, or forge the
+    per-origin WS handshake identity. The sender's own client URL is
+    an engine route; its decoded destination is the only origin the
+    handlers act on. Fail closed: null when the sender is unknown,
+    not on the engine origin, off the engine routes, or when the
+    route does not decode to an http(s) destination. Pure code like
+    the rest of this module. */
+export function senderVirtualOrigin(
+  clientUrl: string | null | undefined,
+  engineOrigin: string,
+): string | null {
+  if (!clientUrl) return null;
+  let cu: URL;
+  try {
+    cu = new URL(clientUrl, engineOrigin);
+  } catch {
+    return null;
+  }
+  if (cu.origin !== engineOrigin) return null;
+  const dest = decodePath(cu.pathname);
+  if (!dest) return null;
+  let du: URL;
+  try {
+    du = new URL(dest);
+  } catch {
+    return null;
+  }
+  if (du.protocol !== "https:" && du.protocol !== "http:") return null;
+  return du.origin;
 }

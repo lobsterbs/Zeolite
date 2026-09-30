@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { virtualOriginHeaders } from "../origin";
+import { senderVirtualOrigin, virtualOriginHeaders } from "../origin";
+import { encodeDest, setScheme } from "../codec";
 
 describe("virtualOriginHeaders (issue #23: upstream Origin / Sec-Fetch-Site)", () => {
   const PAGE = "https://chatgpt.com/";
@@ -55,5 +56,46 @@ describe("virtualOriginHeaders (issue #23: upstream Origin / Sec-Fetch-Site)", (
 
   it("non-http initiator fails closed", () => {
     expect(virtualOriginHeaders("blob:https://engine.host/x", API, "POST", "same-origin")).toEqual({});
+  });
+});
+
+describe("senderVirtualOrigin (bug-scout: control-message sender verification)", () => {
+  const ENGINE = "https://engine.host";
+
+  it("recovers the sender's virtual origin from its client route", () => {
+    setScheme("/zl/", "b64u");
+    const route = "https://engine.host" + encodeDest("https://example.com/page");
+    expect(senderVirtualOrigin(route, ENGINE)).toBe("https://example.com");
+  });
+
+  it("ignores the query tail of a client route", () => {
+    setScheme("/zl/", "b64u");
+    const route = "https://engine.host" + encodeDest("https://example.com/page") + "?x=1";
+    expect(senderVirtualOrigin(route, ENGINE)).toBe("https://example.com");
+  });
+
+  it("fails closed without a client URL", () => {
+    setScheme("/zl/", "b64u");
+    expect(senderVirtualOrigin(undefined, ENGINE)).toBeNull();
+    expect(senderVirtualOrigin(null, ENGINE)).toBeNull();
+    expect(senderVirtualOrigin("", ENGINE)).toBeNull();
+  });
+
+  it("fails closed for a client outside the engine routes", () => {
+    setScheme("/zl/", "b64u");
+    expect(senderVirtualOrigin("https://engine.host/", ENGINE)).toBeNull();
+    expect(senderVirtualOrigin("https://engine.host/devtools.html", ENGINE)).toBeNull();
+  });
+
+  it("fails closed for a foreign-origin sender", () => {
+    setScheme("/zl/", "b64u");
+    const route = "https://evil.example" + encodeDest("https://example.com/page");
+    expect(senderVirtualOrigin(route, ENGINE)).toBeNull();
+  });
+
+  it("fails closed when the route does not decode to an http(s) destination", () => {
+    setScheme("/zl/", "b64u");
+    const route = "https://engine.host" + encodeDest("data:text/plain,hi");
+    expect(senderVirtualOrigin(route, ENGINE)).toBeNull();
   });
 });

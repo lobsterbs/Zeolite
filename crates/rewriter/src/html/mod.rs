@@ -89,7 +89,19 @@ impl Rewriter {
         // Already engine-local (nested rewriting): keep as-is. An empty
         // origin matches every URL, so it must not take this branch.
         if !self.cfg.origin.is_empty() && url.starts_with(&self.cfg.origin) {
-            return url.to_string();
+            // Bug-scout fix: a bare prefix match let a same-suffix
+            // host pass as engine-local (https://e.example.evil.com
+            // when the engine origin is https://e.example.com); the
+            // byte after the origin must be a URL boundary: end,
+            // '/', '?' or '#'.
+            let rest = &url[self.cfg.origin.len()..];
+            if rest.is_empty()
+                || rest.starts_with('/')
+                || rest.starts_with('?')
+                || rest.starts_with('#')
+            {
+                return url.to_string();
+            }
         }
         // Already-encoded engine route (root-relative, engine-origin-
         // absolute, or target-host-bound): never let resolve() bind a
@@ -512,15 +524,267 @@ fn next_attr(s: &str) -> Option<Attr> {
     })
 }
 
-/// Entities the HTML serializer emits in attribute values, plus the
-/// two apostrophe spellings. Anything else is left for the browser.
+/// The full HTML4 named-entity table plus the two apostrophe
+/// spellings (numeric and named): decode_entities mirrors what the
+/// browser's HTML parser hands the DOM for any source spelling, and
+/// format_attr re-escapes the decoded value on emit, so pass-through
+/// values stay DOM-stable across repeated rewrite passes. Unknown or
+/// malformed references are still left for the browser.
 const NAMED_ENTITIES: &[(&str, char)] = &[
-    ("&amp;", '&'),
-    ("&lt;", '<'),
-    ("&gt;", '>'),
-    ("&quot;", '"'),
-    ("&#39;", '\''),
-    ("&apos;", '\''),
+    ("&#39;", '\u{27}'),
+    ("&AElig;", '\u{c6}'),
+    ("&Aacute;", '\u{c1}'),
+    ("&Acirc;", '\u{c2}'),
+    ("&Agrave;", '\u{c0}'),
+    ("&Alpha;", '\u{391}'),
+    ("&Aring;", '\u{c5}'),
+    ("&Atilde;", '\u{c3}'),
+    ("&Auml;", '\u{c4}'),
+    ("&Beta;", '\u{392}'),
+    ("&Ccedil;", '\u{c7}'),
+    ("&Chi;", '\u{3a7}'),
+    ("&Dagger;", '\u{2021}'),
+    ("&Delta;", '\u{394}'),
+    ("&ETH;", '\u{d0}'),
+    ("&Eacute;", '\u{c9}'),
+    ("&Ecirc;", '\u{ca}'),
+    ("&Egrave;", '\u{c8}'),
+    ("&Epsilon;", '\u{395}'),
+    ("&Eta;", '\u{397}'),
+    ("&Euml;", '\u{cb}'),
+    ("&Gamma;", '\u{393}'),
+    ("&Iacute;", '\u{cd}'),
+    ("&Icirc;", '\u{ce}'),
+    ("&Igrave;", '\u{cc}'),
+    ("&Iota;", '\u{399}'),
+    ("&Iuml;", '\u{cf}'),
+    ("&Kappa;", '\u{39a}'),
+    ("&Lambda;", '\u{39b}'),
+    ("&Mu;", '\u{39c}'),
+    ("&Ntilde;", '\u{d1}'),
+    ("&Nu;", '\u{39d}'),
+    ("&OElig;", '\u{152}'),
+    ("&Oacute;", '\u{d3}'),
+    ("&Ocirc;", '\u{d4}'),
+    ("&Ograve;", '\u{d2}'),
+    ("&Omega;", '\u{3a9}'),
+    ("&Omicron;", '\u{39f}'),
+    ("&Oslash;", '\u{d8}'),
+    ("&Otilde;", '\u{d5}'),
+    ("&Ouml;", '\u{d6}'),
+    ("&Phi;", '\u{3a6}'),
+    ("&Pi;", '\u{3a0}'),
+    ("&Prime;", '\u{2033}'),
+    ("&Psi;", '\u{3a8}'),
+    ("&Rho;", '\u{3a1}'),
+    ("&Scaron;", '\u{160}'),
+    ("&Sigma;", '\u{3a3}'),
+    ("&THORN;", '\u{de}'),
+    ("&Tau;", '\u{3a4}'),
+    ("&Theta;", '\u{398}'),
+    ("&Uacute;", '\u{da}'),
+    ("&Ucirc;", '\u{db}'),
+    ("&Ugrave;", '\u{d9}'),
+    ("&Upsilon;", '\u{3a5}'),
+    ("&Uuml;", '\u{dc}'),
+    ("&Xi;", '\u{39e}'),
+    ("&Yacute;", '\u{dd}'),
+    ("&Yuml;", '\u{178}'),
+    ("&Zeta;", '\u{396}'),
+    ("&aacute;", '\u{e1}'),
+    ("&acirc;", '\u{e2}'),
+    ("&acute;", '\u{b4}'),
+    ("&aelig;", '\u{e6}'),
+    ("&agrave;", '\u{e0}'),
+    ("&alefsym;", '\u{2135}'),
+    ("&alpha;", '\u{3b1}'),
+    ("&amp;", '\u{26}'),
+    ("&and;", '\u{2227}'),
+    ("&ang;", '\u{2220}'),
+    ("&apos;", '\u{27}'),
+    ("&aring;", '\u{e5}'),
+    ("&asymp;", '\u{2248}'),
+    ("&atilde;", '\u{e3}'),
+    ("&auml;", '\u{e4}'),
+    ("&bdquo;", '\u{201e}'),
+    ("&beta;", '\u{3b2}'),
+    ("&brvbar;", '\u{a6}'),
+    ("&bull;", '\u{2022}'),
+    ("&cap;", '\u{2229}'),
+    ("&ccedil;", '\u{e7}'),
+    ("&cedil;", '\u{b8}'),
+    ("&cent;", '\u{a2}'),
+    ("&chi;", '\u{3c7}'),
+    ("&circ;", '\u{2c6}'),
+    ("&clubs;", '\u{2663}'),
+    ("&cong;", '\u{2245}'),
+    ("&copy;", '\u{a9}'),
+    ("&crarr;", '\u{21b5}'),
+    ("&cup;", '\u{222a}'),
+    ("&curren;", '\u{a4}'),
+    ("&dArr;", '\u{21d3}'),
+    ("&dagger;", '\u{2020}'),
+    ("&darr;", '\u{2193}'),
+    ("&deg;", '\u{b0}'),
+    ("&delta;", '\u{3b4}'),
+    ("&diams;", '\u{2666}'),
+    ("&divide;", '\u{f7}'),
+    ("&eacute;", '\u{e9}'),
+    ("&ecirc;", '\u{ea}'),
+    ("&egrave;", '\u{e8}'),
+    ("&empty;", '\u{2205}'),
+    ("&emsp;", '\u{2003}'),
+    ("&ensp;", '\u{2002}'),
+    ("&epsilon;", '\u{3b5}'),
+    ("&equiv;", '\u{2261}'),
+    ("&eta;", '\u{3b7}'),
+    ("&eth;", '\u{f0}'),
+    ("&euml;", '\u{eb}'),
+    ("&euro;", '\u{20ac}'),
+    ("&exist;", '\u{2203}'),
+    ("&fnof;", '\u{192}'),
+    ("&forall;", '\u{2200}'),
+    ("&frac12;", '\u{bd}'),
+    ("&frac14;", '\u{bc}'),
+    ("&frac34;", '\u{be}'),
+    ("&frasl;", '\u{2044}'),
+    ("&gamma;", '\u{3b3}'),
+    ("&ge;", '\u{2265}'),
+    ("&gt;", '\u{3e}'),
+    ("&hArr;", '\u{21d4}'),
+    ("&harr;", '\u{2194}'),
+    ("&hearts;", '\u{2665}'),
+    ("&hellip;", '\u{2026}'),
+    ("&iacute;", '\u{ed}'),
+    ("&icirc;", '\u{ee}'),
+    ("&iexcl;", '\u{a1}'),
+    ("&igrave;", '\u{ec}'),
+    ("&image;", '\u{2111}'),
+    ("&infin;", '\u{221e}'),
+    ("&int;", '\u{222b}'),
+    ("&iota;", '\u{3b9}'),
+    ("&iquest;", '\u{bf}'),
+    ("&isin;", '\u{2208}'),
+    ("&iuml;", '\u{ef}'),
+    ("&kappa;", '\u{3ba}'),
+    ("&lArr;", '\u{21d0}'),
+    ("&lambda;", '\u{3bb}'),
+    ("&lang;", '\u{2329}'),
+    ("&laquo;", '\u{ab}'),
+    ("&larr;", '\u{2190}'),
+    ("&lceil;", '\u{2308}'),
+    ("&ldquo;", '\u{201c}'),
+    ("&le;", '\u{2264}'),
+    ("&lfloor;", '\u{230a}'),
+    ("&lowast;", '\u{2217}'),
+    ("&loz;", '\u{25ca}'),
+    ("&lrm;", '\u{200e}'),
+    ("&lsaquo;", '\u{2039}'),
+    ("&lsquo;", '\u{2018}'),
+    ("&lt;", '\u{3c}'),
+    ("&macr;", '\u{af}'),
+    ("&mdash;", '\u{2014}'),
+    ("&micro;", '\u{b5}'),
+    ("&middot;", '\u{b7}'),
+    ("&minus;", '\u{2212}'),
+    ("&mu;", '\u{3bc}'),
+    ("&nabla;", '\u{2207}'),
+    ("&nbsp;", '\u{a0}'),
+    ("&ndash;", '\u{2013}'),
+    ("&ne;", '\u{2260}'),
+    ("&ni;", '\u{220b}'),
+    ("&not;", '\u{ac}'),
+    ("&notin;", '\u{2209}'),
+    ("&nsub;", '\u{2284}'),
+    ("&ntilde;", '\u{f1}'),
+    ("&nu;", '\u{3bd}'),
+    ("&oacute;", '\u{f3}'),
+    ("&ocirc;", '\u{f4}'),
+    ("&oelig;", '\u{153}'),
+    ("&ograve;", '\u{f2}'),
+    ("&oline;", '\u{203e}'),
+    ("&omega;", '\u{3c9}'),
+    ("&omicron;", '\u{3bf}'),
+    ("&oplus;", '\u{2295}'),
+    ("&or;", '\u{2228}'),
+    ("&ordf;", '\u{aa}'),
+    ("&ordm;", '\u{ba}'),
+    ("&oslash;", '\u{f8}'),
+    ("&otilde;", '\u{f5}'),
+    ("&otimes;", '\u{2297}'),
+    ("&ouml;", '\u{f6}'),
+    ("&para;", '\u{b6}'),
+    ("&part;", '\u{2202}'),
+    ("&permil;", '\u{2030}'),
+    ("&perp;", '\u{22a5}'),
+    ("&phi;", '\u{3c6}'),
+    ("&pi;", '\u{3c0}'),
+    ("&piv;", '\u{3d6}'),
+    ("&plusmn;", '\u{b1}'),
+    ("&pound;", '\u{a3}'),
+    ("&prime;", '\u{2032}'),
+    ("&prod;", '\u{220f}'),
+    ("&prop;", '\u{221d}'),
+    ("&psi;", '\u{3c8}'),
+    ("&quot;", '\u{22}'),
+    ("&rArr;", '\u{21d2}'),
+    ("&radic;", '\u{221a}'),
+    ("&rang;", '\u{232a}'),
+    ("&raquo;", '\u{bb}'),
+    ("&rarr;", '\u{2192}'),
+    ("&rceil;", '\u{2309}'),
+    ("&rdquo;", '\u{201d}'),
+    ("&real;", '\u{211c}'),
+    ("&reg;", '\u{ae}'),
+    ("&rfloor;", '\u{230b}'),
+    ("&rho;", '\u{3c1}'),
+    ("&rlm;", '\u{200f}'),
+    ("&rsaquo;", '\u{203a}'),
+    ("&rsquo;", '\u{2019}'),
+    ("&sbquo;", '\u{201a}'),
+    ("&scaron;", '\u{161}'),
+    ("&sdot;", '\u{22c5}'),
+    ("&sect;", '\u{a7}'),
+    ("&shy;", '\u{ad}'),
+    ("&sigma;", '\u{3c3}'),
+    ("&sigmaf;", '\u{3c2}'),
+    ("&sim;", '\u{223c}'),
+    ("&spades;", '\u{2660}'),
+    ("&sub;", '\u{2282}'),
+    ("&sube;", '\u{2286}'),
+    ("&sum;", '\u{2211}'),
+    ("&sup;", '\u{2283}'),
+    ("&sup1;", '\u{b9}'),
+    ("&sup2;", '\u{b2}'),
+    ("&sup3;", '\u{b3}'),
+    ("&supe;", '\u{2287}'),
+    ("&szlig;", '\u{df}'),
+    ("&tau;", '\u{3c4}'),
+    ("&there4;", '\u{2234}'),
+    ("&theta;", '\u{3b8}'),
+    ("&thetasym;", '\u{3d1}'),
+    ("&thinsp;", '\u{2009}'),
+    ("&thorn;", '\u{fe}'),
+    ("&tilde;", '\u{2dc}'),
+    ("&times;", '\u{d7}'),
+    ("&trade;", '\u{2122}'),
+    ("&uArr;", '\u{21d1}'),
+    ("&uacute;", '\u{fa}'),
+    ("&uarr;", '\u{2191}'),
+    ("&ucirc;", '\u{fb}'),
+    ("&ugrave;", '\u{f9}'),
+    ("&uml;", '\u{a8}'),
+    ("&upsih;", '\u{3d2}'),
+    ("&upsilon;", '\u{3c5}'),
+    ("&uuml;", '\u{fc}'),
+    ("&weierp;", '\u{2118}'),
+    ("&xi;", '\u{3be}'),
+    ("&yacute;", '\u{fd}'),
+    ("&yen;", '\u{a5}'),
+    ("&yuml;", '\u{ff}'),
+    ("&zeta;", '\u{3b6}'),
+    ("&zwj;", '\u{200d}'),
+    ("&zwnj;", '\u{200c}'),
 ];
 
 /// Decode one numeric character reference at the start of s
@@ -910,7 +1174,65 @@ mod tests {
         assert_eq!(decode_entities("a&amp;b&#38;c&#x26;d"), "a&b&c&d");
         assert_eq!(decode_entities("&lt;tag&gt;"), "<tag>");
         // Unknown or malformed references pass through untouched.
-        assert_eq!(decode_entities("&nbsp;&unknown;&#"), "&nbsp;&unknown;&#");
+        // Known entities decode; unknown or malformed references
+        // pass through untouched.
+        assert_eq!(decode_entities("&nbsp;&unknown;&#"), "\u{a0}&unknown;&#");
+    }
+
+    #[test]
+    fn decodes_html4_named_entities() {
+        // The full HTML4 table: whatever spelling the source used, the
+        // DOM sees the decoded character, so the rewriter must too.
+        assert_eq!(decode_entities("&nbsp;"), "\u{a0}");
+        assert_eq!(decode_entities("&copy;&deg;&euro;"), "\u{a9}\u{b0}\u{20ac}");
+        // Named and numeric forms of the same character agree.
+        assert_eq!(decode_entities("&copy;"), decode_entities("&#169;"));
+        // Unknown references still pass through untouched.
+        assert_eq!(decode_entities("&notanentity;"), "&notanentity;");
+    }
+
+    #[test]
+    fn full_table_keeps_pass_through_values_stable() {
+        // A pass-through value must stay DOM-stable across repeated
+        // rewrite passes: decode once at the attribute seam, emit
+        // format_attr's re-escaped form, decode again - same value.
+        // Entities never stack (no &amp;nbsp; chains) no matter
+        // which HTML4 spelling the source used.
+        let src = "a&nbsp;b &copy; c &amp; d &#38; e";
+        let once = decode_entities(src);
+        let emitted = format_attr("title", &once, Some('"'));
+        let value = emitted
+            .split("title=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or_default();
+        assert_eq!(decode_entities(value), once);
+        assert_eq!(once, "a\u{a0}b \u{a9} c & d & e");
+    }
+
+    #[test]
+    fn engine_origin_prefix_requires_a_boundary() {
+        // Bug-scout fix: the engine-origin check was a bare
+        // starts_with, so a same-suffix host
+        // (https://proxy.example.evil.com for the origin
+        // https://proxy.example) passed as engine-local and escaped
+        // rewriting entirely. The byte after the origin must be a
+        // URL boundary: end of URL, '/', '?' or '#'.
+        let c = RewriteConfig {
+            origin: "https://proxy.example".into(),
+            codec: Codec::Base64Url {
+                prefix: "/zl/".into(),
+            },
+            ..cfg()
+        };
+        let mut r = Rewriter::new(c);
+        r.set_base("https://target.com/");
+        assert_eq!(r.enc("https://proxy.example"), "https://proxy.example");
+        assert_eq!(r.enc("https://proxy.example/zl/abc"), "https://proxy.example/zl/abc");
+        assert_eq!(r.enc("https://proxy.example?q=1"), "https://proxy.example?q=1");
+        let out = r.enc("https://proxy.example.evil.com/x");
+        assert_ne!(out, "https://proxy.example.evil.com/x");
+        assert!(out.starts_with("/zl/"), "rewritten to a route: {}", out);
     }
 
     #[test]

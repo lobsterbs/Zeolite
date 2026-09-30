@@ -78,13 +78,6 @@ impl Window {
         *g -= 1;
         true
     }
-
-    /// Block until at least one credit is available.
-    async fn wait(&self) {
-        while self.get() == 0 {
-            self.notified.notified().await;
-        }
-    }
 }
 
 /// One open wisp stream: the input channel (wisp DATA -> socket), the
@@ -816,6 +809,43 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
     }
 }
 
+/// Bug-scout fix: with the window starved the relay used to block
+/// in Window::wait without draining its input channel. The session
+/// loop then wedged on its bounded DATA send, and the CONTINUE that
+/// grants the window could never be read: a full-duplex deadlock.
+/// Drain the socket's input while waiting for credits instead.
+/// Returns false when the socket write failed or the input channel
+/// closed (the relay should end); true once a credit is available.
+async fn drain_until_credited(
+    w: &Window,
+    input_rx: &mut mpsc::Receiver<Vec<u8>>,
+    wr: &mut tokio::net::tcp::OwnedWriteHalf,
+    la: &Mutex<Instant>,
+) -> bool {
+    while w.get() == 0 {
+        let ok = tokio::select! {
+            _ = w.notified.notified() => true,
+            m = input_rx.recv() => match m {
+                Some(bytes) => {
+                    if wr.write_all(&bytes).await.is_err() {
+                        false
+                    } else {
+                        if let Ok(mut t) = la.lock() {
+                            *t = Instant::now();
+                        }
+                        true
+                    }
+                }
+                None => false,
+            },
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 async fn spawn_tcp_relay(
     sess: &mut Session,
     stream_id: u32,
@@ -860,7 +890,13 @@ async fn spawn_tcp_relay(
             // v1 clients never send CONTINUE grants, so their window
             // stays closed forever; relay unthrottled instead.
             if client_flow {
-                w.wait().await;
+                // Bug-scout fix: the bare wait blocked the relay while
+                // starved and the input channel was never drained;
+                // drain_until_credited keeps the input side flowing
+                // until the window is granted again.
+                if !drain_until_credited(&w, &mut input_rx, &mut wr, &la).await {
+                    break;
+                }
             }
             tokio::select! {
                 r = rd.read(&mut buf) => match r {
@@ -1006,7 +1042,11 @@ async fn spawn_udp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname
         loop {
             tokio::select! {
                 r = sock.recv(&mut buf) => match r {
-                    Ok(0) | Err(_) => break,
+                    // Bug-scout fix: a zero-length datagram is legal
+                    // UDP and tokio surfaces it as Ok(0); it must not
+                    // end the stream.
+                    Ok(0) => continue,
+                    Err(_) => break,
                     Ok(n) => {
                         // 1 wisp DATA payload = 1 UDP datagram, always.
                         // No CONTINUE is ever sent for UDP streams.
@@ -1331,6 +1371,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tcp_relay_starved_window_keeps_draining_input() {
+        // Bug-scout regression: while the window was starved the relay
+        // blocked without draining its input channel. The session
+        // loop then wedged on its bounded DATA send, and the CONTINUE
+        // that grants the window could never be read: a full-duplex
+        // deadlock. Input must keep flowing while the window is
+        // closed, and the socket read must resume once granted.
+        let lst = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = lst.local_addr().unwrap();
+        let echo = tokio::spawn(async move {
+            if let Ok((mut s, _)) = lst.accept().await {
+                let (mut r, mut w) = s.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            }
+        });
+        let sock = TcpStream::connect(addr).await.unwrap();
+        let (ws_tx, mut ws_rx) = mpsc::channel::<Message>(16);
+        let window = Arc::new(Window::default());
+        // Deliberately starved: no initial grant.
+        let la = Arc::new(Mutex::new(Instant::now()));
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(8);
+        let stream_id = 9u32;
+        let w = window.clone();
+        let relay = tokio::spawn(async move {
+            let (mut rd, mut wr) = sock.into_split();
+            let mut input_rx = input_rx;
+            let mut buf = vec![0u8; 4096];
+            loop {
+                if w.get() == 0 {
+                    if !drain_until_credited(&w, &mut input_rx, &mut wr, &la).await {
+                        break;
+                    }
+                }
+                tokio::select! {
+                    r = rd.read(&mut buf) => match r {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let data = Packet::Data { stream_id, payload: buf[..n].to_vec() };
+                            if send_packet(&ws_tx, &data).await.is_err() {
+                                break;
+                            }
+                            w.take();
+                        }
+                    },
+                    m = input_rx.recv() => match m {
+                        Some(bytes) => {
+                            if wr.write_all(&bytes).await.is_err() { break; }
+                        }
+                        None => break,
+                    },
+                }
+            }
+        });
+
+        // More than the input channel's own capacity: with the old
+        // code every send past the eighth wedged forever (nothing
+        // drained while starved).
+        for i in 0..10u8 {
+            tokio::time::timeout(Duration::from_secs(5), input_tx.send(vec![i; 64]))
+                .await
+                .expect("input send wedged: starved relay not draining")
+                .unwrap();
+        }
+        // Grant the window: the drained bytes come back as wisp DATA.
+        window.grant(1000);
+        let mut got = 0usize;
+        while got < 10 * 64 {
+            let msg = tokio::time::timeout(Duration::from_secs(5), ws_rx.recv())
+                .await
+                .expect("timeout waiting for echo after grant")
+                .expect("ws channel closed");
+            let bin = match msg {
+                Message::Binary(b) => b,
+                other => panic!("expected binary, got {other:?}"),
+            };
+            let mut buf = BytesMut::from(&bin[..]);
+            let frame = Frame::decode(&mut buf).unwrap().unwrap();
+            match frame.parse_packet().unwrap() {
+                Packet::Data {
+                    stream_id: sid,
+                    payload,
+                } => {
+                    assert_eq!(sid, 9);
+                    got += payload.len();
+                }
+                other => panic!("expected DATA, got {other:?}"),
+            }
+        }
+        assert_eq!(got, 640);
+        relay.abort();
+        echo.abort();
+    }
+
+    #[tokio::test]
     async fn udp_relay_datagram_boundaries() {
         // Local UDP echo.
         let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1365,7 +1499,8 @@ mod tests {
             loop {
                 tokio::select! {
                     r = sock.recv(&mut buf) => match r {
-                        Ok(0) | Err(_) => break,
+                        Ok(0) => continue,
+                        Err(_) => break,
                         Ok(n) => {
                             let data = Packet::Data { stream_id, payload: buf[..n].to_vec() };
                             if send_packet(&ws_tx, &data).await.is_err() {
@@ -1391,6 +1526,10 @@ mod tests {
         });
 
         // Two datagrams in, two datagrams out; boundaries preserved.
+        // A zero-length datagram is legal UDP: it must ride along
+        // without ending the stream (bug-scout fix: tokio surfaces it
+        // as Ok(0), which read as EOF).
+        input_tx.send(Vec::new()).await.unwrap();
         input_tx.send(vec![1, 2, 3]).await.unwrap();
         input_tx.send(vec![4]).await.unwrap();
         let mut got: Vec<Vec<u8>> = Vec::new();
@@ -1411,9 +1550,9 @@ mod tests {
             }
         }
         assert_eq!(got, vec![vec![1, 2, 3], vec![4]]);
-        // The counter is bidirectional: 2 client->upstream datagrams
-        // plus the 2 echoed back.
-        assert_eq!(pkt_ctr.load(Ordering::Relaxed), 4);
+        // The counter is bidirectional: 3 client->upstream datagrams
+        // (one of them zero-length) plus the 2 echoed back.
+        assert_eq!(pkt_ctr.load(Ordering::Relaxed), 5);
         relay.abort();
         echo_task.abort();
     }

@@ -22,11 +22,14 @@
    Phase 4 control plane:
      { type: "zl:getNetLog" }                snapshot of the request log
      { type: "zl:tracing", enabled }          opt-in rewrite tracing ring (1.2)
-     { type: "zl:wsOpen", url, protocols [, origin] }  page WS bridge (1.3;
-                                            optional origin + client-route
-                                            recovery feed the per-origin
-                                            handshake identity, item 4)
-     { type: "zl:docCookie", origin, set }  per-origin document.cookie (1.5)
+     { type: "zl:wsOpen", url, protocols }  page WS bridge (1.3; the
+                                            handshake identity is the
+                                            verified sender's own origin,
+                                            recovered from its client
+                                            route, item 4)
+     { type: "zl:docCookie", set }   per-origin document.cookie (1.5;
+                                            the jar origin is the verified
+                                            sender's, never a claim)
      { type: "zl:fingerprint", profile }   document surface spoofing (1.8)
      { type: "zl:recordStart", recId }     deterministic session recording (1.9)
      { type: "zl:recordStop" }             build the zlRecord artifact
@@ -67,7 +70,7 @@ import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket } from "./libcu
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
-import { virtualOriginHeaders } from "./origin";
+import { senderVirtualOrigin, virtualOriginHeaders } from "./origin";
 import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
 import { fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
@@ -1557,8 +1560,11 @@ interface ControlMessage {
   /** zl:wsOpen: page WebSocket bridge destination + protocols. */
   url?: string;
   protocols?: string[];
-  /** zl:docCookie page origin; zl:wsOpen initiator origin (the
-      per-origin handshake identity, item 4). */
+  /** zl:docCookie / zl:wsOpen origin claim from the page. Bug-scout
+      fix: the handlers never trust this field; any proxied page
+      could claim another site's origin and reach its jar cookies or
+      forge the WS handshake identity. The sender's own client
+      route is the only source. Documents what pages still send. */
   origin?: string;
   set?: string;
   /** zl:cancelDownload: registry entry id. */
@@ -1583,6 +1589,20 @@ interface ControlMessage {
   bytes?: Uint8Array;
   /** zl:installExtFiles: unpacked directory listing, path -> bytes. */
   files?: Array<[string, Uint8Array]>;
+}
+
+/* Bug-scout fix: control-plane messages used to trust msg.origin, so
+   any proxied page could claim another site's origin; jar cookie
+   reads and writes via zl:docCookie, a forged per-origin WS handshake
+   identity via zl:wsOpen. The sender's real origin is recovered from
+   its own client route instead; the claim is never read. Unknown or
+   non-proxied senders fail closed (null). */
+function senderOrigin(e: ExtendableMessageEvent): string | null {
+  const client = e.source;
+  if (client && "url" in client) {
+    return senderVirtualOrigin(client.url, self.location.origin);
+  }
+  return null;
 }
 
 self.addEventListener("message", async (e: ExtendableMessageEvent) => {
@@ -1693,22 +1713,12 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
          worker-relayed sockets too, since the relay runs in the page
          context). Headers are engine-built only: a page can never
          smuggle handshake headers onto the transport. */
-      let wsOrigin: string | null = typeof msg.origin === "string" ? msg.origin : null;
-      if (!wsOrigin) {
-        try {
-          /* e.source is the sending client (the controlling page; the
-             worker relay runs in the page context, so worker sockets
-             resolve to their page too). ExtendableMessageEvent has no
-             clientId in the TS lib, so source is the typed path. */
-          const client = e.source;
-          if (client && "url" in client) {
-            const dest = decodePath(new URL(client.url, self.location.origin).pathname);
-            if (dest) wsOrigin = new URL(dest).origin;
-          }
-        } catch {
-          /* initiator stays unknown: no Origin header, honest absence */
-        }
-      }
+      /* Bug-scout fix: msg.origin was a spoof vector (any proxied
+         page could forge the per-origin handshake identity). The
+         sender's own client route is the only source; worker-relayed
+         sockets resolve to their page the same way. Unknown sender
+         means no Origin header, honest absence. */
+      let wsOrigin: string | null = senderOrigin(e);
       const wsHeaders = wsIdentityHeaders(wsOrigin, msg.url, {
         profile: fpProfile,
       });
@@ -1721,11 +1731,15 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
          follow-up on the port is answered with the authoritative jar
          view, so the page-side cache stays eventually consistent
          without a fresh MessageChannel per read/write. */
-      if (!port || typeof msg.origin !== "string" || !/^https?:/i.test(msg.origin)) {
+      /* Bug-scout fix: msg.origin was a spoof vector; any proxied
+         page could read or write another site's jar cookies by
+         claiming its origin. The sender's own client route decides
+         the jar; the claim is never read. */
+      const origin = senderOrigin(e);
+      if (!port || !origin) {
         reply({ ok: false, error: "bad zl:docCookie" });
         break;
       }
-      const origin = msg.origin;
       const handle = (set?: unknown) => {
         if (typeof set === "string") documentCookieWrite(origin, set);
         port.postMessage({ ok: true, cookie: documentCookieRead(origin) });
