@@ -1228,8 +1228,14 @@ mod tests {
         let mut r = Rewriter::new(c);
         r.set_base("https://target.com/");
         assert_eq!(r.enc("https://proxy.example"), "https://proxy.example");
-        assert_eq!(r.enc("https://proxy.example/zl/abc"), "https://proxy.example/zl/abc");
-        assert_eq!(r.enc("https://proxy.example?q=1"), "https://proxy.example?q=1");
+        assert_eq!(
+            r.enc("https://proxy.example/zl/abc"),
+            "https://proxy.example/zl/abc"
+        );
+        assert_eq!(
+            r.enc("https://proxy.example?q=1"),
+            "https://proxy.example?q=1"
+        );
         let out = r.enc("https://proxy.example.evil.com/x");
         assert_ne!(out, "https://proxy.example.evil.com/x");
         assert!(out.starts_with("/zl/"), "rewritten to a route: {}", out);
