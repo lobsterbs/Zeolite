@@ -155,16 +155,21 @@ jobs:
           fi
       - name: Verify vendored transport made it into the build
         run: test -f app/dist/libcurl/index.mjs
-      - name: Bootstrap size budget (must stay under 6.5 KiB minified)
+      - name: Bootstrap size budget (must stay under 8 KiB minified)
         # Raised from 5120 for the #28 navigation guard (window.open,
         # anchor/area/iframe/form/link URL property + setAttribute
         # rewrites, form submit paths, WebRTC removal) and the module
-        # split. Raises are deliberate decisions recorded here, never
-        # quiet accommodations; CI prints the measured size.
+        # split; raised again 6656 -> 8192 when the bootstrap became a
+        # single classic file (the first real-browser run, issue #35):
+        # what used to ride in shared ESM chunks (the nav guard, the
+        # codec helpers) now bundles into the one artifact the page
+        # loads. Measured 6864. Raises are deliberate decisions
+        # recorded here, never quiet accommodations; CI prints the
+        # measured size.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 6656 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 6656)"; exit 1; fi
+          if [ "$SIZE" -ge 8192 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 8192)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

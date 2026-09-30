@@ -161,8 +161,14 @@ async function openProxied(target) {
 }
 
 async function evalIn(frame, label, js, timeoutMs = 15000) {
+  /* Playwright treats a string argument to evaluate() as an
+     EXPRESSION, never as a function to invoke: the first browser run
+     had every page probe "passing" evaluate with undefined because the
+     function strings were evaluated to function values and dropped.
+     Wrapping in "(" + js + ")()" makes the expression invoke the
+     function and return its result. */
   return await Promise.race([
-    frame.evaluate(js),
+    frame.evaluate("(" + js + ")()"),
     sleep(timeoutMs).then(() => {
       throw new Error(label + ": page evaluate timed out");
     }),

@@ -15,9 +15,12 @@
    loading would leave an unpatched window). The CI size gate covers
    the built artifact.
 
-   Budget: under 6.5 KiB minified (CI enforces). Raised from 5 KiB
-   for the navigation guard: a deliberate decision, recorded in the
-   workflow file, never creep.
+   Budget: under 8 KiB minified (CI enforces). 5 KiB originally,
+   6.5 for the #28 navigation guard, 8 when the artifact became the
+   single classic file the browser run demanded (issue #35): what
+   used to ride in shared chunks (the nav guard, the codec helpers)
+   now bundles into the one file the page loads. Deliberate raises,
+   recorded in the workflow file, never creep.
 
    Page-global contract (set by the rewriter at injection time,
    issue #32): window.__ZL = { site: "<opaque token>" } - a stable
