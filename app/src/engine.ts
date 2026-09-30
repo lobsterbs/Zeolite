@@ -4,7 +4,8 @@
 
    Design points:
    - init(): registers the SW on the engine origin, waits for control,
-     then pushes config (URL scheme rotation) to it.
+     then pushes config (route prefix) to it; the scheme is fixed
+     "b64u" since #32 (mirror removed; see docs/engine-adapter.md).
    - navigate(): pure function over the codec; returns the engine-local
      route for a destination.
    - setSiteRoute(): per-site interception toggle, acknowledged by the SW.
@@ -16,8 +17,10 @@ import { encodeDest, setScheme } from "./codec";
 export interface EngineConfig {
   /** Wisp endpoint; defaults to wss(s)://<engine-origin>/wisp/. */
   wispUrl?: string;
-  /** URL path scheme (codec rotation): "b64u" (default) | "mirror". */
-  pathScheme?: "b64u" | "mirror";
+  /** Route scheme. Fixed "b64u" since #32 (mirror removed); kept in
+      the config type for adapter compatibility - the SW rejects any
+      other value. */
+  pathScheme?: "b64u";
   /** Path prefix for the b64u scheme. Default "/j/". */
   pathPrefix?: string;
   /** Cookie jar profile: multiple accounts per site. Default "default". */
@@ -34,7 +37,10 @@ export class ZeoliteEngine {
   /** Register the SW, wait for control, push config. Idempotent. */
   async init(config: EngineConfig = {}): Promise<void> {
     this.config = { ...this.config, ...config };
-    setScheme(this.config.pathPrefix, this.config.pathScheme);
+    /* Scheme is fixed "b64u" since #32; only the prefix is
+       configurable (pathScheme stays in the config type for adapter
+       compatibility). */
+    setScheme(this.config.pathPrefix);
 
     const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
     await navigator.serviceWorker.ready;
@@ -48,7 +54,7 @@ export class ZeoliteEngine {
       // The host should reload once; init() will then fully succeed.
       return;
     }
-    await this.post({ type: "zl:config", prefix: this.config.pathPrefix, scheme: this.config.pathScheme });
+    await this.post({ type: "zl:config", prefix: this.config.pathPrefix });
   }
 
   /** Engine-local route for a destination (usable as an iframe src). */

@@ -54,8 +54,10 @@ describe("routeWorkerUrl (1.6: importScripts and worker fetch)", () => {
       __ZL_PREFIX__?: string;
       __ZL_WORKER_URL__?: string;
       importScripts?: unknown;
+      fetch?: unknown;
     };
     const savedIS = G.importScripts;
+    const savedFetch = G.fetch;
     const calls: string[][] = [];
     G.importScripts = (...args: string[]) => {
       calls.push(args);
@@ -78,7 +80,11 @@ describe("routeWorkerUrl (1.6: importScripts and worker fetch)", () => {
       expect((globalThis as { importScripts: unknown }).importScripts).toBe(wrapped);
     } finally {
       delete G.__ZL_PREFIX__;
-      if (savedIS === undefined) delete G.importScripts; else G.importScripts = savedIS;
+      if (savedIS === undefined) delete G.importScripts;
+      else G.importScripts = savedIS;
+      /* the prelude also wraps fetch: restore the process default; the
+         module-level `installed` flag keeps later installs inert. */
+      if (savedFetch !== undefined) G.fetch = savedFetch;
       setScheme("/j/");
     }
   });

@@ -63,38 +63,38 @@ describe("senderVirtualOrigin (bug-scout: control-message sender verification)",
   const ENGINE = "https://engine.host";
 
   it("recovers the sender's virtual origin from its client route", () => {
-    setScheme("/zl/", "b64u");
+    setScheme("/zl/");
     const route = "https://engine.host" + encodeDest("https://example.com/page");
     expect(senderVirtualOrigin(route, ENGINE)).toBe("https://example.com");
   });
 
   it("ignores the query tail of a client route", () => {
-    setScheme("/zl/", "b64u");
+    setScheme("/zl/");
     const route = "https://engine.host" + encodeDest("https://example.com/page") + "?x=1";
     expect(senderVirtualOrigin(route, ENGINE)).toBe("https://example.com");
   });
 
   it("fails closed without a client URL", () => {
-    setScheme("/zl/", "b64u");
+    setScheme("/zl/");
     expect(senderVirtualOrigin(undefined, ENGINE)).toBeNull();
     expect(senderVirtualOrigin(null, ENGINE)).toBeNull();
     expect(senderVirtualOrigin("", ENGINE)).toBeNull();
   });
 
   it("fails closed for a client outside the engine routes", () => {
-    setScheme("/zl/", "b64u");
+    setScheme("/zl/");
     expect(senderVirtualOrigin("https://engine.host/", ENGINE)).toBeNull();
     expect(senderVirtualOrigin("https://engine.host/devtools.html", ENGINE)).toBeNull();
   });
 
   it("fails closed for a foreign-origin sender", () => {
-    setScheme("/zl/", "b64u");
+    setScheme("/zl/");
     const route = "https://evil.example" + encodeDest("https://example.com/page");
     expect(senderVirtualOrigin(route, ENGINE)).toBeNull();
   });
 
   it("fails closed when the route does not decode to an http(s) destination", () => {
-    setScheme("/zl/", "b64u");
+    setScheme("/zl/");
     const route = "https://engine.host" + encodeDest("data:text/plain,hi");
     expect(senderVirtualOrigin(route, ENGINE)).toBeNull();
   });

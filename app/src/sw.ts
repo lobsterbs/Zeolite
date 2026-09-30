@@ -1872,7 +1872,7 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       try {
         const u = new URL(msg.url);
         if (u.origin === self.location.origin) {
-          let home = contextOf(VCTX, e.clientId)?.targetOrigin ?? null;
+          let home = contextOf(VCTX, (e.source as { id?: string } | null)?.id)?.targetOrigin ?? null;
           if (!home) {
             const client = e.source;
             const cu = client && "url" in client ? decodePath(new URL((client as { url: string }).url, self.location.origin).pathname) : null;
