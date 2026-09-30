@@ -505,12 +505,14 @@ async function main() {
 
   await check("rewriter: HTML img + srcset + CSS url() (file + inline) resolve inside the engine", async () => {
     const { frame, rec } = await openProxied(ORIGIN_A + "/dir/page.html");
-    /* Failure forensics: the CDP recorder shows whether a stuck image
-       request ever got a response from the SW at all. */
+    /* Failure forensics. Engine routes are base64, so the old
+       url.includes("img.png") filter could never match anything and
+       the dump only ran after the asserts had already thrown. Dump
+       every engine-route request, before the asserts. */
     const dump = () => {
       const rs = rec.requests
-        .filter((r) => r.url.includes("img.png") || r.url.includes("style.css"))
-        .map((r) => ({ url: r.url.slice(-40), fromSW: r.fromSW, status: r.status, failed: r.failed }));
+        .filter((r) => r.url.includes("aHR0cDov") || r.url.includes("/wisp/"))
+        .map((r) => ({ url: r.url.slice(-36), fromSW: r.fromSW, status: r.status, failed: r.failed }));
       console.log("  [assets-rec] " + JSON.stringify(rs));
     };
     let out;
@@ -535,19 +537,34 @@ async function main() {
       const ssSrc = document.getElementById("ss")?.currentSrc ?? "";
       const bg = getComputedStyle(document.getElementById("cssbg")).backgroundImage;
       const inl = getComputedStyle(document.getElementById("inlbg")).backgroundImage;
-      return JSON.stringify({ st, img1, ss, ssSrc, bg, inl });
+      /* Resource Timing sees through the SW: responseStatus and body
+         sizes classify a 404 passthrough vs a broken replay vs a good
+         hit. Engine routes all start with the base64 of "http://". */
+      const rt = performance.getEntriesByType("resource")
+        .filter((e) => e.name.includes("aHR0cDov"))
+        .map((e) => ({ n: e.name.slice(-24), s: e.responseStatus, t: e.transferSize, eb: e.encodedBodySize, db: e.decodedBodySize, ms: Math.round(e.duration) }));
+      /* A refetch of the already-loaded route from the controlled page
+         tells whether the SW answers a repeat request with real bytes. */
+      const src1 = document.getElementById("img1")?.currentSrc ?? "";
+      const probe = await Promise.race([
+        fetch(src1)
+          .then(async (r) => [r.status, r.headers.get("content-type"), (await r.arrayBuffer()).byteLength])
+          .catch((e) => ["ERR", String(e).slice(0, 90)]),
+        new Promise((r) => setTimeout(() => r(["HUNG"]), 8000)),
+      ]);
+      return JSON.stringify({ st, img1, ss, ssSrc, bg, inl, rt, probe, ctrl: !!navigator.serviceWorker?.controller });
     }`);
     } catch (e) {
       dump();
       throw e;
     }
     const o = JSON.parse(out);
+    if (o.img1 <= 0 || o.ss <= 0) dump();
     assert(o.img1 > 0, "src img did not decode: " + out);
     assert(o.ss > 0, "srcset img did not decode: " + out);
     for (const k of ["bg", "inl"]) {
       assert(!String(o[k]).includes("7101"), k + " leaks the fixture origin: " + o[k]);
     }
-    if (o.img1 <= 0 || o.ss <= 0) dump();
     return "img " + o.img1 + "px, bg " + o.bg.slice(0, 40);
   });
 
@@ -601,13 +618,15 @@ async function main() {
           .catch((e) => ["FETCH-ERR", String(e)]),
         new Promise((r) => setTimeout(() => r(["FETCH-HUNG"]), 8000)),
       ]);
-      return JSON.stringify({ w: img.naturalWidth, complete: img.complete, src: img.src, probe });
+      return JSON.stringify({ w: img.naturalWidth, complete: img.complete, src: img.src, probe, ctrl: !!navigator.serviceWorker?.controller });
     }`, 25000);
     const o = JSON.parse(out);
     if (o.w <= 0) {
+      /* Engine routes are base64: filter on the base64 of "http://"
+         instead of the target filename, which never appears. */
       const rs = rec.requests
-        .filter((r) => r.url.includes("img.png"))
-        .map((r) => ({ url: r.url.slice(-40), fromSW: r.fromSW, status: r.status, failed: r.failed }));
+        .filter((r) => r.url.includes("aHR0cDov") || r.url.includes("/wisp/"))
+        .map((r) => ({ url: r.url.slice(-36), fromSW: r.fromSW, status: r.status, failed: r.failed }));
       console.log("  [srcdoc-rec] " + JSON.stringify(rs));
     }
     assert(o.w > 0, "srcdoc image did not decode (srcdoc not rewritten?): " + out);

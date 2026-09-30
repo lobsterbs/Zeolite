@@ -219,10 +219,13 @@ export function applyIsolation(
       | (new (name: string) => RealChannel)
       | undefined;
     if (typeof BC === "function") {
+      /* Narrowing does not survive into the hoisted ScopedChannel body;
+         pin the non-optional type once. */
+      const BCtor: new (name: string) => RealChannel = BC;
       function ScopedChannel(this: unknown, name: string): RealChannel & {
         name: string;
       } {
-        const real = new BC(P + name);
+        const real = new BCtor(P + name);
         return {
           name,
           get onmessage() {

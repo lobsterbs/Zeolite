@@ -180,7 +180,9 @@ describe("#37 isolation", () => {
     isolate(a.w, "zl:aaa:");
     isolate(b.w, "zl:bbb:");
     const Ctor = (x: Record<string, unknown>) =>
-      x.BroadcastChannel as unknown as new (n: string) => { name: string };
+      x.BroadcastChannel as unknown as new (
+        n: string,
+      ) => { name: string; postMessage(m: unknown): void };
     const ca = new (Ctor(a.w))("chan");
     const cb = new (Ctor(b.w))("chan");
     expect(ca.name).toBe("chan");
