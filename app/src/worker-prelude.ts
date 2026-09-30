@@ -163,6 +163,14 @@ if ((typeof G.postMessage === "function" || SHARED) && typeof G.WebSocket === "f
         });
       } else if (m?.ev === "error") {
         disp(new Event("error"));
+        /* A terminal error carries the close code: the page relay's
+           fail-close when no service worker controls the page. The
+           engine bridge sends error and close as separate events,
+           so its errors carry no code and behave as before. */
+        if (m.code) {
+          wsState = 3;
+          disp(new CloseEvent("close", { code: m.code, wasClean: m.clean !== false }));
+        }
       } else if (m?.ev === "close") {
         wsState = 3;
         disp(new CloseEvent("close", { code: m.code ?? 1005, wasClean: m.clean !== false }));
@@ -189,7 +197,7 @@ if ((typeof G.postMessage === "function" || SHARED) && typeof G.WebSocket === "f
 
     Object.defineProperties(es, {
       readyState: { get: () => wsState },
-      url: { value: url },
+      url: { value: u.href },
       protocol: { get: () => proto },
       binaryType: {
         get: () => binType,

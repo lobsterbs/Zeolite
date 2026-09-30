@@ -36,16 +36,15 @@ function fnv1a(s: string): string {
 
 /* The page origin ("" when unparseable): the storage prefix derives
  from it and the cookie / serviceWorker shims share it. */
-const ORIGIN = (() => {
- try {
- return new URL(ZL.dest).origin;
- } catch {
- return "";
- }
-})();
+/* "" when the destination is unparseable: the storage prefix falls
+ back to "unknown" and the cookie / serviceWorker shims stay native. */
+let ORIGIN = "";
+try {
+ ORIGIN = new URL(ZL.dest).origin;
+} catch {}
 const SITE = "zl:" + fnv1a(ORIGIN || "unknown");
 const P = SITE + ":";
-const pre = (n: unknown) => P + String(n);
+const pre = (n: string) => P + n;
 
 /* One scanner for clear/key/length: keeps the scoped Storage cheap
  and the minified bootstrap inside its CI size budget. */
@@ -97,12 +96,12 @@ function siteKeys(store: Storage): string[] {
     consistent inside the site scope; it is absent when the host
     factory does not provide it, rather than faked. */
  const shim: Record<string, unknown> = {
- open: (n: unknown, v?: number) => OPEN(pre(n), v),
- deleteDatabase: (n: unknown) => DEL(pre(n)),
+ open: (n: string, v?: number) => OPEN(pre(n), v),
+ deleteDatabase: (n: string) => DEL(pre(n)),
  };
  if (typeof IDB.cmp === "function") {
  const CMP = IDB.cmp.bind(IDB);
- shim.cmp = (a: unknown, b: unknown) => CMP(pre(a), pre(b));
+ shim.cmp = (a: string, b: string) => CMP(pre(a), pre(b));
  }
  try {
  (w as Record<string, unknown>).indexedDB = shim;
@@ -119,10 +118,10 @@ function siteKeys(store: Storage): string[] {
  const KEYS = CA.keys.bind(CA);
  const own = (n: string) => n.startsWith(P);
  const shim: Record<string, unknown> = {
- open: (n: unknown) => OPEN(pre(n)),
- delete: (n: unknown) => DEL(pre(n)),
- has: (n: unknown) => HAS(pre(n)),
- keys: () => KEYS().then((ks) => ks.filter(own).map((n) => n.slice(SITE.length + 1))),
+ open: (n: string) => OPEN(pre(n)),
+ delete: (n: string) => DEL(pre(n)),
+ has: (n: string) => HAS(pre(n)),
+ keys: () => KEYS().then((ks) => ks.filter(own).map((n) => n.slice(P.length))),
  match: async (rq: Request | string, o?: CacheQueryOptions) => {
  for (const n of await KEYS()) {
  if (!own(n)) continue;
@@ -160,7 +159,7 @@ function siteKeys(store: Storage): string[] {
  const d = ev.data as { cookie?: string };
  if (typeof d.cookie === "string") cur = d.cookie;
  };
- ctl.postMessage({ type: "zl:docCookie", origin: ORIGIN }, [ch.port2]);
+ ctl.postMessage({ type: "zl:docCookie" }, [ch.port2]);
  const sy = (set?: string) => ch.port1.postMessage({ set });
  try {
  Object.defineProperty(document, "cookie", {
@@ -198,7 +197,20 @@ function siteKeys(store: Storage): string[] {
 
 const relay = (e: MessageEvent) => {
  const d = e.data as { zl?: string; msg?: unknown };
- if (d?.zl === "ws") (navigator as { serviceWorker?: { controller?: { postMessage: (m: unknown, p?: MessagePort[]) => void } } }).serviceWorker?.controller?.postMessage(d.msg, e.ports as unknown as MessagePort[]);
+ if (d?.zl === "ws") {
+ const ctl = (navigator as { serviceWorker?: { controller?: { postMessage: (m: unknown, p?: MessagePort[]) => void } } }).serviceWorker?.controller;
+ if (ctl) ctl.postMessage(d.msg, e.ports as unknown as MessagePort[]);
+ else {
+ /* No controller: the page shim fails closed; the relay must too, or
+ a worker-relayed socket hangs CONNECTING forever. The terminal error
+ carries the close code (the worker prelude closes on it). */
+ const p = e.ports[0];
+ if (p) {
+ p.postMessage({ ev: "error", code: 1006, clean: false });
+ p.close();
+ }
+ }
+ }
 };
 addEventListener("message", relay);
 
@@ -231,7 +243,8 @@ addEventListener("message", relay);
  const NS = (navigator as { serviceWorker?: unknown }).serviceWorker;
  if (NS && ORIGIN) {
   const LS = w.localStorage as unknown as Storage;
-  swShimApply(NS as object, { get: () => LS.getItem("swreg"), set: (v: string) => LS.setItem("swreg", v), clear: () => LS.removeItem("swreg") }, ZL.dest);
+  const K = "swreg";
+  swShimApply(NS as object, { get: () => LS.getItem(K), set: (v: string) => LS.setItem(K, v), clear: () => LS.removeItem(K) }, ZL.dest);
  }
 }
 
@@ -333,7 +346,7 @@ addEventListener("message", relay);
 
       Object.defineProperties(es, {
         readyState: { get: () => wsState },
-        url: { value: url },
+        url: { value: u.href },
         protocol: { get: () => proto },
         binaryType: {
           get: () => binType,

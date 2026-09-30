@@ -71,7 +71,7 @@ export function swShimRegister(
   scriptURL: string | URL,
   options?: { scope?: string },
 ): VirtualRegistration {
-  const rec = { scriptURL: new URL(String(scriptURL), pageUrl).href, scope: scopeFor(pageUrl, options?.scope) };
+  const rec = { scriptURL: new URL(scriptURL + "", pageUrl).href, scope: scopeFor(pageUrl, options?.scope) };
   store.set(JSON.stringify(rec));
   return registration(rec.scriptURL, rec.scope, store, false);
 }
@@ -95,7 +95,7 @@ export function swShimGet(
   /* Defense in depth: a record that scopes a foreign origin is not
      this page's registration, even if it landed in this store. */
   if (!rec.scope.startsWith(new URL(pageUrl).origin)) return undefined;
-  if (scope !== undefined && rec.scope !== scopeFor(pageUrl, scope)) return undefined;
+  if (scope != null && rec.scope !== scopeFor(pageUrl, scope)) return undefined;
   return registration(rec.scriptURL, rec.scope, store, true);
 }
 
