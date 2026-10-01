@@ -1596,7 +1596,11 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              hand the browser a target-host URL: map Location to an engine
              route so the follow stays inside the engine. The hop's
              Set-Cookie was already captured (hop loop or just above). */
-          if (resp.status >= 300 && resp.status < 400) {
+          /* Any status that carries a Location (201/202 and any a webRequest
+             listener re-added), not only surfaced 3xx: it names the target
+             host, and a fetch() consumer resolving the mapped value
+             against the engine origin gets a working engine route. */
+          if (outHeaders.has("location")) {
             const loc = outHeaders.get("location");
             if (loc) {
               try {
