@@ -93,4 +93,26 @@ describe("response-header surgery never carries the plaintext destination", () =
     mapRefreshHeader(h, "https://leaky.example.org/private/page");
     expect(h.get("refresh")).toBeNull();
   });
+
+  it("Refresh padded 'url =' variant is still mapped", () => {
+    const h = new Headers({ refresh: "5; url = https://leaky.example.org/next" });
+    mapRefreshHeader(h, "https://leaky.example.org/private/page");
+    const out = h.get("refresh")!;
+    expect(out).not.toContain("leaky.example.org");
+    expect(decodePath(out.slice(out.indexOf("url=") + 4))).toBe("https://leaky.example.org/next");
+  });
+
+  it("browser-action headers are stripped (isolation + report escape)", () => {
+    const h = new Headers({
+      "clear-site-data": '"cache", "storage", "cookies"',
+      "report-to": '{"group":"default","endpoints":[{"url":"https://leaky.example.org/report"}]}',
+      nel: '{"report_to":"default","max_age":86400}',
+      "timing-allow-origin": "https://leaky.example.org",
+    });
+    const out = stripHostile(h);
+    expect(out.has("clear-site-data")).toBe(false);
+    expect(out.has("report-to")).toBe(false);
+    expect(out.has("nel")).toBe(false);
+    expect(out.has("timing-allow-origin")).toBe(false);
+  });
 });

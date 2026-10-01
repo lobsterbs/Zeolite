@@ -39,7 +39,17 @@ app/src/__tests__/leak.test.ts):
   CSP-report-only, X-Frame-Options, HSTS, COOP/COEP/CORP,
   Permissions-Policy, Set-Cookie, Set-Cookie2 and the
   destination-bearing informational headers (Link, Content-Location,
-  X-Original-URL). The functional Refresh header is not stripped:
+  X-Original-URL), plus the browser-action headers:
+  Clear-Site-Data (honored by the browser on any response, an upstream
+  response would wipe the engine origin's own storage - the host
+  app's state and every virtual site's partition; an isolation bug,
+  not just a leak), Report-To, NEL and Reporting-Endpoints (the
+  browser would send network-error reports directly to upstream-named
+  real endpoints, a #34-class browser-direct escape), and
+  Timing-Allow-Origin (names upstream origins, nothing reads it).
+  Location is mapped to an engine route on any status that carries
+  it, not only surfaced 3xx. The functional Refresh header is not
+  stripped:
   its url=, when present, is re-encoded to an engine route against
   the response destination (mapRefreshHeader), so a delayed refresh
   stays inside the engine; a same-page refresh (no url=) passes

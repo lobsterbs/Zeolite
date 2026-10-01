@@ -33,6 +33,21 @@ export const HOSTILE = [
   "link",
   "content-location",
   "x-original-url",
+  /* clear-site-data: honored by the browser on ANY response, an
+     upstream response would wipe the engine origin's own storage -
+     the host app's state and every virtual site's partition. An
+     isolation bug, not just a leak. */
+  "clear-site-data",
+  /* NEL/Report-To/Reporting-Endpoints: the browser would send
+     network-error reports DIRECTLY to upstream-named real endpoints
+     (a #34-class browser-direct escape) with the target infra's
+     hostnames in the header, for zero proxied-page value. */
+  "report-to",
+  "nel",
+  "reporting-endpoints",
+  /* Names upstream origins allowed to read timing; nothing in the
+     engine reads it, free to strip. */
+  "timing-allow-origin",
 ];
 
 export function stripHostile(headers: Headers): Headers {
@@ -51,12 +66,17 @@ export function stripHostile(headers: Headers): Headers {
 export function mapRefreshHeader(headers: Headers, dest: string): void {
   const refresh = headers.get("refresh");
   if (!refresh) return;
-  const i = refresh.toLowerCase().indexOf("url=");
-  if (i < 0) return;
-  let v = refresh.slice(i + 4).trim();
+  /* Spec shape is `N; url=U` (case-insensitive); some servers pad the
+     '=', and a quoted U may itself contain ';', so match the first
+     url= however spaced and take the REST of the header as the value.
+     ponytail: a url= hidden inside a quoted earlier param defeats
+     this; spec-shaped headers never hit that. */
+  const m = refresh.match(/url\s*=\s*/i);
+  if (!m || m.index === undefined) return;
+  let v = refresh.slice(m.index + m[0].length).trim();
   if (v.startsWith('"')) v = v.slice(1).replace(/"$/, "");
   try {
-    headers.set("refresh", refresh.slice(0, i + 4) + encodeDest(new URL(v, dest).href));
+    headers.set("refresh", refresh.slice(0, m.index) + "url=" + encodeDest(new URL(v, dest).href));
   } catch {
     headers.delete("refresh");
   }
