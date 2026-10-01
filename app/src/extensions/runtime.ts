@@ -176,6 +176,29 @@ function makeMenusEvent(extId: ExtensionId): EventNamespace<(info: unknown, tab:
   };
 }
 
+/* #44: downloads.onChanged receives the registry state reports the
+   host sends back through zl:downloadState. */
+function makeDownloadsEvent(extId: ExtensionId): EventNamespace<(delta: unknown) => void> {
+  const offs = new Map<unknown, () => void>();
+  return {
+    addListener: (l) => {
+      if (offs.has(l)) return;
+      offs.set(l, DOWNLOADS.onChanged(extId, (delta) => {
+        try {
+          l(delta);
+        } catch {
+          /* a broken listener is the extension's own problem */
+        }
+      }));
+    },
+    removeListener: (l) => {
+      offs.get(l)?.();
+      offs.delete(l);
+    },
+    hasListener: (l) => offs.has(l),
+  };
+}
+
 export function buildApi(
   ext: ExtensionRecord,
   sender: MessageSender,
@@ -298,9 +321,16 @@ export function buildApi(
     removeAll: () => MENUS.removeAll(ext.id),
     onClicked: makeMenusEvent(ext.id),
   };
+  /* #44: search/onChanged answer from the host-report registry
+     (zl:downloadState), keyed by the zl:downloadOp handoff ids. An
+     extension sees only its own handoffs; the registry is in-memory
+     and dies with the worker. */
   const downloadsNs = {
     download: (opts: Record<string, unknown>) =>
       DOWNLOADS.download(ext, opts as unknown as { url: string; filename?: string; saveAs?: boolean }),
+    search: (query: Record<string, unknown> = {}) =>
+      Promise.resolve(DOWNLOADS.search(ext, query as { id?: number })),
+    onChanged: makeDownloadsEvent(ext.id),
   };
   /* permissions: advanced permission lifecycle. The engine has
      no user prompt, so request() auto-grants anything the manifest

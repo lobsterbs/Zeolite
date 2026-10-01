@@ -135,6 +135,25 @@ describe("browser.contextMenus / menus", () => {
       (cm.create as (p: Record<string, unknown>) => string | number)({ title: "x" }),
     ).toThrow(/permission 'contextMenus'/);
   });
+
+  it("carries nesting, type and checked state for the host listing (#45)", async () => {
+    const { rec, api } = await install("MenuNested", ["contextMenus"]);
+    const cm = api.browser.contextMenus as Record<string, unknown>;
+    const create = cm.create as (p: Record<string, unknown>) => string | number;
+    create({ id: "parent", title: "Parent" });
+    create({ id: "child", title: "Child", parentId: "parent" });
+    create({ id: "box", title: "Box", type: "checkbox", checked: true });
+    create({ id: "sep", type: "separator" });
+    expect(() => create({ id: "orphan", title: "x", parentId: "nope" })).toThrow(
+      /parentId not found/,
+    );
+    const items = MENUS.itemsFor(rec.id);
+    expect(items).toHaveLength(4);
+    expect(items[0]).toMatchObject({ id: "parent", parentId: null, type: "normal", checked: false });
+    expect(items[1]).toMatchObject({ id: "child", parentId: "parent", type: "normal" });
+    expect(items[2]).toMatchObject({ id: "box", type: "checkbox", checked: true });
+    expect(items[3]).toMatchObject({ id: "sep", type: "separator" });
+  });
 });
 
 describe("browser.downloads", () => {
@@ -160,6 +179,41 @@ describe("browser.downloads", () => {
     const has = await install("DlUrl", ["downloads"]);
     const dl2 = has.api.browser.downloads as Record<string, unknown>;
     await expect((dl2.download as (o: Record<string, unknown>) => Promise<number>)({})).rejects.toThrow(/requires a url/);
+    DOWNLOADS.setDispatch(null);
+  });
+
+  it("tracks host-reported handoff state and fires onChanged (#44)", async () => {
+    const { rec, api } = await install("DlState", ["downloads"]);
+    DOWNLOADS.setDispatch(() => undefined);
+    const dl = api.browser.downloads as Record<string, unknown>;
+    const id = await (dl.download as (o: Record<string, unknown>) => Promise<number>)({
+      url: "https://example.com/s.bin",
+      filename: "s.bin",
+    });
+    const deltas: unknown[] = [];
+    ((dl.onChanged as { addListener: (l: (d: unknown) => void) => void }).addListener)((d) =>
+      deltas.push(d),
+    );
+    /* progress reports apply while active */
+    expect(DOWNLOADS.applyState(id, "active", { received: 5, size: 10 })).toMatchObject({
+      extId: rec.id,
+      delta: { id, status: "active", received: 5 },
+    });
+    expect(DOWNLOADS.applyState(id, "bogus", {})).toBeNull();
+    expect(DOWNLOADS.applyState(id, "done", { received: 10 })).toMatchObject({
+      delta: { id, status: "done", received: 10 },
+    });
+    /* terminal is final: later reports are refused */
+    expect(DOWNLOADS.applyState(id, "error", { error: "late" })).toBeNull();
+    expect(DOWNLOADS.applyState(id + 999, "done", {})).toBeNull();
+    /* search answers with the extension's own handoffs, newest first */
+    const rows = await (dl.search as (q?: Record<string, unknown>) => Promise<unknown[]>)();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id, extId: rec.id, status: "done", received: 10, url: "https://example.com/s.bin" });
+    /* onChanged fires only when the SW notifies post-wake */
+    DOWNLOADS.notify(rec.id, { id, status: "done", received: 10 });
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0]).toMatchObject({ id, status: "done", received: 10 });
     DOWNLOADS.setDispatch(null);
   });
 });

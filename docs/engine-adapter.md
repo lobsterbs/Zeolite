@@ -75,6 +75,8 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 | `zl:jarProfile` | `profile` (or null) | switch the cookie jar to a throwaway session profile (incognito; cookies.ts) |
 | `zl:getJars` | - | enumerate jar profiles with per-origin cookie records (#41; host-only: proxied-page senders are refused) |
 | `zl:clearJar` | `profile`, `origin` | clear the active or named jar profile, or one origin inside it (#41; host-only) |
+| `zl:listMenus` | `extId?` | list registered context-menu items of enabled extensions (id, title, contexts, parentId, type, checked) so the host can render its menu surface (#45) |
+| `zl:downloadState` | `id`, `status` (`active`/`done`/`error`/`cancelled`), `received?`, `size?`, `error?` | host reports a `zl:downloadOp` handoff's state back; updates the extension downloads registry and fires `downloads.onChanged` for the owning extension after waking its background (#44) |
 | `zl:siteRoute` | `site`, `enabled` | per-site interception toggle (403 when disabled) |
 | `zl:teardown` | - | drop all SW caches, `unregister()` |
 | `zl:find` | `dest`, `cmd` (`find`/`next`/`prev`/`clear`), `pattern`, `options` (`caseSensitive`, `wholeWord`, `wrap`) | in-page find in the addressed proxied document (#29): the page-side finder replies `{ ok, matches, ordinal (1-based), highlight }`; open shadow roots searched, CSS Custom Highlight API where available (`highlight: "none"` = counts only). Addressing is controller-side: `dest` selects the client SW-side and the findLoad message posted to the page carries no destination (#32) |

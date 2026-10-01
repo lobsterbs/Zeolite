@@ -58,6 +58,14 @@
                                               jar profile, or one origin
                                               inside it
 
+    Issue #44/#45 control plane:
+      { type: "zl:downloadState", id, status }  host reports a
+                                              zl:downloadOp handoff's
+                                              state back (registry +
+                                              downloads.onChanged)
+      { type: "zl:listMenus", extId? }      host lists registered
+                                              context-menu items
+
     Bug-scout gate (#41): proxied pages are SW clients too, so control
     messages are host-only now - a proxied document may still send its
     own page-facing messages (zl:docCookie, zl:wsOpen, zl:ext, zl:ping),
@@ -1835,6 +1843,7 @@ interface ControlMessage {
     | "zl:ext"
     | "zl:tabs"
     | "zl:menuClick"
+    | "zl:listMenus"
     | "zl:listExt"
     | "zl:getDiag"
     | "zl:installExt"
@@ -1848,6 +1857,7 @@ interface ControlMessage {
     | "zl:docCookie"
     | "zl:downloads"
     | "zl:cancelDownload"
+    | "zl:downloadState"
     | "zl:exportSession"
     | "zl:importSession"
     | "zl:sameSite"
@@ -2345,6 +2355,27 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       reply({ ok: DL.cancel(id) });
       break;
     }
+    case "zl:downloadState": {
+      /* #44: the UI host reports a zl:downloadOp handoff's progress
+         or outcome (normally fire-and-forget, no reply port; a port
+         gets the acknowledgement). Terminal states are final: later
+         reports for the same id are refused. Delivery wakes the
+         owning extension's background first, same as menu clicks. */
+      const ds = msg as { id?: unknown; status?: unknown; received?: unknown; size?: unknown; error?: unknown };
+      const applied =
+        typeof ds.id === "number" && typeof ds.status === "string"
+          ? DOWNLOADS.applyState(ds.id, ds.status, ds)
+          : null;
+      if (!applied) {
+        reply({ ok: false, error: "unknown or finished download id" });
+        break;
+      }
+      e.waitUntil(
+        wakeExtension(applied.extId).then(() => DOWNLOADS.notify(applied.extId, applied.delta)),
+      );
+      reply({ ok: true });
+      break;
+    }
     case "zl:exportSession": {
       /* 1.7 Sulfide: encrypted session export (cookies + tabs +
          caller extras). The passphrase only ever lives in this
@@ -2619,6 +2650,19 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
         }),
       );
       reply({ ok: true });
+      break;
+    }
+    case "zl:listMenus": {
+      /* #45: the host lists registered context-menu items so it can
+         render a real menu surface. Enabled extensions only; an
+         explicit extId must resolve to an enabled extension. */
+      const rec = msg.extId ? extensions.get(msg.extId) : null;
+      if (msg.extId && (!rec || !rec.enabled)) {
+        reply({ ok: false, error: "no such enabled extension" });
+        break;
+      }
+      const recs = rec ? [rec] : extensions.list().filter((r) => r.enabled);
+      reply({ ok: true, menus: recs.flatMap((r) => MENUS.itemsFor(r.id)) });
       break;
     }
     default:

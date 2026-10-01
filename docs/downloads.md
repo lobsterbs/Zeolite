@@ -41,6 +41,24 @@ an entry that was active when the worker died is honestly marked
 restart. Entry ids stay unique across restarts (the sequence restarts
 past every restored id).
 
+## Extension handoff downloads (#44)
+
+`downloads.download()` inside an extension broadcasts `zl:downloadOp`
+(`{ op: "download", id, extId, url, filename?, saveAs? }`) to the UI
+windows; the host owns the save. The host reports back with
+`zl:downloadState` (`{ id, status, received?, size?, error? }`,
+fire-and-forget, no reply port): the extension downloads registry
+updates and the owning extension's `downloads.onChanged` fires, after
+an idle MV3 background is woken. `downloads.search` answers from the
+same registry; an extension sees only its own handoffs, and terminal
+states are final - later reports for the same id are refused.
+
+Honest limits: these ids are the numeric handoff ids from
+`zl:downloadOp`, a separate namespace from the `dl<N>` attachment
+registry above; a handoff the host never reports stays `active`; and
+the registry is in-memory, so a service-worker restart drops it (the
+same honest-restart rule as `zl:adblock`).
+
 ## Honest limits
 
 - Only `Content-Disposition: attachment` responses are classified as

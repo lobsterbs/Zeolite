@@ -3,9 +3,10 @@
    The registry is real: extensions register items, and clicks
    arrive from the UI host through the zl:menuClick control message,
    which resolves the page's tab through the tabs bridge before
-   delivery. The visible menu surface ships with the LobsterBrowse
-   integration; until then items register but no menu renders, and
-   the compat matrix says exactly that. */
+   delivery. The host lists the registry through zl:listMenus (#45)
+   so it can render the real surface. The visible menu UI ships with
+   the LobsterBrowse integration; until then items register but no
+   menu renders, and the compat matrix says exactly that. */
 
 import type { ExtensionId, ExtensionRecord } from "./types";
 
@@ -15,6 +16,12 @@ export interface MenuItem {
   title: string;
   contexts: string[];
   enabled: boolean;
+  /** #45: nesting parent within the same extension, or null. */
+  parentId: string | null;
+  /** "normal" | "checkbox" | "radio" | "separator". */
+  type: string;
+  /** Checkbox/radio initial state; false for normal/separator. */
+  checked: boolean;
 }
 
 export interface MenuClickInfo {
@@ -43,8 +50,28 @@ export class ContextMenusHost {
       list = [];
       this.items.set(ext.id, list);
     }
+    /* #45: parentId/type/checked round-trip through the registry so
+       the host listing (zl:listMenus) can render the real shape. The
+       parent must already exist in this extension's own items. */
+    const parentId = props.parentId == null ? null : String(props.parentId);
+    if (parentId !== null && !list.some((x) => x.id === parentId)) {
+      throw new Error("zeolite: menus.create parentId not found for this extension");
+    }
+    const type =
+      props.type === "checkbox" || props.type === "radio" || props.type === "separator"
+        ? props.type
+        : "normal";
     if (list.length >= MAX_ITEMS) throw new Error("zeolite: too many menu items");
-    list.push({ extId: ext.id, id: String(id), title, contexts, enabled: true });
+    list.push({
+      extId: ext.id,
+      id: String(id),
+      title,
+      contexts,
+      enabled: true,
+      parentId,
+      type,
+      checked: type === "checkbox" || type === "radio" ? props.checked === true : false,
+    });
     return id;
   }
 
