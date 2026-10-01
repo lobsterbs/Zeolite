@@ -2034,14 +2034,23 @@ function pushDocCookieView(clientId: string): void {
 
 /* #41: jar control is host-only. Proxied pages are SW clients too,
    and zl:getJars must never hand one target site every other site's
-   cookies: the sender must be an engine page (adapter, devtools,
-   extension pages), not a proxied route or nav marker. */
+   cookies: the sender must be a host page (adapter, devtools), not a
+   proxied route or nav marker. #48: extension-origin pages are
+   extension code, not host pages, so they are untrusted here too. */
 function senderIsProxiedPage(e: ExtendableMessageEvent): boolean {
   const src = e.source as Client | null;
   if (!src || !src.url) return true;
   try {
     const su = new URL(src.url, self.location.origin);
-    return isEnginePath(su.pathname) || su.pathname.startsWith(NAV);
+    /* #48: /zl-ext/ and /zl-cs/ host extension code, never host
+       pages - untrusted for the control plane exactly like proxied
+       routes. */
+    return (
+      isEnginePath(su.pathname) ||
+      su.pathname.startsWith(NAV) ||
+      su.pathname.startsWith(EXT_ROUTE) ||
+      su.pathname.startsWith(CS_ROUTE)
+    );
   } catch {
     return true;
   }
@@ -2063,10 +2072,22 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
 
   /* Bug-scout (#41): a proxied page must not drive the control plane
      (read the net log, flip the jar, tear the engine down). Page-facing
-     messages only; everything else needs an engine-page sender. */
+     messages only; everything else needs a host sender. #48:
+     extension-origin pages are extension code, not host pages - the
+     sole exception is zl:extPage, and only from the client registered
+     as that exact extension's page (the case re-checks it). */
   if (senderIsProxiedPage(e) && !PAGE_MESSAGES.has(String(msg?.type))) {
-    reply({ ok: false, error: "host-only control message" });
-    return;
+    const src = e.source as Client | null;
+    const srcId = src && src.url ? src.id : "";
+    const isExtPageCall =
+      msg?.type === "zl:extPage" &&
+      typeof msg?.extId === "string" &&
+      srcId !== "" &&
+      pageClientOf(srcId) === msg.extId;
+    if (!isExtPageCall) {
+      reply({ ok: false, error: "host-only control message" });
+      return;
+    }
   }
 
   switch (msg?.type) {
