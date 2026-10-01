@@ -18,8 +18,10 @@ jobs:
             e2e) p="suite/e2e/e2e.mjs" ;;
           esac
           curl -fsSL "https://raw.githubusercontent.com/lobsterbs/Zeolite/9ec7518a5a04141e472956172cd341e7b8a5e796/$p" -o blob
+          echo "ZLGITHASH-$(git hash-object blob)"
           split -b 8000 -d -a 2 blob part
           c=$(printf 'part%02d' ${{ matrix.n }})
+          echo "ZLCHUNKHASH-${{ matrix.f }}-${{ matrix.n }}-$(sha1sum "$c" 2>/dev/null | cut -d' ' -f1 || echo EMPTY)"
           echo "ZLFILE-${{ matrix.f }}-${{ matrix.n }}-BEGIN"
           if [ -f "$c" ]; then base64 -w 0 "$c"; else echo ZLEMPTY; fi
           echo
