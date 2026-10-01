@@ -223,14 +223,15 @@ function makeNavEnv() {
     },
     location: {},
     document: {
-      createElement() {
+      createElement(tag: string) {
+        if (tag === "input") return { type: "", name: "", value: "" };
         return {
           style: {} as Record<string, string>,
           method: "",
           action: "",
           _entries: [] as unknown[][],
-          append(k: unknown, v: unknown) {
-            this._entries.push([k, v]);
+          appendChild(i: { name: string; value: string }) {
+            this._entries.push([i.name, i.value]);
           },
           submit() {
             submitted.push({ action: this.action, method: this.method, entries: this._entries.slice() });
@@ -299,7 +300,7 @@ describe("navigation api guard (#39)", () => {
     e.fire({
       cancelable: true,
       destination: { url: "https://real.site/login", sameDocument: false },
-      formData: { entries: () => [["user", "u1"], ["pw", "p1"]] },
+      formData: { entries: () => [["user", "u1"], ["pw", "p1"], ["file", { name: "f.bin" }]] },
       preventDefault() {
         prevented = true;
       },
@@ -311,6 +312,7 @@ describe("navigation api guard (#39)", () => {
     expect(e.submitted[0].entries).toEqual([
       ["user", "u1"],
       ["pw", "p1"],
+      ["file", "f.bin"],
     ]);
     expect(e.navigated).toEqual([]);
   });

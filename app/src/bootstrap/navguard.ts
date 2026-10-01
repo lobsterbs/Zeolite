@@ -181,7 +181,18 @@ export function applyNavGuard(
           f.method = "POST";
           f.action = marker;
           f.style.display = "none";
-          for (const [k, v] of (ev.formData as FormData).entries()) f.append(k, v);
+          /* HTMLFormElement has no field-append: the previous
+             f.append(k, v) resolved to Element.append, which injects
+             text nodes instead of entries (CI tsc caught it, TS2345).
+             Hidden inputs carry the urlencoded entries; File values
+             degrade to their name, as the header comment admits. */
+          for (const [k, v] of (ev.formData as FormData).entries()) {
+            const i = (w.document as Document).createElement("input") as HTMLInputElement;
+            i.type = "hidden";
+            i.name = k;
+            i.value = typeof v === "string" ? v : v.name;
+            f.appendChild(i);
+          }
           (w.document as Document).body.appendChild(f);
           f.submit();
           f.remove();
