@@ -156,4 +156,26 @@ describe("browser.cookies (#42)", () => {
     expect(rest.filter((c) => (c as { name: string }).name === "zl_rm")).toHaveLength(0);
     expect(await rm({ url: "https://example.com/", name: "zl_rm" })).toBeNull();
   });
+
+  it("removes a domain cookie stored under a sibling origin's jar (#49)", async () => {
+    const { api } = await install("CookieRmX", ["cookies"], [
+      "https://a.example.com/*",
+      "https://b.example.com/*",
+    ]);
+    /* a.example.com's response stored the Domain cookie in ITS jar entry */
+    documentCookieWrite("https://a.example.com/", "zl_xdom=a; Domain=example.com; Path=/");
+    const ck = api.browser.cookies as Record<string, unknown>;
+    const get = ck.get as (d: Record<string, unknown>) => Promise<unknown>;
+    const rm = ck.remove as (d: Record<string, unknown>) => Promise<unknown>;
+    /* the sibling url reads it across jar entries */
+    expect(await get({ url: "https://b.example.com/", name: "zl_xdom" })).toMatchObject({
+      name: "zl_xdom",
+    });
+    /* and the removal from the sibling url actually deletes it */
+    const done = await rm({ url: "https://b.example.com/", name: "zl_xdom" });
+    expect(done).toEqual({ url: "https://b.example.com/", name: "zl_xdom" });
+    expect(await get({ url: "https://b.example.com/", name: "zl_xdom" })).toBeNull();
+    expect(await get({ url: "https://a.example.com/", name: "zl_xdom" })).toBeNull();
+    expect(await rm({ url: "https://a.example.com/", name: "zl_xdom" })).toBeNull();
+  });
 });

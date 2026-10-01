@@ -7,14 +7,17 @@
    URL. Writes go through the same admission seam as document.cookie
    (documentCookieWrite), so the isolation/domain/SameSite gates are
    enforced once, centrally - and HttpOnly stays unmintable from
-   script, documented honestly in compat.ts. Reads see the ACTIVE
+   script, documented honestly in compat.ts. Removes (#49) delete the
+   matched identities from the jar entries that actually hold them: a
+   Domain cookie may live in a sibling origin's entry, which admission
+   keyed by the API url's origin can never reach. Reads see the ACTIVE
    jar profile (the one proxied pages see); id-only jar records
    (origin string unknown) cannot be permission-checked, so they stay
    invisible to extensions. */
 
 import type { ExtensionRecord } from "./types";
 import { hostPatternsMatch } from "./permissions";
-import { documentCookieWrite, jarEnumeration } from "../cookies";
+import { documentCookieWrite, jarEnumeration, jarRemoveIdentities } from "../cookies";
 import type { Cookie } from "../cookies";
 
 interface UrlFacts {
@@ -228,11 +231,13 @@ export function cookiesRemove(
     }
   }
   if (!targets.size) return Promise.resolve(null);
-  for (const t of targets) {
+  /* #49: the identity may live in a sibling origin's jar entry (a
+     Domain cookie set by a.example.com applies to b.example.com), so
+     the removal targets the entries that hold it, not the API url's
+     origin - admission keyed by the API url can never reach them. */
+  const ids = [...targets].map((t) => {
     const [domain, hostOnly, cpath] = t.split("|");
-    const parts = [name + "=; Expires=Thu, 01 Jan 1970 00:00:00 GMT", "Path=" + cpath];
-    if (hostOnly === "0") parts.push("Domain=" + domain);
-    documentCookieWrite(String(details.url), parts.join("; "));
-  }
-  return Promise.resolve({ url: String(details.url), name });
+    return { name, domain, hostOnly: hostOnly === "1", path: cpath };
+  });
+  return Promise.resolve(jarRemoveIdentities(ids) > 0 ? { url: String(details.url), name } : null);
 }

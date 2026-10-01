@@ -483,6 +483,38 @@ export function documentCookieWrite(pageUrl: string, cookie: string): SetCookieR
   return admitCookie(pageUrl, cookie.replace(/;\s*httponly\b/gi, ""));
 }
 
+/** #49 (browser.cookies.remove): delete cookie identities from every
+    jar entry of the ACTIVE profile, wherever they actually live. The
+    extension bridge has already proven each identity applies to the
+    API url (permission gate + RFC 6265 matching); a Domain cookie may
+    be stored under a sibling origin's jar entry, which admission
+    keyed by the API url's own origin can never reach. Returns how
+    many cookies were removed. */
+export function jarRemoveIdentities(
+  ids: Array<{ name: string; domain: string; hostOnly: boolean; path: string }>,
+): number {
+  const sameIdentity = (c: Cookie) =>
+    ids.some(
+      (i) => i.name === c.name && i.domain === c.domain && i.hostOnly === c.hostOnly && i.path === c.path,
+    );
+  let removed = 0;
+  for (const [key, list] of jars) {
+    if (!inProfile(key)) continue;
+    const keep = list.filter((c) => !sameIdentity(c));
+    if (keep.length === list.length) continue;
+    removed += list.length - keep.length;
+    if (keep.length) jars.set(key, keep);
+    else jars.delete(key);
+  }
+  if (removed > 0) {
+    schedulePersist();
+    for (const i of ids) {
+      traceDecision({ subsystem: "cookies", original: "browser.cookies.remove", result: "api-removed " + i.name });
+    }
+  }
+  return removed;
+}
+
 /** Jar contents per virtual-origin id, for tests and inspection. The
     view is the active profile only, keyed by the bare origin id (the
     session-export format is unchanged by profiles). */
