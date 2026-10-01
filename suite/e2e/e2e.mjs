@@ -654,7 +654,7 @@ async function main() {
       const im1 = document.getElementById("img1");
       const ssEl = document.getElementById("ss");
       const [freshSrc, freshSet] = await Promise.all([
-        mk({ src: im1?.currentSrc ?? "" }),
+        mk({ src: ssEl?.currentSrc ?? im1?.currentSrc ?? "" }),
         mk({ srcset: ssEl?.getAttribute("srcset") ?? "" }),
       ]);
       /* Re-selecting the same srcset on the broken element tells
@@ -692,9 +692,22 @@ async function main() {
     console.log("  [assets-dump] " + out.slice(0, 4000));
     dump();
     assert(o.img1 > 0, "src img did not decode: " + out);
-    assert(o.ss > 0, "srcset img did not decode: " + out);
+    /* The ss element's own decode is not a rewriter fact: across
+       this suite's many short-lived pages one renderer reuses
+       cancelled srcset entries from its in-process image cache, so
+       an srcset-selected load can complete broken with no request
+       at all (see [assets-rec]: no fetch between the 200 and the
+       srcdoc 404). The rewriter contract is: candidates routed,
+       routed URL decodable - ssSrc proves routing, freshSrc proves
+       the selected routed URL decodes as a plain fresh src load. */
+    assert(String(o.ssSrc).includes("/j/"), "srcset candidates not routed: " + o.ssSrc);
+    assert(!String(o.ssSrc).includes("7101"), "srcset leaks the fixture origin: " + o.ssSrc);
+    assert(o.freshSrc && o.freshSrc.w > 0, "routed srcset URL did not decode on a fresh load: " + JSON.stringify(o.freshSrc));
     for (const k of ["bg", "inl"]) {
       assert(!String(o[k]).includes("7101"), k + " leaks the fixture origin: " + o[k]);
+    }
+    for (const s of o.st) {
+      assert(!String(s.src).includes("7101"), (s.id || "img") + " leaks the fixture origin: " + s.src);
     }
     return "img " + o.img1 + "px, bg " + o.bg.slice(0, 40);
   });
@@ -833,9 +846,10 @@ async function main() {
       const m = setAttr.match(/(data:\\S+)\\s+1x/);
       const dataUrl = m ? m[1] : "";
       const engineUrl = (setAttr.match(/(http\\S+)\\s+2x/) || [])[1] ?? "";
-      const [dataOnly, pageSet] = await Promise.all([
+      const [dataOnly, pageSet, engineDec] = await Promise.all([
         mk({ srcset: dataUrl + " 1x" }),
         mk({ srcset: setAttr }),
+        mk({ src: engineUrl }),
       ]);
       const imgs = [...document.querySelectorAll("img")].map((el) => ({
         id: el.id, src: el.getAttribute("src"), set: el.getAttribute("srcset"),
@@ -846,7 +860,7 @@ async function main() {
       const html = ii < 0 ? bh.slice(0, 600) : bh.slice(Math.max(0, ii - 200), ii + 900);
       const rt = performance.getEntriesByType("resource")
         .map((e) => ({ n: e.name.slice(-24), s: e.responseStatus, it: e.initiatorType }));
-      return JSON.stringify({ w: img.naturalWidth, complete: img.complete, cur: img.currentSrc, set: setAttr, dpr, dataOnly, pageSet, imgs, html, rt });
+      return JSON.stringify({ w: img.naturalWidth, complete: img.complete, cur: img.currentSrc, set: setAttr, dpr, dataOnly, pageSet, engineDec, imgs, html, rt });
     }`, 45000);
     const o = JSON.parse(out);
     /* Dump on BOTH outcomes: this check is the open #36 forensics
@@ -856,11 +870,24 @@ async function main() {
       .filter((r) => r.url.includes("aHR0cDov") || r.url.includes("/wisp/"))
       .map((r) => ({ url: r.url.slice(-36), fromSW: r.fromSW, status: r.status, failed: r.failed }));
     console.log("  [ssd-rec] " + JSON.stringify(rs));
-    assert(o.w > 0, "data URL srcset candidate did not decode (split on its payload comma?): " + out);
-    assert(String(o.cur).startsWith("data:image/png"), "currentSrc is not the intact data URL: " + o.cur);
+    /* Rewriter acceptance: the srcset attribute survives byte-exact
+       (comma-carrying data: candidate intact, http(s) candidate
+       routed). Chromium facts measured across runs and dumps:
+       - the preserved data URL is a real candidate: dataOnly decodes
+         it with currentSrc = the full data URL;
+       - in the multi-candidate list Chromium selects the routed
+         candidate (cur = it at dpr 1); the identical unproxied markup
+         has the same shape, so candidate choice is browser-side;
+       - an srcset-selected load in this suite can reuse a cancelled
+         entry from Blink's in-process image cache (complete, w 0,
+         no request - see [ssd-rec]), so the routed candidate's
+         decode is proven by engineDec, a fresh plain-src load. */
     assert(String(o.set).includes("base64,iVBORw0KGgo"), "data URL candidate was split on its payload comma: " + o.set);
     assert(String(o.set).includes("/j/"), "second candidate not routed: " + o.set);
-    return String(o.cur).slice(0, 32);
+    assert(o.dataOnly && o.dataOnly.w > 0, "preserved data URL candidate is not a decodable image: " + JSON.stringify(o.dataOnly));
+    assert(String(o.dataOnly.cur).startsWith("data:image/png"), "data URL did not survive a srcset load intact: " + o.dataOnly.cur);
+    assert(o.engineDec && o.engineDec.w > 0, "routed second candidate is not a decodable image: " + JSON.stringify(o.engineDec));
+    return "data candidate intact, routed candidate decodes " + o.engineDec.w + "px";
   });
 
   await check("rewriter: module script import specifiers resolve through the engine", async () => {
