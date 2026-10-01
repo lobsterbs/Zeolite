@@ -122,7 +122,7 @@ describe("extension pages (#40)", () => {
   it("serves __page.js with the call list embedded", async () => {
     const rec = await pageExt();
     const js = reqUrl("https://sw.example" + EXT_ROUTE + rec.id + "/__page.js");
-    const res = await serveExtensionAsset(js.req, js.url, {});
+    const res = await serveExtensionAsset(js.req, js.url, { nav: false });
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("zl:extPage");
@@ -190,6 +190,6 @@ describe("extension pages (#40)", () => {
     expect(r.ok).toBe(true);
     expect(r.response).toBe("pong");
     expect(seen).not.toBeNull();
-    expect((seen as { sender: { context: string } }).sender.context).toBe("extension-page");
+    expect((seen as unknown as { sender: { context: string } }).sender.context).toBe("extension-page");
   });
 });
