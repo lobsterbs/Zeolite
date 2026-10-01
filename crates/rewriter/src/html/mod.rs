@@ -1833,7 +1833,11 @@ mod tests {
         );
         assert!(out.contains("if (self != self)"), "folded guard: {}", out);
         assert!(!out.contains("top.location"), "navigation sunk: {}", out);
-        assert!(out.contains("self.zl_antiframe"), "sunk to antiframe prop: {}", out);
+        assert!(
+            out.contains("self.zl_antiframe"),
+            "sunk to antiframe prop: {}",
+            out
+        );
         let enc = |u: &str| {
             let abs = resolve(u, base);
             cfg().encode_url(&abs)
@@ -1843,7 +1847,11 @@ mod tests {
             "literal URL routed: {}",
             out
         );
-        assert!(out.contains(r#""hello""#), "non-URL literal intact: {}", out);
+        assert!(
+            out.contains(r#""hello""#),
+            "non-URL literal intact: {}",
+            out
+        );
     }
 
     #[test]
