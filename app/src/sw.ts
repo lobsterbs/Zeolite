@@ -128,6 +128,10 @@ import {
   getExtensionContext,
   resolveContentScripts,
   serveExtensionAsset,
+  mintPageToken,
+  pageClientOf,
+  handleExtPageCall,
+  normalizeExtensionPath,
 } from "./extensions";
 import type { ExtensionStorageArea } from "./extensions/storage";
 import type { UiTab } from "./extensions/tabs";
@@ -991,11 +995,22 @@ self.addEventListener("fetch", (e: FetchEvent) => {
   const foreign = url.origin !== self.location.origin;
   if (!foreign) {
     if (url.pathname.startsWith("/wisp/")) return; // transport endpoint: passthrough
-    /* Extension routes: web-accessible resources (/zl-ext/) and the
-       content-script bridge + declared script files (/zl-cs/). */
+    /* Extension routes: web-accessible resources and extension pages
+       (/zl-ext/, #40) and the content-script bridge + declared
+       script files (/zl-cs/). */
     if (url.pathname.startsWith(EXT_ROUTE) || url.pathname.startsWith(CS_ROUTE)) {
       e.respondWith(
-        serveExtensionAsset(e.request, url).catch(
+        serveExtensionAsset(
+          e.request,
+          url,
+          /* #40: extension-page access. Client ids are SW-observed
+             FetchEvent fields, never page-supplied. */
+          {
+            nav: e.request.headers.get("sec-fetch-dest") === "document",
+            clientId: e.clientId || undefined,
+            resultingClientId: e.resultingClientId || undefined,
+          },
+        ).catch(
           (err) =>
             new Response("zeolite: extension asset failed: " + String(err), {
               status: 500,
@@ -1853,6 +1868,8 @@ interface ControlMessage {
     | "zl:menuClick"
     | "zl:listMenus"
     | "zl:notifyEvent"
+    | "zl:extPage"
+    | "zl:openExtPage"
     | "zl:listExt"
     | "zl:getDiag"
     | "zl:installExt"
@@ -2699,6 +2716,61 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       }
       e.waitUntil(wakeExtension(extId).then(() => NOTIFY.event(extId, nid, kind, btn)));
       reply({ ok: true });
+      break;
+    }
+    case "zl:extPage": {
+      /* #40: RPC from an extension-origin page (options/popup). The
+         sender must be a client registered as that extension's page:
+         client ids are SW-observed on the granted navigation, so a
+         hostile proxied page cannot forge one. The API subset is
+         enforced in handleExtPageCall. */
+      const ep = msg as { extId?: unknown; msg?: unknown };
+      const src = e.source as Client | null;
+      const extId = typeof ep.extId === "string" ? ep.extId : "";
+      const srcId = src && src.url ? src.id : "";
+      const srcUrl = src && src.url ? src.url : null;
+      if (!extId || !srcId || pageClientOf(srcId) !== extId) {
+        reply({ ok: false, error: "not an extension page" });
+        break;
+      }
+      const erec = extensions.get(extId);
+      if (!erec || !erec.enabled) {
+        reply({ ok: false, error: "no such extension" });
+        break;
+      }
+      const call = (ep.msg ?? {}) as { path?: unknown; args?: unknown };
+      const path = Array.isArray(call.path) ? call.path : [];
+      /* runtime.sendMessage needs the background booted to have
+         listeners; other page calls answer from the shared context. */
+      const wake =
+        path[0] === "runtime" && path[1] === "sendMessage"
+          ? wakeExtension(extId)
+          : Promise.resolve();
+      e.waitUntil(
+        wake
+          .then(() => handleExtPageCall(erec, srcUrl, call))
+          .then(reply)
+          .catch((err: unknown) => reply({ ok: false, error: String(err) })),
+      );
+      break;
+    }
+    case "zl:openExtPage": {
+      /* #40: host-only. Resolves an extension's options or popup
+         page, mints a 5-minute page token and answers the /zl-ext/
+         URL the host should navigate a tab to. The token is the only
+         way a first navigation gets past the WAR gate for a non-WAR
+         page. */
+      const op = msg as { extId?: unknown; which?: unknown };
+      const which = op.which === "popup" ? "popup" : "options";
+      const extId = typeof op.extId === "string" ? op.extId : "";
+      const orec = extId ? extensions.get(extId) : null;
+      const raw = which === "popup" ? orec?.action?.defaultPopup : orec?.options?.page;
+      const norm = raw ? normalizeExtensionPath(raw.startsWith("/") ? raw : "/" + raw) : null;
+      if (!orec || !orec.enabled || !norm) {
+        reply({ ok: false, error: "no such " + which + " page" });
+        break;
+      }
+      reply({ ok: true, url: EXT_ROUTE + orec.id + norm + "?zlPageTok=" + mintPageToken(orec.id, norm) });
       break;
     }
     default:

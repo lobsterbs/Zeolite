@@ -26,7 +26,15 @@ export {
   parseServePath,
   EXT_ROUTE,
   CS_ROUTE,
+  mintPageToken,
+  checkPageToken,
+  registerPageClient,
+  pageClientOf,
 } from "./serve";
+export type { ServeCtx, ServeReq } from "./serve";
+export { PAGE_BRIDGE_SOURCE } from "./pagebridge";
+export { handleExtPageCall, pageCallList, PAGE_APIS } from "./pageapi";
+export type { ExtPageCall } from "./pageapi";
 export { TABS, TabRegistry, tabView, changeView } from "./tabs";
 export type { UiTab, TabsEvent, TabsOp, TabsListener, TabChangeInfo, TabMessage } from "./tabs";
 export { SCRIPTING, ScriptingHost, LISTENER_SOURCE } from "./scripting";

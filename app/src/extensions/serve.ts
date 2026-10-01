@@ -1,9 +1,11 @@
 /* Zeolite extension subsystem: asset serving.
 
-   Two same-origin routes stand in for extension:// until extension
-   pages get a dedicated host:
+   Same-origin routes stand in for extension://:
 
-   /zl-ext/<id>/<path>  web_accessible_resources only (fromWeb checks)
+   /zl-ext/<id>/<path>  web_accessible_resources (fromWeb checks);
+                        with a valid page token or from a registered
+                        page client also extension pages (options,
+                        popup, #40) with the page bridge injected
    /zl-cs/<id>/<path>   content-script files: ONLY paths the manifest
                         declares in content_scripts js/css may be
                         served, so a page can never pull background,
@@ -11,12 +13,15 @@
 
    __bridge.js under /zl-cs/ is generated per request with the config
    (which files, which run_at) validated against the manifest before
-   the bridge source is emitted. */
+   the bridge source is emitted. __page.js under /zl-ext/ is generated
+   per extension with the page call list (#40). */
 
 import { extensions } from "./manager";
 import { normalizeExtensionPath } from "./origin";
 import { BRIDGE_SOURCE } from "./bridge";
 import { LISTENER_SOURCE } from "./scripting";
+import { PAGE_BRIDGE_SOURCE } from "./pagebridge";
+import { pageCallList } from "./pageapi";
 import type { ExtensionRecord } from "./types";
 
 export const EXT_ROUTE = "/zl-ext/";
@@ -24,6 +29,7 @@ export const CS_ROUTE = "/zl-cs/";
 
 export type ServeReq =
   | { kind: "war"; id: string; path: string }
+  | { kind: "pagejs"; id: string }
   | { kind: "bridge"; id: string }
   | { kind: "cs"; id: string; path: string }
   | { kind: "listener"; id: string };
@@ -38,6 +44,7 @@ export function parseServePath(pathname: string): ServeReq | null {
     const id = slash === -1 ? rest : rest.slice(0, slash);
     const p = slash === -1 ? "/" : rest.slice(slash);
     if (!EXT_ID_RE.test(id)) return null;
+    if (p === "/__page.js") return { kind: "pagejs", id };
     const norm = normalizeExtensionPath(p);
     return norm ? { kind: "war", id, path: norm } : null;
   }
@@ -89,6 +96,26 @@ function notFound(): Response {
   });
 }
 
+/* #40: extension pages are HTML documents; the page bridge is
+   injected right after <head> (prepended when no head exists). Only
+   .html paths get the injection: a page served from a path without
+   an .html suffix has no API bridge (documented in ./compat). */
+function isHtmlPath(path: string): boolean {
+  return /\.html?$/i.test(path);
+}
+
+function htmlWithPageScript(bytes: Uint8Array, id: string): Response {
+  const html = new TextDecoder().decode(bytes);
+  const tag = '<script src="' + EXT_ROUTE + id + '/__page.js"></script>';
+  const m = /<head[^>]*>/i.exec(html);
+  const body = m
+    ? html.slice(0, m.index + m[0].length) + tag + html.slice(m.index + m[0].length)
+    : tag + html;
+  return new Response(body, {
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
 /* Every js/css path any content_scripts entry declares. */
 function declaredCsFiles(rec: ExtensionRecord): Set<string> {
   const s = new Set<string>();
@@ -120,7 +147,55 @@ function isCfg(v: unknown): v is CsCfg {
   );
 }
 
-export async function serveExtensionAsset(req: Request, url: URL): Promise<Response> {
+/* #40: page-token registry. zl:openExtPage (a host-only control
+   message in the SW) mints a token for one (extension, path) pair; a
+   navigation carrying it is served as an extension page without the
+   WAR gate. 5-minute TTL, in-memory only: tokens die with the
+   worker, and a token never crosses extensions or paths. */
+const PAGE_TOKEN_TTL = 5 * 60 * 1000;
+const pageTokens = new Map<string, { extId: string; path: string; minted: number }>();
+
+export function mintPageToken(extId: string, path: string): string {
+  const tok = crypto.randomUUID();
+  pageTokens.set(tok, { extId, path, minted: Date.now() });
+  return tok;
+}
+
+export function checkPageToken(extId: string, path: string, token: string): boolean {
+  const e = pageTokens.get(token);
+  if (!e) return false;
+  if (Date.now() - e.minted > PAGE_TOKEN_TTL || e.extId !== extId || e.path !== path) {
+    pageTokens.delete(token);
+    return false;
+  }
+  return true;
+}
+
+/* Registered extension-page clients, keyed by the SW-observed client
+   id of a granted navigation. Subresource fetches and zl:extPage
+   messages from these clients authenticate as the extension's page.
+   ponytail: no TTL, the SW's own lifetime bounds the map; a stale
+   entry after a page close is inert because client ids are never
+   reassigned. */
+const pageClients = new Map<string, string>();
+
+export function registerPageClient(clientId: string | undefined, extId: string): void {
+  if (clientId) pageClients.set(clientId, extId);
+}
+
+export function pageClientOf(clientId: string | undefined): string | null {
+  return clientId ? (pageClients.get(clientId) ?? null) : null;
+}
+
+/* #40: serving context for extension-page access. Client ids come
+   from the FetchEvent (SW-observed), never from the page. */
+export interface ServeCtx {
+  nav: boolean;
+  clientId?: string;
+  resultingClientId?: string;
+}
+
+export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx): Promise<Response> {
   if (req.method !== "GET" && req.method !== "HEAD") {
     return new Response("zeolite: method not allowed", { status: 405 });
   }
@@ -186,6 +261,44 @@ export async function serveExtensionAsset(req: Request, url: URL): Promise<Respo
     }
     const bytes = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
     return bytes ? assetResponse(bytes, sr.path) : notFound();
+  }
+
+  if (sr.kind === "pagejs") {
+    /* #40: the extension-page bridge with the call list computed from
+       the live permissions. Any same-origin page may load this file;
+       it is inert without a registered page client (the SW refuses
+       its zl:extPage messages). */
+    const body =
+      "var ZL_PAGE_CFG = " +
+      JSON.stringify({ ext: sr.id, base: EXT_ROUTE + sr.id, calls: pageCallList(rec) }) +
+      ";\n" +
+      PAGE_BRIDGE_SOURCE;
+    return new Response(body, {
+      headers: {
+        "content-type": "text/javascript; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  /* #40: extension-origin pages. A navigation may skip the WAR gate
+     only with a valid page token (minted by the host-only
+     zl:openExtPage) or when the navigating client is already a page
+     of this extension (self-navigation via runtime.getURL). A
+     granted navigation registers the new client id so its
+     subresources and zl:extPage messages authenticate. */
+  const nav = ctx?.nav === true;
+  const pageExt = pageClientOf(ctx?.clientId);
+  if (nav && (checkPageToken(sr.id, sr.path, url.searchParams.get("zlPageTok") ?? "") || pageExt === sr.id)) {
+    registerPageClient(ctx?.resultingClientId, sr.id);
+    const own = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
+    if (!own) return notFound();
+    return isHtmlPath(sr.path) ? htmlWithPageScript(own, sr.id) : assetResponse(own, sr.path);
+  }
+  if (!nav && pageExt === sr.id) {
+    /* Subresource of a served extension page: full package access. */
+    const own = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
+    return own ? assetResponse(own, sr.path) : notFound();
   }
 
   /* web_accessible_resources, WAR-glob checked inside getResource. */
