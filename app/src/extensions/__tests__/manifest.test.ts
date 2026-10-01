@@ -69,13 +69,22 @@ describe("parseManifest MV3", () => {
     expect(diags.warnings.some((w) => w.includes("service_worker"))).toBe(true);
   });
   it("parses MV3 web_accessible_resources objects", () => {
-    const { parsed } = parseManifest({
+    const { parsed, diags } = parseManifest({
       manifest_version: 3,
       name: "M3",
       version: "1.0",
-      web_accessible_resources: [{ resources: ["r/*"], matches: ["<all_urls>"] }],
+      web_accessible_resources: [
+        { resources: ["r/*"], matches: ["https://example.com/*"] },
+        { resources: ["open/*"] },
+      ],
     });
-    expect(parsed?.webAccessibleResources).toEqual(["r/*"]);
+    /* #51: entries with matches are scoped, not open globs; entries
+       without matches warn that they stay glob-exposed. */
+    expect(parsed?.webAccessibleResources).toEqual(["open/*"]);
+    expect(parsed?.webAccessibleScoped).toEqual([
+      { resources: ["r/*"], matches: ["https://example.com/*"] },
+    ]);
+    expect(diags.warnings.some((w) => w.includes("without matches"))).toBe(true);
   });
   it("labels the MV3 action as action", () => {
     const { parsed } = parseManifest({

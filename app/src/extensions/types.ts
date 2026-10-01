@@ -83,6 +83,9 @@ export interface ExtensionRecord {
   options: OptionsSpec | null;
   icons: Record<string, string>;
   webAccessibleResources: string[];
+  /* #51: MV3 web_accessible_resources entries whose "matches" are set;
+     served only when the requesting page destination matches. */
+  webAccessibleScoped: Array<{ resources: string[]; matches: string[] }>;
   externallyConnectable: ExternallyConnectableSpec | null;
   commands: Record<string, unknown>;
   contentSecurityPolicy: string | null;

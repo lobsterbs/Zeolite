@@ -1004,17 +1004,38 @@ self.addEventListener("fetch", (e: FetchEvent) => {
        script files (/zl-cs/). */
     if (url.pathname.startsWith(EXT_ROUTE) || url.pathname.startsWith(CS_ROUTE)) {
       e.respondWith(
-        serveExtensionAsset(
-          e.request,
-          url,
-          /* #40: extension-page access. Client ids are SW-observed
-             FetchEvent fields, never page-supplied. */
-          {
-            nav: e.request.headers.get("sec-fetch-dest") === "document",
-            clientId: e.clientId || undefined,
-            resultingClientId: e.resultingClientId || undefined,
-          },
-        ).catch(
+        (async () => {
+          /* #51: the requesting page destination, resolved like the
+             #33 initiator (virtual context first, client URL decode
+             as the fallback). Never page-supplied; when unknown the
+             scoped-WAR gate inside getResource fails closed. */
+          let pageUrl: string | null = null;
+          try {
+            const vctx = contextOf(VCTX, e.clientId);
+            if (vctx) {
+              pageUrl = vctx.currentUrl || null;
+            } else if (e.clientId) {
+              const client = await self.clients.get(e.clientId);
+              if (client && client.url) {
+                pageUrl = decodePath(new URL(client.url, self.location.origin).pathname);
+              }
+            }
+          } catch {
+            pageUrl = null;
+          }
+          return serveExtensionAsset(
+            e.request,
+            url,
+            /* #40: extension-page access. Client ids are SW-observed
+               FetchEvent fields, never page-supplied. */
+            {
+              nav: e.request.headers.get("sec-fetch-dest") === "document",
+              clientId: e.clientId || undefined,
+              resultingClientId: e.resultingClientId || undefined,
+              pageUrl,
+            },
+          );
+        })().catch(
           (err) =>
             new Response("zeolite: extension asset failed: " + String(err), {
               status: 500,

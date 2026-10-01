@@ -155,22 +155,33 @@ function parseWebAccessible(
   v: unknown,
   mv: 2 | 3,
   diags: ManifestDiagnostics
-): string[] {
+): { globs: string[]; scoped: Array<{ resources: string[]; matches: string[] }> } {
   if (Array.isArray(v)) {
     /* MV2: plain string globs. */
-    if (mv === 2) return strArr(v);
-    /* MV3: array of { resources, matches, extension_ids }. */
-    const out: string[] = [];
+    if (mv === 2) return { globs: strArr(v), scoped: [] };
+    /* MV3: array of { resources, matches, extension_ids }. Entries with
+       matches are scope-bound to the requesting page (#51); entries
+       without matches keep the MV2-style open glob exposure, with a
+       warning that they are not destination-scoped. */
+    const globs: string[] = [];
+    const scoped: Array<{ resources: string[]; matches: string[] }> = [];
     for (const e of objArr(v)) {
       const res = strArr(e.resources);
       if (res.length === 0) {
         diags.warnings.push("web_accessible_resources: MV3 entry without resources ignored");
+        continue;
       }
-      out.push(...res);
+      const matches = strArr(e.matches);
+      if (matches.length === 0) {
+        diags.warnings.push("web_accessible_resources: MV3 entry without matches exposed by glob only");
+        globs.push(...res);
+      } else {
+        scoped.push({ resources: res, matches });
+      }
     }
-    return out;
+    return { globs, scoped };
   }
-  return [];
+  return { globs: [], scoped: [] };
 }
 
 export function parseManifest(
@@ -250,6 +261,9 @@ export function parseManifest(
     if (!KNOWN_FIELDS.has(key)) diags.unsupportedFields.push(key);
   }
 
+  /* #51: WAR globs and MV3 matches-scoped entries are tracked
+     separately; see getResource's fromWeb gate. */
+  const war = parseWebAccessible(raw.web_accessible_resources, mv, diags);
   const parsed: ParsedExtension = {
     name,
     version,
@@ -264,7 +278,8 @@ export function parseManifest(
     action: parseAction(raw, mv),
     options,
     icons: iconMap(raw.icons),
-    webAccessibleResources: parseWebAccessible(raw.web_accessible_resources, mv, diags),
+    webAccessibleResources: war.globs,
+    webAccessibleScoped: war.scoped,
     externallyConnectable,
     commands: isObj(raw.commands) ? (raw.commands as Record<string, unknown>) : {},
     contentSecurityPolicy: csp,

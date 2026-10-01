@@ -56,7 +56,7 @@ export const COMPAT: Record<string, CompatEntry> = {
   "sidebar_action": { supported: "no", reason: "parsed and recorded; no sidebar host yet" },
   "popup pages": { supported: "partial", reason: "served under /zl-ext/<id>/ with the page bridge injected into HTML: browser.runtime/storage/cookies/downloads/notifications/contextMenus subset, no events or ports; the host opens them via the zl:openExtPage token flow" },
   "options pages": { supported: "partial", reason: "same /zl-ext/ page hosting as popups; the first navigation needs a zl:openExtPage token (or self-navigation from an already-open page of the same extension); pages are in-memory state, so a worker restart requires re-opening via zl:openExtPage" },
-  "web_accessible_resources": { supported: "yes", reason: "glob exposure enforced by the resource loader" },
+  "web_accessible_resources": { supported: "partial", reason: "MV2 globs enforced by the resource loader; MV3 matches scopes enforced against the SW-observed requesting page destination (#51); extension_ids scoping not implemented" },
   "zip/xpi install": { supported: "yes" },
   "unpacked install": { supported: "yes" },
 };

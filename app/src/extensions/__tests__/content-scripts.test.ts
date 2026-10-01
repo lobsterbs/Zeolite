@@ -34,6 +34,7 @@ function ext(enabled: boolean, cs: ContentScriptSpec[]): ExtensionRecord {
     options: null,
     icons: {},
     webAccessibleResources: [],
+    webAccessibleScoped: [],
     externallyConnectable: null,
     commands: {},
     contentSecurityPolicy: null,

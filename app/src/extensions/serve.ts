@@ -193,6 +193,10 @@ export interface ServeCtx {
   nav: boolean;
   clientId?: string;
   resultingClientId?: string;
+  /* #51: the requesting page destination, SW-observed from the fetch
+     client. MV3 matches-scoped web_accessible_resources are checked
+     against it; unknown means the scoped gate fails closed. */
+  pageUrl?: string | null;
 }
 
 export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx): Promise<Response> {
@@ -301,10 +305,13 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
     return own ? assetResponse(own, sr.path) : notFound();
   }
 
-  /* web_accessible_resources, WAR-glob checked inside getResource. */
+  /* web_accessible_resources: WAR globs and MV3 "matches" scopes are
+     checked inside getResource against the SW-observed page
+     destination (#51; the old `from` query param was page-supplied
+     and dead). */
   const bytes = await extensions.getResource(sr.id, sr.path, {
     fromWeb: true,
-    pageUrl: url.searchParams.get("from"),
+    pageUrl: ctx?.pageUrl ?? null,
   });
   return bytes ? assetResponse(bytes, sr.path) : notFound();
 }

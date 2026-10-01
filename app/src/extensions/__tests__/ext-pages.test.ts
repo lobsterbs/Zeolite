@@ -202,4 +202,39 @@ describe("extension pages (#40)", () => {
     expect(seen).not.toBeNull();
     expect((seen as unknown as { sender: { context: string } }).sender.context).toBe("extension-page");
   });
+
+  it("enforces MV3 scoped web_accessible_resources against the page destination (#51)", async () => {
+    /* MV3 manifest: scoped.js is only for https://allowed.example. */
+    const manifest = {
+      manifest_version: 3,
+      name: "ScopedWar",
+      version: "1.0",
+      web_accessible_resources: [
+        { resources: ["/scoped.js"], matches: ["https://allowed.example/*"] },
+      ],
+    };
+    await extensions.startup();
+    const { id } = await extensions.installFiles(
+      new Map<string, Uint8Array>([
+        ["manifest.json", enc.encode(JSON.stringify(manifest))],
+        ["scoped.js", enc.encode("var scoped = 1;")],
+      ]),
+    );
+    const js = reqUrl("https://sw.example" + EXT_ROUTE + id + "/scoped.js");
+    /* Page on an allowed destination: served. */
+    const ok = await serveExtensionAsset(js.req, js.url, {
+      nav: false,
+      pageUrl: "https://allowed.example/page.html",
+    });
+    expect(ok.status).toBe(200);
+    /* Page elsewhere: 404. */
+    const denied = await serveExtensionAsset(js.req, js.url, {
+      nav: false,
+      pageUrl: "https://evil.example/page.html",
+    });
+    expect(denied.status).toBe(404);
+    /* No SW-observed page destination: fails closed. */
+    const anon = await serveExtensionAsset(js.req, js.url, { nav: false });
+    expect(anon.status).toBe(404);
+  });
 });

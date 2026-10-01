@@ -21,6 +21,7 @@ import { locateManifest, readZip, DEFAULT_ZIP_LIMITS } from "./package";
 import { parseManifest } from "./manifest";
 import { normalizeExtensionPath } from "./origin";
 import { globToRegExp } from "./content-scripts";
+import { hostPatternsMatch } from "./permissions";
 import { ALARMS } from "./alarms";
 import type { ExtensionId, ExtensionRecord } from "./types";
 
@@ -288,10 +289,31 @@ export class ExtensionManager {
     const norm = normalizeExtensionPath(path.startsWith("/") ? path : "/" + path);
     if (norm === null) return null;
     if (opts.fromWeb) {
-      const okWar = rec.webAccessibleResources.some((g) => globToRegExp(g).test(norm));
-      if (!okWar) return null;
-      /* MV3 matches-scoped WAR entries are enforced from the scripting
-         phase; MV2-style glob exposure is checked above. */
+      /* WAR globs are package-root-relative while globToRegExp is
+         anchored (^...$), so test both the origin-absolute and the
+         root-relative form of the path: MV2 globs like "public/*"
+         must match "/public/x.js". */
+      const warGlobHit = (g: string): boolean => {
+        const re = globToRegExp(g);
+        return re.test(norm) || re.test(norm.slice(1));
+      };
+      const okWar = rec.webAccessibleResources.some(warGlobHit);
+      if (!okWar) {
+        /* #51: MV3 web_accessible_resources entries with "matches" are
+           scope-bound to the requesting page. The page destination is
+           SW-observed only; without one this fails closed. */
+        const pageUrl = opts.pageUrl;
+        let okScoped = false;
+        if (pageUrl) {
+          for (const s of rec.webAccessibleScoped ?? []) {
+            if (s.resources.some(warGlobHit) && hostPatternsMatch(s.matches, pageUrl)) {
+              okScoped = true;
+              break;
+            }
+          }
+        }
+        if (!okScoped) return null;
+      }
     }
     const db = await openDb();
     /* Package paths are stored without the leading slash; the origin
