@@ -25,7 +25,7 @@ export const COMPAT: Record<string, CompatEntry> = {
   "runtime.onStartup": { supported: "yes", reason: "fires at every later background boot" },
   "background scripts (MV2 & Firefox MV3)": { supported: "yes", reason: "executed in a function scope with the extension API object; no engine-global access" },
   "runtime.onMessageExternal": { supported: "no", reason: "cross-extension messaging not implemented" },
-  "storage.local": { supported: "yes" },
+  "storage.local": { supported: "yes", reason: "mounted only with the 'storage' permission, as in Firefox (#50)" },
   "storage.sync": { supported: "partial", reason: "real API, but sync is local persistence only; no account backend" },
   "storage.session": { supported: "partial", reason: "in-memory as in Firefox, but per-context isolation pending the background runtime" },
   "content_scripts (manifest)": { supported: "partial", reason: "injection works via a bridge script in the page world; true isolated worlds need a renderer-level primitive a SW engine lacks" },

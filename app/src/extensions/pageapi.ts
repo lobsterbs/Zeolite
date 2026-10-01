@@ -36,9 +36,11 @@ function msgOf(err: unknown): string {
    permissions so feature detection on the page answers honestly. */
 export function pageCallList(rec: ExtensionRecord): string[] {
   const calls: string[] = ["runtime.getManifest", "runtime.sendMessage"];
-  for (const area of ["local", "sync", "session"]) {
-    for (const op of ["get", "set", "remove", "clear", "getBytesInUse"]) {
-      calls.push("storage." + area + "." + op);
+  if (rec.permissions.includes("storage")) {
+    for (const area of ["local", "sync", "session"]) {
+      for (const op of ["get", "set", "remove", "clear", "getBytesInUse"]) {
+        calls.push("storage." + area + "." + op);
+      }
     }
   }
   if (rec.permissions.includes("cookies")) {

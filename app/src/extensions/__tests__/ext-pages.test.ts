@@ -35,7 +35,7 @@ async function install(name: string, perms: string[], files: Record<string, stri
 }
 
 async function pageExt(): Promise<ExtensionRecord> {
-  return install("PageExt", ["cookies"], {
+  return install("PageExt", ["cookies", "storage"], {
     "options.html": PAGE_HTML,
     "secret.js": "var notForTheWeb = 1;",
   });
@@ -169,13 +169,19 @@ describe("extension pages (#40)", () => {
     expect(badPath.ok).toBe(false);
   });
 
-  it("mounts page cookies only with the permission", async () => {
+  it("mounts page cookies and storage only with their permissions", async () => {
     const noPerms = await install("NoCookiesPage", [], { "options.html": PAGE_HTML });
     const refused = await handleExtPageCall(noPerms, null, {
       path: ["cookies", "get"],
       args: [{ url: "https://example.com/", name: "a" }],
     });
     expect(refused.ok).toBe(false);
+    const noStorage = await handleExtPageCall(noPerms, null, {
+      path: ["storage", "local", "get"],
+      args: ["k"],
+    });
+    expect(noStorage.ok).toBe(false);
+    expect(pageCallList(noPerms)).not.toContain("storage.local.get");
   });
 
   it("delivers page sendMessage with an extension-page sender", async () => {

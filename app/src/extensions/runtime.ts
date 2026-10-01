@@ -245,11 +245,17 @@ export function buildApi(
     onInstalled: makeEvent<(details: unknown) => void>(),
     onStartup: makeEvent<() => void>(),
   };
-  const storageNs = {
-    local: wrapArea(deps.storage.local),
-    sync: wrapArea(deps.storage.sync),
-    session: wrapArea(deps.storage.session),
-  };
+  /* #50: Firefox gates browser.storage on the "storage" permission;
+     mounted only when granted - like cookies/notifications/webRequest -
+     so feature detection answers honestly and the background/page
+     surface agrees with the content-script storage gate in the SW. */
+  const storageNs = ext.permissions.includes("storage")
+    ? {
+        local: wrapArea(deps.storage.local),
+        sync: wrapArea(deps.storage.sync),
+        session: wrapArea(deps.storage.session),
+      }
+    : undefined;
   /* tabs: the engine-side mirror of the UI tab model (see ./tabs).
      The tabs permission (or a matching host permission) gates url and
      title visibility exactly as Firefox does; getCurrent has no tab
@@ -500,7 +506,7 @@ export function buildApi(
 
   const browser: Record<string, unknown> = {
     runtime,
-    storage: storageNs,
+    ...(storageNs ? { storage: storageNs } : {}),
     tabs: tabsNs,
     windows: windowsNs,
     scripting: scriptingNs,
