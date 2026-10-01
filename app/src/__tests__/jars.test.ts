@@ -64,7 +64,7 @@ describe("jar clear (#41 zl:clearJar)", () => {
     setJarProfile("inc:t1");
     documentCookieWrite("https://c.example/", "c1=v; Path=/");
 
-    expect(jarClearScope()).toEqual({ ok: true, jars: 1, cookies: 1 });
+    expect(jarClearScope(undefined, undefined)).toEqual({ ok: true, jars: 1, cookies: 1 });
     const def = jarEnumeration().find((v) => v.profile === "default")!;
     expect(def.cookies).toBe(3);
     expect(jarEnumeration().find((v) => v.profile === "inc:t1")!.cookies).toBe(0);
@@ -89,8 +89,8 @@ describe("jar clear (#41 zl:clearJar)", () => {
 
   it("refuses malformed input instead of coercing a destructive op", () => {
     documentCookieWrite("https://a.example/", "a1=v; Path=/");
-    expect(jarClearScope("")).toEqual({ ok: false, error: "invalid profile", jars: 0, cookies: 0 });
-    expect(jarClearScope("a\u0000b")).toEqual({ ok: false, error: "invalid profile", jars: 0, cookies: 0 });
+    expect(jarClearScope("", undefined)).toEqual({ ok: false, error: "invalid profile", jars: 0, cookies: 0 });
+    expect(jarClearScope("a\u0000b", undefined)).toEqual({ ok: false, error: "invalid profile", jars: 0, cookies: 0 });
     expect(jarClearScope(undefined, "!!!")).toEqual({ ok: false, error: "invalid origin", jars: 0, cookies: 0 });
     expect(jarClearScope(undefined, "UPPER")).toEqual({ ok: false, error: "invalid origin", jars: 0, cookies: 0 });
     /* nothing was cleared by the refused calls */
