@@ -2681,20 +2681,23 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
          wakes an idle MV3 background first, same as menu clicks. */
       const ne = msg as { extId?: string; msg?: unknown };
       const info = ne.msg as { id?: unknown; event?: unknown; buttonIndex?: unknown } | undefined;
-      const valid =
-        typeof ne.extId === "string" &&
-        typeof info?.id === "string" &&
-        (info.event === "clicked" || info.event === "closed" || info.event === "buttonClicked") &&
-        (info.event !== "buttonClicked" || typeof info.buttonIndex === "number");
-      const erec = valid ? extensions.get(ne.extId) : null;
-      if (!valid || !erec || !erec.enabled || !NOTIFY.exists(ne.extId, String(info!.id))) {
+      const extId = typeof ne.extId === "string" ? ne.extId : "";
+      const nid = typeof info?.id === "string" ? info.id : "";
+      const kind: "clicked" | "closed" | "buttonClicked" | null =
+        info?.event === "clicked" || info?.event === "closed" || info?.event === "buttonClicked"
+          ? (info.event as "clicked" | "closed" | "buttonClicked")
+          : null;
+      const btn = typeof info?.buttonIndex === "number" ? info.buttonIndex : undefined;
+      if (!extId || !nid || !kind || (kind === "buttonClicked" && btn === undefined)) {
         reply({ ok: false, error: "bad notifyEvent" });
         break;
       }
-      const nid = String(info!.id);
-      const kind = info!.event as "clicked" | "closed" | "buttonClicked";
-      const btn = typeof info!.buttonIndex === "number" ? info!.buttonIndex : undefined;
-      e.waitUntil(wakeExtension(ne.extId).then(() => NOTIFY.event(ne.extId, nid, kind, btn)));
+      const erec = extensions.get(extId);
+      if (!erec || !erec.enabled || !NOTIFY.exists(extId, nid)) {
+        reply({ ok: false, error: "no such notification" });
+        break;
+      }
+      e.waitUntil(wakeExtension(extId).then(() => NOTIFY.event(extId, nid, kind, btn)));
       reply({ ok: true });
       break;
     }

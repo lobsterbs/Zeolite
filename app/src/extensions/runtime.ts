@@ -27,6 +27,7 @@ import type {
   NotificationClosedListener,
   ButtonClickedListener,
 } from "./notifications";
+import { cookiesGet, cookiesGetAll, cookiesSet, cookiesRemove } from "./cookies";
 import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
 import type { ExtensionStorageArea, StorageValue } from "./storage";
@@ -357,6 +358,19 @@ export function buildApi(
         };
       })()
     : undefined;
+  /* #42: cookies over the virtual jar (see ./cookies), mounted only
+     with the "cookies" permission; every call also host-permission
+     gates the target URL. */
+  const cookiesNs = ext.permissions.includes("cookies")
+    ? (() => {
+        return {
+          get: (d: Record<string, unknown> = {}) => cookiesGet(ext, d),
+          getAll: (d?: Record<string, unknown>) => cookiesGetAll(ext, d),
+          set: (d: Record<string, unknown> = {}) => cookiesSet(ext, d),
+          remove: (d: Record<string, unknown> = {}) => cookiesRemove(ext, d),
+        };
+      })()
+    : undefined;
   /* permissions: advanced permission lifecycle. The engine has
      no user prompt, so request() auto-grants anything the manifest
      declared optional; anything else is refused. */
@@ -499,6 +513,7 @@ export function buildApi(
     ...(webRequestNs ? { webRequest: webRequestNs } : {}),
     ...(alarmsNs ? { alarms: alarmsNs } : {}),
     ...(notificationsNs ? { notifications: notificationsNs } : {}),
+    ...(cookiesNs ? { cookies: cookiesNs } : {}),
   };
   /* Firefox-style chrome.* alias over the same implementations. */
   return { browser, chrome: browser };

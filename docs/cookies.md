@@ -191,6 +191,21 @@ version 3 carries the `cookies` and `downloads` stores). Writes are
 debounced; the SW restores the jar on activate. `zl:teardown` clears
 it: cookies do not survive an engine switch.
 
+## Extension cookies API (#42)
+
+`browser.cookies.*` inside an extension (get/getAll/set/remove) reads
+and writes this same jar, not a parallel store. The `cookies`
+permission mounts the namespace; every call additionally requires a
+host permission matching the target URL (the webRequest gate). Reads
+see the ACTIVE jar profile with RFC 6265 domain/path/secure/expiry
+matching and return Firefox-shaped Cookie views. Writes go through
+`documentCookieWrite`, so the isolation, domain and SameSite gates
+apply once, centrally; a rejected set resolves `null`. Honest gaps:
+HttpOnly is visible to reads but cannot be minted by `set` (a script
+context cannot create it), jar records whose origin string is
+unknown cannot be permission-checked and stay invisible, and
+`cookies.onChanged` is not implemented.
+
 ## Honest limits
 
 - Redirect hops are followed by the SW itself (the transport surfaces
@@ -212,9 +227,11 @@ it: cookies do not survive an engine switch.
 
 Implemented (1.4 Boride; SameSite knob, hop capture and merge-mode
 import added in 2.2 Arsenide; jar profiles added on the
-deep-integration line; enumeration and scoped clear in #41). Tested in
+deep-integration line; enumeration and scoped clear in #41; the
+extension cookies bridge in #42). Tested in
 `app/src/__tests__/cookies.test.ts` (admission, matching, deletion,
-isolation, ordering, persistence, SameSite knob, merge mode) and
+isolation, ordering, persistence, SameSite knob, merge mode),
 `app/src/__tests__/jar-profiles.test.ts` (profile isolation,
-persistence, document.cookie, import scoping).
+persistence, document.cookie, import scoping) and
+`app/src/extensions/__tests__/cookies.test.ts` (bridge semantics).
 

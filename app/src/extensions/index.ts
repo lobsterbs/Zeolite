@@ -66,6 +66,7 @@ export type {
   NotificationClosedListener,
   ButtonClickedListener,
 } from "./notifications";
+export { cookiesGet, cookiesGetAll, cookiesSet, cookiesRemove } from "./cookies";
 export { PERMS, PermissionRegistry } from "./advanced-permissions";
 export type { ApiPermissions, PermListener, PermBackend } from "./advanced-permissions";
 
