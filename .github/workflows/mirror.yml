@@ -1,9 +1,11 @@
 name: Mirror to GitLab
 
+# Push triggers removed until Zeolite#21 is fixed: the GITLAB_PAT
+# value this repo's "lobster" environment holds is rejected by
+# GitLab, so every push ran the mirror red and drowned the CI
+# signal. Manual dispatch only until the secret is rotated; re-add
+# push/create/delete next to workflow_dispatch with the fix.
 on:
-  push:
-  create:
-  delete:
   workflow_dispatch:
 
 jobs:
