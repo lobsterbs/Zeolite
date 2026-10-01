@@ -2,23 +2,25 @@ name: fileread-tmp
 on:
   push:
     branches: [tmp-fileread]
-env:
-  READ_PATH: app/src/sw.ts
-  READ_SIZE: "8000"
 jobs:
   chunk:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
+        f: [sw, e2e]
         n: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
-      - uses: actions/checkout@v4
       - name: print chunk
         run: |
-          split -b "$READ_SIZE" -d -a 2 "$READ_PATH" part
-          f=$(printf 'part%02d' ${{ matrix.n }})
-          if [ ! -f "$f" ]; then echo "ZLEMPTY"; exit 0; fi
-          echo "ZLCHUNK${{ matrix.n }}BEGIN"
-          base64 -w 0 "$f"
+          case "${{ matrix.f }}" in
+            sw) p="app/src/sw.ts" ;;
+            e2e) p="suite/e2e/e2e.mjs" ;;
+          esac
+          curl -fsSL "https://raw.githubusercontent.com/lobsterbs/Zeolite/9ec7518a5a04141e472956172cd341e7b8a5e796/$p" -o blob
+          split -b 8000 -d -a 2 blob part
+          c=$(printf 'part%02d' ${{ matrix.n }})
+          echo "ZLFILE-${{ matrix.f }}-${{ matrix.n }}-BEGIN"
+          if [ -f "$c" ]; then base64 -w 0 "$c"; else echo ZLEMPTY; fi
           echo
-          echo "ZLCHUNK${{ matrix.n }}END"
+          echo "ZLFILE-${{ matrix.f }}-${{ matrix.n }}-END"
