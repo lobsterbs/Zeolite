@@ -1,3 +1,4 @@
+import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
 import { extensions } from "../manager";
 import { buildApi } from "../runtime";
