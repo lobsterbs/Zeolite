@@ -24,9 +24,13 @@ function pkg(name: string, perms: string[], files: Record<string, string> = {}):
 
 const PAGE_HTML = "<html><head><title>opts</title></head><body>options</body></html>";
 
+/* Install ids are derived from the manifest bytes, so every install
+   needs a unique manifest. */
+let seq = 0;
+
 async function install(name: string, perms: string[], files: Record<string, string> = {}): Promise<ExtensionRecord> {
   await extensions.startup();
-  const { id } = await extensions.installFiles(pkg(name, perms, files));
+  const { id } = await extensions.installFiles(pkg(name + " #" + seq++, perms, files));
   return extensions.get(id)!;
 }
 
