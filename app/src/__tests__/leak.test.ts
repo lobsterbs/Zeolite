@@ -85,7 +85,11 @@ describe("response-header surgery never carries the plaintext destination", () =
   });
 
   it("unresolvable Refresh url= fails closed", () => {
-    const h = new Headers({ refresh: "5; url=://broken" });
+    /* port > 65535: the WHATWG parser rejects it, so the fail-closed
+     branch is the oracle here (a scheme-less value resolves as a
+     relative path instead and gets encoded, which is fine - the
+     output is still a route, never a plaintext target). */
+    const h = new Headers({ refresh: "5; url=https://leaky.example.org:99999" });
     mapRefreshHeader(h, "https://leaky.example.org/private/page");
     expect(h.get("refresh")).toBeNull();
   });
