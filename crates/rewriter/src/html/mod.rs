@@ -170,6 +170,19 @@ impl Rewriter {
         out
     }
 
+    /// One-shot external-script body pass (#46): URL-literal rewriting
+    /// plus frame-buster neutralization — the same pipeline inline
+    /// <script> bodies get from the Raw state. External script bodies
+    /// never enter the HTML tokenizer, so the SW applies this at the
+    /// serve seam instead; `self.base` is the script's own URL.
+    pub fn rewrite_js_body(&self, js: &str) -> String {
+        if !self.cfg.rewrite_js_literals {
+            return js.to_string();
+        }
+        let rewritten = crate::js::rewrite_script(js, &|u| self.enc(u));
+        crate::js::antiframe(&rewritten)
+    }
+
     /// Rewrite an iframe srcdoc document (issue #36). The attribute
     /// value reaches the DOM entity-decoded, so the decoded value IS
     /// an HTML document: rewrite it as a nested sub-document with the
@@ -1805,5 +1818,54 @@ mod tests {
         assert!(out.contains(" 2x"), "descriptor kept: {}", out);
         let routed = cfg().encode_url("https://example.com/dir/b.png");
         assert!(out.contains(&routed), "b.png routed: {}", out);
+    }
+
+    #[test]
+    fn rewrites_external_script_body() {
+        // #46: the SW serve seam runs the same URL-literal +
+        // frame-buster pipeline on external script bodies that inline
+        // <script> content gets from the Raw state.
+        let base = "https://cdn.example.com/lib/app.js";
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let out = r.rewrite_js_body(
+            r#"if (top != self) top.location = "https://example.com/"; el.src = "https://img.example.net/a.png"; var s = "hello";"#,
+        );
+        assert!(out.contains("if (self != self)"), "folded guard: {}", out);
+        assert!(!out.contains("top.location"), "navigation sunk: {}", out);
+        assert!(out.contains("self.zl_antiframe"), "sunk to antiframe prop: {}", out);
+        let enc = |u: &str| {
+            let abs = resolve(u, base);
+            cfg().encode_url(&abs)
+        };
+        assert!(
+            out.contains(&format!(r#""{}""#, enc("https://img.example.net/a.png"))),
+            "literal URL routed: {}",
+            out
+        );
+        assert!(out.contains(r#""hello""#), "non-URL literal intact: {}", out);
+    }
+
+    #[test]
+    fn external_script_body_routes_pass_through() {
+        // #46: the specifier pass runs first at the seam, so the body
+        // can already contain root-relative engine routes; those are
+        // not URL-like literals and must survive untouched, and an
+        // engine-origin absolute route stays engine-local.
+        let base = "https://cdn.example.com/lib/app.js";
+        let origin = "https://engine.example.org";
+        let mut c = cfg();
+        c.origin = origin.to_string();
+        let mut r = Rewriter::new(c);
+        r.set_base(base);
+        let out = r.rewrite_js_body(
+            r#"import("/j/aGVsbG8"); fetch("https://engine.example.org/j/d29ybGQ");"#,
+        );
+        assert!(out.contains("/j/aGVsbG8"), "route intact: {}", out);
+        assert!(
+            out.contains(r#"fetch("https://engine.example.org/j/d29ybGQ")"#),
+            "engine-origin URL stays local: {}",
+            out
+        );
     }
 }

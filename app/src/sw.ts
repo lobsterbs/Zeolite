@@ -237,6 +237,10 @@ interface RewriterMod {
   JsRewriter: new (origin: string, base: string, prefix: string, scheme: string) => JsRewriter;
   JsCssRewriter: new (origin: string, base: string, prefix: string, scheme: string) => JsCssRewriter;
   rewriteCss(css: string, origin: string, base: string, prefix: string, scheme: string): string;
+  /* #46: one-shot external script body pass (URL literals +
+     frame-buster neutralization), used by the script-destination
+     serve seam. */
+  rewriteJsBody(js: string, origin: string, base: string, prefix: string, scheme: string): string;
   /* wasm-pack --target web output: `default` is the async init that
      fetches and instantiates the .wasm binary. Without it every
      JsRewriter call dies on an unbound wasm table. */
@@ -1747,9 +1751,26 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              Inline module scripts are a rewriter gap (#36): the parser
              path, not this seam. */
           if (e.request.destination === "script" && isJs(resp) && resp.body) {
-            DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier pass" });
+            DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
-            const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
+            let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
+            /* #46: external script bodies get the URL-literal +
+               frame-buster pass inline scripts get. Specifiers run
+               first: the routes they emit are root-relative, so the
+               literal pass leaves them alone. A wasm load failure must
+               not 502 the script - the specifier output still serves. */
+            try {
+              const mod = await rewriter();
+              src = mod.rewriteJsBody(src, self.location.origin, target, currentPrefix(), "b64u");
+            } catch (err) {
+              DIAG.emit({
+                category: "REWRITE",
+                severity: "error",
+                message: "script body pass failed",
+                technicalReason: String(err),
+                url: target,
+              });
+            }
             WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
             const out = new Response(src, { status: resp.status, headers: outHeaders });
             if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());

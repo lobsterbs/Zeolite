@@ -88,6 +88,30 @@ fn css_enc(cfg: RewriteConfig, base: String) -> Box<dyn Fn(&str) -> String> {
     })
 }
 
+/// #46: one-shot external script body pass for the SW's
+/// script-destination seam: URL-literal rewriting + frame-buster
+/// neutralization, the same pipeline inline <script> bodies get.
+/// Same encoder semantics (engine routes unwrap to the innermost
+/// destination, opaque schemes pass through, fragments re-attach);
+/// base is the script's own URL.
+#[wasm_bindgen(js_name = "rewriteJsBody")]
+pub fn rewrite_js_body_export(
+    js: String,
+    origin: String,
+    base: String,
+    prefix: String,
+    scheme: String,
+) -> String {
+    let cfg = RewriteConfig {
+        origin,
+        codec: codec_for(prefix, scheme),
+        ..Default::default()
+    };
+    let mut r = Rewriter::new(cfg);
+    r.set_base(&base);
+    r.rewrite_js_body(&js)
+}
+
 /// One-shot CSS pass for complete strings (style blocks). Standalone
 /// stylesheets use the streaming JsCssRewriter below instead.
 #[wasm_bindgen(js_name = "rewriteCss")]
