@@ -203,4 +203,115 @@ describe("applyNavGuard", () => {
     applyNavGuard(w, LOC, ENGINE);
     expect(w.open("https://real.site/x")).toBe(1);
   });
+
+  it("installs every hook even without window.navigation (#39)", () => {
+    const e = makeEnv();
+    expect(e.w.open(REAL)).toBe(7);
+    expect(e.opened[0][0]).toBe(navEncode(REAL));
+  });
+});
+
+/* #39: the Navigation API seam. window.navigation is absent from
+   the other fixtures on purpose - the hook must be a pure add-on. */
+function makeNavEnv() {
+  const listeners: Array<(e: any) => void> = [];
+  const navigated: string[] = [];
+  const submitted: Array<{ action: string; method: string; entries: unknown[][] }> = [];
+  const w: Record<string, any> = {
+    open() {
+      return 1;
+    },
+    location: {},
+    document: {
+      createElement() {
+        return {
+          style: {} as Record<string, string>,
+          method: "",
+          action: "",
+          _entries: [] as unknown[][],
+          append(k: unknown, v: unknown) {
+            this._entries.push([k, v]);
+          },
+          submit() {
+            submitted.push({ action: this.action, method: this.method, entries: this._entries.slice() });
+          },
+          remove() {},
+        };
+      },
+      body: { appendChild() {} },
+    },
+    navigation: {
+      addEventListener(_t: string, fn: (e: any) => void) {
+        listeners.push(fn);
+      },
+    },
+  };
+  Object.defineProperty(w.location, "href", {
+    configurable: true,
+    get: () => LOC,
+    set(v: string) {
+      navigated.push(v);
+    },
+  });
+  applyNavGuard(w, LOC, ENGINE);
+  return {
+    w,
+    fire(e: Record<string, any>) {
+      listeners.forEach((fn) => fn(e));
+    },
+    navigated,
+    submitted,
+  };
+}
+
+describe("navigation api guard (#39)", () => {
+  it("cancels a real-origin navigation and re-drives through the marker", () => {
+    const e = makeNavEnv();
+    let prevented = false;
+    e.fire({ cancelable: true, destination: { url: REAL, sameDocument: false }, preventDefault() { prevented = true; } });
+    expect(prevented).toBe(true);
+    expect(e.navigated).toEqual([navEncode(REAL)]);
+  });
+
+  it("leaves engine-origin, relative and opaque destinations native", () => {
+    for (const url of ["https://engine.host/j/zzz", "/local", "about:blank"]) {
+      const e = makeNavEnv();
+      let prevented = false;
+      e.fire({ cancelable: true, destination: { url, sameDocument: false }, preventDefault() { prevented = true; } });
+      expect(prevented).toBe(false);
+      expect(e.navigated).toEqual([]);
+    }
+  });
+
+  it("leaves same-document navigations and non-cancelable events untouched", () => {
+    const e = makeNavEnv();
+    let prevented = false;
+    e.fire({ cancelable: true, destination: { url: REAL, sameDocument: true }, preventDefault() { prevented = true; } });
+    expect(prevented).toBe(false);
+    e.fire({ cancelable: false, destination: { url: REAL, sameDocument: false }, preventDefault() { prevented = true; } });
+    expect(prevented).toBe(false);
+    expect(e.navigated).toEqual([]);
+  });
+
+  it("resubmits a canceled form POST through the marker with its entries", () => {
+    const e = makeNavEnv();
+    let prevented = false;
+    e.fire({
+      cancelable: true,
+      destination: { url: "https://real.site/login", sameDocument: false },
+      formData: { entries: () => [["user", "u1"], ["pw", "p1"]] },
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    expect(prevented).toBe(true);
+    expect(e.submitted.length).toBe(1);
+    expect(e.submitted[0].action).toBe(navEncode("https://real.site/login"));
+    expect(e.submitted[0].method).toBe("POST");
+    expect(e.submitted[0].entries).toEqual([
+      ["user", "u1"],
+      ["pw", "p1"],
+    ]);
+    expect(e.navigated).toEqual([]);
+  });
 });

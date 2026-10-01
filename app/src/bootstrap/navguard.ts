@@ -1,4 +1,4 @@
-/* Runtime navigation guard + WebRTC gate (issue #28).
+/* Runtime navigation guard + WebRTC gate (issues #28, #39).
 
    The service worker only intercepts navigations inside its own
    scope: a cross-origin navigation (window.open, an anchor href, a
@@ -14,12 +14,21 @@
 
    Honest limits, by design:
    - location is LegacyUnforgeable: location.href = "..." cannot be
-     hooked by any page script, so a deliberate self-navigation to a
-     real origin still escapes. No service-worker engine can close
-     that class; it needs a real browser extension.
+     hooked directly. #39 closes the escape class through the
+     Navigation API instead: the navigate event fires in this
+     document for every cross-document navigation it initiates and
+     is cancelable for push/replace/reload types, so the guard
+     cancels a real-origin navigation and re-drives it through the
+     marker. Browsers without window.navigation keep the old limit.
+     Traverse (back/forward) navigations cannot be canceled, but
+     history only ever holds engine routes (#32), so no real-origin
+     destination can sit in it.
    - URLs inserted through the HTML parser (innerHTML, document.write)
-     bypass both the property and setAttribute hooks; the parser has
-     no script-visible seam.
+     bypass the property and setAttribute hooks, but the navigations
+     they eventually trigger still fire the navigate event, so
+     parser-inserted anchors, forms and meta refresh are covered by
+     the same seam. Parser-inserted iframe src assignments remain
+     outside it (the child frame has no bootstrap yet).
    - Engine-origin, relative and opaque URLs pass through untouched:
      those requests stay inside the SW scope and it reroutes them
      natively. <base href> is deliberately left alone (rewriting it
@@ -138,6 +147,49 @@ export function applyNavGuard(
         return (OW as AnyRecord).call(this, s == null ? u : rewire(s), t, f);
       };
     });
+  }
+  /* #39: the Navigation API is the one seam the LegacyUnforgeable
+     location sinks ever had. The navigate event fires in this
+     document for every cross-document navigation it initiates -
+     location.href/assign/replace, anchor and form activations,
+     runtime-injected meta refresh - and is cancelable for
+     push/replace/reload types (never traverse; browser-UI
+     navigations do not fire it here). Cancel the real-origin
+     navigation and re-drive through the marker so the browser
+     stays inside the SW scope. A canceled form POST is resubmitted
+     with its entries - urlencoded only, multipart degrades - rather
+     than silently becoming a GET. */
+  const nav = w.navigation as
+    | { addEventListener(t: string, fn: (e: unknown) => void): void }
+    | undefined;
+  if (nav && typeof nav.addEventListener === "function") {
+    safe(() =>
+      nav.addEventListener("navigate", (e) => {
+        const ev = e as {
+          cancelable?: boolean;
+          destination?: { url?: string; sameDocument?: boolean };
+          formData?: FormData | null;
+          preventDefault(): void;
+        };
+        if (!ev.cancelable || ev.destination?.sameDocument) return;
+        const dest = String(ev.destination?.url ?? "");
+        const marker = rewire(dest);
+        if (marker === dest) return;
+        ev.preventDefault();
+        if (ev.formData) {
+          const f = (w.document as Document).createElement("form") as HTMLFormElement;
+          f.method = "POST";
+          f.action = marker;
+          f.style.display = "none";
+          for (const [k, v] of (ev.formData as FormData).entries()) f.append(k, v);
+          (w.document as Document).body.appendChild(f);
+          f.submit();
+          f.remove();
+        } else {
+          (w.location as { href: string }).href = marker;
+        }
+      }),
+    );
   }
   /* A form whose action was set through a bypassing path can still be
      submitted programmatically: rewrite the action attribute in place
