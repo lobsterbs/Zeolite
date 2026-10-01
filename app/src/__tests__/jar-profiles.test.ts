@@ -6,6 +6,8 @@ import {
   cookiesResetForTests,
   documentCookieRead,
   documentCookieWrite,
+  jarClearScope,
+  jarEnumeration,
   jarLoad,
   jarPersist,
   jarReplace,
@@ -118,5 +120,85 @@ describe("jar profiles (zl:jarProfile)", () => {
     setJarProfile("default");
     /* the default jar was not replaced by the session-profile import */
     expect(cookieHeaderFor("https://a.example/")).toBe("normal=4");
+  });
+});
+
+/* #41 (zl:getJars / zl:clearJar): enumeration and scoped clear. */
+describe("jar enumeration + scoped clear (#41)", () => {
+  it("enumerates profiles with per-origin cookies and resolved origins", () => {
+    applySetCookie("https://a.example/", resp(["a=1"]));
+    setJarProfile("inc-enum");
+    applySetCookie("https://b.example/", resp(["b=2"]));
+    const views = jarEnumeration();
+    expect(views).toHaveLength(2);
+    const def = views.find((v) => v.profile === "default")!;
+    expect(def.active).toBe(false);
+    expect(def.cookies).toBe(1);
+    expect(def.origins[0].origin).toBe("https://a.example");
+    const inc = views.find((v) => v.profile === "inc-enum")!;
+    expect(inc.active).toBe(true);
+    expect(inc.origins[0].origin).toBe("https://b.example");
+    expect(inc.origins[0].cookies[0]).toMatchObject({ name: "b", value: "2" });
+  });
+
+  it("reports the active profile even when it holds no cookies", () => {
+    expect(jarEnumeration()).toEqual([
+      { profile: "default", active: true, cookies: 0, origins: [] },
+    ]);
+  });
+
+  it("survives a jar reload: ids map back to origins (#41)", async () => {
+    applySetCookie("https://a.example/", resp(["keep=2"]));
+    await jarPersist();
+    cookiesResetForTests();
+    await jarLoad();
+    const views = jarEnumeration();
+    expect(views[0].origins[0].origin).toBe("https://a.example");
+  });
+
+  it("clears one origin inside the active profile", () => {
+    applySetCookie("https://a.example/", resp(["a=1"]));
+    applySetCookie("https://b.example/", resp(["b=1"]));
+    expect(jarClearScope(undefined, "https://a.example")).toMatchObject({
+      ok: true,
+      jars: 1,
+      cookies: 1,
+    });
+    expect(cookieHeaderFor("https://a.example/")).toBeNull();
+    expect(cookieHeaderFor("https://b.example/")).toBe("b=1");
+  });
+
+  it("clears a named session profile without touching the default jar", () => {
+    applySetCookie("https://a.example/", resp(["keep=1"]));
+    setJarProfile("inc-clear");
+    applySetCookie("https://a.example/", resp(["inc=1"]));
+    expect(jarClearScope("inc-clear", undefined)).toMatchObject({
+      ok: true,
+      jars: 1,
+      cookies: 1,
+    });
+    expect(cookieHeaderFor("https://a.example/")).toBeNull();
+    setJarProfile(null);
+    expect(cookieHeaderFor("https://a.example/")).toBe("keep=1");
+  });
+
+  it("clears the active profile wholesale when no origin is given", () => {
+    applySetCookie("https://a.example/", resp(["a=1"]));
+    applySetCookie("https://b.example/", resp(["b=1"]));
+    expect(jarClearScope(undefined, undefined)).toMatchObject({
+      ok: true,
+      jars: 2,
+      cookies: 2,
+    });
+    expect(jarEnumeration()[0].cookies).toBe(0);
+  });
+
+  it("refuses malformed input instead of coercing", () => {
+    applySetCookie("https://a.example/", resp(["keep=1"]));
+    expect(jarClearScope("", undefined).ok).toBe(false);
+    expect(jarClearScope(42, undefined).ok).toBe(false);
+    expect(jarClearScope("bad\u0000sep", undefined).ok).toBe(false);
+    expect(jarClearScope(undefined, "not an origin").ok).toBe(false);
+    expect(cookieHeaderFor("https://a.example/")).toBe("keep=1");
   });
 });

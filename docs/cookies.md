@@ -127,6 +127,45 @@ is resolved by the rule, `keep-newest` comparing the `created`
 timestamps. Malformed records are dropped, never admitted. The reply
 carries honest counts: `{ jars, cookies, conflicts }`.
 
+## Jar enumeration + scoped clear (#41)
+
+`zl:getJars` enumerates every jar profile that exists, each with its
+per-origin cookie records:
+
+```
+{ type: "zl:getJars" }
+```
+
+The reply carries `{ ok, active, profiles }`; each profile is
+`{ profile, active, cookies, origins: [{ origin, id, cookies }] }`.
+`origin` is the real target origin when the engine knows it (the
+registry plus an id -> origin record persisted alongside the jar);
+`null` when only the internal id survived. Enumeration spans every
+profile, not just the active one, and the active profile is always
+present, empty or not.
+
+`zl:clearJar` clears the active profile (or a named one), or one
+origin inside it:
+
+```
+{ type: "zl:clearJar" }                                   // active jar
+{ type: "zl:clearJar", profile: "inc:<session-id>" }      // named jar
+{ type: "zl:clearJar", origin: "https://a.example" }      // one origin
+```
+
+The reply carries honest counts (`{ ok, jars, cookies }`). Malformed
+input is refused, not coerced: unlike `zl:jarProfile`, a destructive
+clear never falls back to the default profile on garbage. Clearing
+the default jar persists (debounced like every jar write);
+session-profile clears touch memory only.
+
+Both messages are host-only, and so is the rest of the control plane
+beyond the page-facing messages (`zl:docCookie`, `zl:wsOpen`,
+`zl:ext`, `zl:ping`): proxied pages are service-worker clients too,
+and a target site must never read another origin's cookies or drive
+engine state, so senders on proxied routes (or nav markers) are
+refused outright.
+
 ## Set-Cookie surgery
 
 `set-cookie` and `set-cookie2` are stripped from every response the
@@ -173,7 +212,7 @@ it: cookies do not survive an engine switch.
 
 Implemented (1.4 Boride; SameSite knob, hop capture and merge-mode
 import added in 2.2 Arsenide; jar profiles added on the
-deep-integration line). Tested in
+deep-integration line; enumeration and scoped clear in #41). Tested in
 `app/src/__tests__/cookies.test.ts` (admission, matching, deletion,
 isolation, ordering, persistence, SameSite knob, merge mode) and
 `app/src/__tests__/jar-profiles.test.ts` (profile isolation,

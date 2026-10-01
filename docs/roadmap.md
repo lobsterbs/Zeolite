@@ -149,10 +149,11 @@ Closes the 1.6/1.8 limits.
   2.3, the downloads registry since 2.4), and the session export/import
   and download registry UIs consume the engine implementations instead
   of parallel LB ones (Settings session export/import and the DevTools
-  downloads registry, both in the adapter repo). The cookie-jar and
-  fingerprint-profile surfaces still need engine control messages
-  (there is no zl:getJars today); they stay open follow-through for the
-  2.x line rather than gate items for this release. The architectural
+  downloads registry, both in the adapter repo). The cookie-jar surface got
+  its engine control messages in #41 (zl:getJars and zl:clearJar; the
+  fingerprint-profile surface already had zl:fingerprint); the
+  LB-side Settings surfaces they feed stay open follow-through for
+  the 2.x line rather than gate items for this release. The architectural
   gate still holds: the engine keeps zero LB imports and stays
   standalone-buildable; all integration lives in the adapter.
 - zeolite-server arena reuse: RESOLVED BY AUDIT - the premise was

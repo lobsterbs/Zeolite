@@ -50,6 +50,18 @@
                                              ("off" | "approx")
      { type: "zl:importSession", ..., mode: "merge", rule }  merge-mode
                                              session import (default replace)
+
+    Issue #41 control plane:
+      { type: "zl:getJars" }                jar enumeration: every profile
+                                              with per-origin cookie state
+      { type: "zl:clearJar", profile, origin }  clear the active or named
+                                              jar profile, or one origin
+                                              inside it
+
+    Bug-scout gate (#41): proxied pages are SW clients too, so control
+    messages are host-only now - a proxied document may still send its
+    own page-facing messages (zl:docCookie, zl:wsOpen, zl:ext, zl:ping),
+    nothing else.
    Replies are posted back on the given MessageChannel port, so the
    adapter (and the devtools page) get real acknowledgements.
 
@@ -81,7 +93,7 @@ import { WsBridge, type PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
 import { senderVirtualOrigin, virtualOriginHeaders } from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP, type VirtualContext } from "./vctx";
-import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
+import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarClearScope, jarEnumeration, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
 import { fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
 import { decryptSession, encryptSession } from "./session";
@@ -1842,7 +1854,9 @@ interface ControlMessage {
     | "zl:fingerprint"
     | "zl:recordStart"
     | "zl:recordStop"
-    | "zl:find";
+    | "zl:find"
+    | "zl:getJars"
+    | "zl:clearJar";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -1956,6 +1970,27 @@ function pushDocCookieView(clientId: string): void {
   }
 }
 
+/* #41: jar control is host-only. Proxied pages are SW clients too,
+   and zl:getJars must never hand one target site every other site's
+   cookies: the sender must be an engine page (adapter, devtools,
+   extension pages), not a proxied route or nav marker. */
+function senderIsProxiedPage(e: ExtendableMessageEvent): boolean {
+  const src = e.source as Client | null;
+  if (!src || !src.url) return true;
+  try {
+    const su = new URL(src.url, self.location.origin);
+    return isEnginePath(su.pathname) || su.pathname.startsWith(NAV);
+  } catch {
+    return true;
+  }
+}
+
+/* Page-facing control messages: sent from inside proxied documents
+   and their workers (the bootstrap's docCookie/WS channels and the
+   content-script bridge). zl:ping stays open because its echo carries
+   no secrets and page code may probe liveness. */
+const PAGE_MESSAGES = new Set(["zl:docCookie", "zl:wsOpen", "zl:ext", "zl:ping"]);
+
 self.addEventListener("message", async (e: ExtendableMessageEvent) => {
   /* Issue #17: the restored route shape settles asynchronously; a
      cold-start ping must not report the default shape mid-restore. */
@@ -1963,6 +1998,14 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
   const msg = e.data as ControlMessage;
   const port = e.ports[0];
   const reply = (payload: unknown) => port?.postMessage(payload);
+
+  /* Bug-scout (#41): a proxied page must not drive the control plane
+     (read the net log, flip the jar, tear the engine down). Page-facing
+     messages only; everything else needs an engine-page sender. */
+  if (senderIsProxiedPage(e) && !PAGE_MESSAGES.has(String(msg?.type))) {
+    reply({ ok: false, error: "host-only control message" });
+    return;
+  }
 
   switch (msg?.type) {
     case "zl:ping":
@@ -2019,6 +2062,19 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
          incognito toggle, and on controllerchange. */
       reply(setJarProfile(msg.profile));
       break;
+    case "zl:getJars":
+      /* #41: jar enumeration for the host (LobsterBrowse Settings
+         renders and manages cookie-jar state). Host-only: the
+         proxied-sender gate above refuses target-site pages. */
+      reply({ ok: true, active: jarProfileState(), profiles: jarEnumeration() });
+      break;
+    case "zl:clearJar": {
+      /* #41: clear the active (or named) jar profile, or one origin
+         inside it. Refuses malformed input instead of coercing. */
+      const r = jarClearScope(msg.profile, msg.origin);
+      reply(r.ok ? { ok: true, jars: r.jars, cookies: r.cookies } : { ok: false, error: r.error });
+      break;
+    }
     case "zl:tracing":
       /* 1.2 Halide: opt-in rewrite tracing ring. Off by default;
          resets to off on SW restart, so the host re-sends it. */

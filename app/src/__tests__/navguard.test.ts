@@ -317,3 +317,56 @@ describe("navigation api guard (#39)", () => {
     expect(e.navigated).toEqual([]);
   });
 });
+
+/* #39 residual: runtime-injected meta refresh, the seam that stays
+   reachable on engines without the Navigation API (Firefox: no
+   window.navigation, so the cancel-and-re-drive seam never fires). */
+describe("meta refresh guard (#39 residual)", () => {
+  function makeMetaEnv() {
+    const meta = makeClass("content");
+    const w: Record<string, any> = {
+      HTMLMetaElement: { prototype: meta.proto },
+      open() {
+        return 1;
+      },
+    };
+    applyNavGuard(w, LOC, ENGINE);
+    return meta;
+  }
+  function refreshMeta(meta: ReturnType<typeof makeMetaEnv>) {
+    const el = meta.make();
+    el.httpEquiv = "refresh";
+    return el;
+  }
+
+  it("rewires the url token of a refresh meta's content property", () => {
+    const meta = makeMetaEnv();
+    const el = refreshMeta(meta);
+    el.content = "5; url=" + REAL;
+    expect(meta.read(el)).toBe("5; url=" + navEncode(REAL));
+    expect(el.content).toBe("5; url=" + REAL); /* reads stay page-truthful */
+  });
+
+  it("rewires setAttribute content on refresh metas only", () => {
+    const meta = makeMetaEnv();
+    const el = refreshMeta(meta);
+    el.setAttribute("content", "0; url=" + REAL);
+    expect(el.getAttribute("content")).toBe("0; url=" + navEncode(REAL));
+    const csp = meta.make();
+    csp.httpEquiv = "Content-Security-Policy";
+    csp.setAttribute("content", "default-src " + REAL);
+    expect(csp.getAttribute("content")).toBe("default-src " + REAL);
+    const plain = meta.make();
+    plain.setAttribute("content", "width=device-width");
+    expect(plain.getAttribute("content")).toBe("width=device-width");
+  });
+
+  it("passes relative and engine-origin refresh urls through", () => {
+    const meta = makeMetaEnv();
+    const el = refreshMeta(meta);
+    el.content = "2; url=/local";
+    expect(meta.read(el)).toBe("2; url=/local");
+    el.content = "3; url=https://engine.host/j/zzz";
+    expect(meta.read(el)).toBe("3; url=https://engine.host/j/zzz");
+  });
+});

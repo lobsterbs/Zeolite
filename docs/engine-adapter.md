@@ -73,6 +73,8 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 | `zl:adblock` | `enabled` | global toggle for the /rules.json block lists |
 | `zl:rules` | `ua`, `rules` (`host`, `adblock`, `ua`) | host-app per-site adblock + User-Agent overrides (rules.ts) |
 | `zl:jarProfile` | `profile` (or null) | switch the cookie jar to a throwaway session profile (incognito; cookies.ts) |
+| `zl:getJars` | - | enumerate jar profiles with per-origin cookie records (#41; host-only: proxied-page senders are refused) |
+| `zl:clearJar` | `profile`, `origin` | clear the active or named jar profile, or one origin inside it (#41; host-only) |
 | `zl:siteRoute` | `site`, `enabled` | per-site interception toggle (403 when disabled) |
 | `zl:teardown` | - | drop all SW caches, `unregister()` |
 | `zl:find` | `dest`, `cmd` (`find`/`next`/`prev`/`clear`), `pattern`, `options` (`caseSensitive`, `wholeWord`, `wrap`) | in-page find in the addressed proxied document (#29): the page-side finder replies `{ ok, matches, ordinal (1-based), highlight }`; open shadow roots searched, CSS Custom Highlight API where available (`highlight: "none"` = counts only). Addressing is controller-side: `dest` selects the client SW-side and the findLoad message posted to the page carries no destination (#32) |

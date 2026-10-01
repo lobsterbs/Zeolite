@@ -116,6 +116,11 @@ export interface SetCookieResult {
 
 const registry = new Map<string, VirtualOrigin>();
 
+/* id -> origin reverse map (#41): the registry maps origin -> id, so
+   after a SW restart only this map (persisted as the "origins" record)
+   can tell jarEnumeration whose cookies a jar key holds. */
+const originById = new Map<string, string>();
+
 function fnv1a(s: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
@@ -131,6 +136,7 @@ export function registerOrigin(origin: string): VirtualOrigin {
   if (!e) {
     e = { origin, id: fnv1a(origin), pathBase: encodeDest(origin) };
     registry.set(origin, e);
+    originById.set(e.id, origin);
   }
   return e;
 }
@@ -490,6 +496,116 @@ export function jarSnapshot(): Map<string, Cookie[]> {
   return out;
 }
 
+/* ---- jar enumeration + scoped clear (#41: zl:getJars / zl:clearJar) --- */
+
+/** Resolve a host-supplied origin (full URL or origin string) to its
+    jar id, or accept a bare id. Null refuses garbage. */
+function originIdOf(origin: unknown): string | null {
+  if (typeof origin !== "string" || origin.length === 0) return null;
+  const u = parseUrl(origin);
+  if (u) return registerOrigin(u.origin).id;
+  return /^[a-z0-9]+$/.test(origin) ? origin : null;
+}
+
+export interface JarOriginView {
+  /** Real target origin when known, else null (id-only record). */
+  origin: string | null;
+  /** Stable internal id (the jar key namespace). */
+  id: string;
+  cookies: Cookie[];
+}
+
+export interface JarProfileView {
+  profile: string;
+  active: boolean;
+  cookies: number;
+  origins: JarOriginView[];
+}
+
+/** Enumerate every jar that exists, across ALL profiles, each origin's
+    cookies copied out (zl:getJars reply body). The active profile is
+    always present, empty or not. */
+export function jarEnumeration(): JarProfileView[] {
+  const byProfile = new Map<string, Map<string, Cookie[]>>();
+  for (const [k, list] of jars) {
+    const sep = k.indexOf(SEP);
+    const pid = sep < 0 ? PROFILE_DEFAULT : k.slice(0, sep);
+    const id = sep < 0 ? k : k.slice(sep + 1);
+    let m = byProfile.get(pid);
+    if (!m) {
+      m = new Map<string, Cookie[]>();
+      byProfile.set(pid, m);
+    }
+    m.set(id, list);
+  }
+  if (!byProfile.has(profile)) byProfile.set(profile, new Map<string, Cookie[]>());
+  const out: JarProfileView[] = [];
+  for (const [pid, m] of byProfile) {
+    const origins: JarOriginView[] = [];
+    let count = 0;
+    for (const [id, list] of m) {
+      count += list.length;
+      origins.push({ origin: originById.get(id) ?? null, id, cookies: list.map((c) => ({ ...c })) });
+    }
+    origins.sort((a, b) => (a.origin ?? a.id).localeCompare(b.origin ?? b.id));
+    out.push({ profile: pid, active: pid === profile, cookies: count, origins });
+  }
+  return out;
+}
+
+/** zl:clearJar: clear the whole active (or named) jar profile, or one
+    origin's cookies inside it. Malformed input is refused, not
+    coerced: a destructive op must not fall back to the default
+    profile on garbage. Returns honest counts. */
+export function jarClearScope(
+  profileId: unknown,
+  origin: unknown,
+): { ok: boolean; error?: string; jars: number; cookies: number } {
+  let pid: string;
+  if (profileId === undefined || profileId === null) {
+    pid = profile;
+  } else if (
+    typeof profileId === "string" &&
+    profileId.length > 0 &&
+    profileId.length <= 64 &&
+    !profileId.includes(SEP)
+  ) {
+    pid = profileId;
+  } else {
+    return { ok: false, error: "invalid profile", jars: 0, cookies: 0 };
+  }
+  let id: string | null;
+  if (origin === undefined) {
+    id = null;
+  } else {
+    id = originIdOf(origin);
+    if (id === null) return { ok: false, error: "invalid origin", jars: 0, cookies: 0 };
+  }
+  let jarsCleared = 0;
+  let cookiesCleared = 0;
+  if (id === null) {
+    const scoped = (k: string) =>
+      pid === PROFILE_DEFAULT ? !k.includes(SEP) : k.startsWith(pid + SEP);
+    for (const k of [...jars.keys()]) {
+      if (!scoped(k)) continue;
+      const list = jars.get(k);
+      cookiesCleared += list ? list.length : 0;
+      jars.delete(k);
+      jarsCleared++;
+    }
+  } else {
+    const k = pid === PROFILE_DEFAULT ? id : pid + SEP + id;
+    const list = jars.get(k);
+    if (list) {
+      cookiesCleared = list.length;
+      jars.delete(k);
+      jarsCleared = 1;
+    }
+  }
+  if (jarsCleared > 0 && pid === PROFILE_DEFAULT) schedulePersist();
+  return { ok: true, jars: jarsCleared, cookies: cookiesCleared };
+}
+
 /* ---- persistence ------------------------------------------------------ */
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -510,6 +626,11 @@ export async function jarPersist(): Promise<void> {
   const entries: Array<[string, Cookie[]]> = [];
   for (const [k, v] of jars) if (!k.includes(SEP)) entries.push([k, v]);
   await idbPut(db, STORE_COOKIES, "jar", entries);
+  /* #41: the id -> origin map rides along as its own record so
+     enumeration can name origins after a restart. */
+  const ids: Array<[string, string]> = [];
+  for (const [id, o] of originById) ids.push([id, o]);
+  await idbPut(db, STORE_COOKIES, "origins", ids);
 }
 
 /** Restore the persisted jar (SW activate). Storage failures mean an
@@ -518,7 +639,16 @@ export async function jarLoad(): Promise<void> {
   try {
     const db = await openDb();
     const rec = (await idbGet(db, STORE_COOKIES, "jar")) as Array<[string, Cookie[]]> | undefined;
+    const ids = (await idbGet(db, STORE_COOKIES, "origins")) as Array<[string, string]> | undefined;
     jars.clear();
+    originById.clear();
+    if (Array.isArray(ids)) {
+      for (const entry of ids) {
+        if (Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "string") {
+          originById.set(entry[0], entry[1]);
+        }
+      }
+    }
     if (Array.isArray(rec)) {
       for (const entry of rec) {
         if (Array.isArray(entry) && typeof entry[0] === "string" && Array.isArray(entry[1])) {
@@ -601,6 +731,7 @@ export function jarMerge(
 export function jarClear(): void {
   jars.clear();
   registry.clear();
+  originById.clear();
   jarPersist().catch(() => undefined);
 }
 
@@ -612,6 +743,7 @@ export function cookiesResetForTests(): void {
   }
   jars.clear();
   registry.clear();
+  originById.clear();
   sameSitePolicy = "off";
   profile = PROFILE_DEFAULT;
 }

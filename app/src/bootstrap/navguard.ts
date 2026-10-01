@@ -19,8 +19,11 @@
      document for every cross-document navigation it initiates and
      is cancelable for push/replace/reload types, so the guard
      cancels a real-origin navigation and re-drives it through the
-     marker. Browsers without window.navigation keep the old limit.
-     Traverse (back/forward) navigations cannot be canceled, but
+     marker. Browsers without window.navigation (Firefox today)
+     cannot cancel location-driven cross-document navigations;
+     there the meta-refresh hook below closes that one runtime
+     seam and the location.* limit stands, documented. Traverse
+     (back/forward) navigations cannot be canceled, but
      history only ever holds engine routes (#32), so no real-origin
      destination can sit in it.
    - URLs inserted through the HTML parser (innerHTML, document.write)
@@ -138,6 +141,50 @@ export function applyNavGuard(
     const proto = C.prototype;
     safe(() => guardProp(proto, prop));
     safe(() => guardAttr(proto, prop));
+  }
+  /* #39 residual: runtime-injected meta refresh is the one navigation
+     seam left on engines without the Navigation API (Firefox has no
+     window.navigation, so the cancel-and-re-drive seam never fires).
+     Rewires the url token of http-equiv=refresh content values; only
+     refresh metas are touched, so viewport, CSP and og:* content pass
+     through byte-identical. Parser-inserted meta keeps its limit
+     honestly: that markup belongs to the static rewriter. */
+  const META = w.HTMLMetaElement as AnyRecord | undefined;
+  if (META) {
+    const rewireMeta = (el: AnyRecord, v: string): string => {
+      let he = "";
+      try {
+        he = String(el.httpEquiv ?? "").toLowerCase();
+      } catch {
+        return v;
+      }
+      if (he !== "refresh") return v;
+      return v.replace(/(url\s*=\s*)(.*)$/i, (_m: string, p: string, u: string) => p + rewire(u));
+    };
+    safe(() => {
+      const proto = META.prototype;
+      const d = Object.getOwnPropertyDescriptor(proto, "content");
+      if (d && d.set && d.get) {
+        Object.defineProperty(proto, "content", {
+          configurable: true,
+          enumerable: true,
+          get(this: AnyRecord) {
+            return raw.get(this) ?? d.get!.call(this);
+          },
+          set(this: AnyRecord, v: string) {
+            const s = String(v);
+            raw.set(this, s);
+            d.set!.call(this, rewireMeta(this, s));
+          },
+        });
+      }
+      const O = proto.setAttribute;
+      if (typeof O === "function") {
+        proto.setAttribute = function (this: AnyRecord, n: string, v: string) {
+          return O.call(this, n, n === "content" ? rewireMeta(this, String(v)) : v);
+        };
+      }
+    });
   }
   const OW = w.open;
   if (typeof OW === "function") {
