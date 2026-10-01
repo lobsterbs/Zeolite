@@ -11,6 +11,11 @@ pub enum Codec {
     Base64Url { prefix: String },
     /// Path mirroring (site visible in the path). Stub, Phase 2.
     PathMirror,
+    /// Keyed opaque routes (#55): `/j/<base64url of 0x01 || IV(16) ||
+    /// dest XOR keystream>`, minted and verified with a 16-byte
+    /// SW-realm key. Legacy tails still decode under this codec
+    /// (dual decode: routes minted before the key existed stay valid).
+    Keyed { prefix: String, key: [u8; 16] },
 }
 
 /// Decode a path into the destination URL. Returns None if the path does
@@ -18,16 +23,32 @@ pub enum Codec {
 pub fn decode_path(codec: &Codec, origin: &str, path: &str) -> Option<String> {
     let local = path.strip_prefix(origin).unwrap_or(path);
     match codec {
-        Codec::Base64Url { prefix } => {
-            let rest = local.strip_prefix(prefix.as_str())?;
-            let bytes = b64u_decode(rest)?;
-            String::from_utf8(bytes).ok()
-        }
         Codec::PathMirror => {
             let rest = local.strip_prefix("/m/")?;
             Some(rest.to_string())
         }
+        Codec::Base64Url { prefix } | Codec::Keyed { prefix, .. } => {
+            let rest = local.strip_prefix(prefix.as_str())?;
+            decode_tail(codec, rest)
+        }
     }
+}
+
+/// Decode one encoded tail (prefix already stripped): a v1 keyed
+/// token only decodes with its key and fails closed without one
+/// (#55); anything else is a legacy base64url tail, which always
+/// decodes so pre-#55 routes keep working (dual decode). The query
+/// and fragment are never payload for encoded tails (#20).
+pub(crate) fn decode_tail(codec: &Codec, rest: &str) -> Option<String> {
+    let end = rest.find(['?', '#']).unwrap_or(rest.len());
+    let bytes = b64u_decode(&rest[..end])?;
+    if bytes.len() >= 17 && bytes[0] == 1 {
+        return match codec {
+            Codec::Keyed { key, .. } => keyed_decode(key, &bytes),
+            _ => None,
+        };
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /* ---- tiny base64url, no external deps (keeps the wasm bundle small) ---- */
@@ -74,6 +95,124 @@ pub fn b64u_decode(s: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/* ---- keyed opaque routes (issue #55) -------------------------------- */
+
+/// One SipHash-2-4 round, the reference schedule (veorq/SipHash): no
+/// extra v2 rotation after v3 ^= v2 and no v0 rotation after
+/// v3 ^= v0. The token format is pinned by interop tests on both
+/// sides, so the PRF it rests on is pinned with it.
+fn sipround(state: &mut [u64; 4]) {
+    state[0] = state[0].wrapping_add(state[1]);
+    state[1] = state[1].rotate_left(13);
+    state[1] ^= state[0];
+    state[0] = state[0].rotate_left(32);
+    state[2] = state[2].wrapping_add(state[3]);
+    state[3] = state[3].rotate_left(16);
+    state[3] ^= state[2];
+    state[0] = state[0].wrapping_add(state[3]);
+    state[3] = state[3].rotate_left(21);
+    state[3] ^= state[0];
+    state[2] = state[2].wrapping_add(state[1]);
+    state[1] = state[1].rotate_left(17);
+    state[1] ^= state[2];
+    state[2] = state[2].rotate_left(32);
+}
+
+/// SipHash-2-4 over `msg` with a 128-bit key (64-bit result).
+fn siphash24(key: &[u8; 16], msg: &[u8]) -> u64 {
+    let k0 = u64::from_le_bytes(key[..8].try_into().unwrap());
+    let k1 = u64::from_le_bytes(key[8..].try_into().unwrap());
+    let mut v = [
+        k0 ^ 0x736f_6d65_7073_6575,
+        k1 ^ 0x646f_7261_6e64_6f6d,
+        k0 ^ 0x6c79_6765_6e65_7261,
+        k1 ^ 0x7465_6462_7974_6573,
+    ];
+    let mut i = 0;
+    while i + 8 <= msg.len() {
+        let m = u64::from_le_bytes(msg[i..i + 8].try_into().unwrap());
+        v[3] ^= m;
+        sipround(&mut v);
+        sipround(&mut v);
+        v[0] ^= m;
+        i += 8;
+    }
+    let mut last = (msg.len() as u64) << 56;
+    for (j, b) in msg[i..].iter().enumerate() {
+        last |= (*b as u64) << (8 * j);
+    }
+    v[3] ^= last;
+    sipround(&mut v);
+    sipround(&mut v);
+    v[0] ^= last;
+    v[2] ^= 0xff;
+    sipround(&mut v);
+    sipround(&mut v);
+    sipround(&mut v);
+    sipround(&mut v);
+    v[0] ^ v[1] ^ v[2] ^ v[3]
+}
+
+/// Keystream block j of a token: SipHash over IV || u32le(j) || domain 3.
+fn keystream_block(key: &[u8; 16], iv: &[u8], block: u32) -> [u8; 8] {
+    let mut msg = Vec::with_capacity(iv.len() + 5);
+    msg.extend_from_slice(iv);
+    msg.extend_from_slice(&block.to_le_bytes());
+    msg.push(3);
+    siphash24(key, &msg).to_le_bytes()
+}
+
+/// Parse a base64url 16-byte route key. None on any mismatch: the
+/// caller stays on the legacy codec, never a half-keyed state.
+pub fn parse_key(s: &str) -> Option<[u8; 16]> {
+    b64u_decode(s)?.try_into().ok()
+}
+
+/// Two SipHash MACs of the destination (domains 1 and 2) form the
+/// token IV, binding it to the destination: decode verifies the IV
+/// reproduces, so a wrong key or a tampered token fails closed.
+fn dest_mac(key: &[u8; 16], dest: &[u8], dom: u8) -> [u8; 8] {
+    let mut msg = dest.to_vec();
+    msg.push(dom);
+    siphash24(key, &msg).to_le_bytes()
+}
+
+/// Mint a v1 keyed token: 0x01 || IV(16) || dest XOR keystream.
+pub(crate) fn keyed_token(key: &[u8; 16], dest: &[u8]) -> Vec<u8> {
+    let iv = [dest_mac(key, dest, 1), dest_mac(key, dest, 2)].concat();
+    let mut out = Vec::with_capacity(dest.len() + 17);
+    out.push(1);
+    out.extend_from_slice(&iv);
+    for (j, b) in dest.iter().enumerate() {
+        out.push(b ^ keystream_block(key, &iv, (j / 8) as u32)[j % 8]);
+    }
+    out
+}
+
+/// Decode a v1 keyed token body (prefix stripped, tail already
+/// base64url-decoded). Fails closed (None) on: invalid UTF-8, an IV
+/// that does not reproduce (wrong key, tamper) or a non-http(s)
+/// destination - the engine routes nothing else. Mirrors keyedDecode
+/// in app/src/codec.ts byte for byte.
+fn keyed_decode(key: &[u8; 16], token: &[u8]) -> Option<String> {
+    if token.len() < 17 || token[0] != 1 {
+        return None;
+    }
+    let (iv, ct) = (&token[1..17], &token[17..]);
+    let mut dest = Vec::with_capacity(ct.len());
+    for (j, b) in ct.iter().enumerate() {
+        dest.push(b ^ keystream_block(key, iv, (j / 8) as u32)[j % 8]);
+    }
+    let s = String::from_utf8(dest).ok()?;
+    if iv[..8] != dest_mac(key, s.as_bytes(), 1) || iv[8..] != dest_mac(key, s.as_bytes(), 2) {
+        return None;
+    }
+    if !s.starts_with("http://") && !s.starts_with("https://") {
+        return None;
+    }
+    Some(s)
 }
 
 /// RFC 3986 scheme: ALPHA followed by ALPHA / DIGIT / "+" / "-" / ".".
@@ -402,5 +541,61 @@ mod tests {
         let path = format!("/j/{}", b64u_encode(dest.as_bytes()));
         assert_eq!(decode_path(&c, "", &path).unwrap(), dest);
         assert!(decode_path(&c, "", "/other").is_none());
+    }
+
+    /// #55: keyed tokens round-trip, carry no destination in the
+    /// clear, and fail closed without the key or under a wrong one.
+    #[test]
+    fn keyed_token_roundtrip() {
+        let key: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let c = Codec::Keyed {
+            prefix: "/j/".into(),
+            key,
+        };
+        let dest = "https://example.com/path?q=1";
+        let path = format!("/j/{}", b64u_encode(&keyed_token(&key, dest.as_bytes())));
+        // Pinned interop with the TS codec (app/src/__tests__/codec.test.ts):
+        // same key, same destination, same token string.
+        assert_eq!(
+            path,
+            "/j/AfhHzGwm0S7HzQm7oCo2BuN_M9rWothiobfdMNe-Tw2pTYP-gQpzwm3EC7Hy"
+        );
+        assert_eq!(decode_path(&c, "", &path).unwrap(), dest);
+        assert!(!path.contains("example.com"));
+        // Wrong key fails closed.
+        let wrong = Codec::Keyed {
+            prefix: "/j/".into(),
+            key: core::array::from_fn(|i| (i * 7 + 3) as u8),
+        };
+        assert_eq!(decode_path(&wrong, "", &path), None);
+        // Without the key a token fails closed, not legacy-decoded.
+        let plain = Codec::Base64Url {
+            prefix: "/j/".into(),
+        };
+        assert_eq!(decode_path(&plain, "", &path), None);
+    }
+
+    /// #55: dual decode - legacy tails still decode under the keyed
+    /// codec, so routes minted before the key existed keep working.
+    #[test]
+    fn keyed_codec_decodes_legacy_tails() {
+        let key: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let c = Codec::Keyed {
+            prefix: "/j/".into(),
+            key,
+        };
+        let dest = "https://example.com/x";
+        let legacy = format!("/j/{}", b64u_encode(dest.as_bytes()));
+        assert_eq!(decode_path(&c, "", &legacy).unwrap(), dest);
+    }
+
+    /// Pinned SipHash-2-4 reference vectors (veorq/SipHash test set):
+    /// the token format is frozen, so the PRF is pinned with it.
+    #[test]
+    fn siphash_reference_vectors() {
+        let key: [u8; 16] = core::array::from_fn(|i| i as u8);
+        assert_eq!(siphash24(&key, &[]), 0x726fdb47dd0e0e31);
+        assert_eq!(siphash24(&key, &[0x00]), 0x74f839c593dc67fd);
+        assert_eq!(siphash24(&key, &[0x00, 0x01]), 0x0d6c8009d9a94f5a);
     }
 }

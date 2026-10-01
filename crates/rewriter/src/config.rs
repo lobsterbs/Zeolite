@@ -57,6 +57,14 @@ impl RewriteConfig {
                     crate::encode::b64u_encode(dest.as_bytes())
                 )
             }
+            Codec::Keyed { prefix, key } => {
+                format!(
+                    "{}{}{}",
+                    self.origin,
+                    prefix,
+                    crate::encode::b64u_encode(&crate::encode::keyed_token(key, dest.as_bytes()))
+                )
+            }
             Codec::PathMirror => format!("{}/m/{}", self.origin, dest),
         }
     }
@@ -105,17 +113,17 @@ impl RewriteConfig {
             url
         };
         let rest = match &self.codec {
-            Codec::Base64Url { prefix } => local.strip_prefix(prefix.as_str())?,
+            Codec::Base64Url { prefix } | Codec::Keyed { prefix, .. } => {
+                local.strip_prefix(prefix.as_str())?
+            }
             Codec::PathMirror => local.strip_prefix("/m/")?,
         };
         // Mirror tails carry the destination verbatim, query included:
         // only a fragment ends that payload. b64u tails stop at the
         // first '?' or '#' (issue #20).
         match &self.codec {
-            Codec::Base64Url { .. } => {
-                let end = rest.find(['?', '#']).unwrap_or(rest.len());
-                let bytes = crate::encode::b64u_decode(&rest[..end])?;
-                String::from_utf8(bytes).ok()
+            Codec::Base64Url { .. } | Codec::Keyed { .. } => {
+                crate::encode::decode_tail(&self.codec, rest)
             }
             Codec::PathMirror => {
                 let end = rest.find('#').unwrap_or(rest.len());
@@ -222,6 +230,45 @@ mod tests {
             c.unwrap_engine_route(&nested).as_deref(),
             Some("https://a.dev/p?q=1")
         );
+        assert_eq!(c.decode_engine_route("/other"), None);
+    }
+
+    /// #55: the keyed codec round-trips through the rewrap guard;
+    /// legacy tails still unwrap under it so old routes do not
+    /// double-wrap, and a keyed token fails closed without the key.
+    #[test]
+    fn keyed_routes_decode_for_the_rewrap_guard() {
+        let key: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let c = RewriteConfig {
+            origin: "https://proxy.example".into(),
+            codec: Codec::Keyed {
+                prefix: "/zl/".into(),
+                key,
+            },
+            ..Default::default()
+        };
+        let dest = "https://chatgpt.com/x?y=1";
+        let route = c.encode_url(dest);
+        assert!(route.starts_with("https://proxy.example/zl/"));
+        assert!(!route.contains("chatgpt.com"));
+        assert_eq!(c.decode_engine_route(&route).as_deref(), Some(dest));
+        assert_eq!(c.unwrap_engine_route(&route).as_deref(), Some(dest));
+        // Host-bound keyed routes peel like b64u ones.
+        let tail = &route["https://proxy.example".len()..];
+        let bound = format!("https://chatgpt.com{}", tail);
+        assert_eq!(c.decode_engine_route(&bound).as_deref(), Some(dest));
+        // Legacy tails dual-decode under the keyed codec.
+        let legacy = format!("/zl/{}", crate::encode::b64u_encode(dest.as_bytes()));
+        assert_eq!(c.decode_engine_route(&legacy).as_deref(), Some(dest));
+        // A keyed token fails closed under the keyless codec.
+        let plain = RewriteConfig {
+            origin: "https://proxy.example".into(),
+            codec: Codec::Base64Url {
+                prefix: "/zl/".into(),
+            },
+            ..Default::default()
+        };
+        assert_eq!(plain.decode_engine_route(tail), None);
         assert_eq!(c.decode_engine_route("/other"), None);
     }
 }

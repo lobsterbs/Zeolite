@@ -44,6 +44,11 @@ export interface ZeoliteEngine {
   init(config: EngineConfig): Promise<void>;
   /** Navigate to a destination (returns the engine-local route URL). */
   navigate(target: string): string;
+  /** Opaque route for a destination (#55): the SW mints it with its
+   *  realm-held key, so the destination never appears in a
+   *  page-visible URL; falls back to the legacy codec when no key is
+   *  active. */
+  navigateOpaque(target: string): Promise<string>;
   /** Enable/disable interception for one site (per-site toggle),
    *  acknowledged by the SW and persisted across SW restarts. */
   setSiteRoute(site: string, enabled: boolean): Promise<void>;
@@ -70,6 +75,7 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 | --- | --- | --- |
 | `zl:ping` | - | liveness probe (echoes version, degraded, route shape) |
 | `zl:config` | `prefix` | rotate the route prefix at runtime; the scheme is fixed to `"b64u"` since #32, any other `scheme` value is rejected |
+| `zl:mint` | `dest` | mint an opaque route for a destination (#55): answers `{ ok, route }`; the SW-realm key never leaves the worker, and the message is host-only |
 | `zl:adblock` | `enabled` | global toggle for the /rules.json block lists |
 | `zl:rules` | `ua`, `rules` (`host`, `adblock`, `ua`) | host-app per-site adblock + User-Agent overrides (rules.ts) |
 | `zl:jarProfile` | `profile` (or null) | switch the cookie jar to a throwaway session profile (incognito; cookies.ts) |

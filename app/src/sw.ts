@@ -14,6 +14,11 @@
      { type: "zl:config", prefix }          rotate the route prefix
                                              (scheme fixed "b64u" since
                                              #32; other values rejected)
+     { type: "zl:mint", dest }              mint an opaque route for a
+                                             destination (#55: the SW
+                                             mints with its realm-held
+                                             key; the key never leaves
+                                             the worker)
      { type: "zl:rules", ua, rules }         host-app per-site overrides
                                              (host, adblock, ua)
      { type: "zl:jarProfile", profile }     switch the cookie jar to a
@@ -78,7 +83,8 @@
    wasm-pack build --target web -> copy into app/src/rewriter_wasm). */
 
 /// <reference lib="webworker" />
-import { b64uDecode, decodePath, encodeDest, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setRouteKey, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { loadRouteKey, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
 import { NAV } from "./bootstrap/navguard";
 import { initScript } from "./pageload";
@@ -234,13 +240,13 @@ interface JsCssRewriter {
   finish(): string;
 }
 interface RewriterMod {
-  JsRewriter: new (origin: string, base: string, prefix: string, scheme: string) => JsRewriter;
-  JsCssRewriter: new (origin: string, base: string, prefix: string, scheme: string) => JsCssRewriter;
-  rewriteCss(css: string, origin: string, base: string, prefix: string, scheme: string): string;
+  JsRewriter: new (origin: string, base: string, prefix: string, scheme: string, key?: string) => JsRewriter;
+  JsCssRewriter: new (origin: string, base: string, prefix: string, scheme: string, key?: string) => JsCssRewriter;
+  rewriteCss(css: string, origin: string, base: string, prefix: string, scheme: string, key?: string): string;
   /* #46: one-shot external script body pass (URL literals +
      frame-buster neutralization), used by the script-destination
      serve seam. */
-  rewriteJsBody(js: string, origin: string, base: string, prefix: string, scheme: string): string;
+  rewriteJsBody(js: string, origin: string, base: string, prefix: string, scheme: string, key?: string): string;
   /* wasm-pack --target web output: `default` is the async init that
      fetches and instantiates the .wasm binary. Without it every
      JsRewriter call dies on an unbound wasm table. */
@@ -325,7 +331,7 @@ function rewriteStream(
         // (e.g. a wasm 404) used to reject outside the try and kill every fresh
         // HTML response with no diag event and no console error.
         const mod = await modP;
-        const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u"); // scheme fixed since #32 (mirror removed)
+        const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", routeKeyB64 ?? undefined); // scheme fixed since #32 (mirror removed)
         for (const path of rule.inject ?? []) rw.add_injection(path);
         if (rule.block?.length) rw.set_blocked_hosts(rule.block);
         for (const u of csInject) rw.add_injection(u);
@@ -373,7 +379,7 @@ function cssRewriteStream(
     async start(controller) {
       try {
         const mod = await modP;
-        const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix(), "b64u"); // scheme fixed since #32 (mirror removed)
+        const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix(), "b64u", routeKeyB64 ?? undefined); // scheme fixed since #32 (mirror removed)
         const reader = body.getReader();
         for (;;) {
           const { done, value } = await reader.read();
@@ -925,6 +931,10 @@ function csInjectUrls(target: string, req: Request): string[] {
    worker start; zl:ping and the zl:config ack also echo it so embedders
    can detect drift. zl:teardown drops every cache, this one included,
    which is the intended full reset. */
+/* Issue #55: base64url of the realm-held opaque route key, loaded in
+   routeReady below. null = no key (routeReady not settled yet, or
+   storage unavailable) = the legacy codec. */
+let routeKeyB64: string | null = null;
 const ZL_ROUTE_CACHE = "zeolite-route-v1";
 const ZL_ROUTE_KEY = new URL("route-config.json", self.registration.scope).href;
 const routeReady: Promise<void> = (async () => {
@@ -938,6 +948,21 @@ const routeReady: Promise<void> = (async () => {
     }
   } catch {
     /* storage unavailable: defaults stay until the next zl:config */
+  }
+  /* #55: the opaque route key restores alongside the shape. First
+     boot mints a fresh 16-byte key and persists it. Storage
+     unavailable keeps the legacy codec for this worker lifetime:
+     routes stay browser-decodable, the documented degraded mode. */
+  try {
+    let key = await loadRouteKey();
+    if (!key) {
+      key = crypto.getRandomValues(new Uint8Array(16));
+      await saveRouteKey(key);
+    }
+    routeKeyB64 = b64uEncode(key);
+    setRouteKey(routeKeyB64);
+  } catch {
+    /* storage unavailable: keyed codec stays off */
   }
 })();
 
@@ -1716,11 +1741,14 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             /* Issue #32: no __ZL_WORKER_URL__ global (it handed the
                upstream URL to any worker script); the worker's own
                engine route is passed to the prelude init line and
-               decoded inside its closure. */
+               decoded inside its closure. #55: the init route is
+               minted with the legacy codec on purpose - the prelude
+               realm holds no route key, so a keyed token could never
+               decode there (honest limit, issue text). */
             const head =
               "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
               (await workerPrelude()) +
-              "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDest(target)) + ");\n" +
+              "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n" +
               (fpWorkerScript ? "\n" + fpWorkerScript : "");
             WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
             /* #35: the page cache holds the composed copy (specifiers
@@ -1741,7 +1769,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             const prelude =
               "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
               (await workerPrelude()) +
-              "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDest(target)) + ");\n" +
+              "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n" +
               (fpWorkerScript ? "\n" + fpWorkerScript : "");
             const body = new ReadableStream<Uint8Array>({
               async start(c) {
@@ -1787,7 +1815,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
                not 502 the script - the specifier output still serves. */
             try {
               const mod = await rewriter();
-              src = mod.rewriteJsBody(src, self.location.origin, target, currentPrefix(), "b64u");
+              src = mod.rewriteJsBody(src, self.location.origin, target, currentPrefix(), "b64u", routeKeyB64 ?? undefined);
             } catch (err) {
               DIAG.emit({
                 category: "REWRITE",
@@ -1904,6 +1932,7 @@ function forwardedHeaders(req: Request, target: string, initiator?: string): Hea
 interface ControlMessage {
   type:
     | "zl:config"
+    | "zl:mint"
     | "zl:rules"
     | "zl:jarProfile"
     | "zl:siteRoute"
@@ -2141,6 +2170,20 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
       reply({ ok: true, prefix: currentPrefix(), scheme: "b64u" });
+      break;
+    }
+    case "zl:mint": {
+      /* #55: mint an opaque route for a destination. Host-only by
+         the gate above - a proxied page must not mint routes - and
+         the reply carries the route only, never the key: the key
+         must not leave the worker realm. With no key active
+         (storage unavailable) this still answers, with a legacy
+         route: the degraded mode, not an error. */
+      if (typeof msg.dest !== "string") {
+        reply({ ok: false, error: "mint needs dest" });
+        break;
+      }
+      reply({ ok: true, route: encodeDest(msg.dest) });
       break;
     }
     case "zl:adblock":

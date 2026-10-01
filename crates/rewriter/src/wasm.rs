@@ -7,12 +7,17 @@ use crate::html::Rewriter;
 use wasm_bindgen::prelude::*;
 
 /// Route scheme selector: "mirror" emits path-mirror routes (/m/...),
-/// anything else base64url under the configured prefix. The rewriter
-/// must emit routes in the scheme the SW decodes: a mirror deployment
-/// that gets b64u routes serves links the SW can never decode (#20).
-fn codec_for(prefix: String, scheme: String) -> Codec {
+/// anything else base64url under the configured prefix, or the keyed
+/// opaque codec when a 16-byte route key is passed (#55). The
+/// rewriter must emit routes in the scheme the SW decodes: a mirror
+/// deployment that gets b64u routes serves links the SW can never
+/// decode (#20), and a keyless SW getting keyed routes serves links
+/// it can never decode either (#55).
+fn codec_for(prefix: String, scheme: String, key: Option<String>) -> Codec {
     if scheme == "mirror" {
         Codec::PathMirror
+    } else if let Some(key) = key.as_deref().and_then(crate::encode::parse_key) {
+        Codec::Keyed { prefix, key }
     } else {
         Codec::Base64Url { prefix }
     }
@@ -29,11 +34,18 @@ impl JsRewriter {
     /// base: the real destination URL of the page being rewritten
     /// prefix: codec path prefix (default "/j/")
     /// scheme: route scheme ("mirror" or the b64u default)
+    /// key: base64url 16-byte opaque route key (#55); None = legacy
     #[wasm_bindgen(constructor)]
-    pub fn new(origin: String, base: String, prefix: String, scheme: String) -> JsRewriter {
+    pub fn new(
+        origin: String,
+        base: String,
+        prefix: String,
+        scheme: String,
+        key: Option<String>,
+    ) -> JsRewriter {
         let cfg = RewriteConfig {
             origin,
-            codec: codec_for(prefix, scheme),
+            codec: codec_for(prefix, scheme, key),
             ..Default::default()
         };
         let mut inner = Rewriter::new(cfg);
@@ -101,10 +113,11 @@ pub fn rewrite_js_body_export(
     base: String,
     prefix: String,
     scheme: String,
+    key: Option<String>,
 ) -> String {
     let cfg = RewriteConfig {
         origin,
-        codec: codec_for(prefix, scheme),
+        codec: codec_for(prefix, scheme, key),
         ..Default::default()
     };
     let mut r = Rewriter::new(cfg);
@@ -121,10 +134,11 @@ pub fn rewrite_css(
     base: String,
     prefix: String,
     scheme: String,
+    key: Option<String>,
 ) -> String {
     let cfg = RewriteConfig {
         origin,
-        codec: codec_for(prefix, scheme),
+        codec: codec_for(prefix, scheme, key),
         ..Default::default()
     };
     let enc = css_enc(cfg, base);
@@ -143,10 +157,16 @@ pub struct JsCssRewriter {
 #[wasm_bindgen]
 impl JsCssRewriter {
     #[wasm_bindgen(constructor)]
-    pub fn new(origin: String, base: String, prefix: String, scheme: String) -> JsCssRewriter {
+    pub fn new(
+        origin: String,
+        base: String,
+        prefix: String,
+        scheme: String,
+        key: Option<String>,
+    ) -> JsCssRewriter {
         let cfg = RewriteConfig {
             origin,
-            codec: codec_for(prefix, scheme),
+            codec: codec_for(prefix, scheme, key),
             ..Default::default()
         };
         Self {

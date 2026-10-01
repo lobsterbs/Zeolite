@@ -5,7 +5,6 @@
    route so all subresource fetches are intercepted. */
 
 import { ZeoliteEngine } from "./engine";
-import { encodeDest } from "./codec";
 
 const status = document.getElementById("zl-status")!;
 const frame = document.getElementById("zl-frame") as HTMLIFrameElement;
@@ -37,6 +36,8 @@ if (!target) {
     } catch { /* nothing persisted */ }
     status.style.display = "none";
     frame.style.display = "block";
-    frame.src = engine.navigate(target);
+    /* #55: the frame navigates an opaque route minted by the SW, so
+       the destination never appears in a browser-visible URL. */
+    frame.src = await engine.navigateOpaque(target);
   })();
 }

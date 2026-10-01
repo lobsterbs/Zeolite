@@ -8,6 +8,9 @@
      "b64u" since #32 (mirror removed; see docs/engine-adapter.md).
    - navigate(): pure function over the codec; returns the engine-local
      route for a destination.
+   - navigateOpaque(): the SW mints the route with its realm-held key
+     (#55), so the destination never appears in a page-visible string;
+     falls back to the legacy codec when no key is active.
    - setSiteRoute(): per-site interception toggle, acknowledged by the SW.
    - teardown(): SW unregisters and caches drop; nothing survives an
      engine switch. */
@@ -65,6 +68,19 @@ export class ZeoliteEngine {
   /** Engine-local route for a destination (usable as an iframe src). */
   navigate(target: string): string {
     return encodeDest(target);
+  }
+
+  /** Opaque engine-local route (#55): the SW mints it with its
+      realm-held route key, so the destination never appears in a
+      page-visible string. Without an active key (storage unavailable)
+      the SW answers with a legacy route - the documented degraded
+      mode, not an error. */
+  async navigateOpaque(target: string): Promise<string> {
+    const r = (await this.post({ type: "zl:mint", dest: target })) as {
+      ok: boolean;
+      route?: string;
+    };
+    return r.ok && typeof r.route === "string" ? r.route : encodeDest(target);
   }
 
   /** Enable/disable interception for one site. */

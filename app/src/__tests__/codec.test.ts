@@ -1,17 +1,23 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import {
+  b64uEncode,
   encodeDest,
+  encodeDestLegacy,
   decodePath,
   isEngineAsset,
   isEnginePath,
   referrerDest,
+  setRouteKey,
   setScheme,
   unwrapDest,
 } from "../codec";
 
-/* codec keeps rotatable module state (prefix): reset between
-   tests so an order-dependent rotation leak cannot hide a defect. */
-beforeEach(() => setScheme("/j/"));
+/* codec keeps rotatable module state (prefix, #55 route key): reset
+   between tests so an order-dependent leak cannot hide a defect. */
+beforeEach(() => {
+  setScheme("/j/");
+  setRouteKey(null);
+});
 
 describe("unwrapDest", () => {
   it("returns plain destinations unchanged", () => {
@@ -126,5 +132,56 @@ describe("mirror scheme removal (issue #32)", () => {
     expect(route).not.toContain("target.dev");
     expect(route).toMatch(/^\/j\//);
     expect(decodePath(route)).toBe(dest);
+  });
+});
+
+describe("keyed opaque routes (issue #55)", () => {
+  /* Pinned interop vector, mirrored by the Rust codec test
+     (crates/rewriter/src/encode.rs): key 00..0f, destination below.
+     Routes live in history and bookmarks, so the token format is
+     frozen - this token must survive every refactor byte for byte. */
+  const KEY = b64uEncode(new Uint8Array(16).map((_, i) => i));
+  const DEST = "https://example.com/path?q=1";
+  const PINNED = "/j/AfhHzGwm0S7HzQm7oCo2BuN_M9rWothiobfdMNe-Tw2pTYP-gQpzwm3EC7Hy";
+
+  beforeEach(() => {
+    setScheme("/j/");
+    setRouteKey(null);
+  });
+
+  it("mints and decodes the pinned interop token", () => {
+    setRouteKey(KEY);
+    expect(encodeDest(DEST)).toBe(PINNED);
+    expect(decodePath(PINNED)).toBe(DEST);
+  });
+
+  it("fails closed without the key, on a wrong key and on junk", () => {
+    setRouteKey(null);
+    expect(decodePath(PINNED)).toBeNull();
+    const wrong = b64uEncode(new Uint8Array(16).map((_, i) => i * 7 + 3));
+    setRouteKey(wrong);
+    expect(decodePath(PINNED)).toBeNull();
+    // Token-shaped junk: first byte 1, 16 IV bytes, 2 body bytes.
+    const junk = "/j/" + b64uEncode(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 65, 66]));
+    expect(decodePath(junk)).toBeNull();
+    // A key that is not 16 bytes degrades to legacy, never half-keyed.
+    setRouteKey(b64uEncode(new Uint8Array(8)));
+    expect(encodeDest(DEST)).toBe(encodeDestLegacy(DEST));
+  });
+
+  it("legacy tails always decode, keyed or not (dual decode)", () => {
+    const legacy = encodeDestLegacy(DEST);
+    expect(legacy).not.toBe(PINNED);
+    expect(decodePath(legacy)).toBe(DEST);
+    setRouteKey(KEY);
+    expect(decodePath(legacy)).toBe(DEST);
+  });
+
+  it("a keyed route never carries the destination in the clear", () => {
+    setRouteKey(KEY);
+    const route = encodeDest("https://secret.example/private/page?x=1");
+    expect(route).toMatch(/^\/j\//);
+    expect(route).not.toContain("secret.example");
+    expect(route).not.toContain("private");
   });
 });
