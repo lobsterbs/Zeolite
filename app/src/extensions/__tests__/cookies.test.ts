@@ -89,17 +89,19 @@ describe("browser.cookies (#42)", () => {
   });
 
   it("getAll filters by url or by permitted origins", async () => {
-    const { api } = await install("CookieAll", ["cookies"], ["https://example.com/*"]);
-    documentCookieWrite("https://example.com/", "zl_all=a; Path=/");
-    documentCookieWrite("https://example.com/", "zl_dom=b; Domain=example.com; Path=/");
+    /* Own origin: the jar is shared module state, and the earlier
+       test already wrote cookies for example.com. */
+    const { api } = await install("CookieAll", ["cookies"], ["https://all.example/*"]);
+    documentCookieWrite("https://all.example/", "zl_all=a; Path=/");
+    documentCookieWrite("https://all.example/", "zl_dom=b; Domain=all.example; Path=/");
     documentCookieWrite("https://other.example/", "zl_other=c; Path=/");
     const ck = api.browser.cookies as Record<string, unknown>;
     const all = await (ck.getAll as (d?: Record<string, unknown>) => Promise<unknown[]>)({
-      url: "https://example.com/",
+      url: "https://all.example/",
     });
     expect(all).toHaveLength(2);
     const byName = await (ck.getAll as (d?: Record<string, unknown>) => Promise<unknown[]>)({
-      url: "https://example.com/",
+      url: "https://all.example/",
       name: "zl_dom",
     });
     expect(byName).toHaveLength(1);
