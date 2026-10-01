@@ -648,7 +648,7 @@ async function pageCacheMatch(req: Request): Promise<Response | null> {
          request re-fetches and re-transforms. */
       const jsServe =
         isWorkerDestination(req.destination) ||
-        (req.destination === "script" && isJs(hit));
+        ((req.destination === "script" || req.destination === "") && isJs(hit));
       if (jsServe) {
         await (await caches.open(ZL_PAGES)).delete(req);
       } else {
@@ -1637,7 +1637,10 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              raw store: their cache hits re-run the streaming
              rewriter. */
           const workerServe = isWorkerDestination(e.request.destination) && !!resp.body;
-          const scriptServe = e.request.destination === "script" && isJs(resp) && !!resp.body;
+          /* #47: destination "" JS (fetch/XHR + eval) transforms too,
+             so its raw store must be skipped exactly like script-dest
+             JS - the branch below stores the transformed copy. */
+          const scriptServe = (e.request.destination === "script" || e.request.destination === "") && isJs(resp) && !!resp.body;
           if (e.request.method === "GET" && !workerServe && !scriptServe) void pageCacheStore(e.request, resp.clone());
           if (isHtml(resp) && resp.body) {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
@@ -1748,9 +1751,11 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              specifiers here; dynamic import() in a classic script
              resolves the same way, so every script-destination JS body
              takes the pass (a no-op for bodies without specifiers).
-             Inline module scripts are a rewriter gap (#36): the parser
-             path, not this seam. */
-          if (e.request.destination === "script" && isJs(resp) && resp.body) {
+             #47: destination "" JS (fetch/XHR + eval) takes it too -
+             HTML and CSS rewrite by content type with no destination
+             gate, JS alone was gated. Inline module scripts are a
+             rewriter gap (#36): the parser path, not this seam. */
+          if ((e.request.destination === "script" || e.request.destination === "") && isJs(resp) && resp.body) {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
             let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
