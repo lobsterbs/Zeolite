@@ -31,11 +31,20 @@ since 2.0 dials a destination outside it.
 
 ## Header surgery
 
-Two header paths, both deliberate and both in app/src/sw.ts:
+Two header paths, both deliberate, invoked from app/src/sw.ts
+with the surgery helpers in app/src/headers.ts (unit-gated in
+app/src/__tests__/leak.test.ts):
 
 - Upstream responses pass stripHostile(), which removes CSP,
   CSP-report-only, X-Frame-Options, HSTS, COOP/COEP/CORP,
-  Permissions-Policy, Set-Cookie and Set-Cookie2. This is the core
+  Permissions-Policy, Set-Cookie, Set-Cookie2 and the
+  destination-bearing informational headers (Link, Content-Location,
+  X-Original-URL). The functional Refresh header is not stripped:
+  its url=, when present, is re-encoded to an engine route against
+  the response destination (mapRefreshHeader), so a delayed refresh
+  stays inside the engine; a same-page refresh (no url=) passes
+  untouched and an unresolvable url= fails closed with the header
+  dropped. This is the core
   tradeoff of an interception engine: the proxied page must run inside
   the embedding application, so the origin's confinement headers
   cannot survive. Consequences, stated honestly:

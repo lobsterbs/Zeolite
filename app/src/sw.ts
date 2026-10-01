@@ -84,6 +84,7 @@
 
 /// <reference lib="webworker" />
 import { b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setRouteKey, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { mapRefreshHeader, stripHostile } from "./headers";
 import { loadRouteKey, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
 import { NAV } from "./bootstrap/navguard";
@@ -193,34 +194,9 @@ async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
   return zlCurlFetch(dest, init);
 }
 
-/* ---- Header surgery ------------------------------------------------ */
-
-const HOSTILE = [
-  "content-security-policy",
-  "content-security-policy-report-only",
-  "x-frame-options",
-  "strict-transport-security",
-  "cross-origin-opener-policy",
-  "cross-origin-embedder-policy",
-  "cross-origin-resource-policy",
-  "permissions-policy",
-  "set-cookie",
-  "set-cookie2",
-  /* The transport delivers decoded bodies: a preserved upstream
-     content-encoding would make every fetch() consumer decode
-     plaintext a second time (corrupted bytes), and the rewritten
-     body never matches the upstream length. */
-  "content-encoding",
-  "content-length",
-];
-
-function stripHostile(headers: Headers): Headers {
-  const out = new Headers();
-  for (const [k, v] of headers) {
-    if (!HOSTILE.includes(k.toLowerCase())) out.set(k, v);
-  }
-  return out;
-}
+/* ---- Header surgery ------------------------------------------------
+   stripHostile() and mapRefreshHeader() live in ./headers (unit-gated
+   in __tests__/leak.test.ts); the SW is the call-site layer. */
 
 /* 2.2 Arsenide: bound on SW-followed redirect hops (the transport
    surfaces 3xx; the loop follows). Past the cap the 3xx is surfaced to
@@ -711,6 +687,12 @@ async function pageCacheStore(req: Request, resp: Response): Promise<void> {
        live path; the stored copy is the surgered view. */
     const storedHeaders = stripHostile(resp.headers);
     applyEngineCors(storedHeaders, self.location.origin, req.credentials);
+    /* Cache hits bypass the live surgery path, so the stored view must
+       carry the mapped Refresh too (a target-host url= here would
+       replay against the browser on every hit). */
+    const cu = new URL(req.url);
+    const croute = decodePath(cu.pathname);
+    mapRefreshHeader(storedHeaders, croute ? croute + cu.search : cu.href);
     const stored = new Response(resp.body, { status: 200, headers: storedHeaders });
     stored.headers.set(ZL_CACHED_AT, String(Date.now()));
     await cache.put(req, stored);
@@ -1624,6 +1606,11 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               }
             }
           }
+          /* #32 follow-up: Refresh is functional, not informational, so its
+             url= is mapped to an engine route instead of stripped -
+             a delayed refresh must stay inside the engine. Same-page
+             refresh (no url=) carries no destination and passes. */
+          mapRefreshHeader(outHeaders, finalDest ?? target);
           void applyOnResponse(plugins, target, resp.status, outHeaders);
           const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "");
           traceDecision({ subsystem: "transport", rule: dec.mode, original: target, result: dec.fallbackReason ?? dec.mode, resource: rtype, traceId });
