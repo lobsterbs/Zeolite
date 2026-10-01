@@ -8,17 +8,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        f: [sw, e2e, srv]
-        n: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        f: [e2e]
+        n: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - name: print chunk
         run: |
           case "${{ matrix.f }}" in
-            sw) p="app/src/sw.ts" ;;
             e2e) p="suite/e2e/e2e.mjs" ;;
-            srv) p="crates/zeolite-server/src/lib.rs" ;;
           esac
-          curl -fsSL "https://raw.githubusercontent.com/lobsterbs/Zeolite/ccabab68637a60d08c16701b0871dcfbbca5e2e4/$p" -o blob
+          curl -fsSL "https://raw.githubusercontent.com/lobsterbs/Zeolite/54cf081243e1043c5f577f3f8ebab2d890b06baf/$p" -o blob
           echo "ZLGITHASH-$(git hash-object blob)"
           split -b 8000 -d -a 2 blob part
           c=$(printf 'part%02d' ${{ matrix.n }})
