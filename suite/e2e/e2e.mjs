@@ -686,7 +686,11 @@ async function main() {
       throw e;
     }
     const o = JSON.parse(out);
-    if (o.img1 <= 0 || o.ss <= 0) dump();
+    /* Dump on BOTH outcomes: the ss element is flaky across runs
+       (broken with no matching request in some, decoded in others),
+       so pass-state evidence matters as much as the failure dump. */
+    console.log("  [assets-dump] " + out.slice(0, 4000));
+    dump();
     assert(o.img1 > 0, "src img did not decode: " + out);
     assert(o.ss > 0, "srcset img did not decode: " + out);
     for (const k of ["bg", "inl"]) {
@@ -796,16 +800,62 @@ async function main() {
   });
 
   await check("rewriter: srcset data URL candidate stays intact, other candidates routed (#36)", async () => {
-    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const { frame, rec } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "srcset data url", `async () => {
       const img = document.getElementById("ssd");
       for (let i = 0; i < 100; i++) {
         if (img.complete && img.naturalWidth) break;
         await new Promise((r) => setTimeout(r, 100));
       }
-      return JSON.stringify({ w: img.naturalWidth, cur: img.currentSrc, set: img.srcset });
-    }`, 20000);
+      /* Instrumentation round (#36): the page's element reports
+         currentSrc = the 2x engine candidate (not the data 1x
+         candidate) and a broken load. Discriminating experiments,
+         all in the page, all reported for the dump:
+         - dpr: what density the selection ran against
+         - dataOnly: a fresh img whose srcset has ONLY the data
+           candidate - does Chromium accept a comma-carrying data URL
+           as a srcset candidate at all?
+         - pageSet: a fresh img with the page element's exact srcset
+         - imgs/html: the final markup and every img state
+         - rt: resource timing with initiator types */
+      const dpr = window.devicePixelRatio;
+      const mk = (attrs) => new Promise((res) => {
+        const im = document.createElement("img");
+        for (const [k, v] of Object.entries(attrs)) im.setAttribute(k, v);
+        im.style.width = "1px"; im.style.height = "1px";
+        im.onload = () => res({ ok: 1, w: im.naturalWidth, cur: im.currentSrc });
+        im.onerror = () => res({ err: 1, cur: im.currentSrc });
+        setTimeout(() => res({ late: 1, w: im.naturalWidth, c: im.complete }), 6000);
+        document.body.appendChild(im);
+      });
+      const ssdEl = document.getElementById("ssd");
+      const setAttr = ssdEl?.getAttribute("srcset") ?? "";
+      const m = setAttr.match(/(data:\\S+)\\s+1x/);
+      const dataUrl = m ? m[1] : "";
+      const engineUrl = (setAttr.match(/(http\\S+)\\s+2x/) || [])[1] ?? "";
+      const [dataOnly, pageSet] = await Promise.all([
+        mk({ srcset: dataUrl + " 1x" }),
+        mk({ srcset: setAttr }),
+      ]);
+      const imgs = [...document.querySelectorAll("img")].map((el) => ({
+        id: el.id, src: el.getAttribute("src"), set: el.getAttribute("srcset"),
+        cur: el.currentSrc, w: el.naturalWidth, ok: el.complete,
+      }));
+      const bh = document.body.innerHTML;
+      const ii = bh.indexOf('id="ssd"');
+      const html = ii < 0 ? bh.slice(0, 600) : bh.slice(Math.max(0, ii - 200), ii + 900);
+      const rt = performance.getEntriesByType("resource")
+        .map((e) => ({ n: e.name.slice(-24), s: e.responseStatus, it: e.initiatorType }));
+      return JSON.stringify({ w: img.naturalWidth, complete: img.complete, cur: img.currentSrc, set: setAttr, dpr, dataOnly, pageSet, imgs, html, rt });
+    }`, 45000);
     const o = JSON.parse(out);
+    /* Dump on BOTH outcomes: this check is the open #36 forensics
+       thread, and pass-state evidence is as valuable as the failure. */
+    console.log("  [ssd-dump] " + out.slice(0, 4000));
+    const rs = rec.requests
+      .filter((r) => r.url.includes("aHR0cDov") || r.url.includes("/wisp/"))
+      .map((r) => ({ url: r.url.slice(-36), fromSW: r.fromSW, status: r.status, failed: r.failed }));
+    console.log("  [ssd-rec] " + JSON.stringify(rs));
     assert(o.w > 0, "data URL srcset candidate did not decode (split on its payload comma?): " + out);
     assert(String(o.cur).startsWith("data:image/png"), "currentSrc is not the intact data URL: " + o.cur);
     assert(String(o.set).includes("base64,iVBORw0KGgo"), "data URL candidate was split on its payload comma: " + o.set);
