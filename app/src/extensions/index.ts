@@ -56,6 +56,16 @@ export { MENUS, ContextMenusHost } from "./contextmenus";
 export type { MenuItem, MenuClickInfo, MenuClickedListener } from "./contextmenus";
 export { DOWNLOADS, DownloadsHost } from "./downloads";
 export type { DownloadOptions, DownloadOp, DownloadState, DownloadStatus, DownloadChange, DownloadsChangedListener } from "./downloads";
+export { NOTIFY, NotificationsHost } from "./notifications";
+export type {
+  NotificationButton,
+  NotificationRecord,
+  NotifyOp,
+  NotifyEventKind,
+  NotificationClickedListener,
+  NotificationClosedListener,
+  ButtonClickedListener,
+} from "./notifications";
 export { PERMS, PermissionRegistry } from "./advanced-permissions";
 export type { ApiPermissions, PermListener, PermBackend } from "./advanced-permissions";
 

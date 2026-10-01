@@ -21,6 +21,12 @@ import { WEBREQ } from "./webrequest";
 import type { WrKind } from "./webrequest";
 import { MENUS } from "./contextmenus";
 import { DOWNLOADS } from "./downloads";
+import { NOTIFY } from "./notifications";
+import type {
+  NotificationClickedListener,
+  NotificationClosedListener,
+  ButtonClickedListener,
+} from "./notifications";
 import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
 import type { ExtensionStorageArea, StorageValue } from "./storage";
@@ -332,6 +338,25 @@ export function buildApi(
       Promise.resolve(DOWNLOADS.search(ext, query as { id?: number })),
     onChanged: makeDownloadsEvent(ext.id),
   };
+  /* #43: notifications hand off to the host UI (zl:notifyOp) and
+     events come back through zl:notifyEvent. Mounted only with the
+     permission, so feature detection answers honestly. */
+  const notificationsNs = ext.permissions.includes("notifications")
+    ? (() => {
+        return {
+          create: (idOrOpts: unknown, maybeOpts?: unknown) =>
+            maybeOpts === undefined
+              ? NOTIFY.create(ext, null, idOrOpts as Record<string, unknown>)
+              : NOTIFY.create(ext, idOrOpts as string, maybeOpts as Record<string, unknown>),
+          update: (id: string, opts: Record<string, unknown>) => NOTIFY.update(ext, id, opts),
+          clear: (id: string) => NOTIFY.clear(ext, id),
+          getAll: () => NOTIFY.getAll(ext),
+          onClicked: bridged<NotificationClickedListener>((l) => NOTIFY.onClicked(ext.id, l)),
+          onClosed: bridged<NotificationClosedListener>((l) => NOTIFY.onClosed(ext.id, l)),
+          onButtonClicked: bridged<ButtonClickedListener>((l) => NOTIFY.onButtonClicked(ext.id, l)),
+        };
+      })()
+    : undefined;
   /* permissions: advanced permission lifecycle. The engine has
      no user prompt, so request() auto-grants anything the manifest
      declared optional; anything else is refused. */
@@ -473,6 +498,7 @@ export function buildApi(
     management: managementNs,
     ...(webRequestNs ? { webRequest: webRequestNs } : {}),
     ...(alarmsNs ? { alarms: alarmsNs } : {}),
+    ...(notificationsNs ? { notifications: notificationsNs } : {}),
   };
   /* Firefox-style chrome.* alias over the same implementations. */
   return { browser, chrome: browser };

@@ -45,7 +45,7 @@ export const COMPAT: Record<string, CompatEntry> = {
   "alarms.*": { supported: "partial", reason: "real create/get/getAll/clear/clearAll/onAlarm with in-memory timers in the shared worker context; alarms do not survive an engine restart and are never persisted to disk" },
   "management.*": { supported: "partial", reason: "getSelf/uninstallSelf with no permission; get/getAll/setEnabled/uninstall of other extensions gated on the 'management' permission; onInstalled/onUninstalled/onEnabled/onDisabled fire on observed lifecycle transitions" },
   "contextMenus.*": { supported: "partial", reason: "item registry (nesting, checkbox/radio/separator types) + onClicked delivery via the zl:menuClick channel with tabs-bridge tab resolution; zl:listMenus exposes the registry to the host; the visible menu surface ships with the LobsterBrowse integration" },
-  "notifications.*": { supported: "no", reason: "requires the LobsterBrowse notification surface" },
+  "notifications.*": { supported: "partial", reason: "create/update/clear/getAll over a real registry handed to the host UI via zl:notifyOp; onClosed/onClicked/onButtonClicked fire from the host's zl:notifyEvent reports (idle MV3 backgrounds woken); the rendering surface ships with the LobsterBrowse integration" },
   "downloads.*": { supported: "partial", reason: "download() hands off to the UI host via zl:downloadOp with permission checks; search/onChanged answer from the zl:downloadState host-report registry (own handoffs only, in-memory, lost on worker restart)" },
   "permissions.contains": { supported: "yes" },
   "permissions.getAll": { supported: "yes" },

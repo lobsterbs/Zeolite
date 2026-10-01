@@ -117,6 +117,7 @@ import {
   wakeExtension,
   MENUS,
   DOWNLOADS,
+  NOTIFY,
   PERMS,
   ALARMS,
   MGMT,
@@ -857,6 +858,13 @@ self.addEventListener("activate", (e) => {
       DOWNLOADS.setDispatch((op) => {
         void self.clients.matchAll({ type: "window" }).then((cs) => {
           for (const c of cs) c.postMessage({ type: "zl:downloadOp", op });
+        });
+      });
+      /* Notifications (#43): the UI host renders (LB owns the
+         surface) and reports interactions back via zl:notifyEvent. */
+      NOTIFY.setDispatch((op) => {
+        void self.clients.matchAll({ type: "window" }).then((cs) => {
+          for (const c of cs) c.postMessage({ type: "zl:notifyOp", op });
         });
       });
       /* Advanced permissions: request/remove run through the manager
@@ -1844,6 +1852,7 @@ interface ControlMessage {
     | "zl:tabs"
     | "zl:menuClick"
     | "zl:listMenus"
+    | "zl:notifyEvent"
     | "zl:listExt"
     | "zl:getDiag"
     | "zl:installExt"
@@ -2663,6 +2672,30 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       }
       const recs = rec ? [rec] : extensions.list().filter((r) => r.enabled);
       reply({ ok: true, menus: recs.flatMap((r) => MENUS.itemsFor(r.id)) });
+      break;
+    }
+    case "zl:notifyEvent": {
+      /* #43: the host reports a rendered notification's interaction
+         back (clicked / closed / buttonClicked). The entry must
+         exist and belong to the named enabled extension; delivery
+         wakes an idle MV3 background first, same as menu clicks. */
+      const ne = msg as { extId?: string; msg?: unknown };
+      const info = ne.msg as { id?: unknown; event?: unknown; buttonIndex?: unknown } | undefined;
+      const valid =
+        typeof ne.extId === "string" &&
+        typeof info?.id === "string" &&
+        (info.event === "clicked" || info.event === "closed" || info.event === "buttonClicked") &&
+        (info.event !== "buttonClicked" || typeof info.buttonIndex === "number");
+      const erec = valid ? extensions.get(ne.extId) : null;
+      if (!valid || !erec || !erec.enabled || !NOTIFY.exists(ne.extId, String(info!.id))) {
+        reply({ ok: false, error: "bad notifyEvent" });
+        break;
+      }
+      const nid = String(info!.id);
+      const kind = info!.event as "clicked" | "closed" | "buttonClicked";
+      const btn = typeof info!.buttonIndex === "number" ? info!.buttonIndex : undefined;
+      e.waitUntil(wakeExtension(ne.extId).then(() => NOTIFY.event(ne.extId, nid, kind, btn)));
+      reply({ ok: true });
       break;
     }
     default:
