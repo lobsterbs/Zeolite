@@ -56,12 +56,10 @@ function navB64u(s: string): string {
   const bytes = new TextEncoder().encode(s);
   let out = "";
   for (let i = 0; i < bytes.length; i += 3) {
-    const b0 = bytes[i];
-    const b1 = bytes[i + 1];
-    const b2 = bytes[i + 2];
-    const n = (b0 << 16) | ((b1 ?? 0) << 8) | (b2 ?? 0);
-    out += B64URL[(n >> 18) & 63];
-    out += B64URL[(n >> 12) & 63];
+    /* bytes[i] exists by the loop guard; the ?? 0 pair covers the
+       final 1- and 2-byte tail (size-gate trim, logic unchanged). */
+    const n = (bytes[i]! << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
+    out += B64URL[(n >> 18) & 63] + B64URL[(n >> 12) & 63];
     if (i + 1 < bytes.length) out += B64URL[(n >> 6) & 63];
     if (i + 2 < bytes.length) out += B64URL[n & 63];
   }
@@ -99,9 +97,17 @@ export function applyNavGuard(
      values, so the raw string is kept per element and the marker only
      reaches the browser. */
   const raw = new WeakMap<object, string>();
-  const guardProp = (proto: AnyRecord, prop: string): void => {
+  /* Guard transforms receive the element: the meta hook needs it for
+     its http-equiv check; every other guard uses the plain rewire. */
+  const rewireValue = (_el: AnyRecord, v: string): string => rewire(v);
+  const guardProp = (
+    proto: AnyRecord,
+    prop: string,
+    xf?: (el: AnyRecord, v: string) => string,
+  ): void => {
     const d = Object.getOwnPropertyDescriptor(proto, prop);
     if (!d || !d.set || !d.get) return;
+    const f = xf ?? rewireValue;
     Object.defineProperty(proto, prop, {
       configurable: true,
       enumerable: true,
@@ -109,16 +115,22 @@ export function applyNavGuard(
         return raw.get(this) ?? d.get!.call(this);
       },
       set(this: AnyRecord, v: string) {
-        raw.set(this, String(v));
-        d.set!.call(this, rewire(String(v)));
+        const s = String(v);
+        raw.set(this, s);
+        d.set!.call(this, f(this, s));
       },
     });
   };
-  const guardAttr = (proto: AnyRecord, attr: string): void => {
+  const guardAttr = (
+    proto: AnyRecord,
+    attr: string,
+    xf?: (el: AnyRecord, v: string) => string,
+  ): void => {
     const O = proto.setAttribute;
     if (typeof O !== "function") return;
+    const f = xf ?? rewireValue;
     proto.setAttribute = function (this: AnyRecord, n: string, v: string) {
-      return O.call(this, n, n === attr ? rewire(String(v)) : v);
+      return O.call(this, n, n === attr ? f(this, String(v)) : v);
     };
   };
   /* A read-only prototype must not abort the remaining hooks. */
@@ -151,40 +163,12 @@ export function applyNavGuard(
      honestly: that markup belongs to the static rewriter. */
   const META = w.HTMLMetaElement as AnyRecord | undefined;
   if (META) {
-    const rewireMeta = (el: AnyRecord, v: string): string => {
-      let he = "";
-      try {
-        he = String(el.httpEquiv ?? "").toLowerCase();
-      } catch {
-        return v;
-      }
-      if (he !== "refresh") return v;
-      return v.replace(/(url\s*=\s*)(.*)$/i, (_m: string, p: string, u: string) => p + rewire(u));
-    };
-    safe(() => {
-      const proto = META.prototype;
-      const d = Object.getOwnPropertyDescriptor(proto, "content");
-      if (d && d.set && d.get) {
-        Object.defineProperty(proto, "content", {
-          configurable: true,
-          enumerable: true,
-          get(this: AnyRecord) {
-            return raw.get(this) ?? d.get!.call(this);
-          },
-          set(this: AnyRecord, v: string) {
-            const s = String(v);
-            raw.set(this, s);
-            d.set!.call(this, rewireMeta(this, s));
-          },
-        });
-      }
-      const O = proto.setAttribute;
-      if (typeof O === "function") {
-        proto.setAttribute = function (this: AnyRecord, n: string, v: string) {
-          return O.call(this, n, n === "content" ? rewireMeta(this, String(v)) : v);
-        };
-      }
-    });
+    const rewireMeta = (el: AnyRecord, v: string): string =>
+      String(el.httpEquiv ?? "").toLowerCase() === "refresh"
+        ? v.replace(/(url\s*=\s*)(.*)$/i, (_m: string, p: string, u: string) => p + rewire(u))
+        : v;
+    safe(() => guardProp(META.prototype, "content", rewireMeta));
+    safe(() => guardAttr(META.prototype, "content", rewireMeta));
   }
   const OW = w.open;
   if (typeof OW === "function") {
