@@ -160,6 +160,17 @@ Residuals, stated honestly:
   observer callback is a microtask, the load is a task, so the
   child never receives the plaintext address). Frames inside a
   shadow root escape the document observer (honest limit).
+- srcdoc and about:blank child documents (issue #58): a frame's
+  inline document runs no bootstrap, so the parent hooks cannot see
+  its runtime. The parent now rewrites the navigable attributes
+  inside the srcdoc markup at the property, setAttribute and parser
+  seams, so the child's initial navigations ride the marker route
+  like any engine route. Honest residuals, kept open on the issue:
+  requests the child's own scripts make (fetch/XHR, later DOM
+  writes), unquoted attribute values inside the markup, and
+  children of an about:blank write stay browser-direct - the SW
+  cannot see client ancestry, and blanket-routing about: clients
+  would swallow host-app frames.
 - Fragments after a mapped navigation are an engine-wide bound: the
   page URL the browser commits is the engine route alone, so a
   target's fragment (mapped Location, Refresh url=, marker routes)

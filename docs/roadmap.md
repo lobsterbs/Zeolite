@@ -230,6 +230,33 @@ Closes the 1.6/1.8 limits.
   issue. The cross-cutting rule is read as applying to regressions of
   the engine itself; none is open.
 
+## Phase 17 - 3.1 line follow-through: child-document escapes (shipped)
+
+- Issue #58 (srcdoc/about:blank child documents): DONE client-side
+  in the navguard. srcdoc markup is rewritten at all three seams
+  (property, setAttribute, parser observer), so a srcdoc child's
+  initial navigations ride the marker route. Honest residuals stay
+  open on the issue: the child document's own runtime requests
+  (fetch/XHR, later DOM writes), unquoted attribute values inside
+  the markup, and about:blank write children remain browser-direct;
+  the SW cannot see client ancestry, and blanket-routing about:
+  clients would swallow host-app frames. The e2e fixture-origin
+  probe row stays open on the issue (CI runs no browser by design).
+- Issue #59 (navguard robustness): DONE. setAttribute compares
+  attribute names case-insensitively (HREF sets href), stores the
+  page-truthful raw string for property reads (the raw store is
+  keyed by attribute: an iframe now guards src and srcdoc on one
+  element), and the meta-refresh url rewire handles quoted values.
+- Bootstrap budget raised 11264 -> 12288 for the #58/#59 rows,
+  recorded in the workflow file (deliberate raise, not creep).
+- Issue #11 was verified closed on 2026-09-29 (fixed in 1d72853b);
+  the Phase 16 "honest at the cut" paragraph above is the record at
+  the cut and stays.
+- Shipped on the 3.0 Diamond version string per the 2.1 precedent
+  (gates land with the current string in place); the string moves
+  at the next cut, 3.1 Onyx. The 3.x API freeze holds: no public
+  surface changed in this phase.
+
 ## Cross-cutting gates (every phase)
 
 - Architecture: LobsterBrowse -> Zeolite public API -> Zeolite runtime ->

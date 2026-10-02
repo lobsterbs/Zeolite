@@ -369,6 +369,17 @@ describe("meta refresh guard (#39 residual)", () => {
     el.content = "3; url=https://engine.host/j/zzz";
     expect(meta.read(el)).toBe("3; url=https://engine.host/j/zzz");
   });
+
+  it("rewires quoted refresh urls and keeps the quotes (#59)", () => {
+    const meta = makeMetaEnv();
+    const el = refreshMeta(meta);
+    el.content = "0; url='" + REAL + "'";
+    expect(meta.read(el)).toBe("0; url='" + navEncode(REAL) + "'");
+    const d = meta.make();
+    d.httpEquiv = "refresh";
+    d.setAttribute("content", "1; url=\"" + REAL + "\"");
+    expect(d.getAttribute("content")).toBe("1; url=\"" + navEncode(REAL) + "\"");
+  });
 });
 
 /* Parser-inserted iframe/frame src: the property and setAttribute
@@ -466,6 +477,13 @@ describe("parser-inserted iframe guard", () => {
     e.fire([{ type: "childList", addedNodes: [span, { nodeType: 3 }] }]);
   });
 
+  it("rewires a parser-inserted srcdoc child document (#58)", () => {
+    const e = makeParserEnv();
+    const f = frame({ srcdoc: "<a href=\"" + REAL + "\">x</a>" });
+    e.fire([{ type: "childList", addedNodes: [f] }]);
+    expect(f._attrs.srcdoc).toBe("<a href=\"" + navEncode(REAL) + "\">x</a>");
+  });
+
   it("observes the document element with subtree childList", () => {
     const e = makeParserEnv();
     expect(e.observers.length).toBe(1);
@@ -483,5 +501,67 @@ describe("parser-inserted iframe guard", () => {
       },
     };
     applyNavGuard(w, LOC, ENGINE); /* must not throw, must not observe */
+  });
+});
+
+describe("setAttribute robustness (#59)", () => {
+  it("matches the attribute name case-insensitively (HREF sets href)", () => {
+    const e = makeEnv();
+    const a = e.anchor.make();
+    a.setAttribute("HREF", REAL);
+    expect(a.getAttribute("HREF")).toBe(navEncode(REAL));
+    a.setAttribute("HREF", "/local");
+    expect(a.getAttribute("HREF")).toBe("/local");
+    a.setAttribute("Title", REAL);
+    expect(a.getAttribute("Title")).toBe(REAL);
+  });
+
+  it("stores the page-truthful raw value for property reads", () => {
+    const e = makeEnv();
+    const a = e.anchor.make();
+    a.setAttribute("href", REAL);
+    expect(a.href).toBe(REAL); /* the page wrote REAL, not the marker */
+    expect(a.getAttribute("href")).toBe(navEncode(REAL));
+  });
+});
+
+describe("srcdoc guard (#58)", () => {
+  const DOC = "<a href=\"" + REAL + "\">x</a><form action=\"" + REAL + "\"></form>";
+  const WANTED =
+    "<a href=\"" + navEncode(REAL) + "\">x</a><form action=\"" + navEncode(REAL) + "\"></form>";
+
+  function makeSrcdocEnv() {
+    const srcdoc = makeClass("srcdoc");
+    const w: Record<string, any> = {
+      HTMLIFrameElement: { prototype: srcdoc.proto },
+      open() {
+        return 1;
+      },
+    };
+    applyNavGuard(w, LOC, ENGINE);
+    return srcdoc;
+  }
+
+  it("rewires navigable attributes inside srcdoc markup (property seam)", () => {
+    const srcdoc = makeSrcdocEnv();
+    const el = srcdoc.make();
+    el.srcdoc = DOC;
+    expect(srcdoc.read(el)).toBe(WANTED);
+    expect(el.srcdoc).toBe(DOC); /* reads stay page-truthful */
+  });
+
+  it("rewires srcdoc through setAttribute", () => {
+    const srcdoc = makeSrcdocEnv();
+    const el = srcdoc.make();
+    el.setAttribute("srcdoc", DOC);
+    expect(el.getAttribute("srcdoc")).toBe(WANTED);
+  });
+
+  it("leaves relative and engine-origin srcdoc markup untouched", () => {
+    const srcdoc = makeSrcdocEnv();
+    const el = srcdoc.make();
+    const doc = "<a href=\"/local\">x</a><form action=\"https://engine.host/j/zzz\"></form>";
+    el.srcdoc = doc;
+    expect(srcdoc.read(el)).toBe(doc);
   });
 });

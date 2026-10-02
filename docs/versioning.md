@@ -67,3 +67,9 @@ transport (curl error 56 before response headers surface, issue #11,
 full analysis there). It predates this line and is not a regression
 of it; the redirect target on the same host loads fine and every
 other probed site loads.
+
+Phase 17 (3.1 line follow-through: the srcdoc child-document escape
+#58 and navguard robustness #59) ships on the 3.0 Diamond string,
+following the 2.1 precedent: gates land with the current string in
+place and the string moves at the next cut, 3.1 Onyx. No public
+surface changed; the 3.x API freeze holds.

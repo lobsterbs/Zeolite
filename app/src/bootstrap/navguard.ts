@@ -32,8 +32,9 @@
      parser-inserted anchors, forms and meta refresh are covered by
      the same seam. Parser-inserted iframe/frame src has its own
      observer below: the child frame has no bootstrap yet, so the
-     src is rewired to the marker before the browser's queued iframe
-     load task starts.
+     src (and #58: srcdoc markup, whose child document likewise runs
+     no bootstrap) is rewired to the marker before the browser's
+     queued iframe load task starts.
    - Engine-origin, relative and opaque URLs pass through untouched:
      those requests stay inside the SW scope and it reroutes them
      natively. <base href> is deliberately left alone (rewriting it
@@ -96,9 +97,10 @@ export function applyNavGuard(
     return navEncode(u.href);
   };
   /* Reads must return what the page wrote: frameworks compare href
-     values, so the raw string is kept per element and the marker only
-     reaches the browser. */
-  const raw = new WeakMap<object, string>();
+     values, so the raw string is kept per element and attribute and
+     the marker only reaches the browser. Keyed by name since #58:
+     an iframe now guards src and srcdoc on the same element. */
+  const raw = new WeakMap<object, Record<string, string>>();
   /* Guard transforms receive the element: the meta hook needs it for
      its http-equiv check; every other guard uses the plain rewire. */
   const rewireValue = (_el: AnyRecord, v: string): string => rewire(v);
@@ -114,11 +116,13 @@ export function applyNavGuard(
       configurable: true,
       enumerable: true,
       get(this: AnyRecord) {
-        return raw.get(this) ?? d.get!.call(this);
+        return raw.get(this)?.[prop] ?? d.get!.call(this);
       },
       set(this: AnyRecord, v: string) {
         const s = String(v);
-        raw.set(this, s);
+        const m = raw.get(this);
+        if (m) m[prop] = s;
+        else raw.set(this, { [prop]: s });
         d.set!.call(this, f(this, s));
       },
     });
@@ -131,8 +135,18 @@ export function applyNavGuard(
     const O = proto.setAttribute;
     if (typeof O !== "function") return;
     const f = xf ?? rewireValue;
+    /* #59: DOM attribute names are case-insensitive (HREF sets
+       href), so the compare lowercases; the page-truthful raw string
+       is stored so property reads return what the page wrote. */
     proto.setAttribute = function (this: AnyRecord, n: string, v: string) {
-      return O.call(this, n, n === attr ? f(this, String(v)) : v);
+      const hit = String(n).toLowerCase() === attr;
+      if (hit) {
+        const s = String(v);
+        const m = raw.get(this);
+        if (m) m[attr] = s;
+        else raw.set(this, { [attr]: s });
+      }
+      return O.call(this, n, hit ? f(this, String(v)) : v);
     };
   };
   /* A read-only prototype must not abort the remaining hooks. */
@@ -156,6 +170,24 @@ export function applyNavGuard(
     safe(() => guardProp(proto, prop));
     safe(() => guardAttr(proto, prop));
   }
+  /* #58: srcdoc gives the frame an inline child document that runs
+     no bootstrap (about:srcdoc is not an engine destination), so
+     absolute URLs inside its markup would load browser-direct from
+     the child. Rewire the navigable attributes inside the markup:
+     the child's initial navigations then ride the marker route,
+     which the parent's SW proxies like any engine route. Unquoted
+     attribute values stay as written (HTML ends them at the first
+     whitespace anyway); quoted values keep their quotes. */
+  const rewireSrcdoc = (v: string): string =>
+    v.replace(
+      /(\s(?:href|src|action|formaction|poster|background|cite|data)\s*=\s*)(["'])(.*?)\2/gi,
+      (_m: string, p: string, q: string, u: string) => p + q + rewire(u) + q,
+    );
+  const IFR = w.HTMLIFrameElement as AnyRecord | undefined;
+  if (IFR) {
+    safe(() => guardProp(IFR.prototype, "srcdoc", (_el, v) => rewireSrcdoc(v)));
+    safe(() => guardAttr(IFR.prototype, "srcdoc", (_el, v) => rewireSrcdoc(v)));
+  }
   /* #39 residual: runtime-injected meta refresh is the one navigation
      seam left on engines without the Navigation API (Firefox has no
      window.navigation, so the cancel-and-re-drive seam never fires).
@@ -167,7 +199,10 @@ export function applyNavGuard(
   if (META) {
     const rewireMeta = (el: AnyRecord, v: string): string =>
       String(el.httpEquiv ?? "").toLowerCase() === "refresh"
-        ? v.replace(/(url\s*=\s*)(.*)$/i, (_m: string, p: string, u: string) => p + rewire(u))
+        ? v.replace(
+            /(url\s*=\s*)(["']?)([^"']*)\2/i,
+            (_m: string, p: string, q: string, u: string) => p + q + rewire(u) + q,
+          )
         : v;
     safe(() => guardProp(META.prototype, "content", rewireMeta));
     safe(() => guardAttr(META.prototype, "content", rewireMeta));
@@ -283,10 +318,16 @@ export function applyNavGuard(
     const rewired = (el: AnyRecord): void => {
       const tag = String(el.tagName ?? "").toUpperCase();
       if (tag !== "IFRAME" && tag !== "FRAME") return;
-      const s = typeof el.getAttribute === "function" ? el.getAttribute("src") : null;
-      if (typeof s !== "string" || !s) return;
-      const r = rewire(s);
-      if (r !== s && typeof el.setAttribute === "function") el.setAttribute("src", r);
+      const attr = (n: string, xf: (s: string) => string): void => {
+        const s = typeof el.getAttribute === "function" ? el.getAttribute(n) : null;
+        if (typeof s !== "string" || !s) return;
+        const r = xf(s);
+        if (r !== s && typeof el.setAttribute === "function") el.setAttribute(n, r);
+      };
+      attr("src", rewire);
+      /* #58: a parser-inserted srcdoc child document runs no
+         bootstrap either; its markup rides the same observer. */
+      if (tag === "IFRAME") attr("srcdoc", rewireSrcdoc);
     };
     const scan = (n: AnyRecord): void => {
       if (!n || n.nodeType !== 1) return;
