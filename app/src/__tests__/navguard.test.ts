@@ -565,3 +565,204 @@ describe("srcdoc guard (#58)", () => {
     expect(srcdoc.read(el)).toBe(doc);
   });
 });
+
+
+/* #58 follow-up: inline child realms. An about:srcdoc / about:blank /
+   same-origin child document runs no bootstrap of its own, so runtime
+   navigations inside it fired in the child realm and committed
+   browser-direct; the frame observer now re-enters the guard on the
+   child window. */
+describe("inline child realm guard (#58 follow-up)", () => {
+  function makeChildRealm() {
+    const anchor = makeClass("href");
+    const moInstalls: Array<unknown> = [];
+    class CMO {
+      cb: (muts: any[]) => void;
+      constructor(cb: (muts: any[]) => void) {
+        this.cb = cb;
+        moInstalls.push(this);
+      }
+      observe(_t: any, _o: any) {}
+    }
+    const listeners: Array<(e: any) => void> = [];
+    const navigated: string[] = [];
+    const win: Record<string, any> = {
+      HTMLAnchorElement: { prototype: anchor.proto },
+      MutationObserver: CMO,
+      document: { baseURI: LOC, documentElement: { tag: "html" } },
+      location: {},
+      open() {
+        return 1;
+      },
+      navigation: {
+        addEventListener(_t: string, fn: (e: any) => void) {
+          listeners.push(fn);
+        },
+      },
+    };
+    Object.defineProperty(win.location, "href", {
+      configurable: true,
+      get: () => LOC,
+      set(v: string) {
+        navigated.push(v);
+      },
+    });
+    return {
+      anchor,
+      win,
+      doc: win.document,
+      moInstalls,
+      navigated,
+      fireNav(e: Record<string, any>) {
+        listeners.forEach((fn) => fn(e));
+      },
+    };
+  }
+  /* A frame navigation replaces the child's document: swap in a
+     fresh one, like a srcdoc or src change does. */
+  function swapDoc(child: ReturnType<typeof makeChildRealm>) {
+    child.doc = { baseURI: LOC, documentElement: { tag: "html" } };
+    child.win.document = child.doc;
+  }
+  function childFrame(child: ReturnType<typeof makeChildRealm>) {
+    const el: Record<string, any> = {
+      nodeType: 1,
+      tagName: "IFRAME",
+      _attrs: {},
+      _listeners: {},
+      addEventListener(this: Record<string, any>, t: string, fn: () => void) {
+        (this._listeners[t] ?? (this._listeners[t] = [])).push(fn);
+      },
+      getAttribute(n: string) {
+        return n in el._attrs ? el._attrs[n] : null;
+      },
+      setAttribute(this: Record<string, any>, n: string, v: string) {
+        this._attrs[n] = v;
+      },
+    };
+    Object.defineProperty(el, "contentWindow", {
+      configurable: true,
+      get: () => child.win,
+    });
+    Object.defineProperty(el, "contentDocument", {
+      configurable: true,
+      get: () => child.doc,
+    });
+    return el;
+  }
+  function makeParentEnv() {
+    const observers: Array<{ cb: (muts: any[]) => void }> = [];
+    class PMO {
+      cb: (muts: any[]) => void;
+      constructor(cb: (muts: any[]) => void) {
+        this.cb = cb;
+        observers.push(this);
+      }
+      observe(_t: any, _o: any) {}
+    }
+    const w: Record<string, any> = {
+      MutationObserver: PMO,
+      document: { documentElement: { tag: "html" } },
+      open() {
+        return 1;
+      },
+    };
+    applyNavGuard(w, LOC, ENGINE);
+    return {
+      fire(records: any[]) {
+        observers.forEach((o) => o.cb(records));
+      },
+    };
+  }
+
+  it("guards the child realm when the observer sees an inline frame", () => {
+    const parent = makeParentEnv();
+    const child = makeChildRealm();
+    parent.fire([{ type: "childList", addedNodes: [childFrame(child)] }]);
+    const a = child.anchor.make();
+    a.href = REAL;
+    expect(child.anchor.read(a)).toBe(navEncode(REAL));
+    let prevented = false;
+    child.fireNav({
+      cancelable: true,
+      destination: { url: REAL, sameDocument: false },
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    expect(prevented).toBe(true);
+    expect(child.navigated).toEqual([navEncode(REAL)]);
+  });
+
+  it("does not re-guard a document it already guards", () => {
+    const parent = makeParentEnv();
+    const child = makeChildRealm();
+    const f = childFrame(child);
+    parent.fire([{ type: "childList", addedNodes: [f] }]);
+    expect(child.moInstalls.length).toBe(1);
+    parent.fire([{ type: "childList", addedNodes: [f] }]);
+    expect(child.moInstalls.length).toBe(1);
+  });
+
+  it("re-guards a replaced child document on the frame load event", () => {
+    const parent = makeParentEnv();
+    const child = makeChildRealm();
+    const f = childFrame(child);
+    parent.fire([{ type: "childList", addedNodes: [f] }]);
+    swapDoc(child);
+    (f._listeners.load ?? []).forEach((fn: () => void) => fn());
+    expect(child.moInstalls.length).toBe(2);
+    const a = child.anchor.make();
+    a.href = REAL;
+    expect(child.anchor.read(a)).toBe(navEncode(REAL));
+  });
+
+  it("skips a child realm whose own bootstrap owns the guard (__ZL)", () => {
+    const parent = makeParentEnv();
+    const child = makeChildRealm();
+    const f = childFrame(child);
+    parent.fire([{ type: "childList", addedNodes: [f] }]);
+    child.win.__ZL = { site: "opaque" };
+    swapDoc(child);
+    (f._listeners.load ?? []).forEach((fn: () => void) => fn());
+    expect(child.moInstalls.length).toBe(1);
+  });
+
+  it("skips cross-origin children without throwing", () => {
+    const parent = makeParentEnv();
+    const good = makeChildRealm();
+    const g = childFrame(good);
+    const cross = childFrame(good);
+    Object.defineProperty(cross, "contentWindow", {
+      configurable: true,
+      get: () =>
+        new Proxy(function () {}, {
+          get() {
+            throw new Error("cross-origin access");
+          },
+        }),
+    });
+    Object.defineProperty(cross, "contentDocument", {
+      configurable: true,
+      get: () => ({ baseURI: LOC }),
+    });
+    parent.fire([{ type: "childList", addedNodes: [cross, g] }]);
+    expect(good.moInstalls.length).toBe(1); /* the sibling still got guarded */
+  });
+
+  it("re-drives a navigation exactly once in a twice-guarded realm", () => {
+    const e = makeNavEnv();
+    applyNavGuard(e.w, LOC, ENGINE); /* second guard on the same realm */
+    let prevented = 0;
+    e.fire({
+      cancelable: true,
+      destination: { url: REAL, sameDocument: false },
+      preventDefault(this: any) {
+        prevented++;
+        this.defaultPrevented = true;
+      },
+    });
+    expect(prevented).toBe(1);
+    expect(e.navigated).toEqual([navEncode(REAL)]);
+  });
+});

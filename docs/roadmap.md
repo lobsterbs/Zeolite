@@ -247,6 +247,21 @@ Closes the 1.6/1.8 limits.
   page-truthful raw string for property reads (the raw store is
   keyed by attribute: an iframe now guards src and srcdoc on one
   element), and the meta-refresh url rewire handles quoted values.
+- Issue #58 follow-up (inline child realms): DONE. The frame
+  observer now re-enters the navigation guard on every reachable
+  same-origin child realm - about:srcdoc, about:blank and
+  unbootstrapped same-origin children - recursively, re-armed on
+  the frame's load event, so a runtime meta refresh or location
+  assignment inside the child cancel-and-re-drives through the
+  marker instead of committing browser-direct (a real-URL subframe
+  navigation is exactly what browser URL-block policies evaluate).
+  The navigate listener honors defaultPrevented so a twice-guarded
+  realm re-drives one navigation exactly once. Residuals narrow
+  to: cross-origin/sandboxed children (deliberately native:
+  challenge hosts), the observer-microtask race for a child script
+  that navigates before the guard lands, child fetch/XHR
+  passthrough (the #34 about: limits), shadow-root frames, and
+  unquoted markup values.
 - Bootstrap budget raised 11264 -> 12288 for the #58/#59 rows,
   recorded in the workflow file (deliberate raise, not creep).
 - Issue #11 was verified closed on 2026-09-29 (fixed in 1d72853b);

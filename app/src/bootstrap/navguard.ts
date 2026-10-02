@@ -216,6 +216,55 @@ export function applyNavGuard(
       };
     });
   }
+  /* #58 follow-up: an inline child document (about:srcdoc,
+     about:blank, a same-origin child that never fetched an engine
+     document) runs no bootstrap of its own, so a runtime navigation
+     inside it - a docwrite'd meta refresh, a location assignment -
+     fires in the CHILD realm, where no listener or hook exists, and
+     commits browser-direct. A real-URL subframe navigation is
+     exactly what a browser URL-block policy evaluates, so the
+     child realm gets the guard itself: applyNavGuard re-enters on
+     the child window, and the child's own observer then guards
+     grandchildren, recursively. The element's load event re-runs
+     the hook because a srcdoc or src swap replaces the document.
+     Cross-origin and sandboxed children throw on the realm probe
+     and stay browser-direct on purpose (challenge hosts must stay
+     native), and a realm whose bootstrap already ran (window.__ZL)
+     owns its own guard. A twice-guarded realm is safe: rewire is
+     idempotent on marker routes and the navigate listener honors
+     defaultPrevented. */
+  const guardedDocs = new WeakSet<object>();
+  const loadHooked = new WeakSet<object>();
+  const guardChild = (el: AnyRecord): void => {
+    if (typeof el.addEventListener !== "function") return;
+    if (!loadHooked.has(el)) {
+      loadHooked.add(el);
+      try {
+        el.addEventListener("load", () => guardChild(el));
+      } catch {
+        /* an element that refuses listeners keeps its native load */
+      }
+    }
+    const win = el.contentWindow as AnyRecord | undefined;
+    let doc: AnyRecord | undefined;
+    try {
+      doc = el.contentDocument as AnyRecord | undefined;
+    } catch {
+      return;
+    }
+    if (!win || !doc || guardedDocs.has(doc)) return;
+    try {
+      if (win.__ZL) return;
+    } catch {
+      return; /* cross-origin window: any property access throws */
+    }
+    guardedDocs.add(doc);
+    try {
+      applyNavGuard(win, String(doc.baseURI ?? loc), engineOrigin);
+    } catch {
+      /* a realm that refuses hooks stays native */
+    }
+  };
   /* #39: the Navigation API is the one seam the LegacyUnforgeable
      location sinks ever had. The navigate event fires in this
      document for every cross-document navigation it initiates -
@@ -235,11 +284,15 @@ export function applyNavGuard(
       nav.addEventListener("navigate", (e) => {
         const ev = e as {
           cancelable?: boolean;
+          defaultPrevented?: boolean;
           destination?: { url?: string; sameDocument?: boolean };
           formData?: FormData | null;
           preventDefault(): void;
         };
         if (!ev.cancelable || ev.destination?.sameDocument) return;
+        /* a second listener in a twice-guarded realm must not
+           cancel-and-re-drive a navigation the first already did */
+        if (ev.defaultPrevented) return;
         const dest = String(ev.destination?.url ?? "");
         const marker = rewire(dest);
         if (marker === dest) return;
@@ -328,6 +381,9 @@ export function applyNavGuard(
       /* #58: a parser-inserted srcdoc child document runs no
          bootstrap either; its markup rides the same observer. */
       if (tag === "IFRAME") attr("srcdoc", rewireSrcdoc);
+      /* every frame the observer reaches gets its child realm
+         guarded: the child runs no bootstrap of its own. */
+      guardChild(el);
     };
     const scan = (n: AnyRecord): void => {
       if (!n || n.nodeType !== 1) return;
@@ -345,6 +401,13 @@ export function applyNavGuard(
         }
       }).observe(D.documentElement as unknown as AnyRecord, { childList: true, subtree: true });
     });
+    /* Frames already in the DOM when this realm is guarded (a child
+       realm guarded on load): the observer only sees later
+       additions, so give the present ones their realm guard. */
+    if (typeof D.querySelectorAll === "function") {
+      const frames = D.querySelectorAll("iframe,frame") as ArrayLike<AnyRecord>;
+      for (let i = 0; i < frames.length; i++) guardChild(frames[i]);
+    }
   }
   /* WebRTC connects directly; presence would be a fake feature. */
   delete w.RTCPeerConnection;

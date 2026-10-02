@@ -162,15 +162,23 @@ Residuals, stated honestly:
   shadow root escape the document observer (honest limit).
 - srcdoc and about:blank child documents (issue #58): a frame's
   inline document runs no bootstrap, so the parent hooks cannot see
-  its runtime. The parent now rewrites the navigable attributes
-  inside the srcdoc markup at the property, setAttribute and parser
-  seams, so the child's initial navigations ride the marker route
-  like any engine route. Honest residuals, kept open on the issue:
-  requests the child's own scripts make (fetch/XHR, later DOM
-  writes), unquoted attribute values inside the markup, and
-  children of an about:blank write stay browser-direct - the SW
-  cannot see client ancestry, and blanket-routing about: clients
-  would swallow host-app frames.
+  its runtime. The parent rewrites the navigable attributes inside
+  the srcdoc markup at the property, setAttribute and parser seams,
+  and guards the child realm itself: the frame observer re-enters
+  the navigation guard on every reachable same-origin child
+  window, recursively and re-armed on the frame's load event, so a
+  runtime meta refresh or location assignment inside the child
+  cancels-and-re-drives through the marker instead of committing
+  browser-direct (a real-URL subframe navigation is exactly what a
+  browser URL-block policy evaluates). Honest residuals, kept open
+  on the issue: cross-origin and sandboxed children stay
+  browser-direct on purpose (the realm probe cannot reach them, and
+  blanket-routing them would swallow challenge-host and host-app
+  frames), a child script that navigates before the observer
+  microtask still wins the race, requests the child's own scripts
+  make keep the #34 about: limits, unquoted attribute values inside
+  the markup keep their limit, and frames inside a shadow root
+  escape the document observer.
 - Fragments after a mapped navigation are an engine-wide bound: the
   page URL the browser commits is the engine route alone, so a
   target's fragment (mapped Location, Refresh url=, marker routes)
