@@ -30,8 +30,10 @@
      bypass the property and setAttribute hooks, but the navigations
      they eventually trigger still fire the navigate event, so
      parser-inserted anchors, forms and meta refresh are covered by
-     the same seam. Parser-inserted iframe src assignments remain
-     outside it (the child frame has no bootstrap yet).
+     the same seam. Parser-inserted iframe/frame src has its own
+     observer below: the child frame has no bootstrap yet, so the
+     src is rewired to the marker before the browser's queued iframe
+     load task starts.
    - Engine-origin, relative and opaque URLs pass through untouched:
      those requests stay inside the SW scope and it reroutes them
      natively. <base href> is deliberately left alone (rewriting it
@@ -260,6 +262,49 @@ export function applyNavGuard(
      upstream keep working. A sealed document stays native (safe). */
   const D = w.document as Document | undefined;
   if (D) safe(() => Object.defineProperty(D, "referrer", { get: () => "", configurable: true }));
+  /* Parser-inserted iframe/frame src (innerHTML, document.write):
+     neither hook above ran, so a src naming a real origin would load
+     the child frame DIRECTLY - outside the engine, invisible to the
+     navigate seam (the child has no bootstrap yet). A document-wide
+     MutationObserver rewires it to the marker before the browser's
+     queued iframe load task starts: an observer callback is a
+     microtask, the load is a task, so the child never receives the
+     plaintext address. Added subtrees are scanned whole (innerHTML
+     adds one root, not one record per frame).
+     ponytail: frames inside a shadow root escape a document observer;
+     hooking attachShadow would cover them - add when a real page
+     needs it. */
+  const MO = w.MutationObserver as
+    | (new (cb: (muts: Array<{ type: string; addedNodes: ArrayLike<AnyRecord> }>) => void) => {
+        observe(t: AnyRecord, o: AnyRecord): void;
+      })
+    | undefined;
+  if (D && MO && D.documentElement) {
+    const rewired = (el: AnyRecord): void => {
+      const tag = String(el.tagName ?? "").toUpperCase();
+      if (tag !== "IFRAME" && tag !== "FRAME") return;
+      const s = typeof el.getAttribute === "function" ? el.getAttribute("src") : null;
+      if (typeof s !== "string" || !s) return;
+      const r = rewire(s);
+      if (r !== s && typeof el.setAttribute === "function") el.setAttribute("src", r);
+    };
+    const scan = (n: AnyRecord): void => {
+      if (!n || n.nodeType !== 1) return;
+      rewired(n);
+      if (typeof n.querySelectorAll === "function") {
+        const frames = n.querySelectorAll("iframe,frame") as ArrayLike<AnyRecord>;
+        for (let i = 0; i < frames.length; i++) rewired(frames[i]);
+      }
+    };
+    safe(() => {
+      new MO((muts) => {
+        for (const m of muts) {
+          if (m.type !== "childList") continue;
+          for (let i = 0; i < m.addedNodes.length; i++) scan(m.addedNodes[i]);
+        }
+      }).observe(D.documentElement as unknown as AnyRecord, { childList: true, subtree: true });
+    });
+  }
   /* WebRTC connects directly; presence would be a fake feature. */
   delete w.RTCPeerConnection;
 }

@@ -152,8 +152,14 @@ Residuals, stated honestly:
   real browser extension (declarativeNetRequest navigation
   redirects).
 - URLs inserted through the HTML parser (innerHTML, document.write)
-  bypass both the property and setAttribute hooks; the parser has no
-  script-visible seam.
+  bypass both the property and setAttribute hooks. Anchors, forms
+  and meta refresh still fire the navigate event (covered above);
+  parser-inserted iframe/frame src is covered by a document-wide
+  MutationObserver in the bootstrap, which rewires the src to the
+  marker before the browser's queued iframe load task starts (an
+  observer callback is a microtask, the load is a task, so the
+  child never receives the plaintext address). Frames inside a
+  shadow root escape the document observer (honest limit).
 - Cross-origin subresource requests (fetch/XHR) from controlled pages
   are routed through the engine since #34 (see the browser-direct
   HTTP(S) escape section); what remains here is the navigation class
@@ -285,8 +291,9 @@ Residuals, stated honestly:
   security issue: no data leaks, the failure is closed (error page),
   and the target host is unaffected.
 - Runtime navigation residuals (issue #28): location.href assignments
-  and HTML-parser-inserted URLs (innerHTML, document.write) still
-  escape to the browser; see the runtime navigation escape section.
+  still escape to the browser; parser-inserted URLs are covered where
+  a seam exists (navigate event, iframe observer), frames inside a
+  shadow root are not. See the runtime navigation escape section.
 - Page-identity opacity is obfuscation (issue #32): base64url routes
   are reversible by anyone who holds them (the keyed site token is a
   MAC and is not); see the destination leakage section.

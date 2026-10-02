@@ -370,3 +370,118 @@ describe("meta refresh guard (#39 residual)", () => {
     expect(meta.read(el)).toBe("3; url=https://engine.host/j/zzz");
   });
 });
+
+/* Parser-inserted iframe/frame src: the property and setAttribute
+   hooks never ran (innerHTML, document.write), so a document-wide
+   MutationObserver rewires the src before the browser's queued
+   iframe load task starts. */
+describe("parser-inserted iframe guard", () => {
+  function makeParserEnv() {
+    const iframe = makeClass("src");
+    const observers: Array<{ cb: (muts: any[]) => void; target: any; opts: any }> = [];
+    class MO {
+      cb: (muts: any[]) => void;
+      constructor(cb: (muts: any[]) => void) {
+        this.cb = cb;
+      }
+      observe(target: any, opts: any) {
+        observers.push({ cb: this.cb, target, opts });
+      }
+    }
+    const w: Record<string, any> = {
+      HTMLIFrameElement: { prototype: iframe.proto },
+      MutationObserver: MO,
+      document: { documentElement: { tag: "html" } },
+      open() {
+        return 1;
+      },
+    };
+    applyNavGuard(w, LOC, ENGINE);
+    return {
+      iframe,
+      observers,
+      fire(records: any[]) {
+        observers.forEach((o) => o.cb(records));
+      },
+    };
+  }
+  /* A parser-created frame: plain object with attribute accessors,
+     not an instance of the hooked prototype. */
+  function frame(attrs: Record<string, string>) {
+    const el: Record<string, any> = { nodeType: 1, tagName: "IFRAME", _attrs: attrs };
+    el.getAttribute = (n: string) => (n in attrs ? attrs[n] : null);
+    el.setAttribute = function (this: Record<string, any>, n: string, v: string) {
+      this._attrs[n] = v;
+    };
+    return el;
+  }
+
+  it("rewires an iframe inserted with a real-origin src", () => {
+    const e = makeParserEnv();
+    const f = frame({ src: REAL });
+    e.fire([{ type: "childList", addedNodes: [f] }]);
+    expect(f._attrs.src).toBe(navEncode(REAL));
+  });
+
+  it("descends into an added subtree and covers FRAME too", () => {
+    const e = makeParserEnv();
+    const f = frame({ src: "https://real.site/embed" });
+    const fr: Record<string, any> = frame({ src: "https://real.site/frame" });
+    fr.tagName = "FRAME";
+    const root: Record<string, any> = {
+      nodeType: 1,
+      tagName: "DIV",
+      querySelectorAll: () => [f, fr],
+    };
+    e.fire([{ type: "childList", addedNodes: [root] }]);
+    expect(f._attrs.src).toBe(navEncode("https://real.site/embed"));
+    expect(fr._attrs.src).toBe(navEncode("https://real.site/frame"));
+  });
+
+  it("skips relative, engine-origin, opaque and missing srcs", () => {
+    const e = makeParserEnv();
+    const rel = frame({ src: "/local" });
+    const eng = frame({ src: "https://engine.host/j/zzz" });
+    const opq = frame({ src: "about:blank" });
+    const none = frame({});
+    e.fire([{ type: "childList", addedNodes: [rel, eng, opq, none] }]);
+    expect(rel._attrs.src).toBe("/local");
+    expect(eng._attrs.src).toBe("https://engine.host/j/zzz");
+    expect(opq._attrs.src).toBe("about:blank");
+    expect(none._attrs.src).toBeUndefined();
+  });
+
+  it("ignores non-frame elements and text nodes", () => {
+    const e = makeParserEnv();
+    const span: Record<string, any> = {
+      nodeType: 1,
+      tagName: "SPAN",
+      getAttribute() {
+        return REAL;
+      },
+      setAttribute() {
+        throw new Error("guard touched a non-frame element");
+      },
+    };
+    e.fire([{ type: "childList", addedNodes: [span, { nodeType: 3 }] }]);
+  });
+
+  it("observes the document element with subtree childList", () => {
+    const e = makeParserEnv();
+    expect(e.observers.length).toBe(1);
+    expect(e.observers[0].target.tag).toBe("html");
+    expect(e.observers[0].opts).toEqual({ childList: true, subtree: true });
+  });
+
+  it("stays silent without MutationObserver (honest limit)", () => {
+    const iframe = makeClass("src");
+    const w: Record<string, any> = {
+      HTMLIFrameElement: { prototype: iframe.proto },
+      document: { documentElement: {} },
+      open() {
+        return 1;
+      },
+    };
+    applyNavGuard(w, LOC, ENGINE); /* must not throw, must not observe */
+  });
+});
