@@ -85,8 +85,11 @@ upstream bytes.
   the sole authoritative Cookie source for engine requests. Dotless
   TLD Domain attributes are refused; Max-Age/Expires deletion
   implemented.
-- localStorage/sessionStorage/IndexedDB/Cache API are scoped with the
-  same id; Cache match only sees the origin's own entries.
+- localStorage/sessionStorage/IndexedDB/Cache API are scoped by the
+  page-held site token (the keyed per-origin MAC above, fnv1a in the
+  keyless degraded mode); the SW-side jar id stays SW-private and
+  does not need to match it. Cache match only sees the origin's own
+  entries.
 - 2.0 audit correction (closed in 2.2): Set-Cookie on intermediate
   redirect hops IS captured. The SW follows the hop chain itself (the
   transport surfaces 3xx) and applySetCookie runs against every hop;
@@ -164,8 +167,14 @@ could inspect. The known classes, all closed:
 
 - `window.__ZL` no longer carries the destination. The rewriter
   injects `window.__ZL = { site: "<token>" }`: a stable opaque
-  per-site identity (the fnv1a of the target origin, computed
-  SW-side from the destination the engine already holds privately).
+  per-site identity, computed SW-side from the destination the
+  engine already holds privately. With a #55 route key active the
+  token is a SipHash MAC of the target origin under that key, so an
+  origin dictionary cannot reverse it the way it could the old
+  fnv1a token; the keyless degraded mode keeps the fnv1a token, and
+  the mint waits for the key to settle so one site never splits
+  across both prefixes (storage written under an older prefix is
+  orphaned by the upgrade, honestly).
   Storage scoping, the cookie, relay and serviceWorker shims and
   the ws bridge all key off the token; an unrewritten document falls
   back to hashing the origin of its own baseURI.
@@ -279,8 +288,8 @@ Residuals, stated honestly:
   and HTML-parser-inserted URLs (innerHTML, document.write) still
   escape to the browser; see the runtime navigation escape section.
 - Page-identity opacity is obfuscation (issue #32): base64url routes
-  are reversible by anyone who holds them; see the destination
-  leakage section.
+  are reversible by anyone who holds them (the keyed site token is a
+  MAC and is not); see the destination leakage section.
 - Browser-direct escape residuals (issue #34): blob-worker fetches
   and opaque request URLs passthrough; navigations are the #28
   class. See the browser-direct HTTP(S) escape section.

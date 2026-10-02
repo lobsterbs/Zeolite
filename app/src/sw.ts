@@ -296,11 +296,15 @@ function rewriteStream(
   const modP = rewriter();
   /* Issue #32: the injected contract is { site: <opaque token> },
     computed SW-side from the destination; an active fingerprint
-    profile rides the same first chunk (1.8 Telluride). */
-  const ljInit = initScript(base, fpScript);
+    profile rides the same first chunk (1.8 Telluride). #55
+    follow-up: with a route key the token is a keyed MAC of the
+    origin, so the mint waits for routeReady - a token minted before
+    the key settled would split one site's storage across both the
+    keyed and the legacy prefix. */
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      controller.enqueue(encoder.encode(ljInit));
+      await routeReady;
+      controller.enqueue(encoder.encode(initScript(base, fpScript)));
       const reader = body.getReader();
       try {
         // Rewriter init and construction live inside the try: an init failure

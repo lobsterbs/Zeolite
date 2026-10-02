@@ -242,6 +242,16 @@ export function encodeDestLegacy(dest: string): string {
   return prefix + b64uEncode(ENC.encode(dest));
 }
 
+/** Keyed per-origin site identity (#32 hardening on #55's key): a
+    SipHash MAC of the origin under the route key, domain 4 (disjoint
+    from the route-token domains 1-3), so the page-held storage id is
+    not dictionary-reversible the way the fnv1a fallback is. Null =
+    no route key = the legacy fnv1a token. */
+export function keyedSiteToken(origin: string): string | null {
+  if (!routeKey) return null;
+  return b64uEncode(destMac(routeKey, ENC.encode(origin), 4));
+}
+
 /** Engine-local path -> destination URL, or null if not ours. Dual
     decode: a v1 keyed token decodes with the key and fails closed
     without it; legacy tails always decode, so routes minted before
