@@ -160,6 +160,14 @@ Residuals, stated honestly:
   observer callback is a microtask, the load is a task, so the
   child never receives the plaintext address). Frames inside a
   shadow root escape the document observer (honest limit).
+- Fragments after a mapped navigation are an engine-wide bound: the
+  page URL the browser commits is the engine route alone, so a
+  target's fragment (mapped Location, Refresh url=, marker routes)
+  never re-appears in the address bar and fragment-targeted scroll
+  does not happen. Fragment-only references inside a rendered page
+  (#top) stay client-side and keep working. Re-stamping the fragment
+  onto the served route from the decoded destination would be the
+  fix, if a real site ever needs it.
 - Cross-origin subresource requests (fetch/XHR) from controlled pages
   are routed through the engine since #34 (see the browser-direct
   HTTP(S) escape section); what remains here is the navigation class
