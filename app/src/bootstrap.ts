@@ -17,14 +17,17 @@
    loading would leave an unpatched window). The CI size gate covers
    the built artifact.
 
-   Budget: under 10 KiB minified (CI enforces). 5 KiB originally,
+   Budget: under 11 KiB minified (CI enforces). 5 KiB originally,
    6.5 for the #28 navigation guard, 8 when the artifact became the
    single classic file the browser run demanded (issue #35): what
    used to ride in shared chunks (the nav guard, the codec helpers)
    now bundles into the one file the page loads. 10 for #37: the
    cross-site channel isolation (storage events, BroadcastChannel,
    window.name, cookieStore removal) is per-page correctness, not
-   optional payload. Deliberate raises, recorded in the workflow
+   optional payload. 11 for the #28 parser-inserted iframe observer
+   (a frame injected by innerHTML or document.write has no bootstrap
+   of its own, so the document rewrites its src before the browser's
+   queued load task). Deliberate raises, recorded in the workflow
    file, never creep.
 
    Page-global contract (set by the rewriter at injection time,

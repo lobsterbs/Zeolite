@@ -167,13 +167,18 @@ jobs:
         # cross-site channel isolation (storage-event filter,
         # BroadcastChannel name scoping, window.name, cookieStore
         # removal) is a per-page correctness requirement, not
-        # optional payload. Raises are deliberate decisions recorded
-        # here, never quiet accommodations; CI prints the measured
-        # size.
+        # optional payload. Raised 10240 -> 11264 for the #28
+        # parser-inserted iframe observer: a frame injected by
+        # innerHTML or document.write has no bootstrap of its own,
+        # so the document-side MutationObserver that rewires its src
+        # before the browser's queued load task is per-page
+        # correctness too. Measured 10790. Raises are deliberate
+        # decisions recorded here, never quiet accommodations; CI
+        # prints the measured size.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 10240 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 10240)"; exit 1; fi
+          if [ "$SIZE" -ge 11264 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 11264)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
