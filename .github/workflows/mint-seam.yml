@@ -1,6 +1,8 @@
 name: mint-seam
 
 on:
+  push:
+    branches: [mint-seam]
   workflow_dispatch:
 
 # One-shot mechanical edit for #54 residual 1: admit "zl:mint" to
