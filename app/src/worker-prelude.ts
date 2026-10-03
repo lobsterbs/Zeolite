@@ -64,14 +64,11 @@ export function routeWorkerUrl(
 const mintMemo = new Map<string, Promise<string | null>>();
 
 /** Mint an engine route from a worker, over the page relay post
-    (shared workers: the newest connect port; dedicated workers:
-    post is null - the page relay hooks window "message" events and
-    SharedWorker connect ports only, nothing hooks a dedicated
-    Worker's parent channel, so a wrapper posted from one leaks into
-    the app's onmessage stream and never reaches the engine. The
-    mint refuses there and the caller rides the legacy codec).
-    post returns false when it cannot deliver; a silent port times
-    out to null. */
+    (dedicated workers: the Worker object's own message channel;
+    shared workers: the newest connect port). The page bootstrap
+    hooks both channels and filters wrapper shapes out of the app's
+    handlers. post returns false when it cannot deliver; a silent
+    port times out to null. */
 export function mintUrlViaRelay(
   post: ((m: unknown, t?: Transferable[]) => boolean | void) | null,
   dest: string,
@@ -168,27 +165,30 @@ export function installWorkerPrelude(route: string): void {
      classic and module workers get this prelude.
      #54 residual 5: cross-origin http(s) inputs mint first - the
      keyed route leaves nothing decodable in the worker's request
-     records either. The legacy codec route stays the fallback (no
-     relay, refused mint, timeout). Request objects carry one-shot
+     records either. The legacy codec route stays the fallback (a
+     refused mint, a timeout, a page whose Worker hook could not
+     install). Request objects carry one-shot
      bodies that cannot be replayed through a rebuilt URL; they pass
      to the native fetch untouched, a documented residual. */
   if (typeof G.fetch === "function") {
     const OF = G.fetch.bind(globalThis);
-    /* Dedicated workers refuse the mint up front: the page relay
-       hooks window "message" events and SharedWorker connect ports
-       only, nothing hooks a dedicated Worker's parent channel, so a
-       mint wrapper posted from one leaks into the app's onmessage
-       stream and never reaches the engine. post = null makes
-       mintUrlViaRelay resolve null and the caller fall back to the
-       legacy codec route; minting stays a shared-worker seam until
-       the page grows a Worker-channel hook. */
+    /* Dedicated workers post the wrapper on the Worker object's
+       own message channel; shared workers use their newest connect
+       port. The page bootstrap's Worker/SharedWorker hooks carry
+       both to the engine and filter them out of the app's
+       handlers. */
     const post: ((m: unknown, t?: Transferable[]) => boolean | void) | null =
-      typeof G.postMessage === "function" ? null : (m, t) => {
-        const p = pickRelayPort(sharedPorts as MessagePort[]);
-        if (!p) return false;
-        p.postMessage(m, t ?? []);
-        return true;
-      };
+      typeof G.postMessage === "function"
+        ? (m, t) => {
+            G.postMessage!(m, t);
+            return true;
+          }
+        : (m, t) => {
+            const p = pickRelayPort(sharedPorts as MessagePort[]);
+            if (!p) return false;
+            p.postMessage(m, t ?? []);
+            return true;
+          };
     (globalThis as { fetch?: unknown }).fetch = (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : null;
       if (url === null) return OF(input, init);
@@ -207,8 +207,10 @@ export function installWorkerPrelude(route: string): void {
   }
 
   /* Dedicated-worker WebSocket bridge: same event semantics as the page
-     bootstrap shim, but the channel is opened towards the parent page,
-     which forwards to the service worker. 2.3 Selenide: shared workers
+     bootstrap shim, but the channel is opened towards the parent page
+     (the page bootstrap's Worker constructor hook carries it to the
+     service worker and filters the wrapper out of the app's
+     handlers). 2.3 Selenide: shared workers
      have no parent-page postMessage, so the shim relays over the newest
      connect port instead - the page-side bootstrap relay (installed on
      worker.port by the SharedWorker constructor wrapper) carries the
@@ -229,6 +231,18 @@ export function installWorkerPrelude(route: string): void {
         return protocols === undefined ? new OWS(url) : new OWS(url, protocols);
       }
       const es = new EventTarget() as unknown as WebSocket;
+      /* instanceof parity: the EventTarget keeps its internal slots
+         and adopts the real prototype; own plain on-handler props
+         shadow the prototype's brand-checked accessors so
+         fireHandler still reads plain data. */
+      Object.setPrototypeOf(es, OWS.prototype);
+      for (const h of ["onopen", "onmessage", "onerror", "onclose"])
+        Object.defineProperty(es, h, {
+          writable: true,
+          enumerable: true,
+          configurable: true,
+          value: null,
+        });
       let wsState = 0;
       let binType: "blob" | "arraybuffer" = "blob";
       let proto = "";
@@ -256,11 +270,16 @@ export function installWorkerPrelude(route: string): void {
           clean?: boolean;
           protocol?: string;
         };
+        /* Native parity: once CLOSING/CLOSED no further open or
+           message events fire (a late engine open or a message
+           racing a close is dropped). */
         if (m?.ev === "open") {
+          if (wsState >= 2) return;
           wsState = 1;
           proto = m.protocol ?? "";
           disp(new Event("open"));
         } else if (m?.ev === "message") {
+          if (wsState >= 2) return;
           q = q.then(async () => {
             let data: unknown = m.data;
             if (binType === "arraybuffer" && data instanceof Blob) {

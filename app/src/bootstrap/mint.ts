@@ -101,7 +101,14 @@ export function applyReemit(w: Record<string, unknown>): void {
   /* sendBeacon(): the native contract queues and returns true, it
      does not deliver; the shim keeps the optimistic true and posts
      on the minted route (keepalive). A refused mint or a rejected
-     POST falls back to the native beacon. */
+     POST falls back to the native beacon, and so does a beacon
+     fired during unload: a deferred mint cannot land once the page
+     is torn down, but the native beacon is queued past it. */
+  /* pagehide (not unload: also covers the back/forward cache). */
+  let unloading = false;
+  const wadd = (w as { addEventListener?: (t: string, l: () => void) => void })
+    .addEventListener;
+  if (typeof wadd === "function") wadd.call(w, "pagehide", () => { unloading = true; });
   const navg = w.navigator as
     | { sendBeacon?: (u: string | URL, d?: BodyInit | null) => boolean }
     | undefined;
@@ -118,9 +125,9 @@ export function applyReemit(w: Record<string, unknown>): void {
       const s = typeof u === "string" ? u : u instanceof URL ? u.href : null;
       if (s === null) return native(u, d);
       const dest = crossDest(s);
-      if (!dest) return native(u, d);
+      if (!dest || unloading) return native(u, d);
       mintRoute(dest).then((route) => {
-        if (!route || !OF) {
+        if (!route || !OF || unloading) {
           native(u, d);
           return;
         }
@@ -183,6 +190,15 @@ export function applyReemit(w: Record<string, unknown>): void {
         OSend.apply(self, a);
       });
     };
+    /* abort() during a pending re-emit cancels it: without this the
+       mint would resolve and re-open a request the app aborted.
+       readyState has stayed UNSENT between open() and the minted
+       re-open, so the native abort applies directly. */
+    const OAbort = OX.prototype.abort as (...a: unknown[]) => unknown;
+    OX.prototype.abort = function (this: AnyRecord, ...a: unknown[]) {
+      pend.delete(this);
+      return OAbort.apply(this, a);
+    };
   }
 
   /* EventSource: the constructor defers to the minted route; a close
@@ -196,6 +212,11 @@ export function applyReemit(w: Record<string, unknown>): void {
     const CES = OES;
     const SHIM = function (this: AnyRecord, target0: string, o?: { withCredentials?: boolean }) {
       const es = new EventTarget() as AnyRecord;
+      /* instanceof parity: the EventTarget keeps its internal slots
+         and adopts the real prototype (SHIM.prototype is that same
+         prototype); the own on-handler, readyState, url and close
+         props below shadow its brand-checked accessors. */
+      Object.setPrototypeOf(es, CES.prototype);
       const on: Record<string, ((e: unknown) => unknown) | undefined> = {};
       const listen: Record<string, Array<(e: unknown) => void>> = {};
       let real: EventSource | null = null;

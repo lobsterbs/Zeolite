@@ -34,6 +34,18 @@ export function applyWs(w: Record<string, unknown>): void {
         return new OWS(url, protocols);
       }
       const es = new EventTarget() as unknown as WebSocket;
+      /* instanceof parity: the EventTarget keeps its internal slots
+         and adopts the real prototype; own plain on-handler props
+         shadow the prototype's brand-checked accessors so fire()
+         still reads plain data. */
+      Object.setPrototypeOf(es, OWS.prototype);
+      for (const h of ["onopen", "onmessage", "onerror", "onclose"])
+        Object.defineProperty(es, h, {
+          writable: true,
+          enumerable: true,
+          configurable: true,
+          value: null,
+        });
       let wsState = 0;
       let binType: "blob" | "arraybuffer" = "blob";
       let proto = "";
@@ -68,11 +80,16 @@ const disp = (e: Event) => {
           clean?: boolean;
           protocol?: string;
         };
+        /* Native parity: once CLOSING/CLOSED no further open or
+           message events fire (a late engine open or a message
+           racing a close is dropped). */
         if (m.ev === "open") {
+          if (wsState >= 2) return;
           wsState = 1;
           proto = m.protocol ?? "";
           disp(new Event("open"));
         } else if (m.ev === "message") {
+          if (wsState >= 2) return;
           q = q.then(async () => {
             let data: unknown = m.data;
             if (binType === "arraybuffer" && data instanceof Blob) {

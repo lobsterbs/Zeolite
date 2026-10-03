@@ -17,7 +17,7 @@
    loading would leave an unpatched window). The CI size gate covers
    the built artifact.
 
-   Budget: under 16 KiB minified (CI enforces). 5 KiB originally,
+   Budget: under 18 KiB minified (CI enforces). 5 KiB originally,
    6.5 for the #28 navigation guard, 8 when the artifact became the
    single classic file the browser run demanded (issue #35): what
    used to ride in shared chunks (the nav guard, the codec helpers)
@@ -33,7 +33,11 @@
    page-realm mint client and re-emission (fetch, sendBeacon, XHR and
    EventSource inputs ride minted engine routes) plus the navguard
    swap/defer seams (runtime DOM navigation values upgrade from the
-   decodable marker to keyed routes). Deliberate
+   decodable marker to keyed routes). 18 for the #54 dedicated-Worker
+   hook: the relay taps worker message channels (a Worker object, a
+   SharedWorker port) so mint/ws wrappers reach the engine without
+   leaking into the app's handlers, and the WS/EventSource shims
+   gain instanceof and close-state parity. Deliberate
    raises, recorded in the workflow file, never creep.
 
    Page-global contract (set by the rewriter at injection time,

@@ -155,7 +155,7 @@ jobs:
           fi
       - name: Verify vendored transport made it into the build
         run: test -f app/dist/libcurl/index.mjs
-      - name: Bootstrap size budget (must stay under 16 KiB minified)
+      - name: Bootstrap size budget (must stay under 18 KiB minified)
         # Raised from 5120 for the #28 navigation guard (window.open,
         # anchor/area/iframe/form/link URL property + setAttribute
         # rewrites, form submit paths, WebRTC removal) and the module
@@ -183,13 +183,19 @@ jobs:
         # swap/defer seams (runtime DOM navigation values upgrade
         # from the decodable marker to keyed routes) is per-page
         # privacy correctness, same class as the rows above.
+        # Raised 16384 -> 18432 for the #54 dedicated-Worker hook: the
+        # relay taps worker message channels (a Worker object, a
+        # SharedWorker port) so mint/ws wrappers reach the engine
+        # without leaking into the app's handlers - per-page
+        # correctness again - and the WS/EventSource shims gain
+        # instanceof and close-state parity in the same pass.
         # Raises are deliberate
         # decisions recorded here, never quiet accommodations; CI
         # prints the measured size.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 16384 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 16384)"; exit 1; fi
+          if [ "$SIZE" -ge 18432 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 18432)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
