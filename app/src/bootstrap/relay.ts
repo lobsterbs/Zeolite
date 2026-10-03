@@ -24,7 +24,7 @@ const isWrapper = (d: unknown): boolean =>
    MessagePort, which addEventListener never does).
    addEventListener("message") callbacks are wrapped through a
    WeakMap so removeEventListener maps back. */
-const tapChannel = (t: Worker | MessagePort): void => {
+export const tapChannel = (t: Worker | MessagePort): void => {
  const nativeAdd = t.addEventListener.bind(t) as (...a: unknown[]) => void;
  const nativeRemove = t.removeEventListener.bind(t) as (...a: unknown[]) => void;
  const wrapped = new WeakMap<object, EventListener>();

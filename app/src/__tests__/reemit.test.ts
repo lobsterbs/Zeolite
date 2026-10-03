@@ -196,10 +196,24 @@ describe("re-emission seams (#54 residual 2)", () => {
     const x = new e.w.XMLHttpRequest();
     x.open("GET", "https://xhr.example/api?t=8", true);
     x.setRequestHeader("X-A", "1");
+    expect(x.readyState).toBe(1); /* OPENED: native open() parity while the mint is pending */
     expect(e.xhrLog).toEqual([]); /* nothing native yet */
     x.send();
     await settle();
     expect(e.xhrLog).toEqual(["open:GET|/j/x1|true|null|null", "hdr:X-A:1", "send"]);
+  });
+
+  it("abort() cancels a pending re-emit: nothing native ever opens", async () => {
+    stubMint("/j/x2");
+    const e = fakeWindow();
+    applyReemit(e.w);
+    const x = new e.w.XMLHttpRequest();
+    x.open("GET", "https://xhr.example/api?t=15", true);
+    expect(x.readyState).toBe(1);
+    x.abort();
+    expect(Object.prototype.hasOwnProperty.call(x, "readyState")).toBe(false); /* the own OPENED patch is gone */
+    await settle();
+    expect(e.xhrLog).toEqual([]); /* the mint resolved into a canceled re-emit */
   });
 
   it("keeps sync and engine-local XHRs on the native path", () => {
@@ -224,6 +238,7 @@ describe("re-emission seams (#54 residual 2)", () => {
     const e = fakeWindow();
     applyReemit(e.w);
     const es = new e.w.EventSource("https://sse.example/stream?t=10");
+    expect(es instanceof e.w.EventSource).toBe(true); /* SHIM.prototype is the real prototype */
     expect(e.esMade.length).toBe(0); /* deferred: no request yet */
     await settle();
     expect(e.esMade.length).toBe(1);

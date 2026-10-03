@@ -160,6 +160,7 @@ export function applyReemit(w: Record<string, unknown>): void {
       const dest = a[2] === undefined || a[2] === true ? crossDest(s) : null;
       if (!dest) {
         pend.delete(this);
+        delete this.readyState;
         return OOpen.apply(this, a);
       }
       pend.set(this, {
@@ -168,6 +169,18 @@ export function applyReemit(w: Record<string, unknown>): void {
         user: a[3] == null ? null : String(a[3]),
         pw: a[4] == null ? null : String(a[4]),
         headers: [],
+      });
+      /* Native open() reports OPENED synchronously; the deferred
+         re-open would leave readyState at UNSENT until the mint
+         lands, a visible drift for apps polling it. An own getter
+         shadows the prototype's until the minted re-open, a
+         canceling open() or an abort() deletes it. The rest of the
+         response surface (status, responseText) keeps its native
+         UNSENT behavior, a documented residual. */
+      Object.defineProperty(this, "readyState", {
+        configurable: true,
+        enumerable: false,
+        get: () => 1,
       });
     };
     OX.prototype.setRequestHeader = function (this: AnyRecord, ...a: unknown[]) {
@@ -185,19 +198,24 @@ export function applyReemit(w: Record<string, unknown>): void {
       mintRoute(st.url).then((route) => {
         if (pend.get(self) !== st) return;
         pend.delete(self);
+        delete self.readyState;
         OOpen.call(self, st.method, route ?? st.url, true, st.user, st.pw);
         for (const h of st.headers) OHdr.call(self, h[0], h[1]);
         OSend.apply(self, a);
       });
     };
     /* abort() during a pending re-emit cancels it: without this the
-       mint would resolve and re-open a request the app aborted.
-       readyState has stayed UNSENT between open() and the minted
-       re-open, so the native abort applies directly. */
-    const OAbort = OX.prototype.abort as (...a: unknown[]) => unknown;
+       mint would resolve and re-open a request the app aborted. The
+       own OPENED patch above is removed first, so the native abort
+       sees the real UNSENT state; deleting an absent own prop is a
+       no-op. The native abort is optional: the wrapped constructor
+       may lack one (the test realm's fake does), and the cancel
+       itself must not throw. */
+    const OAbort = OX.prototype.abort as ((...a: unknown[]) => unknown) | undefined;
     OX.prototype.abort = function (this: AnyRecord, ...a: unknown[]) {
       pend.delete(this);
-      return OAbort.apply(this, a);
+      delete this.readyState;
+      return OAbort?.apply(this, a);
     };
   }
 

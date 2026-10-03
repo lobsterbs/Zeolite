@@ -62,6 +62,16 @@ describe("minted route contract (#54 seam)", () => {
     expect(new TextDecoder().decode(b64uDecode(tail)!)).not.toContain("secret");
   });
 
+  it("a rotated key strands existing routes; a fresh mint rides the new key", () => {
+    setRouteKey(b64uEncode(new Uint8Array(16).map((_, i) => i)));
+    const old = encodeDest("https://rotate.example/private");
+    /* Rotation: every route minted under the old key fails closed;
+       minting under the new one keeps working. */
+    setRouteKey(b64uEncode(new Uint8Array(16).map((_, i) => 255 - i)));
+    expect(decodePath(old)).toBeNull();
+    expect(decodePath(encodeDest("https://rotate.example/private"))).toBe("https://rotate.example/private");
+  });
+
   it("a keyless mint degrades to the legacy shape, still a valid route", () => {
     const dest = "https://example.com/x";
     expect(encodeDest(dest)).toBe(encodeDestLegacy(dest));
