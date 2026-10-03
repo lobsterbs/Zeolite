@@ -26,6 +26,7 @@ export type DiagCategory =
   | "PARSER"
   | "TIMEOUT"
   | "BLOCKED"
+  | "CHALLENGE"
   | "UNSUPPORTED"
   | "UNKNOWN";
 
@@ -40,6 +41,7 @@ export type DiagCause =
   | "rewrite"
   | "browser_limit"
   | "extension"
+  | "challenge"
   | "unknown";
 
 /** Lifecycle stages a resource or navigation can pass through. Not

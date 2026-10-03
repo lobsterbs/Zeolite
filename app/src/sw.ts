@@ -108,7 +108,7 @@ import { WsBridge, type PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
 import { senderVirtualOrigin, virtualOriginHeaders } from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP, type VirtualContext } from "./vctx";
-import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, jarClear, jarClearScope, jarEnumeration, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
+import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, isPassChallenge, jarClear, jarClearScope, jarEnumeration, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
 import { fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
 import { decryptSession, encryptSession } from "./session";
@@ -1629,6 +1629,20 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              admission, so the copy corrects itself. Unknown client
              (SW-initiated fetch, navigation) is a no-op inside. */
           if (admitted.some((r) => r.stored || r.deleted)) void pushDocCookieView(e.clientId);
+          /* #52: a solved Anubis challenge hands its cookies back through
+             the ordinary jar admission above; flag the handoff so hosts
+             can react (detect-only, never a solve). */
+          if (isPassChallenge(target) || (hopUrl !== target && isPassChallenge(hopUrl)))
+            DIAG.emit({
+              traceId,
+              requestId: traceId,
+              category: "CHALLENGE",
+              cause: "challenge",
+              severity: "info",
+              stage: "UPSTREAM_RESPONSE",
+              message: "challenge pass-through: cookies captured for " + target,
+              url: target,
+            });
           const headers = stripHostile(resp.headers);
           /* Issue #2: engine routes serve their own origin. The preserved
              target ACAO (e.g. "https://excalidraw.com") fails the CORS

@@ -779,3 +779,15 @@ export function cookiesResetForTests(): void {
   sameSitePolicy = "off";
   profile = PROFILE_DEFAULT;
 }
+
+/* #52 detect-only: recognize an Anubis pass-challenge endpoint so the
+   SW can flag the moment a solved challenge hands cookies back through
+   the ordinary jar. This is NOT challenge solving; the engine stays
+   challenge-DETECT only by design. */
+export function isPassChallenge(dest: string): boolean {
+  try {
+    return new URL(dest).pathname === "/.within.website/x/cmd/anubis/api/pass-challenge";
+  } catch {
+    return false;
+  }
+}

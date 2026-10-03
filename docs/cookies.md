@@ -206,8 +206,32 @@ context cannot create it), jar records whose origin string is
 unknown cannot be permission-checked and stay invisible, and
 `cookies.onChanged` is not implemented.
 
+## Challenge handoff (Anubis) (#52)
+
+The engine is challenge-DETECT only: it never solves a proof-of-work
+challenge and never fakes one. What it provides is the cookie handoff
+surface:
+
+1. The challenge page runs inside the proxied frame; the user (or a
+   future solve verb) solves it in-context.
+2. The solve posts to the Anubis pass-challenge endpoint
+   (`/.within.website/x/cmd/anubis/api/pass-challenge`).
+3. The response's `Set-Cookie` is captured by ordinary jar admission
+   (`applySetCookie`), persisted in the per-origin jar.
+4. Every later upstream request to that host replays the jar
+   (`cookieHeaderFor`), so subsequent navigations skip the challenge.
+
+When the response URL is the pass-challenge endpoint, the SW emits a
+diag event (category `CHALLENGE`, cause `challenge`, stage
+`UPSTREAM_RESPONSE`); hosts can watch it through `zl:getDiag`.
+
 ## Honest limits
 
+- The challenge interstitial itself is not detected: there is no
+  body-marker scanning, so a challenge whose solve never reaches the
+  pass-challenge endpoint produces no CHALLENGE event.
+- An unsolvable challenge stays unsolved: the handoff surface only
+  captures and replays cookies; it never claims solve support.
 - Redirect hops are followed by the SW itself (the transport surfaces
   3xx), so `Set-Cookie` on intermediate hops is captured (2.2). A hop
   the SW cannot follow (307/308 with a one-shot stream body, or past
