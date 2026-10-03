@@ -5,13 +5,14 @@ on:
     branches: [mint-seam]
   workflow_dispatch:
 
-# One-shot mechanical edit for #54 residual 1: admit "zl:mint" to
-# the page-realm control-message gate in app/src/sw.ts. The edit
-# happens inside the checkout with exactly-once assertions, so it
-# can never be applied twice or to the wrong statement; the
-# regions printed to the job log are the review evidence. sw.ts is
-# 136KB, too large to move around byte-exactly by hand. Idempotent:
-# a second run on an already-patched tree commits nothing.
+# One-shot mechanical edits for #54 residual 1, applied inside the
+# checkout with exactly-once assertions (sw.ts is 136KB, too large
+# to move around byte-exactly by hand). Patch A admits "zl:mint" to
+# the page-realm control-message gate; patch B makes the zl:mint
+# case honest about that admission and bounds mints to absolute
+# http(s) destinations. The regions printed to the job log are the
+# review evidence. Idempotent: a run on a fully patched tree
+# commits nothing.
 
 permissions:
   contents: write
@@ -30,7 +31,7 @@ jobs:
           node --input-type=module - <<'EOF'
           import { readFileSync, writeFileSync } from "node:fs";
           const p = "app/src/sw.ts";
-          const src = readFileSync(p, "utf8");
+          let src = readFileSync(p, "utf8");
           const m = src.match(/const PAGE_MESSAGES[^;]*;/s);
           console.log("=== PAGE_MESSAGES statement ===");
           console.log(m ? m[0] : "(NOT FOUND)");
@@ -47,21 +48,59 @@ jobs:
           }
           if (!m) throw new Error("PAGE_MESSAGES statement not found");
           if (!m[0].includes('"zl:docCookie"')) throw new Error("unexpected PAGE_MESSAGES shape");
-          if (m[0].includes('"zl:mint"')) { console.log("already patched; skipping"); process.exit(0); }
-          const comment = '/* "zl:mint" (#54 residual 1, page-realm mint seam): a proxied\n   page can already construct a legacy route for any destination\n   (the codec is page-public), so admitting minting grants no new\n   capability; the zl:mint case bounds mints to absolute http(s)\n   destinations. */\n';
-          const patched = m[0].replace('"zl:docCookie"', '"zl:mint", "zl:docCookie"');
-          if (patched === m[0]) throw new Error("insertion failed");
-          writeFileSync(p, src.replace(m[0], comment + patched));
-          console.log("=== patched ===");
+          let didA = false;
+          if (!m[0].includes('"zl:mint"')) {
+            const comment = '/* "zl:mint" (#54 residual 1, page-realm mint seam): a proxied\n   page can already construct a legacy route for any destination\n   (the codec is page-public), so admitting minting grants no new\n   capability; the zl:mint case bounds mints to absolute http(s)\n   destinations. */\n';
+            const patched = m[0].replace('"zl:docCookie"', '"zl:mint", "zl:docCookie"');
+            if (patched === m[0]) throw new Error("insertion failed");
+            src = src.replace(m[0], comment + patched);
+            didA = true;
+            console.log("=== patch A applied ===");
+          } else {
+            console.log("patch A already applied");
+          }
+          const caseA = src.indexOf('case "zl:mint": {');
+          if (caseA < 0) throw new Error("zl:mint case not found");
+          let caseB = src.indexOf('case "', caseA + 10);
+          if (caseB < 0) throw new Error("no case after zl:mint");
+          console.log("=== full zl:mint case (pre-edit) ===");
+          console.log(src.slice(caseA, caseB));
+          let didB = false;
+          if (!src.slice(caseA, caseB).includes("mintableDest")) {
+            const body = src.slice(caseA, caseB);
+            let nb = body.replace(/\/\* #55:[\s\S]*?\*\//,
+              '/* #55/#54: mint an opaque route for a destination. The reply\n         carries the route only, never the key: the key must not\n         leave the worker realm. #54 residual 1 admits proxied\n         pages to this case: a page can already construct a legacy\n         route for any destination (the codec is page-public), so\n         minting grants no new capability; mints are bounded to\n         absolute http(s) destinations (mintableDest). With no key\n         active (storage unavailable) this still answers, with a\n         legacy route: the degraded mode, not an error. */');
+            if (nb === body) throw new Error("comment replacement failed");
+            const checkAnchor = 'if (typeof msg.dest !== "string") {';
+            if (nb.split(checkAnchor).length !== 2) throw new Error("dest check anchor count != 1");
+            nb = nb.replace(checkAnchor, 'if (typeof msg.dest !== "string" || !mintableDest(msg.dest)) {');
+            const errAnchor = 'reply({ ok: false, error: "mint needs dest" });';
+            if (nb.split(errAnchor).length !== 2) throw new Error("error reply anchor count != 1");
+            nb = nb.replace(errAnchor, 'reply({ ok: false, error: "mint needs an absolute http(s) dest" });');
+            src = src.slice(0, caseA) + nb + src.slice(caseB);
+            const im = src.match(/import \{[^}]*\} from "\.\/codec";/);
+            console.log("=== codec import ===");
+            console.log(im ? im[0] : "(no ./codec import found)");
+            if (!im) throw new Error("no ./codec import to extend");
+            if (!im[0].includes("mintableDest")) {
+              src = src.replace(im[0], im[0].replace("import {", "import {\n  mintableDest,"));
+            }
+            didB = true;
+            console.log("=== patch B applied ===");
+          } else {
+            console.log("patch B already applied");
+          }
+          if (!didA && !didB) { console.log("nothing to do"); process.exit(0); }
+          writeFileSync(p, src);
           EOF
-      - name: Prove the patch landed
-        run: grep -n 'zl:mint' app/src/sw.ts | head -5
+      - name: Prove the patches landed
+        run: grep -n 'zl:mint\|mintableDest' app/src/sw.ts | head -8
       - name: Run the mint + codec unit tests (full CI gates the merge)
         run: |
           cd app
           npm install
           npx vitest run src/__tests__/mint.test.ts src/__tests__/codec.test.ts
-      - name: Commit the patch (skipped when already applied)
+      - name: Commit the patches (skipped when already applied)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -70,5 +109,5 @@ jobs:
             echo "nothing to commit"
             exit 0
           fi
-          git commit -m "sw: admit zl:mint to proxied pages (#54 page-realm mint seam)"
+          git commit -m "sw: bound zl:mint mints to http(s) dests, honest case comment (#54)"
           git push
