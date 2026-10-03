@@ -5,28 +5,23 @@ on:
 jobs:
   chunk:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        n: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     steps:
-      - name: print chunk
+      - name: print chunks
         run: |
-          for f in codec.ts codec.test.ts sw.ts; do
-            case "$f" in
-              codec.ts) p="app/src/codec.ts";;
-              codec.test.ts) p="app/src/__tests__/codec.test.ts";;
-              sw.ts) p="app/src/sw.ts";;
-            esac
+          read_chunked() {
+            f="$1"; p="$2"
             curl -fsSL "https://raw.githubusercontent.com/lobsterbs/Zeolite/main/$p" -o "$f"
             echo "ZLGITHASH-$f-$(git hash-object "$f")"
             echo "ZLSIZE-$f-$(wc -c < "$f")"
             split -b 8000 -d -a 2 "$f" "part_$f."
-            c="part_$f.$(printf '%02d' ${{ matrix.n }})"
-            echo "ZLCHUNKHASH-$f-${{ matrix.n }}-$(sha1sum "$c" 2>/dev/null | cut -d' ' -f1 || echo EMPTY)"
-            echo "ZLFILE-$f-${{ matrix.n }}-BEGIN"
-            if [ -f "$c" ]; then base64 -w 0 "$c"; else echo ZLEMPTY; fi
-            echo
-            echo "ZLFILE-$f-${{ matrix.n }}-END"
+            for c in part_$f.*; do
+              echo "ZLFILE-$f-${c#part_$f.}-BEGIN"
+              base64 -w 0 "$c"
+              echo
+              echo "ZLFILE-$f-${c#part_$f.}-END"
+            done
             rm -f "part_$f."*
-          done
+          }
+          read_chunked codec.ts app/src/codec.ts
+          read_chunked codec.test.ts app/src/__tests__/codec.test.ts
+          read_chunked sw.ts app/src/sw.ts
