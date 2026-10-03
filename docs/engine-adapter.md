@@ -76,7 +76,7 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 | --- | --- | --- |
 | `zl:ping` | - | liveness probe (echoes version, degraded, route shape, httpsUpgrade) |
 | `zl:config` | `prefix`, `httpsUpgrade?` | rotate the route prefix at runtime; the scheme is fixed to `"b64u"` since #32, any other `scheme` value is rejected. `httpsUpgrade` toggles the opt-in engine-side upgrade of http:// destinations (#53): absent keeps the persisted choice, the ack echoes the live value |
-| `zl:mint` | `dest` | mint an opaque route for a destination (#55): answers `{ ok, route }`; the SW-realm key never leaves the worker, and the message is host-only |
+| `zl:mint` | `dest` | mint an opaque route for a destination (#55): answers `{ ok, route }`; the SW-realm key never leaves the worker. Admitted to proxied pages as the #54 page-realm mint seam: a page can construct a legacy route for any destination itself, so minting grants no new capability; `dest` is bounded to absolute http(s) URLs (`mintableDest`). Consumers (navguard markers, worker-prelude inputs, bootstrap re-emission) are not yet migrated, see the #54 residuals |
 | `zl:adblock` | `enabled` | global toggle for the /rules.json block lists |
 | `zl:rules` | `ua`, `rules` (`host`, `adblock`, `ua`) | host-app per-site adblock + User-Agent overrides (rules.ts) |
 | `zl:jarProfile` | `profile` (or null) | switch the cookie jar to a throwaway session profile (incognito; cookies.ts) |

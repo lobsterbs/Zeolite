@@ -242,6 +242,21 @@ export function encodeDestLegacy(dest: string): string {
   return prefix + b64uEncode(ENC.encode(dest));
 }
 
+/** zl:mint request validation (#54 residual 1): the SW mints a route
+    only for engine-routable absolute http(s) destinations, mirroring
+    the keyedDecode bound. Admitting zl:mint to proxied pages grants
+    no new capability - the legacy codec is page-public and a page
+    could always encode any destination itself. */
+export function mintableDest(dest: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(dest);
+  } catch {
+    return false;
+  }
+  return u.protocol === "http:" || u.protocol === "https:";
+}
+
 /** Keyed per-origin site identity (#32 hardening on #55's key): a
     SipHash MAC of the origin under the route key, domain 4 (disjoint
     from the route-token domains 1-3), so the page-held storage id is

@@ -249,6 +249,15 @@ Honest bounds:
   destination in window.__ZL and on page surfaces, and that two virtual
   contexts stay isolated in localStorage, the cookie jar and the Cache
   API.
+- The page-realm mint seam (#54 residual 1): proxied pages may send
+  zl:mint and receive an opaque route minted under the SW-realm key.
+  This grants no new capability (the legacy codec is page-public; a
+  page could always encode any destination itself) and minted
+  destinations are bounded to absolute http(s) URLs. Consumers are
+  not yet migrated: navguard markers, worker-prelude fetch inputs
+  and bootstrap-issued requests still carry legacy-shape routes
+  until #54 items 2-3 land; importScripts stays legacy for good
+  (synchronous, no channel to the SW).
 
 ## Browser-direct HTTP(S) escapes (issue #34)
 

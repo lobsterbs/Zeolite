@@ -83,7 +83,8 @@
    wasm-pack build --target web -> copy into app/src/rewriter_wasm). */
 
 /// <reference lib="webworker" />
-import { b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setRouteKey, setScheme, unwrapDest, currentPrefix } from "./codec";
+import {
+  mintableDest, b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setRouteKey, setScheme, unwrapDest, currentPrefix } from "./codec";
 import { mapRefreshHeader, stripHostile } from "./headers";
 import { loadRouteKey, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
@@ -2169,7 +2170,12 @@ function senderIsProxiedPage(e: ExtendableMessageEvent): boolean {
    and their workers (the bootstrap's docCookie/WS channels and the
    content-script bridge). zl:ping stays open because its echo carries
    no secrets and page code may probe liveness. */
-const PAGE_MESSAGES = new Set(["zl:docCookie", "zl:wsOpen", "zl:ext", "zl:ping"]);
+/* "zl:mint" (#54 residual 1, page-realm mint seam): a proxied
+   page can already construct a legacy route for any destination
+   (the codec is page-public), so admitting minting grants no new
+   capability; the zl:mint case bounds mints to absolute http(s)
+   destinations. */
+const PAGE_MESSAGES = new Set(["zl:mint", "zl:docCookie", "zl:wsOpen", "zl:ext", "zl:ping"]);
 
 self.addEventListener("message", async (e: ExtendableMessageEvent) => {
   /* Issue #17: the restored route shape settles asynchronously; a
@@ -2238,14 +2244,17 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       break;
     }
     case "zl:mint": {
-      /* #55: mint an opaque route for a destination. Host-only by
-         the gate above - a proxied page must not mint routes - and
-         the reply carries the route only, never the key: the key
-         must not leave the worker realm. With no key active
-         (storage unavailable) this still answers, with a legacy
-         route: the degraded mode, not an error. */
-      if (typeof msg.dest !== "string") {
-        reply({ ok: false, error: "mint needs dest" });
+      /* #55/#54: mint an opaque route for a destination. The reply
+         carries the route only, never the key: the key must not
+         leave the worker realm. #54 residual 1 admits proxied
+         pages to this case: a page can already construct a legacy
+         route for any destination (the codec is page-public), so
+         minting grants no new capability; mints are bounded to
+         absolute http(s) destinations (mintableDest). With no key
+         active (storage unavailable) this still answers, with a
+         legacy route: the degraded mode, not an error. */
+      if (typeof msg.dest !== "string" || !mintableDest(msg.dest)) {
+        reply({ ok: false, error: "mint needs an absolute http(s) dest" });
         break;
       }
       reply({ ok: true, route: encodeDest(msg.dest) });
