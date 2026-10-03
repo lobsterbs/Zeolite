@@ -212,11 +212,6 @@ export function applyReemit(w: Record<string, unknown>): void {
     const CES = OES;
     const SHIM = function (this: AnyRecord, target0: string, o?: { withCredentials?: boolean }) {
       const es = new EventTarget() as AnyRecord;
-      /* instanceof parity: the EventTarget keeps its internal slots
-         and adopts the real prototype (SHIM.prototype is that same
-         prototype); the own on-handler, readyState, url and close
-         props below shadow its brand-checked accessors. */
-      Object.setPrototypeOf(es, CES.prototype);
       const on: Record<string, ((e: unknown) => unknown) | undefined> = {};
       const listen: Record<string, Array<(e: unknown) => void>> = {};
       let real: EventSource | null = null;
@@ -247,6 +242,16 @@ export function applyReemit(w: Record<string, unknown>): void {
               });
       };
       const nativeAdd = es.addEventListener.bind(es) as (...a: unknown[]) => void;
+      /* instanceof parity: the EventTarget keeps its internal slots
+         and adopts the real prototype (SHIM.prototype is that same
+         prototype); the own on-handler, readyState, url and close
+         props below shadow its brand-checked accessors. The swap
+         lands after the native listener is bound: until the own
+         patches exist the EventTarget methods are only reachable
+         through the prototype chain, and a replaced constructor's
+         prototype need not extend EventTarget (the test realm's
+         does not). */
+      Object.setPrototypeOf(es, CES.prototype);
       es.addEventListener = function (this: AnyRecord, ...a: unknown[]) {
         const type = String(a[0]);
         if (typeof a[1] === "function") {
