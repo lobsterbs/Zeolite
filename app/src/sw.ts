@@ -84,7 +84,7 @@
 
 /// <reference lib="webworker" />
 import {
-  mintableDest, b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, referrerDest, setRouteKey, setScheme, unwrapDest, currentPrefix } from "./codec";
+  mintableDest, b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, referrerDest, setRouteKey, setScheme, unwrapDest, currentPrefix } from "./codec";
 import { mapRefreshHeader, stripHostile } from "./headers";
 import { loadRouteKey, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
@@ -781,7 +781,12 @@ self.addEventListener("install", () => {
   void rewriter().catch(() => undefined);
 });
 
-let netGeneration = 0;
+/* NetLog generation is an epoch stamped per worker evaluation, not a
+   count from zero: a restarted worker used to come back with
+   generation 1 again, so a devtools that reconnected after a restart
+   could see an unchanged generation and skip the ring reset its
+   entries+cursor needed. */
+let netGeneration = Date.now();
 
 /* Restart-safe engine init (runs once per worker evaluation). A
    terminated worker restarts by re-evaluating this module WITHOUT a
@@ -794,9 +799,9 @@ let netGeneration = 0;
    instead of in activate; consumers that need the restored state
    await initReady (the fetch handler and the control plane). */
 const initReady = (async () => {
-  /* Generation bump per worker evaluation: a restart resets the
+  /* Generation stamp per worker evaluation: a restart resets the
      netLog ring, and the devtools delta-sync resets on it. */
-  netGeneration++;
+  netGeneration = Date.now();
   /* 1.4 Boride: restore the persisted cookie jar. Storage failure
      means an in-memory jar, never an init failure. */
   try {
@@ -1228,8 +1233,21 @@ self.addEventListener("fetch", (e: FetchEvent) => {
       } else if (isEnginePath(url.pathname)) {
         const raw = decodePath(url.pathname);
         /* #31: an undecodable engine route answers the error page for
-           navigations (bad route), the short text for subresources. */
-        if (!raw) return navOutcome(e, url, 404, "route", "zeolite: bad route");
+           navigations (bad route), the short text for subresources.
+           A token-shaped tail is almost certainly a route minted
+           under a key this worker no longer holds - a key rotation
+           strands every old route - so it gets its own reason instead
+           of the generic bad-route text. */
+        if (!raw)
+          return navOutcome(
+            e,
+            url,
+            404,
+            "route",
+            looksKeyedToken(url.pathname)
+              ? "zeolite: undecodable keyed route (route key rotated?)"
+              : "zeolite: bad route",
+          );
         dest0 = unwrapDest(raw);
         routeCarriesQuery = true;
       } else {
@@ -2303,9 +2321,11 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       reply({ ok: true, enabled: msg.enabled !== false });
       break;
     case "zl:getTracing": {
-      /* Delta poll, same cursor protocol as zl:getNetLog. */
+      /* Delta poll, same cursor protocol as zl:getNetLog, generation
+         included so a devtools that reconnected across a worker
+         restart resets its tracing cursor like the netLog one. */
       const since = (msg as { since?: number }).since ?? 0;
-      reply({ ok: true, ...tracingSnapshot(since) });
+      reply({ ok: true, generation: netGeneration, ...tracingSnapshot(since) });
       break;
     }
     case "zl:siteRoute":

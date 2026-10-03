@@ -267,15 +267,33 @@ export function keyedSiteToken(origin: string): string | null {
   return b64uEncode(destMac(routeKey, ENC.encode(origin), 4));
 }
 
+/** Engine path -> decoded tail bytes (query and fragment stripped), or
+    null when the path is not an engine route or the tail is not
+    base64url. Shared by decodePath and looksKeyedToken so the two can
+    never disagree about what a tail is. */
+function tailBytes(path: string): Uint8Array | null {
+  const i = path.indexOf(prefix);
+  if (i < 0) return null;
+  return b64uDecode(path.slice(i + prefix.length).split(/[?#]/)[0]);
+}
+
+/** Shape-only check: does an engine path's tail look like a v1 keyed
+    token (0x01 lead, at least the 17 header bytes)? Needs no key, so
+    the SW can tell a route minted under a key it no longer holds (a
+    rotated key strands every old route) from a plain bad tail in its
+    404 reason. Not a security decision: only keyedDecode's MAC check
+    decides what actually decodes. */
+export function looksKeyedToken(path: string): boolean {
+  const bytes = tailBytes(path);
+  return !!bytes && bytes.length >= 17 && bytes[0] === 1;
+}
+
 /** Engine-local path -> destination URL, or null if not ours. Dual
     decode: a v1 keyed token decodes with the key and fails closed
     without it; legacy tails always decode, so routes minted before
     the key existed keep working. */
 export function decodePath(path: string): string | null {
-  const i = path.indexOf(prefix);
-  if (i < 0) return null;
-  const b64 = path.slice(i + prefix.length).split(/[?#]/)[0];
-  const bytes = b64uDecode(b64);
+  const bytes = tailBytes(path);
   if (!bytes) return null;
   if (bytes.length >= 17 && bytes[0] === 1) return keyedDecode(routeKey, bytes);
   return DEC.decode(bytes);

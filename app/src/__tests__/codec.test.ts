@@ -6,6 +6,7 @@ import {
   decodePath,
   isEngineAsset,
   isEnginePath,
+  looksKeyedToken,
   referrerDest,
   setRouteKey,
   setScheme,
@@ -183,5 +184,18 @@ describe("keyed opaque routes (issue #55)", () => {
     expect(route).toMatch(/^\/j\//);
     expect(route).not.toContain("secret.example");
     expect(route).not.toContain("private");
+  });
+
+  it("looksKeyedToken flags token shape without needing the key", () => {
+    setRouteKey(KEY);
+    expect(looksKeyedToken(encodeDest(DEST))).toBe(true);
+    expect(looksKeyedToken(encodeDestLegacy(DEST))).toBe(false);
+    setRouteKey(null);
+    // A route stranded by a key rotation is still token-shaped, so the
+    // SW 404 reason can single it out from a plain bad tail.
+    expect(looksKeyedToken(PINNED)).toBe(true);
+    expect(looksKeyedToken("/j/aGVsbG8")).toBe(false);
+    expect(looksKeyedToken("/j/AQ")).toBe(false);
+    expect(looksKeyedToken("/not-engine/j/AQ")).toBe(false);
   });
 });
