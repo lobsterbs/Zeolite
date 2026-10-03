@@ -11,7 +11,8 @@ on:
 # the page-realm control-message gate; patch B makes the zl:mint
 # case honest about that admission and bounds mints to absolute
 # http(s) destinations. The regions printed to the job log are the
-# review evidence. Idempotent: a run on a fully patched tree
+# review evidence; the apply job never runs on a tree it would
+# change twice. Idempotent: a run on a fully patched tree
 # commits nothing.
 
 permissions:
