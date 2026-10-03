@@ -2169,7 +2169,12 @@ function senderIsProxiedPage(e: ExtendableMessageEvent): boolean {
    and their workers (the bootstrap's docCookie/WS channels and the
    content-script bridge). zl:ping stays open because its echo carries
    no secrets and page code may probe liveness. */
-const PAGE_MESSAGES = new Set(["zl:docCookie", "zl:wsOpen", "zl:ext", "zl:ping"]);
+/* "zl:mint" (#54 residual 1, page-realm mint seam): a proxied
+   page can already construct a legacy route for any destination
+   (the codec is page-public), so admitting minting grants no new
+   capability; the zl:mint case bounds mints to absolute http(s)
+   destinations. */
+const PAGE_MESSAGES = new Set(["zl:mint", "zl:docCookie", "zl:wsOpen", "zl:ext", "zl:ping"]);
 
 self.addEventListener("message", async (e: ExtendableMessageEvent) => {
   /* Issue #17: the restored route shape settles asynchronously; a
