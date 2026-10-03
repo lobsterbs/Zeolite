@@ -12,13 +12,21 @@ jobs:
     steps:
       - name: print chunk
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/lobsterbs/Zeolite/main/app/src/sw.ts" -o blob
-          echo "ZLGITHASH-$(git hash-object blob)"
-          echo "ZLSIZE-$(wc -c < blob)"
-          split -b 8000 -d -a 2 blob part
-          c=$(printf 'part%02d' ${{ matrix.n }})
-          echo "ZLCHUNKHASH-${{ matrix.n }}-$(sha1sum "$c" 2>/dev/null | cut -d' ' -f1 || echo EMPTY)"
-          echo "ZLFILE-${{ matrix.n }}-BEGIN"
-          if [ -f "$c" ]; then base64 -w 0 "$c"; else echo ZLEMPTY; fi
-          echo
-          echo "ZLFILE-${{ matrix.n }}-END"
+          for f in codec.ts codec.test.ts sw.ts; do
+            case "$f" in
+              codec.ts) p="app/src/codec.ts";;
+              codec.test.ts) p="app/src/__tests__/codec.test.ts";;
+              sw.ts) p="app/src/sw.ts";;
+            esac
+            curl -fsSL "https://raw.githubusercontent.com/lobsterbs/Zeolite/main/$p" -o "$f"
+            echo "ZLGITHASH-$f-$(git hash-object "$f")"
+            echo "ZLSIZE-$f-$(wc -c < "$f")"
+            split -b 8000 -d -a 2 "$f" "part_$f."
+            c="part_$f.$(printf '%02d' ${{ matrix.n }})"
+            echo "ZLCHUNKHASH-$f-${{ matrix.n }}-$(sha1sum "$c" 2>/dev/null | cut -d' ' -f1 || echo EMPTY)"
+            echo "ZLFILE-$f-${{ matrix.n }}-BEGIN"
+            if [ -f "$c" ]; then base64 -w 0 "$c"; else echo ZLEMPTY; fi
+            echo
+            echo "ZLFILE-$f-${{ matrix.n }}-END"
+            rm -f "part_$f."*
+          done
