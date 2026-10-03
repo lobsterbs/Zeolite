@@ -20,7 +20,14 @@ export { readZip, locateManifest } from "./package";
 export { resolveContentScripts, contentScriptMatches, globToRegExp } from "./content-scripts";
 export { EXT_SCHEME, parseExtensionUrl, extensionUrl, normalizeExtensionPath } from "./origin";
 export { MESSENGER, getExtensionContext } from "./context";
-export { bootEnabled, bootExtension, wakeExtension, idleTerminate, backgroundIsServiceWorker } from "./background";
+export {
+  bootEnabled,
+  bootInstalled,
+  bootExtension,
+  wakeExtension,
+  idleTerminate,
+  backgroundIsServiceWorker,
+} from "./background";
 export {
   serveExtensionAsset,
   parseServePath,

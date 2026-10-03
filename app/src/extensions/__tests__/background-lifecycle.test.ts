@@ -5,6 +5,7 @@ import { MESSENGER } from "../context";
 import {
   bootEnabled,
   bootExtension,
+  bootInstalled,
   wakeExtension,
   idleTerminate,
   backgroundIsServiceWorker,
@@ -103,6 +104,30 @@ describe("MV3 service-worker lifecycle", () => {
     await bootExtension(extensions.get(id)!);
     expect(extensions.get(id)?.state).toBe("error");
     await wakeExtension(id);
+    expect(extensions.get(id)?.state).toBe("error");
+  });
+});
+
+describe("bootInstalled (install into a live worker)", () => {
+  it("boots a just-installed script background immediately", async () => {
+    const { id } = await extensions.installFiles(scriptPkg("ScriptFreshBoot"));
+    expect(extensions.get(id)?.state).toBe("installed");
+    await bootInstalled(id);
+    expect(extensions.get(id)?.state).toBe("running");
+    await expect(MESSENGER.sendMessage(id, bgSender(id), "ping")).resolves.toEqual({ bg: "ping" });
+  });
+
+  it("leaves service-worker backgrounds to on-demand wake", async () => {
+    const { id } = await extensions.installFiles(swPkg("SwFreshBoot"));
+    await bootInstalled(id);
+    expect(extensions.get(id)?.state).not.toBe("running");
+  });
+
+  it("records a failed boot on the extension, not the caller", async () => {
+    const bad = scriptPkg("ScriptBadBoot");
+    bad.set("bg.js", enc.encode("throw new Error('broken background');"));
+    const { id } = await extensions.installFiles(bad);
+    await bootInstalled(id);
     expect(extensions.get(id)?.state).toBe("error");
   });
 });

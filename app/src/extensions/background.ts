@@ -89,6 +89,25 @@ export async function wakeExtension(id: ExtensionId): Promise<void> {
   armIdleTimer(id);
 }
 
+/** Boot a just-installed extension's script background. bootEnabled
+    runs only at worker activation, so an install into a live worker
+    would otherwise leave the background dead until the next worker
+    evaluation. Service-worker backgrounds stay demand-booted
+    (wakeExtension owns them); disabled or already-booted records are
+    left alone. A boot failure lands on the record (ERROR), never on
+    the caller: the install itself already succeeded. */
+export async function bootInstalled(id: ExtensionId): Promise<void> {
+  const rec = extensions.get(id);
+  if (!rec || !rec.enabled || rec.state !== "installed") return;
+  if (backgroundIsServiceWorker(rec)) return;
+  try {
+    await bootExtension(rec);
+  } catch {
+    /* engine-level failure (context/db): the record keeps its state
+       and the next activation retries via bootEnabled */
+  }
+}
+
 export async function bootEnabled(): Promise<void> {
   for (const rec of extensions.list()) {
     if (!rec.enabled) continue;

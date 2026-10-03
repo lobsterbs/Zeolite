@@ -129,6 +129,7 @@ import {
   ALARMS,
   MGMT,
   bootEnabled,
+  bootInstalled,
   tabView,
   contentScriptMatches,
   extensions,
@@ -2664,13 +2665,17 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       }
       e.waitUntil(
         extensions.installFromZip(em.bytes).then(
-          (r) =>
+          async (r) => {
+            /* A live worker never re-runs bootEnabled (activation
+               only), so the fresh background boots right here. */
+            await bootInstalled(r.id);
             reply({
               ok: true,
               id: r.id,
               warnings: r.warnings,
               unsupportedFields: r.unsupportedFields,
-            }),
+            });
+          },
           (err) => reply({ ok: false, error: String(err) }),
         ),
       );
@@ -2694,13 +2699,16 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       }
       e.waitUntil(
         extensions.installFiles(map).then(
-          (r) =>
+          async (r) => {
+            /* Same as zl:installExt: boot the fresh background now. */
+            await bootInstalled(r.id);
             reply({
               ok: true,
               id: r.id,
               warnings: r.warnings,
               unsupportedFields: r.unsupportedFields,
-            }),
+            });
+          },
           (err) => reply({ ok: false, error: String(err) }),
         ),
       );
