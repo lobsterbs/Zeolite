@@ -1,0 +1,170 @@
+{
+  "base": "http://localhost:6002",
+  "transport": "wisp v2.1 over /wisp/",
+  "fixture": "127.0.0.1:42379",
+  "generated": "2026-10-03T20:15:15.615Z",
+  "summary": {
+    "pass": 14,
+    "fail": 0,
+    "clientRuntime": 12,
+    "total": 26
+  },
+  "capabilities": [
+    {
+      "name": "wisp-handshake",
+      "gate": true,
+      "status": "pass",
+      "note": "v2.1 INFO exchange + CONTINUE(0)"
+    },
+    {
+      "name": "tcp-connect",
+      "gate": true,
+      "status": "pass",
+      "note": "594 bytes relayed"
+    },
+    {
+      "name": "relay-response-bytes",
+      "gate": true,
+      "status": "pass",
+      "note": "body 458B byte-identical to direct"
+    },
+    {
+      "name": "relay-request-echo",
+      "gate": true,
+      "status": "pass",
+      "note": "request bytes relayed upstream and echoed"
+    },
+    {
+      "name": "relay-media-bytes",
+      "gate": true,
+      "status": "pass",
+      "note": "14B binary body intact"
+    },
+    {
+      "name": "relay-download-bytes",
+      "gate": true,
+      "status": "pass",
+      "note": "attachment body intact"
+    },
+    {
+      "name": "relay-status-404",
+      "gate": true,
+      "status": "pass",
+      "note": "status 404"
+    },
+    {
+      "name": "relay-status-500",
+      "gate": true,
+      "status": "pass",
+      "note": "status 500"
+    },
+    {
+      "name": "relay-redirect-301",
+      "gate": true,
+      "status": "pass",
+      "note": "status 301 + Location preserved"
+    },
+    {
+      "name": "relay-redirect-302",
+      "gate": true,
+      "status": "pass",
+      "note": "status 302 + Location preserved"
+    },
+    {
+      "name": "relay-redirect-307",
+      "gate": true,
+      "status": "pass",
+      "note": "status 307 + Location preserved"
+    },
+    {
+      "name": "relay-set-cookie",
+      "gate": true,
+      "status": "pass",
+      "note": "upstream Set-Cookie bytes preserved (jar application is client-side)"
+    },
+    {
+      "name": "ssrf-private-blocked",
+      "gate": true,
+      "status": "pass",
+      "note": "loopback CONNECT refused with reason 0x48"
+    },
+    {
+      "name": "auth-required-refusal",
+      "gate": true,
+      "status": "pass",
+      "note": "keyless v2 handshake refused with reason 0xc2"
+    },
+    {
+      "name": "html-links",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    },
+    {
+      "name": "opaque-urls",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    },
+    {
+      "name": "css-urls",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    },
+    {
+      "name": "iframe-src",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    },
+    {
+      "name": "js-serve",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    },
+    {
+      "name": "fetch-reroute",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    },
+    {
+      "name": "websocket-bridge",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    },
+    {
+      "name": "worker-virtualization",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    },
+    {
+      "name": "storage-virtualization",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    },
+    {
+      "name": "cache-api",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    },
+    {
+      "name": "client-cookie-jars",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    },
+    {
+      "name": "spa-routing",
+      "gate": false,
+      "status": "client-runtime",
+      "note": "lives in the SW/wasm client runtime; covered by the app unit suite + wasm job, not probed over wisp"
+    }
+  ]
+}

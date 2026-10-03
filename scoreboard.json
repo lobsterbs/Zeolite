@@ -1,0 +1,61 @@
+{
+  "base": "http://localhost:6002",
+  "transport": "wisp v2.1 over /wisp/ (raw HTTP/1.1 on port 80)",
+  "generated": "2026-10-03T20:15:14.659Z",
+  "summary": {
+    "pass": 5,
+    "total": 5
+  },
+  "results": [
+    {
+      "name": "youtube",
+      "status": "pass",
+      "ttfbDirect": 43,
+      "ttfbProxy": 28,
+      "ratio": 0.65,
+      "statusDirect": 301,
+      "statusProxy": 301,
+      "error": null
+    },
+    {
+      "name": "reddit",
+      "status": "pass",
+      "ttfbDirect": 11,
+      "ttfbProxy": 10,
+      "ratio": 0.91,
+      "statusDirect": 301,
+      "statusProxy": 301,
+      "error": null
+    },
+    {
+      "name": "wikipedia",
+      "status": "pass",
+      "ttfbDirect": 6,
+      "ttfbProxy": 4,
+      "ratio": 0.67,
+      "statusDirect": 301,
+      "statusProxy": 301,
+      "error": null
+    },
+    {
+      "name": "github",
+      "status": "pass",
+      "ttfbDirect": 6,
+      "ttfbProxy": 9,
+      "ratio": 1.5,
+      "statusDirect": 301,
+      "statusProxy": 301,
+      "error": null
+    },
+    {
+      "name": "discord",
+      "status": "pass",
+      "ttfbDirect": 11,
+      "ttfbProxy": 16,
+      "ratio": 1.45,
+      "statusDirect": 301,
+      "statusProxy": 301,
+      "error": null
+    }
+  ]
+}
