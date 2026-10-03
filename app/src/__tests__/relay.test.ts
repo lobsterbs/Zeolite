@@ -22,7 +22,7 @@ describe("tapChannel (#54 dedicated-Worker hook)", () => {
     const ch = new FakeChannel();
     const relaySeen: unknown[] = [];
     ch.addEventListener("message", (e) => relaySeen.push((e as MessageEvent).data));
-    tapChannel(ch);
+    tapChannel(ch as unknown as MessagePort);
     const appSeen: unknown[] = [];
     ch.addEventListener("message", (e) => appSeen.push((e as MessageEvent).data));
     ch.dispatchEvent(msg({ zl: "mint", msg: { dest: "https://x.example/" } }));
@@ -36,23 +36,23 @@ describe("tapChannel (#54 dedicated-Worker hook)", () => {
 
   it("onmessage becomes an own property that starts the port and skips wrappers", () => {
     const ch = new FakeChannel();
-    tapChannel(ch);
+    tapChannel(ch as unknown as MessagePort);
     const seen: unknown[] = [];
-    (ch as Record<string, unknown>).onmessage = (e: MessageEvent) => seen.push(e.data);
+    (ch as unknown as Record<string, unknown>).onmessage = (e: MessageEvent) => seen.push(e.data);
     expect(Object.prototype.hasOwnProperty.call(ch, "onmessage")).toBe(true);
     expect(ch.started).toBe(true); /* assignment starts delivery, like a MessagePort */
     ch.dispatchEvent(msg({ zl: "ws" }));
     ch.dispatchEvent(msg({ ok: 1 }));
     expect(seen).toEqual([{ ok: 1 }]);
     /* clearing the handler stops delivery; the property stays */
-    (ch as Record<string, unknown>).onmessage = null;
+    (ch as unknown as Record<string, unknown>).onmessage = null;
     ch.dispatchEvent(msg({ ok: 2 }));
     expect(seen).toEqual([{ ok: 1 }]);
   });
 
   it("removeEventListener removes the wrapped callback, not the raw one", () => {
     const ch = new FakeChannel();
-    tapChannel(ch);
+    tapChannel(ch as unknown as MessagePort);
     const seen: unknown[] = [];
     const cb = (e: Event) => seen.push((e as MessageEvent).data);
     ch.addEventListener("message", cb);
@@ -63,8 +63,8 @@ describe("tapChannel (#54 dedicated-Worker hook)", () => {
 
   it("a throwing app handler is contained", () => {
     const ch = new FakeChannel();
-    tapChannel(ch);
-    (ch as Record<string, unknown>).onmessage = () => {
+    tapChannel(ch as unknown as MessagePort);
+    (ch as unknown as Record<string, unknown>).onmessage = () => {
       throw new Error("app boom");
     };
     expect(() => ch.dispatchEvent(msg({ ok: 1 }))).not.toThrow();
