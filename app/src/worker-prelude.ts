@@ -64,9 +64,14 @@ export function routeWorkerUrl(
 const mintMemo = new Map<string, Promise<string | null>>();
 
 /** Mint an engine route from a worker, over the page relay post
-    (dedicated workers: the parent-page postMessage; shared workers:
-    the newest connect port). post returns false when it cannot
-    deliver; a silent port times out to null. */
+    (shared workers: the newest connect port; dedicated workers:
+    post is null - the page relay hooks window "message" events and
+    SharedWorker connect ports only, nothing hooks a dedicated
+    Worker's parent channel, so a wrapper posted from one leaks into
+    the app's onmessage stream and never reaches the engine. The
+    mint refuses there and the caller rides the legacy codec).
+    post returns false when it cannot deliver; a silent port times
+    out to null. */
 export function mintUrlViaRelay(
   post: ((m: unknown, t?: Transferable[]) => boolean | void) | null,
   dest: string,
@@ -169,18 +174,21 @@ export function installWorkerPrelude(route: string): void {
      to the native fetch untouched, a documented residual. */
   if (typeof G.fetch === "function") {
     const OF = G.fetch.bind(globalThis);
+    /* Dedicated workers refuse the mint up front: the page relay
+       hooks window "message" events and SharedWorker connect ports
+       only, nothing hooks a dedicated Worker's parent channel, so a
+       mint wrapper posted from one leaks into the app's onmessage
+       stream and never reaches the engine. post = null makes
+       mintUrlViaRelay resolve null and the caller fall back to the
+       legacy codec route; minting stays a shared-worker seam until
+       the page grows a Worker-channel hook. */
     const post: ((m: unknown, t?: Transferable[]) => boolean | void) | null =
-      typeof G.postMessage === "function"
-        ? (m, t) => {
-            G.postMessage!(m, t);
-            return true;
-          }
-        : (m, t) => {
-            const p = pickRelayPort(sharedPorts as MessagePort[]);
-            if (!p) return false;
-            p.postMessage(m, t);
-            return true;
-          };
+      typeof G.postMessage === "function" ? null : (m, t) => {
+        const p = pickRelayPort(sharedPorts as MessagePort[]);
+        if (!p) return false;
+        p.postMessage(m, t ?? []);
+        return true;
+      };
     (globalThis as { fetch?: unknown }).fetch = (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : null;
       if (url === null) return OF(input, init);

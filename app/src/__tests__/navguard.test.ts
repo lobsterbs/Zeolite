@@ -419,47 +419,50 @@ describe("meta refresh guard (#39 residual)", () => {
    hooks never ran (innerHTML, document.write), so a document-wide
    MutationObserver rewires the src before the browser's queued
    iframe load task starts. */
-describe("parser-inserted iframe guard", () => {
-  function makeParserEnv() {
-    const iframe = makeClass("src");
-    const observers: Array<{ cb: (muts: any[]) => void; target: any; opts: any }> = [];
-    class MO {
-      cb: (muts: any[]) => void;
-      constructor(cb: (muts: any[]) => void) {
-        this.cb = cb;
-      }
-      observe(target: any, opts: any) {
-        observers.push({ cb: this.cb, target, opts });
-      }
+/* Parser-created frames are plain objects off the hooked prototype; the
+   env and element factories are shared by the guard suite and the mint
+   seam suite below (#54 residual 3). */
+function makeParserEnv() {
+  const iframe = makeClass("src");
+  const observers: Array<{ cb: (muts: any[]) => void; target: any; opts: any }> = [];
+  class MO {
+    cb: (muts: any[]) => void;
+    constructor(cb: (muts: any[]) => void) {
+      this.cb = cb;
     }
-    const w: Record<string, any> = {
-      HTMLIFrameElement: { prototype: iframe.proto },
-      MutationObserver: MO,
-      document: { documentElement: { tag: "html" } },
-      open() {
-        return 1;
-      },
-    };
-    applyNavGuard(w, LOC, ENGINE);
-    return {
-      iframe,
-      observers,
-      fire(records: any[]) {
-        observers.forEach((o) => o.cb(records));
-      },
-    };
+    observe(target: any, opts: any) {
+      observers.push({ cb: this.cb, target, opts });
+    }
   }
-  /* A parser-created frame: plain object with attribute accessors,
-     not an instance of the hooked prototype. */
-  function frame(attrs: Record<string, string>) {
-    const el: Record<string, any> = { nodeType: 1, tagName: "IFRAME", _attrs: attrs };
-    el.getAttribute = (n: string) => (n in attrs ? attrs[n] : null);
-    el.setAttribute = function (this: Record<string, any>, n: string, v: string) {
-      this._attrs[n] = v;
-    };
-    return el;
-  }
+  const w: Record<string, any> = {
+    HTMLIFrameElement: { prototype: iframe.proto },
+    MutationObserver: MO,
+    document: { documentElement: { tag: "html" } },
+    open() {
+      return 1;
+    },
+  };
+  applyNavGuard(w, LOC, ENGINE);
+  return {
+    iframe,
+    observers,
+    fire(records: any[]) {
+      observers.forEach((o) => o.cb(records));
+    },
+  };
+}
+/* A parser-created frame: plain object with attribute accessors,
+   not an instance of the hooked prototype. */
+function frame(attrs: Record<string, string>) {
+  const el: Record<string, any> = { nodeType: 1, tagName: "IFRAME", _attrs: attrs };
+  el.getAttribute = (n: string) => (n in attrs ? attrs[n] : null);
+  el.setAttribute = function (this: Record<string, any>, n: string, v: string) {
+    this._attrs[n] = v;
+  };
+  return el;
+}
 
+describe("parser-inserted iframe guard", () => {
   it("rewires an iframe inserted with a real-origin src", async () => {
     const e = makeParserEnv();
     const f = frame({ src: REAL });
