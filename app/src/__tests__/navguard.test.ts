@@ -1,10 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyNavGuard, navEncode, NAV } from "../bootstrap/navguard";
 import { b64uDecode } from "../codec";
 
 const LOC = "https://engine.host/j/abc";
 const ENGINE = "https://engine.host";
 const REAL = "https://real.site/x";
+
+/* Mint seams resolve asynchronously: drain microtasks plus a few
+   macrotask ticks (MessagePort delivery in Node is a macrotask). */
+async function settle() {
+  for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+}
 
 /* Fake DOM class: a prototype property backed by a WeakMap (so the
    guard's per-element raw map sees real object identity) and a
@@ -49,11 +55,27 @@ function makeEnv() {
   const link = makeClass("href");
   const submitted: string[] = [];
   const opened: unknown[][] = [];
+  const wins: Array<{ location: { href: string }; _hrefs: string[] }> = [];
   form.proto.submit = function () {
     submitted.push("submit");
   };
   form.proto.requestSubmit = function () {
     submitted.push("requestSubmit");
+  };
+  const openFake = (...args: unknown[]) => {
+    opened.push(args);
+    const hrefs: string[] = [];
+    const win: Record<string, any> = { location: {} };
+    Object.defineProperty(win.location, "href", {
+      configurable: true,
+      get: () => hrefs[hrefs.length - 1] ?? "",
+      set(v: string) {
+        hrefs.push(v);
+      },
+    });
+    (win as any)._hrefs = hrefs;
+    wins.push(win as { location: { href: string }; _hrefs: string[] });
+    return win;
   };
   const w: Record<string, any> = {
     HTMLAnchorElement: { prototype: anchor.proto },
@@ -61,13 +83,10 @@ function makeEnv() {
     HTMLFormElement: { prototype: form.proto },
     HTMLLinkElement: { prototype: link.proto },
     RTCPeerConnection: function RTCPeerConnection() {},
-    open(...args: unknown[]) {
-      opened.push(args);
-      return 7;
-    },
+    open: openFake,
   };
   applyNavGuard(w, LOC, ENGINE);
-  return { w, anchor, iframe, form, link, opened, submitted };
+  return { w, anchor, iframe, form, link, opened, wins, submitted };
 }
 
 describe("navEncode", () => {
@@ -88,7 +107,7 @@ describe("navEncode", () => {
 });
 
 describe("applyNavGuard", () => {
-  it("rewrites cross-origin anchor/iframe/link/form property assignments", () => {
+  it("rewrites cross-origin anchor/iframe/link/form property assignments", async () => {
     const e = makeEnv();
     const a = e.anchor.make();
     a.href = REAL;
@@ -96,12 +115,16 @@ describe("applyNavGuard", () => {
     expect(a.href).toBe(REAL); // reads return what the page wrote
     const f = e.iframe.make();
     f.src = REAL;
-    expect(e.iframe.read(f)).toBe(navEncode(REAL));
+    expect(e.iframe.read(f)).toBe(""); /* defer: blanked inside the write */
     const l = e.link.make();
     l.href = REAL;
-    expect(e.link.read(l)).toBe(navEncode(REAL));
+    expect(e.link.read(l)).toBe("");
     const fo = e.form.make();
     fo.action = REAL;
+    expect(e.form.read(fo)).toBe("");
+    await settle();
+    expect(e.iframe.read(f)).toBe(navEncode(REAL)); /* mint refused: marker */
+    expect(e.link.read(l)).toBe(navEncode(REAL));
     expect(e.form.read(fo)).toBe(navEncode(REAL));
   });
 
@@ -122,25 +145,30 @@ describe("applyNavGuard", () => {
     expect(e.anchor.read(a)).toBe(navEncode("https://real.site/y"));
   });
 
-  it("rewrites setAttribute on the guarded attributes only", () => {
+  it("rewrites setAttribute on the guarded attributes only", async () => {
     const e = makeEnv();
     const a = e.anchor.make();
     a.setAttribute("href", REAL);
-    expect(a.getAttribute("href")).toBe(navEncode(REAL));
+    expect(a.getAttribute("href")).toBe(navEncode(REAL)); /* swap: marker sync */
     a.setAttribute("href", "/local");
     expect(a.getAttribute("href")).toBe("/local");
     a.setAttribute("title", REAL);
     expect(a.getAttribute("title")).toBe(REAL);
     const fo = e.form.make();
     fo.setAttribute("action", "https://real.site/login");
+    expect(fo.getAttribute("action")).toBe(""); /* defer: blanked first */
+    await settle();
     expect(fo.getAttribute("action")).toBe(navEncode("https://real.site/login"));
   });
 
-  it("rewrites window.open targets, passes through the rest", () => {
+  it("rewrites window.open targets, passes through the rest", async () => {
     const e = makeEnv();
-    expect(e.w.open(REAL, "_blank")).toBe(7);
-    expect(e.opened[0][0]).toBe(navEncode(REAL));
+    const win = e.w.open(REAL, "_blank");
+    expect(win).toBeTruthy();
+    expect(e.opened[0][0]).toBe(""); /* blank popup first (#54) */
     expect(e.opened[0][1]).toBe("_blank");
+    await settle();
+    expect(e.wins[0]._hrefs).toEqual([navEncode(REAL)]); /* mint refused: marker */
     e.w.open("/local");
     expect(e.opened[1][0]).toBe("/local");
     e.w.open();
@@ -204,10 +232,13 @@ describe("applyNavGuard", () => {
     expect(w.open("https://real.site/x")).toBe(1);
   });
 
-  it("installs every hook even without window.navigation (#39)", () => {
+  it("installs every hook even without window.navigation (#39)", async () => {
     const e = makeEnv();
-    expect(e.w.open(REAL)).toBe(7);
-    expect(e.opened[0][0]).toBe(navEncode(REAL));
+    const win = e.w.open(REAL);
+    expect(win).toBeTruthy();
+    expect(e.opened[0][0]).toBe("");
+    await settle();
+    expect(e.wins[0]._hrefs).toEqual([navEncode(REAL)]);
   });
 });
 
@@ -266,12 +297,13 @@ function makeNavEnv() {
 }
 
 describe("navigation api guard (#39)", () => {
-  it("cancels a real-origin navigation and re-drives through the marker", () => {
+  it("cancels a real-origin navigation and re-drives through the minted route", async () => {
     const e = makeNavEnv();
     let prevented = false;
     e.fire({ cancelable: true, destination: { url: REAL, sameDocument: false }, preventDefault() { prevented = true; } });
     expect(prevented).toBe(true);
-    expect(e.navigated).toEqual([navEncode(REAL)]);
+    await settle();
+    expect(e.navigated).toEqual([navEncode(REAL)]); /* mint refused: marker */
   });
 
   it("leaves engine-origin, relative and opaque destinations native", () => {
@@ -294,7 +326,7 @@ describe("navigation api guard (#39)", () => {
     expect(e.navigated).toEqual([]);
   });
 
-  it("resubmits a canceled form POST through the marker with its entries", () => {
+  it("resubmits a canceled form POST through the marker with its entries", async () => {
     const e = makeNavEnv();
     let prevented = false;
     e.fire({
@@ -306,6 +338,7 @@ describe("navigation api guard (#39)", () => {
       },
     });
     expect(prevented).toBe(true);
+    await settle();
     expect(e.submitted.length).toBe(1);
     expect(e.submitted[0].action).toBe(navEncode("https://real.site/login"));
     expect(e.submitted[0].method).toBe("POST");
@@ -427,14 +460,16 @@ describe("parser-inserted iframe guard", () => {
     return el;
   }
 
-  it("rewires an iframe inserted with a real-origin src", () => {
+  it("rewires an iframe inserted with a real-origin src", async () => {
     const e = makeParserEnv();
     const f = frame({ src: REAL });
     e.fire([{ type: "childList", addedNodes: [f] }]);
-    expect(f._attrs.src).toBe(navEncode(REAL));
+    expect(f._attrs.src).toBe(""); /* blanked inside the observer microtask */
+    await settle();
+    expect(f._attrs.src).toBe(navEncode(REAL)); /* mint refused: marker */
   });
 
-  it("descends into an added subtree and covers FRAME too", () => {
+  it("descends into an added subtree and covers FRAME too", async () => {
     const e = makeParserEnv();
     const f = frame({ src: "https://real.site/embed" });
     const fr: Record<string, any> = frame({ src: "https://real.site/frame" });
@@ -445,6 +480,9 @@ describe("parser-inserted iframe guard", () => {
       querySelectorAll: () => [f, fr],
     };
     e.fire([{ type: "childList", addedNodes: [root] }]);
+    expect(f._attrs.src).toBe("");
+    expect(fr._attrs.src).toBe("");
+    await settle();
     expect(f._attrs.src).toBe(navEncode("https://real.site/embed"));
     expect(fr._attrs.src).toBe(navEncode("https://real.site/frame"));
   });
@@ -675,7 +713,7 @@ describe("inline child realm guard (#58 follow-up)", () => {
     };
   }
 
-  it("guards the child realm when the observer sees an inline frame", () => {
+  it("guards the child realm when the observer sees an inline frame", async () => {
     const parent = makeParentEnv();
     const child = makeChildRealm();
     parent.fire([{ type: "childList", addedNodes: [childFrame(child)] }]);
@@ -691,6 +729,7 @@ describe("inline child realm guard (#58 follow-up)", () => {
       },
     });
     expect(prevented).toBe(true);
+    await settle();
     expect(child.navigated).toEqual([navEncode(REAL)]);
   });
 
@@ -750,7 +789,7 @@ describe("inline child realm guard (#58 follow-up)", () => {
     expect(good.moInstalls.length).toBe(1); /* the sibling still got guarded */
   });
 
-  it("re-drives a navigation exactly once in a twice-guarded realm", () => {
+  it("re-drives a navigation exactly once in a twice-guarded realm", async () => {
     const e = makeNavEnv();
     applyNavGuard(e.w, LOC, ENGINE); /* second guard on the same realm */
     let prevented = 0;
@@ -763,6 +802,108 @@ describe("inline child realm guard (#58 follow-up)", () => {
       },
     });
     expect(prevented).toBe(1);
+    await settle();
     expect(e.navigated).toEqual([navEncode(REAL)]);
+  });
+});
+
+
+/* #54 residual 3: the mint seams. A stubbed controller answers
+   zl:mint with a fixed route; the tests pin swap (marker sync,
+   route upgrade), defer (blank, route), the newer-write-wins
+   guard, the navigate re-drive, window.open popups,
+   parser-inserted frames and the mint-failure marker fallback.
+   Unique destinations per test: the module-level memo must not
+   leak routes across tests. */
+describe("navguard mint seams (#54 residual 3)", () => {
+  function stubMint(route: string) {
+    vi.stubGlobal("navigator", {
+      serviceWorker: {
+        controller: {
+          postMessage(m: any, ports?: MessagePort[]) {
+            queueMicrotask(() => ports?.[0]?.postMessage({ ok: true, route }));
+          },
+        },
+      },
+    });
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("swap rows upgrade the marker to the minted route", async () => {
+    stubMint("/j/m1");
+    const e = makeEnv();
+    const a = e.anchor.make();
+    a.href = "https://mint1.site/x";
+    expect(e.anchor.read(a)).toBe(navEncode("https://mint1.site/x")); /* marker sync */
+    await settle();
+    expect(e.anchor.read(a)).toBe("/j/m1");
+    expect(a.href).toBe("https://mint1.site/x"); /* reads stay page-truthful */
+  });
+
+  it("defer rows upgrade the blank to the minted route", async () => {
+    stubMint("/j/m2");
+    const e = makeEnv();
+    const f = e.iframe.make();
+    f.src = "https://mint2.site/x";
+    expect(e.iframe.read(f)).toBe("");
+    await settle();
+    expect(e.iframe.read(f)).toBe("/j/m2");
+  });
+
+  it("a newer write wins over a pending mint upgrade", async () => {
+    stubMint("/j/m3");
+    const e = makeEnv();
+    const a = e.anchor.make();
+    a.setAttribute("href", "https://mint3.site/x");
+    a.setAttribute("href", "/local");
+    await settle();
+    expect(a.getAttribute("href")).toBe("/local"); /* upgrade dropped */
+  });
+
+  it("the navigate re-drive rides the minted route", async () => {
+    stubMint("/j/m4");
+    const e = makeNavEnv();
+    let prevented = false;
+    e.fire({
+      cancelable: true,
+      destination: { url: "https://mint4.site/x", sameDocument: false },
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    expect(prevented).toBe(true);
+    await settle();
+    expect(e.navigated).toEqual(["/j/m4"]);
+  });
+
+  it("window.open drives the popup to the minted route", async () => {
+    stubMint("/j/m5");
+    const e = makeEnv();
+    e.w.open("https://mint5.site/x", "_blank");
+    expect(e.opened[0][0]).toBe("");
+    await settle();
+    expect(e.wins[0]._hrefs).toEqual(["/j/m5"]);
+  });
+
+  it("parser-inserted frames ride the minted route", async () => {
+    stubMint("/j/m6");
+    const e = makeParserEnv();
+    const f = frame({ src: "https://mint6.site/x" });
+    e.fire([{ type: "childList", addedNodes: [f] }]);
+    expect(f._attrs.src).toBe("");
+    await settle();
+    expect(f._attrs.src).toBe("/j/m6");
+  });
+
+  it("a refused mint degrades to the marker, never a hang", async () => {
+    vi.stubGlobal("navigator", { serviceWorker: {} }); /* controller absent */
+    const e = makeEnv();
+    const f = e.iframe.make();
+    f.src = "https://mint7.site/x";
+    expect(e.iframe.read(f)).toBe("");
+    await settle();
+    expect(e.iframe.read(f)).toBe(navEncode("https://mint7.site/x"));
   });
 });

@@ -51,6 +51,59 @@ export function routeWorkerUrl(
   return encodeDest(abs.href);
 }
 
+/* ---- worker mint (#54 residual 5) ----------------------------------
+   The worker realm has no service worker, so a worker-side mint
+   rides the same relay a worker WebSocket rides: the prelude posts
+   a zl:mint control message (wrapped for the page relay, which
+   forwards it with the transferred port) and the engine replies on
+   the port with the minted route. Contract identical to the page
+   client: resolve the route or null - null means the caller falls
+   back to the legacy codec route. Successes memoize; failures are
+   deleted so a retry after the page settles can succeed. */
+
+const mintMemo = new Map<string, Promise<string | null>>();
+
+/** Mint an engine route from a worker, over the page relay post
+    (dedicated workers: the parent-page postMessage; shared workers:
+    the newest connect port). post returns false when it cannot
+    deliver; a silent port times out to null. */
+export function mintUrlViaRelay(
+  post: ((m: unknown, t?: Transferable[]) => boolean | void) | null,
+  dest: string,
+  timeout = 5000,
+): Promise<string | null> {
+  if (!post) return Promise.resolve(null);
+  const hit = mintMemo.get(dest);
+  if (hit) return hit;
+  const p = new Promise<string | null>((resolve) => {
+    const ch = new MessageChannel();
+    let done = false;
+    const fin = (route: string | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(route);
+    };
+    const timer = setTimeout(() => fin(null), timeout);
+    ch.port1.onmessage = (ev) => {
+      const m = ev.data as { ok?: boolean; route?: unknown };
+      fin(typeof m?.route === "string" ? m.route : null);
+    };
+    let delivered = false;
+    try {
+      delivered = post({ zl: "mint", msg: { type: "zl:mint", dest } }, [ch.port2]) !== false;
+    } catch {
+      delivered = false;
+    }
+    if (!delivered) fin(null);
+  });
+  mintMemo.set(dest, p);
+  p.then((route) => {
+    if (!route) mintMemo.delete(dest);
+  });
+  return p;
+}
+
 /* ---- in-worker wiring ------------------------------------------------
    Guarded so importing this module under vitest (or in a module
    worker, where importScripts does not exist) stays inert until the
@@ -89,19 +142,59 @@ export function installWorkerPrelude(route: string): void {
       IS(...args.map((a) => routeWorkerUrl(prefix, workerUrl, engineOrigin, a)));
   }
 
+  /* Shared-worker connect ports, collected before the fetch hook so
+     the mint path can pick the newest one at call time (the WS shim
+     below picks the same way). */
+  const sharedPorts: unknown[] = [];
+  const SHARED =
+    typeof G.postMessage !== "function" &&
+    typeof G.onconnect !== "undefined";
+  if (SHARED && typeof G.addEventListener === "function") {
+    G.addEventListener("connect", (ev) => {
+      const p = ev.ports?.[0];
+      if (p) sharedPorts.push(p);
+    });
+  }
+
   /* Issue #4: a worker fetch() with a root-relative URL resolves against
      the worker script's engine-local URL, escapes to the embedder origin
      and 404s. Same rule as importScripts: resolve against the upstream
      worker URL and route cross-origin http(s) through the codec. Both
-     classic and module workers get this prelude. */
+     classic and module workers get this prelude.
+     #54 residual 5: cross-origin http(s) inputs mint first - the
+     keyed route leaves nothing decodable in the worker's request
+     records either. The legacy codec route stays the fallback (no
+     relay, refused mint, timeout). Request objects carry one-shot
+     bodies that cannot be replayed through a rebuilt URL; they pass
+     to the native fetch untouched, a documented residual. */
   if (typeof G.fetch === "function") {
     const OF = G.fetch.bind(globalThis);
+    const post: ((m: unknown, t?: Transferable[]) => boolean | void) | null =
+      typeof G.postMessage === "function"
+        ? (m, t) => {
+            G.postMessage!(m, t);
+            return true;
+          }
+        : (m, t) => {
+            const p = pickRelayPort(sharedPorts as MessagePort[]);
+            if (!p) return false;
+            p.postMessage(m, t);
+            return true;
+          };
     (globalThis as { fetch?: unknown }).fetch = (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : null;
-      /* Request objects carry one-shot bodies that cannot be replayed
-         through a rebuilt URL; they pass to the native fetch untouched. */
       if (url === null) return OF(input, init);
-      return OF(routeWorkerUrl(prefix, workerUrl, engineOrigin, url), init);
+      let abs: URL;
+      try {
+        abs = new URL(url, workerUrl);
+      } catch {
+        return OF(input, init);
+      }
+      if (abs.origin === engineOrigin) return OF(input, init);
+      if (abs.protocol !== "http:" && abs.protocol !== "https:") return OF(input, init);
+      return mintUrlViaRelay(post, abs.href).then((route) =>
+        OF(route ?? routeWorkerUrl(prefix, workerUrl, engineOrigin, url), init),
+      );
     };
   }
 
@@ -115,17 +208,6 @@ export function installWorkerPrelude(route: string): void {
      the shim's private MessageChannel. The engine is the relay, not a
      page: no page code ever sees a WebSocket event. A shared shim with
      no connected port fails closed (error + 1006 close), never native. */
-  const sharedPorts: unknown[] = [];
-  const SHARED =
-    typeof G.postMessage !== "function" &&
-    typeof G.onconnect !== "undefined";
-  if (SHARED && typeof G.addEventListener === "function") {
-    G.addEventListener("connect", (ev) => {
-      const p = ev.ports?.[0];
-      if (p) sharedPorts.push(p);
-    });
-  }
-
   if ((typeof G.postMessage === "function" || SHARED) && typeof G.WebSocket === "function") {
     const OWS = G.WebSocket;
     const LJWS = function (url: string, protocols?: string | string[]) {

@@ -41,7 +41,20 @@
      would break relative resolution for the whole page).
    - RTCPeerConnection is removed, not shimmed: WebRTC connects
      directly, cannot be routed through the engine, and leaving a
-     constructible-looking API would be a fake feature. */
+     constructible-looking API would be a fake feature.
+   - #54 residuals: the NAV marker is base64url - decodable by the
+     page-public legacy codec - so every runtime seam the guard
+     rewrites now upgrades to a minted keyed engine route (zl:mint)
+     whenever a microtask can be afforded. swap rows (anchor/area
+     href) write the marker synchronously and upgrade in place;
+     defer rows (iframe src, form action, link href, parser-inserted
+     src, window.open, the navigate re-drive) write a blank first
+     and the route after the mint - the load task starts after the
+     observer microtask, so nothing browser-direct is ever
+     requested. A refused or failed mint falls back to the marker:
+     the documented degrade, never a hang. */
+
+import { mintRoute } from "./mint";
 
 export const NAV = "/__zl_nav__";
 
@@ -82,19 +95,24 @@ export function applyNavGuard(
   loc: string,
   engineOrigin: string,
 ): void {
-  /* Absolute http(s) URLs off the engine origin become marker routes;
-     everything else (relative, opaque scheme, engine-local, already
-     routed) passes through unchanged. */
-  const rewire = (v: string): string => {
+  /* Absolute cross-origin http(s) destination, or null: relative,
+     opaque, engine-local and already-routed values are no mint
+     business (#54). */
+  const destAbs = (v: string): string | null => {
     let u: URL;
     try {
       u = new URL(String(v), loc);
     } catch {
-      return String(v);
+      return null;
     }
-    if (u.protocol !== "https:" && u.protocol !== "http:") return String(v);
-    if (u.origin === engineOrigin) return String(v);
-    return navEncode(u.href);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    if (u.origin === engineOrigin) return null;
+    return u.href;
+  };
+  /* The synchronous fallback every mint failure degrades to. */
+  const rewire = (v: string): string => {
+    const d = destAbs(v);
+    return d === null ? String(v) : navEncode(d);
   };
   /* Reads must return what the page wrote: frameworks compare href
      values, so the raw string is kept per element and attribute and
@@ -102,16 +120,38 @@ export function applyNavGuard(
      an iframe now guards src and srcdoc on the same element. */
   const raw = new WeakMap<object, Record<string, string>>();
   /* Guard transforms receive the element: the meta hook needs it for
-     its http-equiv check; every other guard uses the plain rewire. */
-  const rewireValue = (_el: AnyRecord, v: string): string => rewire(v);
+     its http-equiv check; the srcdoc hook rewrites markup. #54
+     modes: "sync" rows transform synchronously (srcdoc/meta
+     markup); "swap" rows write the marker immediately and upgrade
+     to the minted route when the mint lands (read-heavy hrefs must
+     never be blank); "defer" rows write a blank immediately - the
+     load task starts after this task - and the minted route (marker
+     fallback) lands next. A newer write always wins. */
+  type Mode = "sync" | "swap" | "defer";
+  const mintUp = (
+    el: AnyRecord,
+    key: string,
+    wrote: string,
+    dest: string,
+    write: (v: string) => void,
+  ): void => {
+    mintRoute(dest).then((route) => {
+      if (raw.get(el)?.[key] !== wrote) return;
+      try {
+        write(route ?? navEncode(dest));
+      } catch {
+        /* a newer write owns the element */
+      }
+    });
+  };
   const guardProp = (
     proto: AnyRecord,
     prop: string,
+    mode: Mode,
     xf?: (el: AnyRecord, v: string) => string,
   ): void => {
     const d = Object.getOwnPropertyDescriptor(proto, prop);
     if (!d || !d.set || !d.get) return;
-    const f = xf ?? rewireValue;
     Object.defineProperty(proto, prop, {
       configurable: true,
       enumerable: true,
@@ -123,30 +163,45 @@ export function applyNavGuard(
         const m = raw.get(this);
         if (m) m[prop] = s;
         else raw.set(this, { [prop]: s });
-        d.set!.call(this, f(this, s));
+        if (xf) {
+          d.set!.call(this, xf(this, s));
+          return;
+        }
+        const dest = destAbs(s);
+        if (dest === null) {
+          d.set!.call(this, s);
+          return;
+        }
+        if (mode === "defer") d.set!.call(this, "");
+        else d.set!.call(this, navEncode(dest));
+        mintUp(this, prop, s, dest, (r) => d.set!.call(this, r));
       },
     });
   };
   const guardAttr = (
     proto: AnyRecord,
     attr: string,
+    mode: Mode,
     xf?: (el: AnyRecord, v: string) => string,
   ): void => {
     const O = proto.setAttribute;
     if (typeof O !== "function") return;
-    const f = xf ?? rewireValue;
     /* #59: DOM attribute names are case-insensitive (HREF sets
        href), so the compare lowercases; the page-truthful raw string
        is stored so property reads return what the page wrote. */
     proto.setAttribute = function (this: AnyRecord, n: string, v: string) {
       const hit = String(n).toLowerCase() === attr;
-      if (hit) {
-        const s = String(v);
-        const m = raw.get(this);
-        if (m) m[attr] = s;
-        else raw.set(this, { [attr]: s });
-      }
-      return O.call(this, n, hit ? f(this, String(v)) : v);
+      if (!hit) return O.call(this, n, v);
+      const s = String(v);
+      const m = raw.get(this);
+      if (m) m[attr] = s;
+      else raw.set(this, { [attr]: s });
+      if (xf) return O.call(this, n, xf(this, s));
+      const dest = destAbs(s);
+      if (dest === null) return O.call(this, n, s);
+      if (mode === "defer") O.call(this, n, "");
+      else O.call(this, n, navEncode(dest));
+      mintUp(this, attr, s, dest, (r) => O.call(this, n, r));
     };
   };
   /* A read-only prototype must not abort the remaining hooks. */
@@ -157,18 +212,33 @@ export function applyNavGuard(
       /* hook stays native */
     }
   };
-  const table: Array<[AnyRecord | undefined, string]> = [
-    [w.HTMLAnchorElement as AnyRecord, "href"],
-    [w.HTMLAreaElement as AnyRecord, "href"],
-    [w.HTMLIFrameElement as AnyRecord, "src"],
-    [w.HTMLFormElement as AnyRecord, "action"],
-    [w.HTMLLinkElement as AnyRecord, "href"],
+  /* The navigate re-drive below resubmits a canceled form through a
+     synthetic form: its action must be written with the PRE-hook
+     setAttribute, or the defer hook on form action would blank the
+     action and the POST would go to the current document (#54). */
+  const FORM_PROTO = w.HTMLFormElement as AnyRecord | undefined;
+  const FORM_SET = FORM_PROTO
+    ? (FORM_PROTO.prototype.setAttribute as (
+        this: AnyRecord,
+        n: string,
+        v: string,
+      ) => void)
+    : undefined;
+  /* swap rows: hrefs are read by page code, never blanked.
+     defer rows: writes that trigger loads are blanked first; the
+     minted route lands before the load task. */
+  const table: Array<[AnyRecord | undefined, string, "swap" | "defer"]> = [
+    [w.HTMLAnchorElement as AnyRecord, "href", "swap"],
+    [w.HTMLAreaElement as AnyRecord, "href", "swap"],
+    [w.HTMLIFrameElement as AnyRecord, "src", "defer"],
+    [w.HTMLFormElement as AnyRecord, "action", "defer"],
+    [w.HTMLLinkElement as AnyRecord, "href", "defer"],
   ];
-  for (const [C, prop] of table) {
+  for (const [C, prop, mode] of table) {
     if (!C) continue;
     const proto = C.prototype;
-    safe(() => guardProp(proto, prop));
-    safe(() => guardAttr(proto, prop));
+    safe(() => guardProp(proto, prop, mode));
+    safe(() => guardAttr(proto, prop, mode));
   }
   /* #58: srcdoc gives the frame an inline child document that runs
      no bootstrap (about:srcdoc is not an engine destination), so
@@ -185,8 +255,8 @@ export function applyNavGuard(
     );
   const IFR = w.HTMLIFrameElement as AnyRecord | undefined;
   if (IFR) {
-    safe(() => guardProp(IFR.prototype, "srcdoc", (_el, v) => rewireSrcdoc(v)));
-    safe(() => guardAttr(IFR.prototype, "srcdoc", (_el, v) => rewireSrcdoc(v)));
+    safe(() => guardProp(IFR.prototype, "srcdoc", "sync", (_el, v) => rewireSrcdoc(v)));
+    safe(() => guardAttr(IFR.prototype, "srcdoc", "sync", (_el, v) => rewireSrcdoc(v)));
   }
   /* #39 residual: runtime-injected meta refresh is the one navigation
      seam left on engines without the Navigation API (Firefox has no
@@ -204,15 +274,31 @@ export function applyNavGuard(
             (_m: string, p: string, q: string, u: string) => p + q + rewire(u) + q,
           )
         : v;
-    safe(() => guardProp(META.prototype, "content", rewireMeta));
-    safe(() => guardAttr(META.prototype, "content", rewireMeta));
+    safe(() => guardProp(META.prototype, "content", "sync", rewireMeta));
+    safe(() => guardAttr(META.prototype, "content", "sync", rewireMeta));
   }
   const OW = w.open;
   if (typeof OW === "function") {
     safe(() => {
       w.open = function (this: AnyRecord, u?: string | URL, t?: string, f?: string) {
         const s = u == null ? undefined : typeof u === "string" ? u : u.href;
-        return (OW as AnyRecord).call(this, s == null ? u : rewire(s), t, f);
+        if (s == null) return (OW as AnyRecord).call(this, u, t, f);
+        const d = destAbs(s);
+        if (!d) return (OW as AnyRecord).call(this, rewire(s), t, f);
+        /* #54: open the popup on a blank engine-origin document,
+           then drive it to the minted route - the plaintext target
+           never reaches the popup request. A closed popup stays
+           blank (contained). */
+        const win = (OW as AnyRecord).call(this, "", t, f) as AnyRecord | null;
+        mintRoute(d).then((route) => {
+          try {
+            const l = win && (win as { location?: unknown }).location;
+            if (l) (l as { href: string }).href = route ?? navEncode(d);
+          } catch {
+            /* a closed popup cannot be driven */
+          }
+        });
+        return win;
       };
     });
   }
@@ -293,14 +379,26 @@ export function applyNavGuard(
         /* a second listener in a twice-guarded realm must not
            cancel-and-re-drive a navigation the first already did */
         if (ev.defaultPrevented) return;
-        const dest = String(ev.destination?.url ?? "");
-        const marker = rewire(dest);
-        if (marker === dest) return;
+        const dest = destAbs(String(ev.destination?.url ?? ""));
+        if (dest === null) return;
         ev.preventDefault();
-        if (ev.formData) {
+        /* #54: re-drive through the minted route (marker fallback);
+           the cancel already happened, so the mint delay is paid
+           before the first byte of the navigation. */
+        mintRoute(dest).then((route) => {
+          const target = route ?? navEncode(dest);
+          if (!ev.formData) {
+            (w.location as { href: string }).href = target;
+            return;
+          }
           const f = (w.document as Document).createElement("form") as HTMLFormElement;
           f.method = "POST";
-          f.action = marker;
+          /* the synthetic form's action goes through the PRE-hook
+             setAttribute: the defer hook on form action would blank
+             the action and the POST would go to the current
+             document (#54). */
+          if (FORM_SET) FORM_SET.call(f, "action", target);
+          else f.action = target;
           f.style.display = "none";
           /* HTMLFormElement has no field-append: the previous
              f.append(k, v) resolved to Element.append, which injects
@@ -317,9 +415,7 @@ export function applyNavGuard(
           (w.document as Document).body.appendChild(f);
           f.submit();
           f.remove();
-        } else {
-          (w.location as { href: string }).href = marker;
-        }
+        });
       }),
     );
   }
@@ -377,7 +473,26 @@ export function applyNavGuard(
         const r = xf(s);
         if (r !== s && typeof el.setAttribute === "function") el.setAttribute(n, r);
       };
-      attr("src", rewire);
+      /* #54: a parser-inserted cross-origin src is blanked inside
+         the observer microtask (the load task starts after it) and
+         the minted route lands next; the marker stays the fallback,
+         and a newer src write cancels the upgrade. */
+      {
+        const s0 = typeof el.getAttribute === "function" ? el.getAttribute("src") : null;
+        if (typeof s0 === "string" && s0 && typeof el.setAttribute === "function") {
+          const d = destAbs(s0);
+          if (d !== null) {
+            el.setAttribute("src", "");
+            mintRoute(d).then((route) => {
+              try {
+                if (el.getAttribute("src") === "") el.setAttribute("src", route ?? navEncode(d));
+              } catch {
+                /* the frame left the DOM */
+              }
+            });
+          }
+        }
+      }
       /* #58: a parser-inserted srcdoc child document runs no
          bootstrap either; its markup rides the same observer. */
       if (tag === "IFRAME") attr("srcdoc", rewireSrcdoc);

@@ -14,11 +14,15 @@ export function applyRelay(w: Record<string, unknown>, site: string, pageUrl: st
  forwards it (with the transferred port) to the engine controller.
  2.3 Selenide: shared workers have no parent-page postMessage, so
  their prelude posts the same message on its newest connect port - the
- SharedWorker wrapper below hooks that port into this same relay. */
+ SharedWorker wrapper below hooks that port into this same relay.
+ #54 residual 2: the prelude also mints through this relay (a
+ zl:"mint" wrapper carries a zl:mint control message the same way),
+ so worker fetch inputs ride keyed routes like the page's own
+ seams. */
 
 const relay = (e: MessageEvent) => {
  const d = e.data as { zl?: string; msg?: unknown };
- if (d && d.zl === "ws") {
+ if (d && (d.zl === "ws" || d.zl === "mint")) {
     const ctl = swc();
  if (ctl) ctl.postMessage(d.msg, e.ports as unknown as MessagePort[]);
  else {
@@ -27,7 +31,11 @@ const relay = (e: MessageEvent) => {
  carries the close code (the worker prelude closes on it). */
  const p = e.ports[0];
  if (p) {
- p.postMessage({ ev: "error", code: 1006, clean: false });
+ /* #54: a mint port is refused (ok:false), not sent a socket
+ error - the caller resolves null immediately instead of
+ waiting out its mint timeout. */
+ if (d.zl === "mint") p.postMessage({ ok: false, error: "no controller" });
+ else p.postMessage({ ev: "error", code: 1006, clean: false });
  p.close();
  }
  }
