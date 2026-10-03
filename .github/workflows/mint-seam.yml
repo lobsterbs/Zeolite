@@ -1,0 +1,72 @@
+name: mint-seam
+
+on:
+  workflow_dispatch:
+
+# One-shot mechanical edit for #54 residual 1: admit "zl:mint" to
+# the page-realm control-message gate in app/src/sw.ts. The edit
+# happens inside the checkout with exactly-once assertions, so it
+# can never be applied twice or to the wrong statement; the
+# regions printed to the job log are the review evidence. sw.ts is
+# 136KB, too large to move around byte-exactly by hand. Idempotent:
+# a second run on an already-patched tree commits nothing.
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Print gate regions and patch sw.ts
+        run: |
+          node --input-type=module - <<'EOF'
+          import { readFileSync, writeFileSync } from "node:fs";
+          const p = "app/src/sw.ts";
+          const src = readFileSync(p, "utf8");
+          const m = src.match(/const PAGE_MESSAGES[^;]*;/s);
+          console.log("=== PAGE_MESSAGES statement ===");
+          console.log(m ? m[0] : "(NOT FOUND)");
+          const g = src.indexOf("PAGE_MESSAGES");
+          console.log("=== gate context (first PAGE_MESSAGES use) ===");
+          if (g >= 0) console.log(src.slice(Math.max(0, g - 700), g + 500));
+          console.log("=== every zl:mint occurrence ===");
+          let i = -1;
+          let n = 0;
+          while ((i = src.indexOf('"zl:mint"', i + 1)) >= 0) {
+            n++;
+            console.log("--- occurrence " + n + " at offset " + i + " ---");
+            console.log(src.slice(Math.max(0, i - 500), i + 900));
+          }
+          if (!m) throw new Error("PAGE_MESSAGES statement not found");
+          if (!m[0].includes('"zl:docCookie"')) throw new Error("unexpected PAGE_MESSAGES shape");
+          if (m[0].includes('"zl:mint"')) { console.log("already patched; skipping"); process.exit(0); }
+          const comment = '/* "zl:mint" (#54 residual 1, page-realm mint seam): a proxied\n   page can already construct a legacy route for any destination\n   (the codec is page-public), so admitting minting grants no new\n   capability; the zl:mint case bounds mints to absolute http(s)\n   destinations. */\n';
+          const patched = m[0].replace('"zl:docCookie"', '"zl:mint", "zl:docCookie"');
+          if (patched === m[0]) throw new Error("insertion failed");
+          writeFileSync(p, src.replace(m[0], comment + patched));
+          console.log("=== patched ===");
+          EOF
+      - name: Prove the patch landed
+        run: grep -n 'zl:mint' app/src/sw.ts | head -5
+      - name: Run the mint + codec unit tests (full CI gates the merge)
+        run: |
+          cd app
+          npm install
+          npx vitest run src/__tests__/mint.test.ts src/__tests__/codec.test.ts
+      - name: Commit the patch (skipped when already applied)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/sw.ts
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git commit -m "sw: admit zl:mint to proxied pages (#54 page-realm mint seam)"
+          git push
