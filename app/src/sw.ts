@@ -94,7 +94,7 @@ import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, refineWithContent, transitRecord, transitStats } from "./transit";
-import { ZL_WISP_URL } from "./config";
+import { ZL_WISP_URL, httpsUpgraded } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, setRulesEnabled, setSiteOverrides, siteUaFor, type ResourceType } from "./rules";
@@ -938,16 +938,25 @@ function csInjectUrls(target: string, req: Request): string[] {
    routeReady below. null = no key (routeReady not settled yet, or
    storage unavailable) = the legacy codec. */
 let routeKeyB64: string | null = null;
+/* Issue #53: opt-in engine-side HTTPS upgrade. The live toggle
+   lives here, persisted with the route shape; the pure transform
+   is config.ts:httpsUpgraded. Applied at the single destination
+   choke point and per redirect hop, so the engine never fetches
+   cleartext while it is on. No silent downgrade: a failed
+   https fetch fails through the normal error pipeline. */
+let httpsUpgrade = false;
 const ZL_ROUTE_CACHE = "zeolite-route-v1";
 const ZL_ROUTE_KEY = new URL("route-config.json", self.registration.scope).href;
 const routeReady: Promise<void> = (async () => {
   try {
     const hit = await (await caches.open(ZL_ROUTE_CACHE)).match(ZL_ROUTE_KEY);
     if (hit) {
-      const cfg = (await hit.json()) as { prefix?: string; scheme?: string };
+      const cfg = (await hit.json()) as { prefix?: string; scheme?: string; httpsUpgrade?: boolean };
       /* A pre-#32 deployment may have persisted scheme "mirror": it
          coerces to the default (mirror routes are gone, #32). */
       setScheme(cfg.prefix ?? "/j/");
+      /* #53: the host's upgrade choice restores with the shape. */
+      if (typeof cfg.httpsUpgrade === "boolean") httpsUpgrade = cfg.httpsUpgrade;
     }
   } catch {
     /* storage unavailable: defaults stay until the next zl:config */
@@ -973,7 +982,7 @@ async function persistRoute(prefix: string): Promise<void> {
   try {
     await (await caches.open(ZL_ROUTE_CACHE)).put(
       ZL_ROUTE_KEY,
-      new Response(JSON.stringify({ prefix })),
+      new Response(JSON.stringify({ prefix, httpsUpgrade })),
     );
   } catch {
     /* storage unavailable: the in-memory rotation still works */
@@ -1249,6 +1258,12 @@ self.addEventListener("fetch", (e: FetchEvent) => {
       // Query string travels outside the encoded destination - engine
       // routes only (see routeCarriesQuery above).
       let target = routeCarriesQuery && url.search ? bareDest + url.search : bareDest;
+      /* #53: the single upgrade choke point. Every destination
+         shape (rewriter-emitted routes, navguard markers, escaped
+         same-origin paths, foreign-origin requests) resolves here
+         before cache or transport; mixed-content subresources and
+         redirect targets pass the same seam on their own fetch. */
+      target = httpsUpgraded(target, httpsUpgrade);
 
       if (siteDisabled(target)) {
         /* #31: a disabled-site navigation lands on the error page
@@ -1424,7 +1439,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           });
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
         }
-        if (ruleDec.url || ic.url) target = ic.url ?? ruleDec.url ?? target;
+        if (ruleDec.url || ic.url) target = httpsUpgraded(ic.url ?? ruleDec.url ?? target, httpsUpgrade);
 
         /* Cache-first for proxied GETs. */
         if (e.request.method === "GET") {
@@ -1572,6 +1587,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             } catch {
               break; /* unresolvable Location: surface the 3xx as-is */
             }
+            /* #53: the engine-side hop chain bypasses the fetch
+               choke point, so each hop upgrades here too. */
+            next = httpsUpgraded(next, httpsUpgrade);
             if (resp.status === 307 || resp.status === 308) {
               if (hopBody) break; /* one-shot stream: cannot replay */
             } else if (resp.status === 303 || hopMethod === "POST") {
@@ -1999,6 +2017,9 @@ interface ControlMessage {
   /** zl:config route scheme. Fixed "b64u" since #32; any other value
       is rejected (mirror removed). Kept optional for old embedders. */
   scheme?: string;
+  /** zl:config: opt-in engine-side HTTPS upgrade (#53). Absent keeps
+      the persisted choice; the ack echoes the live value. */
+  httpsUpgrade?: boolean;
   /** zl:rules: default outgoing user-agent for hosts without an
       override (null/absent keeps the browser's own UA). */
   ua?: string | null;
@@ -2180,6 +2201,7 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
         /* Fixed shape since #32 (mirror removed); kept in the reply so
            old embedder probes that compare it stay compatible. */
         scheme: "b64u",
+        httpsUpgrade,
         profile: jarProfileState(),
       });
       break;
@@ -2193,10 +2215,12 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
         reply({ ok: false, error: "scheme removed: routes are b64u only (#32)" });
         break;
       }
+      /* #53: absent leaves the persisted choice (old embedders). */
+      if (typeof msg.httpsUpgrade === "boolean") httpsUpgrade = msg.httpsUpgrade;
       setScheme(msg.prefix ?? "/j/");
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
-      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u" });
+      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade });
       break;
     }
     case "zl:mint": {

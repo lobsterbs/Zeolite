@@ -3,7 +3,7 @@
 ## How LobsterBrowse loads Scramjet today
 
 LobsterBrowse embeds Scramjet as a full-page iframe: the tab points at
-the engine service URL with `?url=<target>` (`scramjet/public/index.js`
+the engine service URL with `?url= ` (`scramjet/public/index.js`
 hides its demo UI, registers the Scramjet SW, and opens the target in a
 full-viewport frame). The engine owns its origin because its service
 worker must control every proxied request. The UI never calls engine
@@ -29,7 +29,7 @@ nothing surfaced below the `register()` call, and Chromium 91+ is
 required. An embedder that registers the worker itself must pass the
 same `type`. The page- and worker-facing artifacts (`bootstrap.js`,
 `worker-prelude.js`, `finder.js`) are the opposite: they are built as
-classic single-file scripts, because a `<script src>` without
+classic single-file scripts, because a ` ` without
 `type="module"`, a classic worker script and page `eval` cannot parse
 ESM syntax.
 
@@ -62,6 +62,7 @@ interface EngineConfig {
   pathScheme?: "b64u";                       // fixed since #32, mirror removed
   pathPrefix?: string;                    // default "/j/"
   profile?: string;                       // cookie jar profile, default "default"
+  httpsUpgrade?: boolean;                 // opt-in: upgrade http:// destinations before fetching (#53)
 }
 ```
 
@@ -73,8 +74,8 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 
 | message | payload | effect |
 | --- | --- | --- |
-| `zl:ping` | - | liveness probe (echoes version, degraded, route shape) |
-| `zl:config` | `prefix` | rotate the route prefix at runtime; the scheme is fixed to `"b64u"` since #32, any other `scheme` value is rejected |
+| `zl:ping` | - | liveness probe (echoes version, degraded, route shape, httpsUpgrade) |
+| `zl:config` | `prefix`, `httpsUpgrade?` | rotate the route prefix at runtime; the scheme is fixed to `"b64u"` since #32, any other `scheme` value is rejected. `httpsUpgrade` toggles the opt-in engine-side upgrade of http:// destinations (#53): absent keeps the persisted choice, the ack echoes the live value |
 | `zl:mint` | `dest` | mint an opaque route for a destination (#55): answers `{ ok, route }`; the SW-realm key never leaves the worker, and the message is host-only |
 | `zl:adblock` | `enabled` | global toggle for the /rules.json block lists |
 | `zl:rules` | `ua`, `rules` (`host`, `adblock`, `ua`) | host-app per-site adblock + User-Agent overrides (rules.ts) |
@@ -84,7 +85,7 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 | `zl:listMenus` | `extId?` | list registered context-menu items of enabled extensions (id, title, contexts, parentId, type, checked) so the host can render its menu surface (#45) |
 | `zl:downloadState` | `id`, `status` (`active`/`done`/`error`/`cancelled`), `received?`, `size?`, `error?` | host reports a `zl:downloadOp` handoff's state back; updates the extension downloads registry and fires `downloads.onChanged` for the owning extension after waking its background (#44) |
 | `zl:notifyEvent` | `extId`, `msg: { id, event, buttonIndex? }` | host reports a rendered notification's interaction back (`zl:notifyOp` is the SW->host create/clear broadcast); fires the extension's `notifications.onClosed`/`onClicked`/`onButtonClicked` after waking its background (#43) |
-| `zl:openExtPage` | `extId`, `which?` (`options`/`popup`, default `options`) | resolve an extension's options/popup page and mint a 5-minute page token; answers `{ ok, url }` where `url` is the `/zl-ext/<id>/<page>?zlPageTok=<token>` the host should navigate a tab to (#40; host-only) |
+| `zl:openExtPage` | `extId`, `which?` (`options`/`popup`, default `options`) | resolve an extension's options/popup page and mint a 5-minute page token; answers `{ ok, url }` where `url` is the `/zl-ext/ /?zlPageTok= ` the host should navigate a tab to (#40; host-only) |
 | `zl:extPage` | `extId`, `msg: { path, args }` | internal RPC from an extension-origin page's bridge (not for the host); the sender must be a client registered as that extension's page and the path is whitelist-gated in the page API (#40) |
 | `zl:siteRoute` | `site`, `enabled` | per-site interception toggle (403 when disabled) |
 | `zl:teardown` | - | drop all SW caches, `unregister()` |
@@ -109,17 +110,17 @@ find bar.
 
 ## Isolation guarantees (Phase 2 acceptance)
 
-- Storage: proxied site data is namespaced `zl:<sitehash>:` per site;
-  engine-origin storage is never exposed to page code.
+- Storage: proxied site data is namespaced `zl::` per site;
+ engine-origin storage is never exposed to page code.
 - Host-app traffic is untouched by #34: the SW routes foreign-origin
-  requests only for proxied clients (client URL decodes to an engine
-  route, or a #33 virtual context exists). The embedding app's own
-  cross-origin calls keep the direct browser path.
+ requests only for proxied clients (client URL decodes to an engine
+ route, or a #33 virtual context exists). The embedding app's own
+ cross-origin calls keep the direct browser path.
 - SW state: `teardown()` unregisters `/sw.js` and deletes every cache
-  it owned, so switching engines leaves no interception active.
+ it owned, so switching engines leaves no interception active.
 - Session export/import is NOT implemented. The 1.7 `zl:exportSession`
-  control-plane message (encrypted, SW-side) is the live session
-  transfer path; this adapter never shipped its own plaintext blob.
+ control-plane message (encrypted, SW-side) is the live session
+ transfer path; this adapter never shipped its own plaintext blob.
 
 ## Keepalive / reconnect
 
@@ -132,7 +133,7 @@ from the pre-vendoring era and has been removed.)
 ## Status
 
 - Phase 2 adapter surface: implemented (engine.ts + sw.ts control plane
-  + codec rotation).
+ + codec rotation).
 - Pending before "done": runtime validation of the full switch path
-  (Scramjet -> Zeolite -> teardown -> Scramjet) on a real deployment,
-  which also requires the Phase 1 transport vendoring to land first.
+ (Scramjet -> Zeolite -> teardown -> Scramjet) on a real deployment,
+ which also requires the Phase 1 transport vendoring to land first.
