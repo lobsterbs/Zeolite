@@ -782,101 +782,117 @@ self.addEventListener("install", () => {
 
 let netGeneration = 0;
 
+/* Restart-safe engine init (runs once per worker evaluation). A
+   terminated worker restarts by re-evaluating this module WITHOUT a
+   new install/activate pair, so activate-only init left every
+   restart with an empty extension registry, an empty cookie jar,
+   unwired tabs/scripting/downloads/notifications dispatches and
+   unwoken alarms: installed extensions looked missing, menu
+   listings went stale, and host notification broadcasts were
+   dropped silently. Everything below is idempotent, so it runs here
+   instead of in activate; consumers that need the restored state
+   await initReady (the fetch handler and the control plane). */
+const initReady = (async () => {
+  /* Generation bump per worker evaluation: a restart resets the
+     netLog ring, and the devtools delta-sync resets on it. */
+  netGeneration++;
+  /* 1.4 Boride: restore the persisted cookie jar. Storage failure
+     means an in-memory jar, never an init failure. */
+  try {
+    await jarLoad();
+  } catch {
+    /* in-memory jar only */
+  }
+  /* 2.2 Arsenide: restore the persisted download registry. Entries
+     that were active across the restart are honestly marked
+     interrupted by the load itself; resume stays unbuilt. */
+  try {
+    await DL.load();
+  } catch {
+    /* in-memory registry only */
+  }
+  /* Extensions: load the installed set, then boot enabled
+     background scripts. Any failure lands in that extension's
+     record; the engine itself never fails because of one. */
+  try {
+    await extensions.startup();
+    await bootEnabled();
+    /* Alarms wake MV3 backgrounds through the background module;
+       management events observe the manager's lifecycle stream. */
+    ALARMS.setWake(wakeExtension);
+    MGMT.wire(extensions);
+  } catch {
+    /* extension subsystem unavailable: stays inert */
+  }
+  /* Tabs bridge: extension ops broadcast to the engine UI clients,
+     which own the real tab model and mirror changes back through
+     the zl:tabs sync channel. */
+  TABS.setDispatch((op) => {
+    void self.clients.matchAll({ type: "window" }).then((cs) => {
+      for (const c of cs) c.postMessage({ type: "zl:tabsOp", op });
+    });
+  });
+  /* tabs.sendMessage: each page verifies it is the addressee by
+     destination, so the payload carries the target tab's url. */
+  TABS.setMessageDispatch((_tabId, tabUrl, extId, payload) => {
+    void self.clients.matchAll({ type: "window" }).then((cs) => {
+      for (const c of cs) {
+        let cdest = "";
+        try {
+          const cu = new URL(c.url, self.location.origin);
+          cdest = decodePath(cu.pathname) + cu.search;
+        } catch {
+          continue;
+        }
+        if (cdest === tabUrl) {
+          c.postMessage({ type: "zl:tabMessage", extId, dest: tabUrl, payload });
+        }
+      }
+    });
+  });
+  /* Scripting: the payload carries the exact page destination; the
+     page listener drops anything not addressed to itself. */
+  SCRIPTING.setDispatch((msg) => {
+    void self.clients.matchAll({ type: "window" }).then((cs) => {
+      for (const c of cs) c.postMessage(msg);
+    });
+  });
+  /* Downloads: the UI host owns the save. */
+  DOWNLOADS.setDispatch((op) => {
+    void self.clients.matchAll({ type: "window" }).then((cs) => {
+      for (const c of cs) c.postMessage({ type: "zl:downloadOp", op });
+    });
+  });
+  /* Notifications (#43): the UI host renders (the embedding host
+     owns the surface) and reports interactions back via
+     zl:notifyEvent. */
+  NOTIFY.setDispatch((op) => {
+    void self.clients.matchAll({ type: "window" }).then((cs) => {
+      for (const c of cs) c.postMessage({ type: "zl:notifyOp", op });
+    });
+  });
+  /* Advanced permissions: request/remove run through the manager
+     so grants persist and the master record stays authoritative. */
+  PERMS.setBackend(async (id, op, perms) => {
+    const rec =
+      op === "grant"
+        ? await extensions.grantOptional(id, perms)
+        : await extensions.revokeOptional(id, perms);
+    return rec ? { permissions: [...rec.permissions], origins: [...rec.hostPermissions] } : null;
+  });
+})();
+
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     (async () => {
       await self.clients.claim();
       /* Warm the transport so the first proxied request skips libcurl
          init. A missing vendored build just logs, as before. */
-      netGeneration++;
-      /* 1.4 Boride: restore the persisted cookie jar. Storage failure
-         means an in-memory jar, never an activate failure. */
-      try {
-        await jarLoad();
-      } catch {
-        /* in-memory jar only */
-      }
-      /* 2.2 Arsenide: restore the persisted download registry. Entries
-         that were active across the restart are honestly marked
-         interrupted by the load itself; resume stays unbuilt. */
-      try {
-        await DL.load();
-      } catch {
-        /* in-memory registry only */
-      }
       try {
         await ensureCurl();
       } catch {
         /* transport-missing: the suite records it, as before */
       }
-      /* Extensions: load the installed set, then boot enabled
-         background scripts. Any failure lands in that extension's
-         record; the engine itself never fails because of one. */
-      try {
-        await extensions.startup();
-        await bootEnabled();
-        /* Alarms wake MV3 backgrounds through the background module;
-           management events observe the manager's lifecycle stream. */
-        ALARMS.setWake(wakeExtension);
-        MGMT.wire(extensions);
-      } catch {
-        /* extension subsystem unavailable: stays inert */
-      }
-      /* Tabs bridge: extension ops broadcast to the engine UI clients,
-         which own the real tab model and mirror changes back through
-         the zl:tabs sync channel. */
-      TABS.setDispatch((op) => {
-        void self.clients.matchAll({ type: "window" }).then((cs) => {
-          for (const c of cs) c.postMessage({ type: "zl:tabsOp", op });
-        });
-      });
-      /* tabs.sendMessage: each page verifies it is the addressee by
-         destination, so the payload carries the target tab's url. */
-      TABS.setMessageDispatch((_tabId, tabUrl, extId, payload) => {
-        void self.clients.matchAll({ type: "window" }).then((cs) => {
-          for (const c of cs) {
-            let cdest = "";
-            try {
-              const cu = new URL(c.url, self.location.origin);
-              cdest = decodePath(cu.pathname) + cu.search;
-            } catch {
-              continue;
-            }
-            if (cdest === tabUrl) {
-              c.postMessage({ type: "zl:tabMessage", extId, dest: tabUrl, payload });
-            }
-          }
-        });
-      });
-      /* Scripting: the payload carries the exact page destination; the
-         page listener drops anything not addressed to itself. */
-      SCRIPTING.setDispatch((msg) => {
-        void self.clients.matchAll({ type: "window" }).then((cs) => {
-          for (const c of cs) c.postMessage(msg);
-        });
-      });
-      /* Downloads: the UI host owns the save. */
-      DOWNLOADS.setDispatch((op) => {
-        void self.clients.matchAll({ type: "window" }).then((cs) => {
-          for (const c of cs) c.postMessage({ type: "zl:downloadOp", op });
-        });
-      });
-      /* Notifications (#43): the UI host renders (LB owns the
-         surface) and reports interactions back via zl:notifyEvent. */
-      NOTIFY.setDispatch((op) => {
-        void self.clients.matchAll({ type: "window" }).then((cs) => {
-          for (const c of cs) c.postMessage({ type: "zl:notifyOp", op });
-        });
-      });
-      /* Advanced permissions: request/remove run through the manager
-         so grants persist and the master record stays authoritative. */
-      PERMS.setBackend(async (id, op, perms) => {
-        const rec =
-          op === "grant"
-            ? await extensions.grantOptional(id, perms)
-            : await extensions.revokeOptional(id, perms);
-        return rec ? { permissions: [...rec.permissions], origins: [...rec.hostPermissions] } : null;
-      });
     })(),
   );
 });
@@ -1017,6 +1033,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
     if (url.pathname.startsWith(EXT_ROUTE) || url.pathname.startsWith(CS_ROUTE)) {
       e.respondWith(
         (async () => {
+          /* Restart-safe: extension serving needs the restored
+             registry (a restarted worker boots with none). */
+          await initReady;
           /* #51: the requesting page destination, resolved like the
              #33 initiator (virtual context first, client URL decode
              as the fallback). Never page-supplied; when unknown the
@@ -1041,7 +1060,15 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             /* #40: extension-page access. Client ids are SW-observed
                FetchEvent fields, never page-supplied. */
             {
-              nav: e.request.headers.get("sec-fetch-dest") === "document",
+              /* #40: a navigation is mode "navigate". sec-fetch-dest
+                 only appears when the browser attaches Fetch
+                 Metadata, which browser-initiated and popup
+                 navigations can lack (a live host window.open to a
+                 minted page URL fell through to the WAR gate because
+                 nav was computed false on a dest-less request). */
+              nav:
+                e.request.mode === "navigate" ||
+                e.request.headers.get("sec-fetch-dest") === "document",
               clientId: e.clientId || undefined,
               resultingClientId: e.resultingClientId || undefined,
               pageUrl,
@@ -1066,6 +1093,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
   e.respondWith(
     (async () => {
       await routeReady;
+      await initReady;
       /* Route computation. Three shapes reach this handler:
          - foreign-origin http(s) requests (#34): the whole URL is the
            destination. Only requests from proxied documents are
@@ -2110,8 +2138,11 @@ const PAGE_MESSAGES = new Set(["zl:docCookie", "zl:wsOpen", "zl:ext", "zl:ping"]
 
 self.addEventListener("message", async (e: ExtendableMessageEvent) => {
   /* Issue #17: the restored route shape settles asynchronously; a
-     cold-start ping must not report the default shape mid-restore. */
+     cold-start ping must not report the default shape mid-restore.
+     Registry-dependent answers also wait for the restart-safe
+     init, so a just-restarted worker serves real state. */
   await routeReady;
+  await initReady;
   const msg = e.data as ControlMessage;
   const port = e.ports[0];
   const reply = (payload: unknown) => port?.postMessage(payload);
