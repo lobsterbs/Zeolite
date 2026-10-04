@@ -1,4 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+/* The vitest node environment's global TextDecoder is a shim whose
+   non-UTF-8 labels decode per byte and whose bogus labels do not
+   throw, which would make the legacy-label tests below assert the
+   shim instead of the engine's semantics. The real Node decoder is
+   pinned for these tests: headers.makeDecoder resolves the bare
+   TextDecoder from globalThis at call time, so the stub covers it
+   exactly. */
+import { TextDecoder as NodeTextDecoder } from "node:util";
 import { decodePath, encodeDest } from "../codec";
 import { navEncode } from "../bootstrap/navguard";
 import { initScript } from "../pageload";
@@ -131,6 +139,9 @@ describe("response-header surgery never carries the plaintext destination", () =
    replacement-character garbage. */
 describe("charset resolution (issue B)", () => {
   const enc = (s: string) => new TextEncoder().encode(s);
+
+  beforeEach(() => vi.stubGlobal("TextDecoder", NodeTextDecoder));
+  afterEach(() => vi.unstubAllGlobals());
 
   it("charsetFromHeader extracts the charset parameter", () => {
     expect(charsetFromHeader("text/html; charset=Shift_JIS")).toBe("Shift_JIS");
