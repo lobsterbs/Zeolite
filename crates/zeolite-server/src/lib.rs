@@ -880,6 +880,20 @@ async fn spawn_tcp_relay(
                 return;
             }
         };
+        // wisp v2: CONTINUE is the CONNECT ack and grants the initial
+        // send window. Send it only after the outbound connect
+        // succeeded: on failure the client gets Close at the connect
+        // phase instead of a mid-handshake Close that curl reports as
+        // bogus SSL error 35. Early client DATA just buffers in the
+        // stream's input channel until the socket exists.
+        let _ = send_packet(
+            &ws_tx,
+            &Packet::Continue {
+                stream_id,
+                buffer_remaining: wisp_core::handshake::INITIAL_BUFFER_SIZE,
+            },
+        )
+        .await;
         tracing::info!(stream_id, host, port, "tcp stream opened");
         let (mut rd, mut wr) = sock.into_split();
         let mut input_rx = input_rx;
@@ -956,16 +970,6 @@ async fn spawn_tcp_relay(
             udp_packets: Arc::new(AtomicU64::new(0)),
         },
     );
-    // wisp v2: after a successful TCP CONNECT the server grants the
-    // initial send window with a CONTINUE on the new stream.
-    let _ = send_packet(
-        &sess.ws_tx,
-        &Packet::Continue {
-            stream_id,
-            buffer_remaining: wisp_core::handshake::INITIAL_BUFFER_SIZE,
-        },
-    )
-    .await;
 }
 
 async fn spawn_udp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname: String) {
