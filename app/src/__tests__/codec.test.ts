@@ -71,6 +71,14 @@ describe("referrerDest", () => {
     expect(referrerDest(page, "/api?v=1")).toBe("https://target.dev/api?v=1");
   });
 
+  it("resolves a directory-relative tail against the referrer's page URL", () => {
+    /* Bug-scout regression: relative tails used to resolve against
+       the origin root, so /dir/page.html referencing img/x.png
+       recovered /img/x.png instead of /dir/img/x.png. */
+    const page = "https://engine.dev" + encodeDest("https://target.dev/some/dir/page.html");
+    expect(referrerDest(page, "img/logo.png")).toBe("https://target.dev/some/dir/img/logo.png");
+  });
+
   it("null for referrers that are not engine routes", () => {
     expect(referrerDest("https://engine.dev/index.html", "/x")).toBeNull();
     expect(referrerDest("", "/x")).toBeNull();
@@ -253,5 +261,29 @@ describe("recoverPath (concatenated tails)", () => {
     setRouteKeys([]);
     const tail = encodeDestLegacy("https://example.com/a.png").slice(R.length);
     expect(recoverPath(R + tail + "/b.png")).toBeNull();
+  });
+
+  it("rejects a hostile token-shaped tail fast, not quadratic", () => {
+    /* Availability regression: the old per-L rescan re-decoded the
+       tail for every prefix length with a per-byte SipHash; a single
+       crafted request could freeze the shared worker for seconds.
+       The gate must kill a wrong-key tail in constant time. */
+    setScheme(R);
+    setRouteKeys([KEY]);
+    const t0 = Date.now();
+    /* "AQ" decodes to a 0x01 lead byte, so the shape check passes and
+       the wrong-key gate is what must reject it, fast. */
+    expect(recoverPath(R + "AQ" + "A".repeat(2000))).toBeNull();
+    expect(Date.now() - t0).toBeLessThan(500);
+  });
+
+  it("rejects a hostile tail when the plaintext carries non-b64u chars", () => {
+    /* The appended plaintext after a real token contains "/" and "."
+       (not b64u): recovery must still find the token prefix before
+       the first invalid char. */
+    setScheme(R);
+    setRouteKeys([KEY]);
+    const token = encodeDest("https://example.com/a/b.png").slice(R.length);
+    expect(recoverPath(R + token + "/more/path.gif")).toBe("https://example.com/a/b.png/more/path.gif");
   });
 });

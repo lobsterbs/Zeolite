@@ -116,10 +116,33 @@ impl ConnectFailure {
     }
 }
 
-/// Resolve -> validate EVERY address -> connect. The address that is
-/// actually connected is the one that was validated, so a DNS rebinding
-/// answer that resolves to private space is rejected, never connected.
+/// Resolve -> validate EVERY address -> connect, under ONE overall
+/// deadline. DNS gets the full budget, then every candidate address
+/// shares what remains: a host whose many addresses are all
+/// unroutable used to cost N x connect_timeout (bug-scout fix), so
+/// the whole connect is capped at one timeout.
 pub async fn connect_validated(
+    dest: &policy::DestinationPolicy,
+    hostname: &str,
+    port: u16,
+    connect_timeout: Duration,
+) -> Result<TcpStream, ConnectFailure> {
+    match tokio::time::timeout(
+        connect_timeout,
+        connect_validated_steps(dest, hostname, port, connect_timeout),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => Err(ConnectFailure::Timeout),
+    }
+}
+
+/// The resolve -> validate -> connect steps; the caller owns the
+/// overall deadline. The address that is actually connected is the
+/// one that was validated, so a DNS rebinding answer that resolves
+/// to private space is rejected, never connected.
+async fn connect_validated_steps(
     dest: &policy::DestinationPolicy,
     hostname: &str,
     port: u16,
@@ -494,6 +517,17 @@ struct Session {
 }
 
 impl Session {
+    /// Reap streams whose relay task finished on its own (remote EOF,
+    /// socket error, failed connect): the task already sent Close, but
+    /// its dead entry kept counting toward max_streams_per_conn until
+    /// the idle sweep aged it out (up to stream_idle_timeout), so a
+    /// client that does not echo Close could lock the connection out
+    /// with Throttled. Also stops the duplicate-Close wart: a client
+    /// Close for a finished stream no longer finds an entry to echo.
+    fn reap_finished(&mut self) {
+        self.streams.retain(|_, e| !e.task.is_finished());
+    }
+
     /// Fully close one stream: cancel its relay task, drop the input
     /// channel and remove the entry. No dead entries, no orphaned tasks.
     fn close_stream(&mut self, stream_id: u32) -> bool {
@@ -511,6 +545,7 @@ impl Session {
     /// activity within the configured window and UDP streams that
     /// exceeded their byte/packet budget.
     fn sweep(&mut self) {
+        self.reap_finished();
         let idle = self.shared.cfg.stream_idle_timeout;
         let mut kill: Vec<u32> = Vec::new();
         for (id, e) in &self.streams {
@@ -715,6 +750,10 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                 port,
                 hostname,
             } => {
+                // Reap finished relays first: a dead entry must not
+                // read as a duplicate CONNECT (stream-id reuse) or
+                // count toward the stream limit.
+                sess.reap_finished();
                 if sess.streams.contains_key(&stream_id) {
                     tracing::warn!(stream_id, "protocol failure: duplicate CONNECT");
                     continue;
@@ -784,6 +823,9 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                 if stream_id == 0 {
                     break; // whole connection
                 }
+                // A finished relay already sent Close; reaping here
+                // stops the server from echoing a second one.
+                sess.reap_finished();
                 if sess.close_stream(stream_id) {
                     let _ = send_packet(
                         &ws_tx,
@@ -846,6 +888,129 @@ async fn drain_until_credited(
     true
 }
 
+/// Drain the stream's input channel while the outbound connect is
+/// pending (bug-scout fix): a naive client that does not wait for
+/// CONTINUE can push more DATA than the 64-slot input channel holds,
+/// and the session loop's bounded send would then wedge EVERY stream
+/// on this WebSocket, Close and CONTINUE included. Early DATA is
+/// buffered (capped at 128 KiB; past that the stream is closed
+/// Throttled, the same signal the post-connect path gives a client
+/// that ignores its window) and handed back to flush once the socket
+/// exists. Returns None when the input channel closed or the cap hit
+/// (the caller ends the stream; the Close is already sent or the
+/// client is gone).
+async fn connect_with_drain<T, F>(
+    ws_tx: &WsTx,
+    stream_id: u32,
+    input_rx: &mut mpsc::Receiver<Vec<u8>>,
+    fut: F,
+) -> Option<Result<(T, std::collections::VecDeque<Vec<u8>>), ConnectFailure>>
+where
+    F: std::future::Future<Output = Result<T, ConnectFailure>>,
+{
+    tokio::pin!(fut);
+    let mut buffered: std::collections::VecDeque<Vec<u8>> = Default::default();
+    let mut buffered_bytes = 0usize;
+    loop {
+        tokio::select! {
+            r = &mut fut => return Some(r.map(|v| (v, buffered))),
+            m = input_rx.recv() => match m {
+                Some(bytes) => {
+                    buffered_bytes += bytes.len();
+                    if buffered_bytes > 128 * 1024 {
+                        let _ = send_packet(
+                            ws_tx,
+                            &Packet::Close {
+                                stream_id,
+                                reason: CloseReason::Throttled,
+                            },
+                        )
+                        .await;
+                        return None;
+                    }
+                    buffered.push_back(bytes);
+                }
+                None => return None,
+            },
+        }
+    }
+}
+
+/// The TCP relay loop, after a successful connect. Extracted so the
+/// tests below exercise the REAL loop (bug-scout fix: they used to
+/// hand-copy it, and the copy had already drifted).
+#[allow(clippy::too_many_arguments)] // ponytail: one relay loop, its inputs are its inputs
+async fn tcp_relay_loop(
+    mut rd: tokio::net::tcp::OwnedReadHalf,
+    mut wr: tokio::net::tcp::OwnedWriteHalf,
+    mut input_rx: mpsc::Receiver<Vec<u8>>,
+    ws_tx: &WsTx,
+    stream_id: u32,
+    w: &Window,
+    client_flow: bool,
+    la: &Mutex<Instant>,
+) {
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        // Out of credits: stop reading the socket until the client
+        // grants a new window with CONTINUE (real backpressure).
+        // v1 clients never send CONTINUE grants, so their window
+        // stays closed forever; relay unthrottled instead.
+        if client_flow {
+            // Bug-scout fix: the bare wait blocked the relay while
+            // starved and the input channel was never drained;
+            // drain_until_credited keeps the input side flowing
+            // until the window is granted again.
+            if !drain_until_credited(w, &mut input_rx, &mut wr, la).await {
+                break;
+            }
+        }
+        tokio::select! {
+            r = rd.read(&mut buf) => match r {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let data = Packet::Data {
+                        stream_id,
+                        payload: buf[..n].to_vec(),
+                    };
+                    if send_packet(ws_tx, &data).await.is_err() {
+                        break;
+                    }
+                    // Spend one credit; when the window is empty the
+                    // next loop iteration waits for the client's
+                    // CONTINUE (real backpressure, not a fake 128).
+                    if client_flow {
+                        w.take();
+                    }
+                    if let Ok(mut t) = la.lock() {
+                        *t = Instant::now();
+                    }
+                }
+            },
+            m = input_rx.recv() => match m {
+                Some(bytes) => {
+                    if wr.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                    if let Ok(mut t) = la.lock() {
+                        *t = Instant::now();
+                    }
+                }
+                None => break,
+            },
+        }
+    }
+    let _ = send_packet(
+        ws_tx,
+        &Packet::Close {
+            stream_id,
+            reason: CloseReason::Voluntary,
+        },
+    )
+    .await;
+    tracing::info!(stream_id, "tcp relay ended");
+}
+
 async fn spawn_tcp_relay(
     sess: &mut Session,
     stream_id: u32,
@@ -865,9 +1030,22 @@ async fn spawn_tcp_relay(
     let dest = shared.dest.clone();
     let host = hostname.clone();
     let task = tokio::spawn(async move {
-        let sock = match connect_validated(&dest, &host, port, cfg.connect_timeout).await {
-            Ok(s) => s,
-            Err(f) => {
+        let mut input_rx = input_rx;
+        // Connect while draining early DATA (naive clients that do
+        // not wait for CONTINUE); connect_validated carries one
+        // overall deadline (DNS + every candidate address).
+        let (rd, wr) = match connect_with_drain(
+            &ws_tx,
+            stream_id,
+            &mut input_rx,
+            connect_validated(&dest, &host, port, cfg.connect_timeout),
+        )
+        .await
+        {
+            // Input closed or pre-connect flood: the Close is sent,
+            // nothing to relay.
+            None => return,
+            Some(Err(f)) => {
                 tracing::info!(stream_id, host, port, failure = ?f, "connect failed");
                 let _ = send_packet(
                     &ws_tx,
@@ -879,83 +1057,45 @@ async fn spawn_tcp_relay(
                 .await;
                 return;
             }
-        };
-        // wisp v2: CONTINUE is the CONNECT ack and grants the initial
-        // send window. Send it only after the outbound connect
-        // succeeded: on failure the client gets Close at the connect
-        // phase instead of a mid-handshake Close that curl reports as
-        // bogus SSL error 35. Early client DATA just buffers in the
-        // stream's input channel until the socket exists.
-        let _ = send_packet(
-            &ws_tx,
-            &Packet::Continue {
-                stream_id,
-                buffer_remaining: wisp_core::handshake::INITIAL_BUFFER_SIZE,
-            },
-        )
-        .await;
-        tracing::info!(stream_id, host, port, "tcp stream opened");
-        let (mut rd, mut wr) = sock.into_split();
-        let mut input_rx = input_rx;
-        let mut buf = vec![0u8; 16 * 1024];
-        loop {
-            // Out of credits: stop reading the socket until the client
-            // grants a new window with CONTINUE (real backpressure).
-            // v1 clients never send CONTINUE grants, so their window
-            // stays closed forever; relay unthrottled instead.
-            if client_flow {
-                // Bug-scout fix: the bare wait blocked the relay while
-                // starved and the input channel was never drained;
-                // drain_until_credited keeps the input side flowing
-                // until the window is granted again.
-                if !drain_until_credited(&w, &mut input_rx, &mut wr, &la).await {
-                    break;
+            Some(Ok((sock, prebuffer))) => {
+                // wisp v2: CONTINUE is the CONNECT ack and grants the
+                // initial send window. Send it only after the outbound
+                // connect succeeded: on failure the client gets Close at
+                // the connect phase instead of a mid-handshake Close
+                // that curl reports as bogus SSL error 35.
+                let _ = send_packet(
+                    &ws_tx,
+                    &Packet::Continue {
+                        stream_id,
+                        buffer_remaining: wisp_core::handshake::INITIAL_BUFFER_SIZE,
+                    },
+                )
+                .await;
+                tracing::info!(stream_id, host, port, "tcp stream opened");
+                let (rd, mut wr) = sock.into_split();
+                // Flush what arrived during the connect, in order.
+                let mut flush_failed = false;
+                for chunk in &prebuffer {
+                    if wr.write_all(chunk).await.is_err() {
+                        flush_failed = true;
+                        break;
+                    }
                 }
-            }
-            tokio::select! {
-                r = rd.read(&mut buf) => match r {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let data = Packet::Data {
+                if flush_failed {
+                    let _ = send_packet(
+                        &ws_tx,
+                        &Packet::Close {
                             stream_id,
-                            payload: buf[..n].to_vec(),
-                        };
-                        if send_packet(&ws_tx, &data).await.is_err() {
-                            break;
-                        }
-                        // Spend one credit; when the window is empty the
-                        // next loop iteration waits for the client's
-                        // CONTINUE (real backpressure, not a fake 128).
-                        if client_flow {
-                            w.take();
-                        }
-                        if let Ok(mut t) = la.lock() {
-                            *t = Instant::now();
-                        }
-                    }
-                },
-                m = input_rx.recv() => match m {
-                    Some(bytes) => {
-                        if wr.write_all(&bytes).await.is_err() {
-                            break;
-                        }
-                        if let Ok(mut t) = la.lock() {
-                            *t = Instant::now();
-                        }
-                    }
-                    None => break,
-                },
+                            reason: CloseReason::Voluntary,
+                        },
+                    )
+                    .await;
+                    return;
+                }
+                (rd, wr)
             }
-        }
-        let _ = send_packet(
-            &ws_tx,
-            &Packet::Close {
-                stream_id,
-                reason: CloseReason::Voluntary,
-            },
-        )
-        .await;
-        tracing::info!(stream_id, "tcp relay ended");
+        };
+        tcp_relay_loop(rd, wr, input_rx, &ws_tx, stream_id, &w, client_flow, &la).await;
     });
 
     sess.streams.insert(
@@ -993,6 +1133,11 @@ async fn spawn_udp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname
         // One UDP socket per stream, connected to the validated
         // destination. Wisp v2.1 fixes the destination at CONNECT time
         // (no per-datagram destination prefix), so connect() is safe.
+        // ponytail: unlike TCP this does not drain input while the
+        // destination is being validated - a UDP CONNECT does no
+        // outbound connect, only one policy-checked DNS lookup, so
+        // the pending window is one lookup long; add a drain here if
+        // a client ever manages to wedge the session on it.
         let addr = match udp_dest_validated(&dest, &host, port, cfg.connect_timeout).await {
             Ok(a) => a,
             Err(f) => {
@@ -1295,8 +1440,10 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_relay_roundtrip_with_window() {
-        // Local echo server. The relay task is exercised directly; the
-        // destination policy is a session-level concern, not the relay's.
+        // Local echo server. The REAL relay loop runs (tcp_relay_loop,
+        // bug-scout fix: this test used to hand-copy the loop, and the
+        // copy had already drifted); the destination policy is a
+        // session-level concern, not the relay's.
         let lst = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = lst.local_addr().unwrap();
         let echo = tokio::spawn(async move {
@@ -1315,34 +1462,8 @@ mod tests {
         let w = window.clone();
         let la = last_active.clone();
         let relay = tokio::spawn(async move {
-            let (mut rd, mut wr) = sock.into_split();
-            let mut input_rx = input_rx;
-            let mut buf = vec![0u8; 4096];
-            loop {
-                if w.get() == 0 {
-                    break;
-                }
-                tokio::select! {
-                    r = rd.read(&mut buf) => match r {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let data = Packet::Data { stream_id, payload: buf[..n].to_vec() };
-                            if send_packet(&ws_tx, &data).await.is_err() {
-                                break;
-                            }
-                            w.take();
-                            if let Ok(mut t) = la.lock() { *t = Instant::now(); }
-                        }
-                    },
-                    m = input_rx.recv() => match m {
-                        Some(bytes) => {
-                            if wr.write_all(&bytes).await.is_err() { break; }
-                            if let Ok(mut t) = la.lock() { *t = Instant::now(); }
-                        }
-                        None => break,
-                    },
-                }
-            }
+            let (rd, wr) = sock.into_split();
+            tcp_relay_loop(rd, wr, input_rx, &ws_tx, stream_id, &w, true, &la).await;
         });
 
         // Outbound data through the input channel.
@@ -1382,6 +1503,7 @@ mod tests {
         // that grants the window could never be read: a full-duplex
         // deadlock. Input must keep flowing while the window is
         // closed, and the socket read must resume once granted.
+        // Runs the REAL relay loop (tcp_relay_loop).
         let lst = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = lst.local_addr().unwrap();
         let echo = tokio::spawn(async move {
@@ -1399,32 +1521,8 @@ mod tests {
         let stream_id = 9u32;
         let w = window.clone();
         let relay = tokio::spawn(async move {
-            let (mut rd, mut wr) = sock.into_split();
-            let mut input_rx = input_rx;
-            let mut buf = vec![0u8; 4096];
-            loop {
-                if w.get() == 0 && !drain_until_credited(&w, &mut input_rx, &mut wr, &la).await {
-                    break;
-                }
-                tokio::select! {
-                    r = rd.read(&mut buf) => match r {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let data = Packet::Data { stream_id, payload: buf[..n].to_vec() };
-                            if send_packet(&ws_tx, &data).await.is_err() {
-                                break;
-                            }
-                            w.take();
-                        }
-                    },
-                    m = input_rx.recv() => match m {
-                        Some(bytes) => {
-                            if wr.write_all(&bytes).await.is_err() { break; }
-                        }
-                        None => break,
-                    },
-                }
-            }
+            let (rd, wr) = sock.into_split();
+            tcp_relay_loop(rd, wr, input_rx, &ws_tx, stream_id, &w, true, &la).await;
         });
 
         // More than the input channel's own capacity: with the old
@@ -1464,6 +1562,68 @@ mod tests {
         assert_eq!(got, 640);
         relay.abort();
         echo.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_connect_closes_without_continue_and_is_reaped() {
+        // Bug-scout regressions: (1) CONTINUE used to be granted
+        // before the outbound connect, so a failed connect surfaced
+        // as a mid-handshake Close (curl's bogus "SSL error 35") - a
+        // failed connect must Close at the connect phase with NO
+        // CONTINUE. (2) The finished relay's dead entry used to stay
+        // in the session map until the idle sweep, counting toward
+        // max_streams_per_conn.
+        let (ws_tx, mut ws_rx) = mpsc::channel::<Message>(16);
+        let mut sess = Session {
+            shared: Shared::new(Config::default()),
+            ws_tx,
+            streams: std::collections::HashMap::new(),
+            next_sweep: Instant::now(),
+        };
+        // Loopback is blocked by the default destination policy
+        // (instant, no DNS); under the compat suite's test escape
+        // hatch the connect is refused instead - both are honest
+        // connect failures, both must Close without CONTINUE.
+        spawn_tcp_relay(&mut sess, 7, 61999, "127.0.0.1".into(), true).await;
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws_rx.recv())
+            .await
+            .expect("timeout waiting for Close")
+            .expect("ws channel closed");
+        let bin = match msg {
+            Message::Binary(b) => b,
+            other => panic!("expected binary, got {other:?}"),
+        };
+        let mut buf = BytesMut::from(&bin[..]);
+        let frame = Frame::decode(&mut buf).unwrap().unwrap();
+        match frame.parse_packet().unwrap() {
+            Packet::Close { stream_id, reason } => {
+                assert_eq!(stream_id, 7);
+                assert!(
+                    matches!(reason, CloseReason::Blocked | CloseReason::ConnectionRefused),
+                    "unexpected close reason {reason:?}"
+                );
+            }
+            Packet::Continue { .. } => panic!("CONTINUE granted for a failed connect"),
+            other => panic!("expected Close, got {other:?}"),
+        }
+        // The entry stays until the relay task finishes, then the
+        // reap (Connect arm / sweep) must drop it: a dead stream must
+        // not count toward max_streams_per_conn.
+        let mut finished = false;
+        for _ in 0..200 {
+            finished = sess
+                .streams
+                .get(&7)
+                .map(|e| e.task.is_finished())
+                .unwrap_or(false);
+            if finished {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(finished, "relay task must finish after a failed connect");
+        sess.reap_finished();
+        assert!(sess.streams.is_empty(), "finished relay entry must be reaped");
     }
 
     #[tokio::test]

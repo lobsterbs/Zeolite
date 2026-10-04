@@ -1272,17 +1272,23 @@ self.addEventListener("fetch", (e: FetchEvent) => {
            the rewriter misses resolves against the doc route into
            /zl/<plaintext-tail>. Resolve it against the requesting
            client's virtual context, then the referrer - the same
-           chain the escaped-path branch below uses. Navigations and
-           token-shaped tails keep the honest error: a rotated key or
-           a garbage link is a user-visible strand, not something to
-           guess about. relTail already carries url.search, so the
-           query must not be appended a second time. */
+           chain the escaped-path branch below uses. The tail stays
+           directory-relative (no forced leading "/"): a document at
+           /a/b/page.html referencing img/x.png means /a/b/img/x.png,
+           not /img/x.png. Navigations and token-shaped tails keep the
+           honest error: a rotated key or a garbage link is a
+           user-visible strand, not something to guess about. relTail
+           already carries url.search, so the query must not be
+           appended a second time. */
         if (
           !raw &&
           e.request.mode !== "navigate" &&
           !looksKeyedToken(url.pathname)
         ) {
-          const relTail = "/" + url.pathname.slice(currentPrefix().length) + url.search;
+          /* Bare prefix keeps the old root-relative meaning: "" would
+             resolve to the page's own URL, not the site root. */
+          const stripped = url.pathname.slice(currentPrefix().length);
+          const relTail = (stripped === "" ? "/" : stripped) + url.search;
           raw = resolveRelative(VCTX, e.clientId, relTail);
           if (!raw && e.request.referrer)
             raw = referrerDest(e.request.referrer, relTail);

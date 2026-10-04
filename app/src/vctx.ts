@@ -99,10 +99,12 @@ export function contextOf(
   return clientId ? map.get(clientId) : undefined;
 }
 
-/** Resolve an escaped same-origin path against the client's upstream
-    origin. Null when no context exists (the caller falls back to
-    referrer decoding, then passthrough) or when the path does not
-    parse against it. */
+/** Resolve an escaped same-origin path against the client's context.
+    Directory-relative tails ("img/x.png") resolve against the
+    establishing document's full URL (its directory); absolute paths
+    (leading "/") resolve to the origin root, unchanged. Null when no
+    context exists (the caller falls back to referrer decoding, then
+    passthrough) or when the path does not parse against it. */
 export function resolveRelative(
   map: Map<string, VirtualContext>,
   clientId: string | undefined,
@@ -111,7 +113,7 @@ export function resolveRelative(
   const ctx = contextOf(map, clientId);
   if (!ctx) return null;
   try {
-    return new URL(path, ctx.targetOrigin).href;
+    return new URL(path, ctx.currentUrl).href;
   } catch {
     return null;
   }

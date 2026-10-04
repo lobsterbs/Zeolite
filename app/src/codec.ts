@@ -235,7 +235,19 @@ function keyedDecode(key: Uint8Array | null, bytes: Uint8Array): string | null {
   const iv = bytes.slice(1, 17);
   const ct = bytes.slice(17);
   const d = new Uint8Array(ct.length);
-  for (let i = 0; i < ct.length; i++) d[i] = ct[i] ^ keystreamBlock(key, iv, i >> 3)[i & 7];
+  // One keystream block covers 8 body bytes; cache per block instead
+  // of re-running SipHash for every single byte. This decode runs on
+  // every keyed route request, so the 8x cut matters.
+  const blocks: (Uint8Array | undefined)[] = [];
+  for (let i = 0; i < ct.length; i++) {
+    const bi = i >> 3;
+    let ks = blocks[bi];
+    if (!ks) {
+      ks = keystreamBlock(key, iv, bi);
+      blocks[bi] = ks;
+    }
+    d[i] = ct[i] ^ ks[i & 7];
+  }
   let dest: string;
   try {
     dest = DEC_STRICT.decode(d);
@@ -336,22 +348,69 @@ export function decodePath(path: string): string | null {
     every prefix length as a standalone keyed token and accept only a
     MAC-verified decode; the remainder joins the decoded destination
     verbatim. Legacy tails are refused: without a MAC, a short prefix
-    decodes to anything and false positives are certain. Returns the
-    recovered destination, or null. ponytail: prefix scan is
-    O(tail^2) capped at 2048 chars and only on the decodePath failure
-    path; re-decode incrementally if tails ever grow. */
+    decodes to anything and false positives are certain.
+
+    Hostile-tail hardening: b64u is a bit stream, so one decode of
+    the valid-char prefix yields the byte prefix that every shorter
+    L decodes to, and the token IV (bytes 1..17) is identical for
+    every L. One keystream block per key decrypts the first body
+    bytes; unless they read "http://" or "https://" the key is wrong
+    and the tail dies in O(1) - the old per-L rescan was O(tail^2)
+    with a per-byte SipHash and could freeze the shared worker for
+    seconds on one crafted request. Only a key that passes the gate
+    pays for the per-L MAC scan, which is token-sized, not
+    tail-sized. ponytail: the gate is 56 bits, but reaching the MAC
+    scan without the SW-realm key is the attacker's problem, and a
+    key that passes the gate is by definition the minting key. */
 export function recoverPath(path: string): string | null {
   const i = path.indexOf(prefix);
   if (i < 0) return null;
   const tail = path.slice(i + prefix.length).split(/[?#]/)[0];
   if (tail.length < 23 || tail.length > 2048) return null;
-  for (let L = 23; L <= tail.length; L++) {
-    if (L % 4 === 1) continue; // never a full b64u token boundary
-    const bytes = b64uDecode(tail.slice(0, L));
-    if (!bytes || bytes.length < 17 || bytes[0] !== 1) continue;
-    for (const key of routeKeys) {
-      const dest = keyedDecode(key, bytes);
-      if (dest) return dest + tail.slice(L);
+  // The appended plaintext can carry non-b64u chars ("/", ".", ":");
+  // decode only up to the first one - every candidate L sits before
+  // it, and a shorter decode is byte-identical to the old per-L one.
+  let maxL = 0;
+  while (maxL < tail.length && B64URL.indexOf(tail[maxL]) >= 0) maxL++;
+  if (maxL < 23) return null;
+  const bytes = b64uDecode(tail.slice(0, maxL));
+  if (!bytes || bytes.length < 24 || bytes[0] !== 1) return null;
+  const iv = bytes.slice(1, 17);
+  const ct = bytes.slice(17);
+  for (const key of routeKeys) {
+    // Gate: the first decrypted body bytes must read "http(s)://".
+    const ks0 = keystreamBlock(key, iv, 0);
+    let gate = "";
+    for (let b = 0; b < 8; b++) gate += String.fromCharCode((ct[b] ?? 0) ^ ks0[b]);
+    if (!gate.startsWith("http://") && !gate.startsWith("https://")) continue;
+    // Full decrypt once, one keystream block per 8 body bytes.
+    const d = new Uint8Array(ct.length);
+    const blocks: (Uint8Array | undefined)[] = [];
+    for (let k = 0; k < ct.length; k++) {
+      const bi = k >> 3;
+      let ks = blocks[bi];
+      if (!ks) {
+        ks = keystreamBlock(key, iv, bi);
+        blocks[bi] = ks;
+      }
+      d[k] = ct[k] ^ ks[k & 7];
+    }
+    for (let L = 23; L <= maxL; L++) {
+      if (L % 4 === 1) continue; // never a full b64u token boundary
+      const cand = d.slice(0, ((3 * L) >> 2) - 17);
+      if (
+        concatBytes(destMac(key, cand, 1), destMac(key, cand, 2)).some((b, j) => b !== iv[j])
+      ) {
+        continue;
+      }
+      let dest: string;
+      try {
+        dest = DEC_STRICT.decode(cand);
+      } catch {
+        continue;
+      }
+      if (!/^https?:\/\//.test(dest)) continue;
+      return dest + tail.slice(L);
     }
   }
   return null;
@@ -445,7 +504,11 @@ export function referrerDest(referrer: string, path: string): string | null {
   }
   if (home.protocol !== "http:" && home.protocol !== "https:") return null;
   try {
-    return new URL(path, home.origin).href;
+    // Resolve against the page's full URL, not just its origin: a
+    // directory-relative tail ("img/x.png" from /a/b/page.html) must
+    // land in the page's directory. Absolute paths (leading "/")
+    // still resolve to the origin root, unchanged.
+    return new URL(path, home).href;
   } catch {
     return null;
   }

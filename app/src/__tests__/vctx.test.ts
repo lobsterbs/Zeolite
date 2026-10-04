@@ -15,6 +15,18 @@ describe("VirtualContext routing (issue #33)", () => {
     expect(resolveRelative(m, "doc-1", "/api/data?q=2")).toBe("https://site.example/api/data?q=2");
   });
 
+  it("resolves a directory-relative tail against the document URL, not the origin root", () => {
+    /* Bug-scout regression: a missed relative URL from a document in a
+       subdirectory (/a/b/page.html referencing img/x.png) used to be
+       force-prefixed "/" and resolved to /img/x.png. */
+    const m = new Map<string, VirtualContext>();
+    establishContext(m, "d", "https://s.example/dir/page.html");
+    expect(resolveRelative(m, "d", "img/x.png")).toBe("https://s.example/dir/img/x.png");
+    expect(resolveRelative(m, "d", "img/x.png?v=2")).toBe("https://s.example/dir/img/x.png?v=2");
+    /* Absolute paths still resolve against the origin root. */
+    expect(resolveRelative(m, "d", "/root.png")).toBe("https://s.example/root.png");
+  });
+
   it("returns null with no context so the referrer compat fallback stays in charge", () => {
     const m = new Map<string, VirtualContext>();
     expect(resolveRelative(m, "doc-1", "/api/data")).toBeNull();
