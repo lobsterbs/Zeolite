@@ -1,12 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-/* The vitest node environment's global TextDecoder is a shim whose
-   non-UTF-8 labels decode per byte and whose bogus labels do not
-   throw, which would make the legacy-label tests below assert the
-   shim instead of the engine's semantics. The real Node decoder is
-   pinned for these tests: headers.makeDecoder resolves the bare
-   TextDecoder from globalThis at call time, so the stub covers it
-   exactly. */
-import { TextDecoder as NodeTextDecoder } from "node:util";
+import { describe, expect, it } from "vitest";
 import { decodePath, encodeDest } from "../codec";
 import { navEncode } from "../bootstrap/navguard";
 import { initScript } from "../pageload";
@@ -140,9 +132,6 @@ describe("response-header surgery never carries the plaintext destination", () =
 describe("charset resolution (issue B)", () => {
   const enc = (s: string) => new TextEncoder().encode(s);
 
-  beforeEach(() => vi.stubGlobal("TextDecoder", NodeTextDecoder));
-  afterEach(() => vi.unstubAllGlobals());
-
   it("charsetFromHeader extracts the charset parameter", () => {
     expect(charsetFromHeader("text/html; charset=Shift_JIS")).toBe("Shift_JIS");
     expect(charsetFromHeader('text/html; charset="windows-1252"')).toBe("windows-1252");
@@ -178,14 +167,14 @@ describe("charset resolution (issue B)", () => {
 
   it("makeDecoder never throws on a bogus label", () => {
     const d = makeDecoder("not-a-real-charset");
-    expect(d.decode(new Uint8Array([63, 61, 66, 0xc3, 0xa9]))).toBe("café");
+    expect(d.decode(new Uint8Array([0x63, 0x61, 0x66, 0xc3, 0xa9]))).toBe("café");
   });
 
   it("legacy encodings round-trip instead of mangling", () => {
     /* "café" as latin-1: the old always-UTF-8 decode dropped the E9. */
-    expect(makeDecoder("windows-1252").decode(new Uint8Array([63, 61, 66, 0xe9]))).toBe("café");
+    expect(makeDecoder("windows-1252").decode(new Uint8Array([0x63, 0x61, 0x66, 0xe9]))).toBe("café");
     expect(makeDecoder("shift_jis").decode(new Uint8Array([0x93, 0xfa, 0x96, 0x7b]))).toBe("日本");
-    expect(decodeBody(new Uint8Array([63, 61, 66, 0xe9]).buffer, "text/html; charset=windows-1252")).toBe("café");
+    expect(decodeBody(new Uint8Array([0x63, 0x61, 0x66, 0xe9]).buffer, "text/html; charset=windows-1252")).toBe("café");
   });
 
   it("a truncated multi-byte tail flushes to a replacement char, never silence", () => {
