@@ -1599,7 +1599,10 @@ mod tests {
             Packet::Close { stream_id, reason } => {
                 assert_eq!(stream_id, 7);
                 assert!(
-                    matches!(reason, CloseReason::Blocked | CloseReason::ConnectionRefused),
+                    matches!(
+                        reason,
+                        CloseReason::Blocked | CloseReason::ConnectionRefused
+                    ),
                     "unexpected close reason {reason:?}"
                 );
             }
@@ -1623,7 +1626,10 @@ mod tests {
         }
         assert!(finished, "relay task must finish after a failed connect");
         sess.reap_finished();
-        assert!(sess.streams.is_empty(), "finished relay entry must be reaped");
+        assert!(
+            sess.streams.is_empty(),
+            "finished relay entry must be reaped"
+        );
     }
 
     #[tokio::test]
