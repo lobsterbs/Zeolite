@@ -7,8 +7,10 @@ import {
   isEngineAsset,
   isEnginePath,
   looksKeyedToken,
+  recoverPath,
   referrerDest,
   setRouteKey,
+  setRouteKeys,
   setScheme,
   unwrapDest,
 } from "../codec";
@@ -197,5 +199,59 @@ describe("keyed opaque routes (issue #55)", () => {
     expect(looksKeyedToken("/j/aGVsbG8")).toBe(false);
     expect(looksKeyedToken("/j/AQ")).toBe(false);
     expect(looksKeyedToken("/not-engine/j/AQ")).toBe(false);
+  });
+});
+
+describe("recoverPath (concatenated tails)", () => {
+  /* The JS literal pass mints a keyed route for a URL-shaped literal
+     that is only a fragment; runtime concatenation appends the rest
+     after the token, so the request path is <token><plaintext> and
+     decodePath 404s. recoverPath retries every prefix as a
+     MAC-verified token and appends the remainder verbatim. */
+  const KEY = b64uEncode(new Uint8Array(16).map((_, i) => i * 5 + 1));
+  const R = "/zl/";
+
+  it("recovers a fragment token with the rest of the URL appended", () => {
+    setScheme(R);
+    setRouteKeys([KEY]);
+    const token = encodeDest("https://simple").slice(R.length);
+    expect(recoverPath(R + token + "analyticscdn.com/simple.gif")).toBe(
+      "https://simpleanalyticscdn.com/simple.gif",
+    );
+  });
+
+  it("recovers a host-only token with an absolute path appended", () => {
+    setScheme(R);
+    setRouteKeys([KEY]);
+    const token = encodeDest("https://example.com").slice(R.length);
+    expect(recoverPath(R + token + "/fonts/x.woff2")).toBe("https://example.com/fonts/x.woff2");
+  });
+
+  it("keeps query and fragment outside the recovered tail", () => {
+    setScheme(R);
+    setRouteKeys([KEY]);
+    const token = encodeDest("https://example.com").slice(R.length);
+    expect(recoverPath(R + token + "/a.png?x=1#f")).toBe("https://example.com/a.png");
+  });
+
+  it("returns null for a plaintext tail: no token prefix", () => {
+    setScheme(R);
+    setRouteKeys([KEY]);
+    expect(recoverPath(R + "img/goats.mp4")).toBeNull();
+  });
+
+  it("returns null when the minting key left the decode history", () => {
+    setScheme(R);
+    setRouteKeys([KEY]);
+    const token = encodeDest("https://example.com/a.png").slice(R.length);
+    setRouteKeys([b64uEncode(new Uint8Array(16).fill(9))]);
+    expect(recoverPath(R + token + "/b.png")).toBeNull();
+  });
+
+  it("returns null without a route key: legacy tails are refused", () => {
+    setScheme(R);
+    setRouteKeys([]);
+    const tail = encodeDestLegacy("https://example.com/a.png").slice(R.length);
+    expect(recoverPath(R + tail + "/b.png")).toBeNull();
   });
 });

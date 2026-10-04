@@ -84,7 +84,7 @@
 
 /// <reference lib="webworker" />
 import {
-  mintableDest, b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, passChallengeRedirFixed, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+  mintableDest, b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
 import { mapRefreshHeader, stripHostile } from "./headers";
 import { loadRouteHistory, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
@@ -1258,7 +1258,36 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         if (!nav || !/^https?:\/\//.test(nav)) return navOutcome(e, url, 404, "route", "zeolite: bad route");
         dest0 = nav;
       } else if (isEnginePath(url.pathname)) {
-        const raw = decodePath(url.pathname);
+        let raw = decodePath(url.pathname);
+        let carriesQuery = true;
+        /* Concatenated-route recovery: the JS literal pass mints a
+           keyed route for a string literal that is only a URL
+           fragment, and runtime string concatenation appends the rest
+           after the token (<token><plaintext>). decodePath rejects
+           the whole tail; recoverPath retries every prefix as a
+           MAC-verified token and appends the remainder verbatim -
+           global by token shape, never by site. */
+        if (!raw) raw = recoverPath(url.pathname);
+        /* Relative-path recovery, subresources only: a relative URL
+           the rewriter misses resolves against the doc route into
+           /zl/<plaintext-tail>. Resolve it against the requesting
+           client's virtual context, then the referrer - the same
+           chain the escaped-path branch below uses. Navigations and
+           token-shaped tails keep the honest error: a rotated key or
+           a garbage link is a user-visible strand, not something to
+           guess about. relTail already carries url.search, so the
+           query must not be appended a second time. */
+        if (
+          !raw &&
+          e.request.mode !== "navigate" &&
+          !looksKeyedToken(url.pathname)
+        ) {
+          const relTail = "/" + url.pathname.slice(currentPrefix().length) + url.search;
+          raw = resolveRelative(VCTX, e.clientId, relTail);
+          if (!raw && e.request.referrer)
+            raw = referrerDest(e.request.referrer, relTail);
+          if (raw) carriesQuery = false;
+        }
         /* #31: an undecodable engine route answers the error page for
            navigations (bad route), the short text for subresources.
            A token-shaped tail is almost certainly a route minted
@@ -1276,7 +1305,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               : "zeolite: bad route",
           );
         dest0 = unwrapDest(raw);
-        routeCarriesQuery = true;
+        routeCarriesQuery = carriesQuery;
       } else {
         if (isEngineAsset(url.pathname)) return fetch(e.request); // engine asset: passthrough
         /* Issue #33: the requesting client's own virtual context is the

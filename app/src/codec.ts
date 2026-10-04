@@ -327,6 +327,36 @@ export function decodePath(path: string): string | null {
   return DEC.decode(bytes);
 }
 
+/** Recover a concatenated route tail (the URL-literal gap). The JS
+    literal pass mints a keyed route for any string literal that
+    looks like an absolute URL, but a literal can be a FRAGMENT the
+    page later completes by string concatenation ("https://x" +
+    "cdn.example/img.gif"): the minted token ends up with plaintext
+    appended after it, and decodePath rejects the whole tail. Retry
+    every prefix length as a standalone keyed token and accept only a
+    MAC-verified decode; the remainder joins the decoded destination
+    verbatim. Legacy tails are refused: without a MAC, a short prefix
+    decodes to anything and false positives are certain. Returns the
+    recovered destination, or null. ponytail: prefix scan is
+    O(tail^2) capped at 2048 chars and only on the decodePath failure
+    path; re-decode incrementally if tails ever grow. */
+export function recoverPath(path: string): string | null {
+  const i = path.indexOf(prefix);
+  if (i < 0) return null;
+  const tail = path.slice(i + prefix.length).split(/[?#]/)[0];
+  if (tail.length < 23 || tail.length > 2048) return null;
+  for (let L = 23; L <= tail.length; L++) {
+    if (L % 4 === 1) continue; // never a full b64u token boundary
+    const bytes = b64uDecode(tail.slice(0, L));
+    if (!bytes || bytes.length < 17 || bytes[0] !== 1) continue;
+    for (const key of routeKeys) {
+      const dest = keyedDecode(key, bytes);
+      if (dest) return dest + tail.slice(L);
+    }
+  }
+  return null;
+}
+
 /** Schemes the engine never routes: the browser owns blob:, data: and
     about: natively (createObjectURL media, blob workers, generated
     downloads, data: documents). The SW fetch handler passes these
