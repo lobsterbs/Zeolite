@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { initScript, siteToken } from "../pageload";
+import { initScript, siteToken, initSplicePoint } from "../pageload";
 import { b64uEncode, setRouteKey } from "../codec";
 
 const DEST = "https://real.site/deep/page?q=1";
@@ -24,7 +24,6 @@ describe("siteToken (issue #32)", () => {
     expect(siteToken("")).toMatch(/^[a-z0-9]+$/);
   });
 });
-
 describe("initScript (issue #32)", () => {
   it("injects the opaque site identity, never the destination", () => {
     const s = initScript(DEST, null);
@@ -79,5 +78,46 @@ describe("siteToken (keyed mode)", () => {
     expect(s).toBe('<script>window.__ZL={"site":"' + siteToken(DEST) + '"};</script>');
     expect(s).not.toContain("real.site");
     expect(s).not.toContain(DEST);
+  });
+});
+
+/* Quirks fix (issue A): the init script must splice AFTER the doctype -
+   a script start tag before <!doctype html> puts the parser in quirks
+   mode and the doctype is then ignored. Doctype-less documents keep
+   the stream-start placement (index 0) so they stay in quirks mode,
+   no accidental upgrade. */
+describe("initSplicePoint (quirks fix)", () => {
+  it("splices after a leading doctype", () => {
+    expect(initSplicePoint("<!doctype html><html>")).toBe(15);
+    expect(initSplicePoint("<!DOCTYPE HTML>\n<html>")).toBe(15);
+    expect(initSplicePoint('<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"><html>')).toBe(50);
+  });
+
+  it("skips leading BOM, whitespace and comments", () => {
+    expect(initSplicePoint("﻿<!doctype html><p>")).toBe(16);
+    expect(initSplicePoint("  \n\t<!doctype html><p>")).toBe(19);
+    expect(initSplicePoint("<!-- hi -->\n<!doctype html><p>")).toBe(27);
+    expect(initSplicePoint("<!--a--><!--b--><!doctype html>")).toBe(31);
+  });
+
+  it("returns null while a doctype is split across chunks", () => {
+    expect(initSplicePoint("<!doctype ht")).toBeNull();
+    expect(initSplicePoint("<!doctype html")).toBeNull(); /* no ">" yet */
+    expect(initSplicePoint("  <!-- st")).toBeNull(); /* comment not closed */
+    expect(initSplicePoint("<!")).toBeNull(); /* could still grow into a doctype */
+    expect(initSplicePoint("")).toBeNull();
+  });
+
+  it("decides at end of stream what the held head could not", () => {
+    expect(initSplicePoint("<!doctype ht", true)).toBe(0);
+    expect(initSplicePoint("  <!-- st", true)).toBe(0);
+    expect(initSplicePoint("", true)).toBe(0);
+  });
+
+  it("places at stream start when no doctype can follow", () => {
+    expect(initSplicePoint("<p>hello")).toBe(0);
+    expect(initSplicePoint("plain text")).toBe(0);
+    expect(initSplicePoint("<!CDATA[x")).toBe(0); /* not a doctype */
+    expect(initSplicePoint("<!-- c --><div>")).toBe(0); /* comment then element, no doctype */
   });
 });

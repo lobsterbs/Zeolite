@@ -3,7 +3,15 @@ import { decodePath, encodeDest } from "../codec";
 import { navEncode } from "../bootstrap/navguard";
 import { initScript } from "../pageload";
 import { errorPage } from "../errorpage";
-import { mapRefreshHeader, stripHostile } from "../headers";
+import {
+  mapRefreshHeader,
+  stripHostile,
+  charsetFromHeader,
+  resolveCharset,
+  makeDecoder,
+  decodeBody,
+  utf8ContentType,
+} from "../headers";
 
 /* Issue #32 acceptance: the real destination string must be absent
    from every page-visible surface the engine produces: routes in the
@@ -42,7 +50,6 @@ describe("page-visible surfaces never carry the plaintext destination (#32)", ()
     expect(decodePath(encodeDest(TARGET))).toBe(TARGET);
   });
 });
-
 
 describe("response-header surgery never carries the plaintext destination", () => {
   const H: Record<string, string> = {
@@ -114,5 +121,74 @@ describe("response-header surgery never carries the plaintext destination", () =
     expect(out.has("report-to")).toBe(false);
     expect(out.has("nel")).toBe(false);
     expect(out.has("timing-allow-origin")).toBe(false);
+  });
+});
+
+/* Issue B: a rewritten body decodes with the upstream charset
+   (header, BOM, meta/@charset prescan, spec default) and the served
+   copy is re-encoded UTF-8 with the header saying so. Legacy encodings
+   must round-trip; the old always-UTF-8 decode turned them into
+   replacement-character garbage. */
+describe("charset resolution (issue B)", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+
+  it("charsetFromHeader extracts the charset parameter", () => {
+    expect(charsetFromHeader("text/html; charset=Shift_JIS")).toBe("Shift_JIS");
+    expect(charsetFromHeader('text/html; charset="windows-1252"')).toBe("windows-1252");
+    expect(charsetFromHeader("text/html")).toBeNull();
+    expect(charsetFromHeader("")).toBeNull();
+  });
+
+  it("the header charset wins over a BOM and any meta", () => {
+    expect(resolveCharset("text/html; charset=utf-8", new Uint8Array([0xff, 0xfe, 0x3c]), true)).toBe("utf-8");
+  });
+
+  it("a BOM resolves the charset without a header", () => {
+    expect(resolveCharset("text/html", new Uint8Array([0xef, 0xbb, 0xbf, 0x3c]), true)).toBe("utf-8");
+    expect(resolveCharset("text/html", new Uint8Array([0xff, 0xfe, 0x3c]), true)).toBe("utf-16le");
+    expect(resolveCharset("text/html", new Uint8Array([0xfe, 0xff, 0x3c]), true)).toBe("utf-16be");
+  });
+
+  it("an HTML meta prescan resolves the charset", () => {
+    expect(resolveCharset("text/html", enc('<html><head><meta charset="windows-1252">'), true)).toBe("windows-1252");
+    expect(resolveCharset("text/html", enc('<meta http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">'), true)).toBe("ISO-8859-1");
+    expect(resolveCharset("text/html", enc('<meta charset="Shift_JIS">'), true)).toBe("Shift_JIS");
+  });
+
+  it("a CSS @charset resolves the stylesheet charset", () => {
+    expect(resolveCharset("text/css", enc('@charset "iso-8859-1";\nbody{color:red}'), false)).toBe("iso-8859-1");
+  });
+
+  it("spec defaults when nothing declares a charset", () => {
+    expect(resolveCharset("text/html", enc("<html><body>plain"), true)).toBe("windows-1252");
+    expect(resolveCharset("text/css", enc("body{color:red}"), false)).toBe("utf-8");
+    expect(resolveCharset("", null, true)).toBe("windows-1252");
+  });
+
+  it("makeDecoder never throws on a bogus label", () => {
+    const d = makeDecoder("not-a-real-charset");
+    expect(d.decode(new Uint8Array([63, 61, 66, 0xc3, 0xa9]))).toBe("café");
+  });
+
+  it("legacy encodings round-trip instead of mangling", () => {
+    /* "café" as latin-1: the old always-UTF-8 decode dropped the E9. */
+    expect(makeDecoder("windows-1252").decode(new Uint8Array([63, 61, 66, 0xe9]))).toBe("café");
+    expect(makeDecoder("shift_jis").decode(new Uint8Array([0x93, 0xfa, 0x96, 0x7b]))).toBe("日本");
+    expect(decodeBody(new Uint8Array([63, 61, 66, 0xe9]).buffer, "text/html; charset=windows-1252")).toBe("café");
+  });
+
+  it("a truncated multi-byte tail flushes to a replacement char, never silence", () => {
+    const d = makeDecoder("utf-8");
+    let out = d.decode(new Uint8Array([0xe3, 0x81, 0x82, 0xe6]), { stream: true }); /* あ + orphan first byte of 日 */
+    expect(out).toBe("あ");
+    out = d.decode(); /* the flush the done-branch used to skip */
+    expect(out).toBe("\uFFFD");
+  });
+
+  it("utf8ContentType always declares utf-8 on the served copy", () => {
+    expect(utf8ContentType("text/html; charset=windows-1252")).toBe("text/html; charset=utf-8");
+    expect(utf8ContentType("text/html")).toBe("text/html; charset=utf-8");
+    expect(utf8ContentType("text/css")).toBe("text/css; charset=utf-8");
+    expect(utf8ContentType("")).toBe("text/html; charset=utf-8");
   });
 });

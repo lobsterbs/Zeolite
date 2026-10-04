@@ -85,16 +85,16 @@
 /// <reference lib="webworker" />
 import {
   mintableDest, b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
-import { mapRefreshHeader, stripHostile } from "./headers";
+import { charsetFromHeader, decodeBody, makeDecoder, mapRefreshHeader, resolveCharset, stripHostile, utf8ContentType } from "./headers";
 import { loadRouteHistory, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
 import { NAV } from "./bootstrap/navguard";
-import { initScript } from "./pageload";
+import { initScript, initSplicePoint } from "./pageload";
 import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, refineWithContent, transitRecord, transitStats } from "./transit";
+import { decideTransport, docKind, refineWithContent, sniffsAsHtml, transitRecord, transitStats, DOC_DESTS } from "./transit";
 import { ZL_WISP_URL, httpsUpgraded } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
@@ -270,35 +270,75 @@ async function workerPrelude(): Promise<string> {
 }
 
 function isHtml(resp: Response): boolean {
-  return (resp.headers.get("content-type") ?? "").toLowerCase().includes("text/html");
+  /* One classification (transit.docKind) for the rewrite branches and
+     the transit refinement; XHTML documents are HTML to the rewriter
+     (issue C). */
+  return docKind(resp.headers.get("content-type") ?? "") === "html";
 }
 function isCss(resp: Response): boolean {
-  return (resp.headers.get("content-type") ?? "").toLowerCase().includes("text/css");
+  return docKind(resp.headers.get("content-type") ?? "") === "css";
 }
 function isJs(resp: Response): boolean {
   const ct = (resp.headers.get("content-type") ?? "").toLowerCase();
   return ct.includes("javascript") || ct.includes("ecmascript");
 }
 
+/** Concatenate held byte chunks (stream-head sniffing). */
+function cat(chunks: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
+  let o = 0;
+  for (const c of chunks) {
+    out.set(c, o);
+    o += c.length;
+  }
+  return out;
+}
+
+/** Raw passthrough of an already-started body: one held chunk plus
+    the rest of the reader, bytes untouched. */
+function rawFrom(
+  head: Uint8Array | undefined,
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    async start(c) {
+      if (head) c.enqueue(head);
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) c.enqueue(value);
+      }
+      c.close();
+    },
+  });
+}
+
 /** HTML bodies: pipe response chunks through the wasm rewriter. The
     bootstrap needs a per-site identity on window.__ZL (an opaque
     token since #32; the real destination never enters the page), so
-    we emit a tiny inline script before the first rewritten chunk.
-    SiteConfig per-site rules are applied to this rewriter instance:
-    injections (Phase 3 hooks) and blocked hosts (ad stripping). */
+    a tiny inline script is spliced into the stream head AFTER the
+    doctype (quirks fix: it used to ride the very first chunk, before
+    the doctype, which forced quirks mode on every proxied document
+    that declared one; a doctype-less page keeps the stream-start
+    placement and its quirks mode). SiteConfig per-site rules are
+    applied to this rewriter instance: injections (Phase 3 hooks) and
+    blocked hosts (ad stripping). Issue B: the body decodes with the
+    upstream charset (header, BOM, meta prescan, spec default), never
+    assumed UTF-8 in; the served copy is re-encoded UTF-8 and the
+    caller rewrites the served content-type to charset=utf-8. */
 function rewriteStream(
-  body: ReadableStream<Uint8Array>,
+  body: ReadableStream<Uint8Array> | ReadableStreamDefaultReader<Uint8Array>,
   base: string,
   rule: { inject?: string[]; block?: string[] },
   csInject: string[],
+  contentType: string,
   onDone?: () => void,
 ): ReadableStream<Uint8Array> {
-  const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   const modP = rewriter();
   /* Issue #32: the injected contract is { site: <opaque token> },
     computed SW-side from the destination; an active fingerprint
-    profile rides the same first chunk (1.8 Telluride). #55
+    profile rides the same splice (1.8 Telluride). #55
     follow-up: with a route key the token is a keyed MAC of the
     origin, so the mint waits for routeReady - a token minted before
     the key settled would split one site's storage across both the
@@ -306,8 +346,11 @@ function rewriteStream(
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       await routeReady;
-      controller.enqueue(encoder.encode(initScript(base, fpScript)));
-      const reader = body.getReader();
+      const init = initScript(base, fpScript);
+      const emit = (out: string) => {
+        if (out) controller.enqueue(encoder.encode(out));
+      };
+      const reader = body instanceof ReadableStream ? body.getReader() : body;
       try {
         // Rewriter init and construction live inside the try: an init failure
         // (e.g. a wasm 404) used to reject outside the try and kill every fresh
@@ -317,17 +360,69 @@ function rewriteStream(
         for (const path of rule.inject ?? []) rw.add_injection(path);
         if (rule.block?.length) rw.set_blocked_hosts(rule.block);
         for (const u of csInject) rw.add_injection(u);
+        /* Stream-head hold (quirks splice + charset): raw bytes
+           accumulate until the charset resolves (header label, else
+           BOM/meta prescan over the first 1024 bytes), decoded text
+           until the doctype splice point resolves (initSplicePoint).
+           Bounded: 2KB of still-undecided head falls back to
+           stream-start injection, the old placement - never an
+           unbounded hold. */
+        const headerLabel = charsetFromHeader(contentType);
+        let decoder: TextDecoder | null = headerLabel ? makeDecoder(headerLabel) : null;
+        let held: Uint8Array[] = [];
+        let heldLen = 0;
+        let head = "";
+        let injected = false;
+        const splice = (at: number) => {
+          emit(rw.process(head.slice(0, at)));
+          controller.enqueue(encoder.encode(init));
+          emit(rw.process(head.slice(at)));
+          head = "";
+          injected = true;
+        };
         for (;;) {
           const { done, value } = await reader.read();
           if (done) {
+            /* Flush the decoder's incomplete tail: a multi-byte
+               sequence truncated at end-of-stream used to be dropped
+               silently (issue B). */
+            let rest = decoder === null ? "" : decoder.decode();
+            if (!injected) {
+              if (decoder === null) {
+                decoder = makeDecoder(resolveCharset(contentType, cat(held), true));
+                head = decoder.decode(cat(held), { stream: true });
+                held = [];
+                rest = decoder.decode();
+              } else {
+                head += rest;
+                rest = "";
+              }
+              splice(initSplicePoint(head, true) ?? 0);
+            }
+            if (rest) emit(rw.process(rest));
             const tail = rw.finish();
             if (tail) controller.enqueue(encoder.encode(tail));
             controller.close();
             onDone?.();
             return;
           }
-          const out = rw.process(decoder.decode(value, { stream: true }));
-          if (out) controller.enqueue(encoder.encode(out));
+          if (injected) {
+            emit(rw.process(decoder!.decode(value, { stream: true })));
+            continue;
+          }
+          if (decoder !== null) {
+            head += decoder.decode(value, { stream: true });
+          } else {
+            held.push(value);
+            heldLen += value.length;
+            if (heldLen < 1024) continue;
+            decoder = makeDecoder(resolveCharset(contentType, cat(held), true));
+            head += decoder.decode(cat(held), { stream: true });
+            held = [];
+          }
+          const at = initSplicePoint(head);
+          if (at !== null) splice(at);
+          else if (head.length > 2048) splice(0);
         }
       } catch (e) {
         DIAG.emit({
@@ -348,13 +443,17 @@ function rewriteStream(
    one-shot pass, so large CSS delayed first paint). No window.__ZL
    init is injected here: CSS is not a document, the bootstrap never
    runs in a stylesheet context. The rewriter retains only the
-   incomplete url( tail between chunks. */
+   incomplete url( tail between chunks. Issue B: the body decodes
+   with the upstream charset (header, BOM or a leading @charset, all
+   within the first bytes, so the head is held only until the
+   charset resolves); the served copy is UTF-8 and the caller
+   declares it on the served content-type. */
 function cssRewriteStream(
   body: ReadableStream<Uint8Array>,
   base: string,
+  contentType: string,
   onDone?: () => void,
 ): ReadableStream<Uint8Array> {
-  const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   const modP = rewriter();
   return new ReadableStream<Uint8Array>({
@@ -363,17 +462,43 @@ function cssRewriteStream(
         const mod = await modP;
         const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix(), "b64u", routeKeyB64 ?? undefined); // scheme fixed since #32 (mirror removed)
         const reader = body.getReader();
+        const emit = (out: string) => {
+          if (out) controller.enqueue(encoder.encode(out));
+        };
+        const headerLabel = charsetFromHeader(contentType);
+        let decoder: TextDecoder | null = headerLabel ? makeDecoder(headerLabel) : null;
+        let held: Uint8Array[] = [];
+        let heldLen = 0;
         for (;;) {
           const { done, value } = await reader.read();
           if (done) {
+            let text = "";
+            if (decoder === null) {
+              decoder = makeDecoder(resolveCharset(contentType, cat(held), false));
+              text = decoder.decode(cat(held), { stream: true });
+              held = [];
+            }
+            /* Flush the decoder's incomplete tail: a multi-byte
+               sequence truncated at end-of-stream used to be dropped
+               silently (issue B). */
+            text += decoder.decode();
+            if (text) emit(rw.process(text));
             const tail = rw.finish();
             if (tail) controller.enqueue(encoder.encode(tail));
             controller.close();
             onDone?.();
             return;
           }
-          const out = rw.process(decoder.decode(value, { stream: true }));
-          if (out) controller.enqueue(encoder.encode(out));
+          if (decoder !== null) {
+            emit(rw.process(decoder.decode(value, { stream: true })));
+            continue;
+          }
+          held.push(value);
+          heldLen += value.length;
+          if (heldLen < 64) continue; /* @charset must sit at the very start */
+          decoder = makeDecoder(resolveCharset(contentType, cat(held), false));
+          emit(rw.process(decoder.decode(cat(held), { stream: true })));
+          held = [];
         }
       } catch (e) {
         DIAG.emit({
@@ -752,7 +877,19 @@ function siteDisabled(target: string): boolean {
 
 /* ---- Fetch interception -------------------------------------------- */
 
-/** Classify a request by sec-fetch-dest plus response content-type.
+/** The request destination from the spec source of truth first:
+    sec-fetch-* are forbidden headers the browser's network layer
+    adds, and SW-visible requests can lack them entirely (Firefox;
+    the repo's own #40), so every sec-fetch-dest header read goes
+    through here. request.destination is set on every FetchEvent
+    request; its "" (fetch/XHR) is what the header calls "empty", so
+    the helper maps it and never returns a bare "". */
+function reqDest(req: Request): string {
+  if (req.destination) return req.destination;
+  return (req.headers.get("sec-fetch-dest") ?? "").toLowerCase() || "empty";
+}
+
+/** Classify a request by destination plus response content-type.
     The devtools network panel filters on this; honest fallbacks only:
     unknown destinations and unknown content types report OTHER. */
 function classifyRtype(destHeader: string, contentType: string): string {
@@ -910,7 +1047,7 @@ self.addEventListener("activate", (e) => {
 function csInjectUrls(target: string, req: Request): string[] {
   const exts = extensions.list();
   if (exts.length === 0) return [];
-  const dest = (req.headers.get("sec-fetch-dest") ?? "").toLowerCase();
+  const dest = reqDest(req);
   const subframe = dest === "iframe" || dest === "object";
   const urls: string[] = [];
   for (const r of resolveContentScripts(exts, target, subframe)) {
@@ -1023,7 +1160,7 @@ function navOutcome(
     path: url.pathname + url.search,
     dest: url.href,
     status,
-    rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
+    rtype: classifyRtype(reqDest(e.request), ""),
     ms: 0,
     bytes: -1,
     err: text,
@@ -1102,15 +1239,17 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             /* #40: extension-page access. Client ids are SW-observed
                FetchEvent fields, never page-supplied. */
             {
-              /* #40: a navigation is mode "navigate". sec-fetch-dest
-                 only appears when the browser attaches Fetch
-                 Metadata, which browser-initiated and popup
-                 navigations can lack (a live host window.open to a
-                 minted page URL fell through to the WAR gate because
-                 nav was computed false on a dest-less request). */
+              /* #40: a navigation is mode "navigate"; the destination
+                 field is the spec source (reqDest), because the
+                 sec-fetch-dest header only appears when the browser
+                 attaches Fetch Metadata, which browser-initiated and
+                 popup navigations can lack (a live host window.open
+                 to a minted page URL fell through to the WAR gate
+                 because nav was computed false on a dest-less
+                 request). */
               nav:
                 e.request.mode === "navigate" ||
-                e.request.headers.get("sec-fetch-dest") === "document",
+                reqDest(e.request) === "document",
               clientId: e.clientId || undefined,
               resultingClientId: e.resultingClientId || undefined,
               pageUrl,
@@ -1199,7 +1338,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             path: url.pathname + url.search,
             dest: e.request.url,
             status: 0,
-            rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
+            rtype: classifyRtype(reqDest(e.request), ""),
             ms: -1,
             bytes: -1,
             verdict: "passthrough: cross-origin",
@@ -1229,7 +1368,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             path: url.href,
             dest: url.href,
             status: 204,
-            rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
+            rtype: classifyRtype(reqDest(e.request), ""),
             ms: 0,
             bytes: 0,
             verdict: "cors-preflight: answered by engine",
@@ -1436,9 +1575,10 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           return d;
         };
         /* NativeTransit decision: pre-fetch classification from the
-           destination scheme + sec-fetch-dest; refined with the actual
-           content type once the response arrives. */
-        const decision = decideTransport(target, e.request.headers.get("sec-fetch-dest") ?? "");
+           destination scheme + request destination; refined with the
+           actual content type once the response arrives. */
+        const dest = reqDest(e.request);
+        const decision = decideTransport(target, dest);
         /* webNavigation.onBeforeNavigate: navigation-mode requests
            report the interception itself, before any cache or upstream
            work. */
@@ -1448,7 +1588,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           requestId: traceId,
           url: target,
           method: e.request.method,
-          type: wrType(e.request.headers.get("sec-fetch-dest") ?? ""),
+          type: wrType(dest),
           timeStamp: Date.now(),
         };
         /* webRequest.onBeforeRequest: a blocking listener can cancel the
@@ -1464,13 +1604,15 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             traceId,
             requestId: traceId,
           });
-          transitRecord(traceId, target, decision);
+          /* Issue E: no transitRecord on blocked exits - a cancelled
+             request never completed, so it must not count as
+             NativeTransit; the netLog row below carries the block. */
           netLogPush({
             method: e.request.method, traceId,
             path: internalUrl,
             dest: target,
             status: 403,
-            rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
+            rtype: classifyRtype(dest, ""),
             ms: Date.now() - t0,
             bytes: -1,
             verdict: "blocked",
@@ -1484,10 +1626,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
            rules first, then programmatic handlers; a block from either
            wins, before cache and transport. See docs/interception.md. */
         const engineRules = await loadRules();
-        const rtype = classifyRtype(
-          e.request.headers.get("sec-fetch-dest") ?? "",
-          "",
-        ).toLowerCase() as ResourceType;
+        const rtype = classifyRtype(dest, "").toLowerCase() as ResourceType;
         const ruleDec = applyRules(engineRules, target, rtype);
         const kinds: Exclude<InterceptKind, "response">[] = ["request"];
         if (e.request.mode === "navigate") kinds.push("navigation");
@@ -1531,7 +1670,8 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             traceId,
             requestId: traceId,
           });
-          transitRecord(traceId, target, decision);
+          /* Issue E: no transitRecord - blocked, never completed (the
+             netLog row carries the block). */
           netLogPush({
             method: e.request.method, traceId,
             path: internalUrl,
@@ -1553,7 +1693,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         if (e.request.method === "GET") {
           const hit = await pageCacheMatch(e.request);
           if (hit) {
-            const dec = refineWithContent(decision, hit.headers.get("content-type") ?? "");
+            const dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
             transitRecord(traceId, target, dec);
             /* Bug-scout fix: cache-hit navigations used to skip the
                webNavigation lifecycle entirely. */
@@ -1568,10 +1708,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               path: internalUrl,
               dest: target,
               status: hit.status,
-              rtype: classifyRtype(
-                e.request.headers.get("sec-fetch-dest") ?? "",
-                hit.headers.get("content-type") ?? "",
-              ),
+              rtype: classifyRtype(dest, hit.headers.get("content-type") ?? ""),
               ms: Date.now() - t0,
               bytes: Number(hit.headers.get("content-length") ?? -1),
               verdict: "cache",
@@ -1605,15 +1742,20 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               const chRules = await siteRules();
               const chRule = ruleFor(chRules, target);
               const csInject = csInjectUrls(target, e.request);
+              const hitCt = hit.headers.get("content-type") ?? "text/html";
+              /* Issue B: the served copy is re-encoded UTF-8. */
+              hitHeaders.set("content-type", utf8ContentType(hitCt));
               return new Response(
-                rewriteStream(hit.body, target, chRule, csInject, () => {
+                rewriteStream(hit.body, target, chRule, csInject, hitCt, () => {
                   if (e.request.mode === "navigate") WEBNAV.completed(target);
                 }),
                 { status: hit.status, headers: hitHeaders },
               );
             }
             if (isCss(hit) && hit.body) {
-              return new Response(cssRewriteStream(hit.body, target), {
+              const hitCt = hit.headers.get("content-type") ?? "text/css";
+              hitHeaders.set("content-type", utf8ContentType(hitCt));
+              return new Response(cssRewriteStream(hit.body, target, hitCt), {
                 status: hit.status,
                 headers: hitHeaders,
               });
@@ -1657,7 +1799,11 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               (e.request.referrer
                 ? referrerDest(e.request.referrer, foreign ? "/" : url.pathname + url.search) ?? undefined
                 : undefined),
-            navigation: (e.request.headers.get("sec-fetch-dest") ?? "") === "document",
+            /* Issue D: a top-level navigation is mode "navigate"
+               (destination "document"); the header alone was false on
+               browsers that omit Fetch Metadata, which dropped Lax
+               cookies from cross-site logins under sameSite approx. */
+            navigation: e.request.mode === "navigate" || dest === "document",
           };
           /* 1.4 Boride: the jar is the authoritative Cookie source for
              engine-initiated requests, written last so rules and
@@ -1813,7 +1959,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              refresh (no url=) carries no destination and passes. */
           mapRefreshHeader(outHeaders, finalDest ?? target);
           void applyOnResponse(plugins, target, resp.status, outHeaders);
-          const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "");
+          const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "", dest);
           traceDecision({ subsystem: "transport", rule: dec.mode, original: target, result: dec.fallbackReason ?? dec.mode, resource: rtype, traceId });
           if (finalDest)
             traceDecision({ subsystem: "transport", rule: "redirect", original: target, result: finalDest, resource: rtype, traceId });
@@ -1826,10 +1972,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             ms: Date.now() - t0,
             bytes: Number(resp.headers.get("content-length") ?? -1),
             verdict: plugins?.length ? "pass:" + plugins.length : undefined,
-            rtype: classifyRtype(
-              e.request.headers.get("sec-fetch-dest") ?? "",
-              resp.headers.get("content-type") ?? "",
-            ),
+            rtype: classifyRtype(dest, resp.headers.get("content-type") ?? ""),
             rewritten: isHtml(resp) ? "html" : isCss(resp) ? "css" : undefined,
             transport: dec.mode,
             fallbackReason: dec.fallbackReason,
@@ -1861,6 +2004,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               });
             }
           }
+          /* The upstream content type, used by the rewrite branches
+             below (charset resolution, honest classification). */
+          const respCt = resp.headers.get("content-type") ?? "";
           /* #35 (browser E2E): script/worker JS bodies flow through a
              serve-time transform below (specifier pass, worker
              prelude), and each of those branches stores its TRANSFORMED
@@ -1869,43 +2015,83 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              visit, so the raw store skips exactly the union of the
              transformed branches. Documents and stylesheets keep the
              raw store: their cache hits re-run the streaming
-             rewriter. */
+             rewriter. Content-type-less document responses are never
+             stored either: only the fresh path can sniff them (issue
+             C), a cached copy would serve the second visit
+             unrewritten. */
           const workerServe = isWorkerDestination(e.request.destination) && !!resp.body;
           /* #47: destination "" JS (fetch/XHR + eval) transforms too,
              so its raw store must be skipped exactly like script-dest
              JS - the branch below stores the transformed copy. */
           const scriptServe = (e.request.destination === "script" || e.request.destination === "") && isJs(resp) && !!resp.body;
-          if (e.request.method === "GET" && !workerServe && !scriptServe) void pageCacheStore(e.request, resp.clone());
-          if (isHtml(resp) && resp.body) {
+          if (
+            e.request.method === "GET" &&
+            !workerServe &&
+            !scriptServe &&
+            !(DOC_DESTS.has(dest) && respCt === "")
+          ) {
+            void pageCacheStore(e.request, resp.clone());
+          }
+          if ((isHtml(resp) || (respCt === "" && DOC_DESTS.has(dest) && resp.body)) && resp.body) {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
             traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });
             /* Main-frame document loads feed the webNavigation bridge;
                subresource fetches do not arrive in navigate mode. */
             if (e.request.mode === "navigate") WEBNAV.committed(target);
             const csInject = csInjectUrls(target, e.request);
-            return new Response(
-              rewriteStream(resp.body, target, rule, csInject, () => {
-                /* webNavigation.onCompleted + webRequest.onCompleted:
-                   the document stream (and with it the navigation) is
-                   done. */
-                WEBNAV.completed(target);
-                WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-              }),
-              {
-                status: resp.status,
-                headers: outHeaders,
-              },
-            );
+            const rewriteDone = () => {
+              /* webNavigation.onCompleted + webRequest.onCompleted:
+                 the document stream (and with it the navigation) is
+                 done. */
+              WEBNAV.completed(target);
+              WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            };
+            if (respCt !== "") {
+              /* Issue B: the rewritten body is re-encoded UTF-8; the
+                 served content-type must say so, or a legacy upstream
+                 charset corrupts the page. */
+              outHeaders.set("content-type", utf8ContentType(respCt));
+              return new Response(
+                rewriteStream(resp.body, target, rule, csInject, respCt, rewriteDone),
+                {
+                  status: resp.status,
+                  headers: outHeaders,
+                },
+              );
+            }
+            /* Issue C: a content-type-less response to a document
+               destination is sniffed on its first chunk exactly the
+               way the browser sniffs navigations: html joins the
+               rewrite path (served as utf-8 html), anything else
+               passes the raw bytes through untouched. */
+            const sniffReader = resp.body!.getReader();
+            const { value: sniffHead } = await sniffReader.read();
+            if (sniffHead && sniffsAsHtml(sniffHead)) {
+              outHeaders.set("content-type", "text/html; charset=utf-8");
+              return new Response(
+                rewriteStream(sniffReader, target, rule, csInject, "text/html", rewriteDone),
+                {
+                  status: resp.status,
+                  headers: outHeaders,
+                },
+              );
+            }
+            return new Response(rawFrom(sniffHead, sniffReader), {
+              status: resp.status,
+              headers: outHeaders,
+            });
           }
           if (isCss(resp) && resp.body) {
             /* 2.4 Bromide: standalone stylesheets stream through the wasm
                CSS rewriter (previously a one-shot pass over a fully
                buffered body). Completion events fire at stream end, like
-               the HTML path. */
+               the HTML path. Issue B: decoded with the upstream charset,
+               served UTF-8 with the header saying so. */
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "css rewrite stream wired" });
             traceDecision({ subsystem: "rewriter", rule: "css", original: target, result: "streaming", resource: rtype, traceId });
+            outHeaders.set("content-type", utf8ContentType(respCt));
             return new Response(
-              cssRewriteStream(resp.body, target, () => {
+              cssRewriteStream(resp.body, target, respCt, () => {
                 DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
                 WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
               }),
@@ -1925,7 +2111,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           if (isWorkerDestination(e.request.destination) && e.request.mode === "cors" && resp.body) {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "module worker specifier pass" });
             traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
-            const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
+            const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, decodeBody(await resp.arrayBuffer(), respCt));
             /* Issue #32: no __ZL_WORKER_URL__ global (it handed the
                upstream URL to any worker script); the worker's own
                engine route is passed to the prelude init line and
@@ -1942,6 +2128,11 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             /* #35: the page cache holds the composed copy (specifiers
                rewritten, prelude prepended); a stored raw body would
                serve a second visit unrewritten. */
+            /* Issue B: decode with the upstream charset (the fetch
+               spec's text() is always UTF-8 and mangled legacy
+               script bodies); the composed copy is re-encoded UTF-8
+               and the served header says so. */
+            outHeaders.set("content-type", utf8ContentType(respCt));
             const out = new Response(head + src, { status: resp.status, headers: outHeaders });
             if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());
             return out;
@@ -1995,7 +2186,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           if ((e.request.destination === "script" || e.request.destination === "") && isJs(resp) && resp.body) {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
-            let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, await resp.text());
+            let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, decodeBody(await resp.arrayBuffer(), respCt));
             /* #46: external script bodies get the URL-literal +
                frame-buster pass inline scripts get. Specifiers run
                first: the routes they emit are root-relative, so the
@@ -2014,6 +2205,10 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               });
             }
             WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            /* Issue B: the decoded-with-upstream-charset body is
+               re-encoded UTF-8 by the string Response constructor;
+               the served header must say so. */
+            outHeaders.set("content-type", utf8ContentType(respCt));
             const out = new Response(src, { status: resp.status, headers: outHeaders });
             if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());
             return out;
@@ -2039,13 +2234,14 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             url: target,
           });
           WEBREQ.errorOccurred({ ...wrDetails, error: String(err) });
-          transitRecord(traceId, target, decision);
+          /* Issue E: no transitRecord - errored, never completed (the
+             netLog row carries the failure). */
           netLogPush({
             method: e.request.method, traceId,
             path: internalUrl,
             dest: target,
             status: 0,
-            rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
+            rtype: classifyRtype(dest, ""),
             ms: Date.now() - t0,
             bytes: -1,
             err: String(err),

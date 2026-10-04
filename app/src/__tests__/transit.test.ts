@@ -6,6 +6,9 @@ import {
   transitRecord,
   transitStats,
   transitResetForTests,
+  docKind,
+  sniffsAsHtml,
+  DOC_DESTS,
 } from "../transit";
 
 beforeEach(() => transitResetForTests());
@@ -48,6 +51,56 @@ describe("decideTransport", () => {
       fallbackReason: "UNSUPPORTED_PROTOCOL",
     });
   });
+  /* Issue E: embed, fencedframe and xslt used to fall through to
+     NativeTransit; they load documents like iframe/object do. */
+  it("embed, fencedframe and xslt destinations require the rewrite path", () => {
+    for (const dest of DOC_DESTS) {
+      expect(decideTransport("https://example.com/x", dest)).toEqual({
+        mode: "RewriteFallback",
+        fallbackReason: "DOCUMENT_REWRITE_REQUIRED",
+      });
+    }
+  });
+});
+
+/* Issue C: one classification for the SW's rewrite branches and the
+   refinement; XHTML documents are HTML to the rewriter. */
+describe("docKind", () => {
+  it("html for text/html and application/xhtml+xml", () => {
+    expect(docKind("text/html")).toBe("html");
+    expect(docKind("text/html; charset=shift_jis")).toBe("html");
+    expect(docKind("application/xhtml+xml")).toBe("html");
+    expect(docKind("APPLICATION/XHTML+XML")).toBe("html");
+  });
+  it("css for text/css", () => {
+    expect(docKind("text/css")).toBe("css");
+    expect(docKind("text/css; charset=utf-8")).toBe("css");
+  });
+  it("none for everything else", () => {
+    expect(docKind("image/svg+xml")).toBe("none");
+    expect(docKind("application/xml")).toBe("none");
+    expect(docKind("application/javascript")).toBe("none");
+    expect(docKind("")).toBe("none");
+  });
+});
+
+/* Issue C: the browser sniffs html for content-type-less navigations;
+   the SW sniffs the same way so such documents join the rewrite path
+   instead of leaking absolute links past the engine. */
+describe("sniffsAsHtml", () => {
+  const enc = (s: string) => new TextEncoder().encode(s);
+  it("recognizes document opens", () => {
+    expect(sniffsAsHtml(enc("<!doctype html><html>"))).toBe(true);
+    expect(sniffsAsHtml(enc("<!DOCTYPE HTML>\n<html>"))).toBe(true);
+    expect(sniffsAsHtml(enc("<!-- comment --><html>"))).toBe(true);
+    expect(sniffsAsHtml(enc("<table><tr>"))).toBe(true);
+    expect(sniffsAsHtml(enc("<script>"))).toBe(true);
+  });
+  it("does not claim binary or script-adjacent heads", () => {
+    expect(sniffsAsHtml(enc("\x89PNG\r\n\x1a\n"))).toBe(false);
+    expect(sniffsAsHtml(enc("function f(){}"))).toBe(false);
+    expect(sniffsAsHtml(enc(""))).toBe(false);
+  });
 });
 
 describe("refineWithContent", () => {
@@ -64,6 +117,38 @@ describe("refineWithContent", () => {
     expect(refineWithContent(native, "image/png")).toEqual({ mode: "NativeTransit" });
     expect(refineWithContent({ mode: "RewriteFallback", fallbackReason: "DOCUMENT_REWRITE_REQUIRED" }, "image/png"))
       .toEqual({ mode: "RewriteFallback", fallbackReason: "DOCUMENT_REWRITE_REQUIRED" });
+  });
+  /* Issue C: destination-aware refinement. An XML document on a
+     document destination is a required-but-unsupported rewrite: the
+     rewriter speaks HTML, not XML, so the body still serves native
+     and the honest reason is the only telemetry. */
+  it("XML documents on document destinations are recorded as required-but-unsupported", () => {
+    const native = { mode: "NativeTransit" as const };
+    expect(refineWithContent(native, "image/svg+xml", "document")).toEqual({
+      mode: "RewriteFallback",
+      fallbackReason: "XML_DOCUMENT_REWRITE_REQUIRED",
+    });
+    expect(refineWithContent(native, "application/xml", "iframe")).toEqual({
+      mode: "RewriteFallback",
+      fallbackReason: "XML_DOCUMENT_REWRITE_REQUIRED",
+    });
+    /* XML on a non-document destination is a plain resource. */
+    expect(refineWithContent(native, "image/svg+xml", "image")).toEqual({ mode: "NativeTransit" });
+  });
+  it("content-type-less document destinations demand the rewrite path", () => {
+    const native = { mode: "NativeTransit" as const };
+    expect(refineWithContent(native, "", "document")).toEqual({
+      mode: "RewriteFallback",
+      fallbackReason: "DOCUMENT_REWRITE_REQUIRED",
+    });
+    expect(refineWithContent(native, "", "fetch")).toEqual({ mode: "NativeTransit" });
+  });
+  it("XHTML bodies are html to the rewriter, whatever the destination", () => {
+    const native = { mode: "NativeTransit" as const };
+    expect(refineWithContent(native, "application/xhtml+xml", "iframe")).toEqual({
+      mode: "RewriteFallback",
+      fallbackReason: "DOCUMENT_REWRITE_REQUIRED",
+    });
   });
 });
 
@@ -96,5 +181,13 @@ describe("transitRecord", () => {
     expect(s.fallback).toBe(1);
     expect(s.fallbacks[0].url).toBe("https://a.com/");
     expect(s.fallbacks[0].reason).toBe("CSS_URL_REWRITE_REQUIRED");
+  });
+  /* Issue E: the epoch lets a consumer detect a SW restart instead
+     of trusting counters that silently reset. */
+  it("stats carry the per-worker epoch", () => {
+    const s = transitStats();
+    expect(typeof s.epoch).toBe("number");
+    expect(s.epoch).toBeGreaterThan(0);
+    expect(transitStats().epoch).toBe(s.epoch);
   });
 });
