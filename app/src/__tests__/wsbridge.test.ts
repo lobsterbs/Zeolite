@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WsBridge, type PortLike, type WsFactory, type WsHooks } from "../wsbridge";
 
 interface FakeHandlers {
@@ -196,5 +196,115 @@ describe("WsBridge", () => {
     expect(rec.closes).toHaveLength(2);
     expect(p1.closed).toBe(true);
     expect(p2.closed).toBe(true);
+  });
+});
+
+/* #61 keepalive watchdog. Fake timers drive the ticks; the factory
+   below owns a controllable ping/lastPongAt seam so the watchdog runs
+   against a transport that really answers (or really stays silent). */
+describe("WsBridge keepalive watchdog (#61)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function pingFactory(): {
+    factory: WsFactory;
+    handlers: FakeHandlers[];
+    pings: { count: number };
+    pong: () => void;
+  } {
+    const handlers: FakeHandlers[] = [];
+    const pings = { count: 0 };
+    let pongAt = 0;
+    const factory: WsFactory = {
+      open: (url, protocols, h) => {
+        handlers.push({ url, protocols, h });
+        return {
+          send: () => undefined,
+          close: () => undefined,
+          ping: () => {
+            pings.count++;
+            return true;
+          },
+          lastPongAt: () => pongAt,
+        };
+      },
+    };
+    return { factory, handlers, pings, pong: () => pongAt++ };
+  }
+
+  it("closes 1006/unclean after consecutive unanswered pings", () => {
+    vi.useFakeTimers();
+    const { hooks, rec } = fakeHooks();
+    const { factory, handlers, pings } = pingFactory();
+    const b = new WsBridge(factory, hooks, { keepaliveIntervalMs: 1000, keepaliveMisses: 2 });
+    const p = fakePort();
+    b.open(p, "wss://example.com/", []);
+    handlers[0].h.onopen("");
+    vi.advanceTimersByTime(1000);
+    expect(pings.count).toBe(1);
+    expect(b.size).toBe(1);
+    vi.advanceTimersByTime(1000);
+    expect(b.size).toBe(0);
+    expect((rec.closes as Array<{ code: number; clean: boolean }>)[0]).toMatchObject({ code: 1006, clean: false });
+    expect(
+      (rec.traces as Array<{ result?: string }>).some((t) =>
+        (t.result ?? "").includes("abnormal close 1006: keepalive timeout"),
+      ),
+    ).toBe(true);
+    expect(p.posted).toContainEqual({ ev: "close", code: 1006, clean: false, reason: "keepalive timeout" });
+    /* the watchdog timer died with the connection */
+    vi.advanceTimersByTime(5000);
+    expect(pings.count).toBe(1);
+  });
+
+  it("rx bytes and pongs reset the missed counter", () => {
+    vi.useFakeTimers();
+    const { hooks } = fakeHooks();
+    const { factory, handlers, pings, pong } = pingFactory();
+    const b = new WsBridge(factory, hooks, { keepaliveIntervalMs: 1000, keepaliveMisses: 2 });
+    const p = fakePort();
+    b.open(p, "wss://example.com/", []);
+    handlers[0].h.onopen("");
+    vi.advanceTimersByTime(1000); /* tick 1: missed = 1 */
+    handlers[0].h.onmessage("x"); /* rx resets */
+    pong(); /* the ping was answered */
+    vi.advanceTimersByTime(1000); /* tick 2: answered -> 0 */
+    vi.advanceTimersByTime(1000); /* tick 3: missed = 1 */
+    pong();
+    vi.advanceTimersByTime(1000); /* tick 4: answered -> 0 */
+    expect(b.size).toBe(1);
+    expect(pings.count).toBe(4);
+  });
+
+  it("never starts a watchdog without the ping/pong seam", () => {
+    vi.useFakeTimers();
+    const { hooks } = fakeHooks();
+    const { factory, handlers } = fakeFactory();
+    const b = new WsBridge(factory, hooks, { keepaliveIntervalMs: 1000 });
+    const p = fakePort();
+    b.open(p, "wss://example.com/", []);
+    handlers[0].h.onopen("");
+    vi.advanceTimersByTime(10000);
+    expect(b.size).toBe(1); /* no timer, no kills: quiet sockets stay open */
+  });
+
+  it("clears watchdog timers on closeAll", () => {
+    vi.useFakeTimers();
+    const { hooks } = fakeHooks();
+    const { factory, handlers, pings } = pingFactory();
+    const b = new WsBridge(factory, hooks, { keepaliveIntervalMs: 1000 });
+    const p1 = fakePort();
+    const p2 = fakePort();
+    b.open(p1, "wss://a.example/", []);
+    b.open(p2, "wss://b.example/", []);
+    handlers[0].h.onopen("");
+    handlers[1].h.onopen("");
+    vi.advanceTimersByTime(1000);
+    b.closeAll();
+    expect(b.size).toBe(0);
+    expect(pings.count).toBe(2);
+    vi.advanceTimersByTime(10000);
+    expect(pings.count).toBe(2); /* no dangling intervals */
   });
 });

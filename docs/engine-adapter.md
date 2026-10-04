@@ -130,6 +130,18 @@ transport reconnects on the next request, and page fetches fail loudly
 rather than hang. (The old `wisp.ts` heartbeat client was dead code
 from the pre-vendoring era and has been removed.)
 
+Page WebSocket bridges have a watchdog seam since #61: the wsbridge
+sends WS pings and closes the page socket abnormally (1006, unclean,
+trace entry) after consecutive unanswered pings - but only when the
+transport factory exposes ping()/lastPongAt(). The vendored
+@mercuryworkshop/libcurl-transport (2.0.5 / libcurl.js 0.7.4) exposes
+no WS control-frame surface, so the capability is absent and the
+bridge degrades honestly: a silently dead peer (NAT timeout, half-open
+TCP, suspended instance) still leaves the page socket OPEN until the
+transport itself errors. Closing that residual needs upstream
+transport ping support (or a wisp-level keepalive, which the pinned
+v2.1 protocol does not have).
+
 ## Status
 
 - Phase 2 adapter surface: implemented (engine.ts + sw.ts control plane

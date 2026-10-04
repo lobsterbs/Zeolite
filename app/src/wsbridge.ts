@@ -12,6 +12,15 @@
 export interface WsHandle {
   send(data: unknown): void;
   close(code: number, reason?: string): void;
+  /* Keepalive seam (#61), optional: send one WS ping frame. Absent
+     means the transport cannot emit WS control frames and the bridge
+     watchdog stays off (honest degradation, not a silent
+     approximation). Returns false when the send failed. */
+  ping?(): boolean;
+  /* Keepalive seam (#61), optional: epoch ms of the last received
+     pong. The watchdog treats a ping as answered only when this
+     advances between ticks. */
+  lastPongAt?(): number;
 }
 
 export interface WsFactory {
@@ -78,12 +87,33 @@ interface Conn {
       immediately after new WebSocket() do not lose data while the
       transport initializes or the handshake runs. */
   pending: unknown[];
+  /* Keepalive watchdog state (#61): interval handle, consecutive
+     unanswered pings, pong timestamp seen at the previous tick. */
+  ka?: ReturnType<typeof setInterval>;
+  missed: number;
+  lastPong: number;
+}
+
+export interface WsBridgeOptions {
+  /** Watchdog ping interval in ms; 0 disables the watchdog. */
+  keepaliveIntervalMs?: number;
+  /** Consecutive unanswered pings before an abnormal close. */
+  keepaliveMisses?: number;
 }
 
 export class WsBridge {
   private conns = new Map<PortLike, Conn>();
+  private kaInterval: number;
+  private kaMisses: number;
 
-  constructor(private factory: WsFactory, private hooks: WsHooks) {}
+  constructor(
+    private factory: WsFactory,
+    private hooks: WsHooks,
+    opts?: WsBridgeOptions,
+  ) {
+    this.kaInterval = opts?.keepaliveIntervalMs ?? 30_000;
+    this.kaMisses = opts?.keepaliveMisses ?? 2;
+  }
 
   get size(): number {
     return this.conns.size;
@@ -109,6 +139,8 @@ export class WsBridge {
       ready: false,
       t0: Date.now(),
       pending: [],
+      missed: 0,
+      lastPong: 0,
     };
     this.conns.set(port, conn);
     port.onmessage = (ev) => {
@@ -139,6 +171,29 @@ export class WsBridge {
           this.hooks.onReady(conn.token, protocol, Date.now() - conn.t0);
           this.hooks.trace({ subsystem: "websocket", original: target, result: "open", resource: "websocket" });
           port.postMessage({ ev: "open", protocol });
+          /* #61 keepalive watchdog: only when the transport can both
+             send WS pings and observe pongs. A transport without the
+             seam (the vendored libcurl bundle today) never starts a
+             timer, so quiet server-push sockets stay open. */
+          if (
+            this.kaInterval > 0 &&
+            typeof conn.handle.ping === "function" &&
+            typeof conn.handle.lastPongAt === "function"
+          ) {
+            conn.lastPong = conn.handle.lastPongAt();
+            conn.ka = setInterval(() => {
+              if (this.conns.get(port) !== conn) return;
+              const ponged = conn.handle.lastPongAt!();
+              if (ponged > conn.lastPong) conn.missed = 0;
+              else conn.missed++;
+              conn.lastPong = ponged;
+              if (conn.missed >= this.kaMisses) {
+                this.end(port, 1006, false, "keepalive timeout");
+                return;
+              }
+              if (!conn.handle.ping!()) this.end(port, 1006, false, "keepalive send failed");
+            }, this.kaInterval);
+          }
           /* Flush everything buffered during the handshake, after the
              open event so page onopen handlers run first (native
              order). */
@@ -150,6 +205,7 @@ export class WsBridge {
         },
         onmessage: (data) => {
           if (this.conns.get(port) !== conn) return;
+          conn.missed = 0; /* any rx proves liveness (#61) */
           this.hooks.onBytes(conn.token, byteSize(data), 0);
           this.hooks.trace({ subsystem: "websocket", original: "rx", result: conn.url, resource: "websocket" });
           port.postMessage({ ev: "message", data });
@@ -190,6 +246,7 @@ export class WsBridge {
   private end(port: PortLike, code: number, clean: boolean, reason?: string): void {
     const conn = this.conns.get(port);
     if (!conn) return;
+    if (conn.ka !== undefined) clearInterval(conn.ka);
     this.conns.delete(port);
     port.onmessage = null;
     this.hooks.onClose(conn.token, code, clean, Date.now() - conn.t0);
