@@ -3,7 +3,8 @@
 Guidance for AI agents and human contributors. Read this before changing code, architecture, CI, or public documentation.
 
 ## Project identity
-Zeolite is a standalone, reusable Rust/WASM web interception and proxy engine. It provides a browser-side service-worker runtime, Wisp v2.1 transport, streaming rewriting, diagnostics, and a WebExtension compatibility layer.
+Zeolite is a standalone, reusable Rust/WASM web interception and proxy engine.
+The project is explicitly experimental: public status is "experimental", releases are not stability guarantees, and the API/embed contract may change without a deprecation window. Docs must keep stating this. It provides a browser-side service-worker runtime, Wisp v2.1 transport, streaming rewriting, diagnostics, and a WebExtension compatibility layer.
 Keep Zeolite independent from LobsterBrowse UI code. Do not document planned behavior as implemented.
 
 ## Current architecture

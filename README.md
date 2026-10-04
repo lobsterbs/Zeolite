@@ -1,6 +1,8 @@
 # Zeolite
 ![Zeolite banner](assets/zeolite-banner.svg)
 **Current release: 2.0 Graphene** · Rust/WASM · Wisp v2.1
+
+> **Status: experimental.** Zeolite is experimental software. The engine, its API surface, and the embed contract can change or break at any time without a deprecation window. Do not treat any release as stable or production-ready; the honesty norms apply (known gaps stay written down), but stability guarantees do not exist yet.
 Zeolite is a standalone, reusable web interception/proxy engine providing a browser service-worker runtime, streaming rewriting, Wisp transport, diagnostics, and WebExtension compatibility.
 ## Current architecture
 The 1.0 release is interception + rewriting. The rewriter is production code.
