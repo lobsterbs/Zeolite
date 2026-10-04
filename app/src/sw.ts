@@ -1681,6 +1681,30 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             resp = await wispFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
           }
           DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
+          /* A 3xx that escaped the hop loop - cap reached, a hop whose
+             one-shot body cannot replay, or no resolvable Location - is
+             surfaced to the page with a mapped Location. For
+             navigations the browser follows that Location itself, so
+             a looping upstream chain shows up as repeated visible
+             reloads (one surfaced hop per MAX_REDIRECT_HOPS engine
+             hops, until the browser's own redirect cap kills the
+             chain). Mark the surface so DevTools can explain the
+             reload cycle instead of leaving it mysterious. */
+          if (resp.status >= 300 && resp.status < 400) {
+            DIAG.emit({
+              traceId,
+              requestId: traceId,
+              category: "TRANSPORT",
+              cause: "redirect-surfaced",
+              severity: "info",
+              stage: "UPSTREAM_RESPONSE",
+              message:
+                "redirect surfaced to the page (hop cap " + MAX_REDIRECT_HOPS +
+                " or unreplayable hop); the browser follows the mapped Location itself, " +
+                "so a looping upstream chain reloads the page in cycles",
+              url: target,
+            });
+          }
           /* Stage E: the SW-followed hop chain is the authority on the
              final destination; a transport-exposed final URL is the
              fallback. */
