@@ -71,8 +71,10 @@ describe("page WebSocket shim abnormal close (#61)", () => {
       order.push("close");
       seen = { code: ev.code, wasClean: ev.wasClean };
     };
-    port2?.postMessage({ ev: "open", protocol: "chat" });
-    port2?.postMessage({ ev: "close", code: 1006, clean: false });
+    /* the closure assignment is invisible to control-flow analysis */
+    const port = port2 as MessagePort | null;
+    port?.postMessage({ ev: "open", protocol: "chat" });
+    port?.postMessage({ ev: "close", code: 1006, clean: false });
     await new Promise((r) => setTimeout(r, 0)); /* let port delivery flush */
     await new Promise((r) => setTimeout(r, 0)); /* let queued events flush */
     expect(order).toEqual(["open", "close"]);
