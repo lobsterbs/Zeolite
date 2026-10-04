@@ -31,6 +31,28 @@ describe("errorPage", () => {
     expect(page).toContain('name="zl-error"');
     expect(page).toContain("&quot;category&quot;:&quot;dns&quot;");
     expect(page).toContain("&quot;version&quot;:&quot;2.3 Selenide&quot;");
+    expect(page).toContain("&quot;route&quot;:&quot;/j/aHR0cHM6Ly90YXJnZXQuZGV2L3A&quot;");
+  });
+
+  it("carries reason, traceId and status, URL-redacted (issue #32)", () => {
+    const p = errorPage({
+      route: "/j/x",
+      category: "stream",
+      engineVersion: "v",
+      reason: "fetch failed after hop https://evil.example/p?x=1",
+      traceId: "t123",
+      status: 502,
+    });
+    expect(p).toContain("&quot;reason&quot;:&quot;fetch failed after hop [redacted url]&quot;");
+    expect(p).toContain("&quot;traceId&quot;:&quot;t123&quot;");
+    expect(p).toContain("&quot;status&quot;:502");
+    expect(p).not.toContain("evil.example");
+  });
+
+  it("omits absent optional fields from the payload", () => {
+    expect(page).not.toContain("reason");
+    expect(page).not.toContain("traceId");
+    expect(page).not.toContain("status");
   });
 
   it("never prints a destination URL (issue #32)", () => {
@@ -48,7 +70,7 @@ describe("errorPage", () => {
     expect(p).not.toContain("onerror=\"alert");
   });
 
-  it("is deterministic, minimal and theme-aware", () => {
+  it("is deterministic and theme-aware", () => {
     const again = errorPage({
       route: "/j/aHR0cHM6Ly90YXJnZXQuZGV2L3A",
       category: "dns",
@@ -56,7 +78,7 @@ describe("errorPage", () => {
     });
     expect(again).toBe(page);
     expect(page).toContain("color-scheme: light dark");
-    expect(page).not.toContain("prefers-color-scheme");
+    expect(page).toContain("@media (prefers-color-scheme: dark)");
     expect(page).toContain('href="/j/aHR0cHM6Ly90YXJnZXQuZGV2L3A"');
   });
 
