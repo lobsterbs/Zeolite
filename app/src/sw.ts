@@ -1695,7 +1695,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
               traceId,
               requestId: traceId,
               category: "TRANSPORT",
-              cause: "redirect-surfaced",
+              cause: "proxy",
               severity: "info",
               stage: "UPSTREAM_RESPONSE",
               message:
