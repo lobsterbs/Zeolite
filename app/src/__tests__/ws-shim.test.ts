@@ -6,7 +6,7 @@ import { applyWs } from "../bootstrap/ws";
 const ctlState = vi.hoisted(() => ({
   ctl: null as { postMessage(msg: unknown, transfer?: unknown[]): void } | null,
 }));
-vi.mock("../siteid", () => ({ swc: () => ctlState.ctl }));
+vi.mock("../bootstrap/siteid", () => ({ swc: () => ctlState.ctl }));
 
 /* The page WebSocket shim (#54 parity): a shim instance must be
    instanceof the real constructor (prototype parity), raw on-handler
