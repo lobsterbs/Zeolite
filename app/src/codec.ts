@@ -92,12 +92,33 @@ const DEC_STRICT = new TextDecoder("utf-8", { fatal: true });
     instances keep the legacy encoding by construction. */
 let routeKey: Uint8Array | null = null;
 
+/** Decode history: every key this deployment minted, newest first.
+    Minting uses routeKey (the newest); decodePath tries each key in
+    order, so a restart that minted a fresh key keeps routes already
+    handed to pages, history and the address bar decodable instead of
+    stranding them (#55). */
+let routeKeys: Uint8Array[] = [];
+
 /** Activate the keyed codec (base64url of 16 raw bytes), or null to
     return to the legacy codec. Anything that is not a decodable
     16-byte key degrades to legacy - never a half-keyed state. */
 export function setRouteKey(b64: string | null): void {
   const bytes = b64 === null ? null : b64uDecode(b64);
   routeKey = bytes && bytes.length === 16 ? bytes : null;
+  routeKeys = routeKey ? [routeKey] : [];
+}
+
+/** Activate the keyed codec with the full decode history (base64url
+    of 16 raw bytes each, newest first, as loaded from ./routekey).
+    Same degraded rule as setRouteKey: anything that is not a
+    decodable 16-byte key is dropped; an empty list is the legacy
+    codec. The first entry is the minting key. */
+export function setRouteKeys(b64s: string[]): void {
+  const keys = b64s
+    .map((b) => b64uDecode(b))
+    .filter((k): k is Uint8Array => !!k && k.length === 16);
+  routeKeys = keys;
+  routeKey = keys[0] ?? null;
 }
 
 const M64 = (1n << 64n) - 1n;
@@ -289,13 +310,20 @@ export function looksKeyedToken(path: string): boolean {
 }
 
 /** Engine-local path -> destination URL, or null if not ours. Dual
-    decode: a v1 keyed token decodes with the key and fails closed
-    without it; legacy tails always decode, so routes minted before
-    the key existed keep working. */
+    decode: a v1 keyed token decodes with any key in the decode
+    history (newest first) and fails closed when none match; legacy
+    tails always decode, so routes minted before the key existed keep
+    working. */
 export function decodePath(path: string): string | null {
   const bytes = tailBytes(path);
   if (!bytes) return null;
-  if (bytes.length >= 17 && bytes[0] === 1) return keyedDecode(routeKey, bytes);
+  if (bytes.length >= 17 && bytes[0] === 1) {
+    for (const key of routeKeys) {
+      const dest = keyedDecode(key, bytes);
+      if (dest) return dest;
+    }
+    return null;
+  }
   return DEC.decode(bytes);
 }
 
@@ -391,4 +419,36 @@ export function referrerDest(referrer: string, path: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Anubis pass-challenge redir repair (the #52 challenge-handoff gap
+    the server-side deployments close in their own proxy): the engine
+    rewriter maps the challenge page's return URL literal into an
+    engine route, so the pass-challenge request carries redir
+    pointing at the engine origin - and the upstream deployment
+    rejects a redirect target outside its allowlist
+    (redirect_domain_not_allowed), so verification fails after the
+    challenge completes. When redir is a decodable engine route
+    (keyed or legacy), rebuild the query with the plaintext upstream
+    page URL so the challenge can finish; the response redirect chain
+    maps the hop back to an engine route through the ordinary
+    pipeline. Returns the fixed absolute URL, or null when redir is
+    absent or not a decodable engine route. */
+export function passChallengeRedirFixed(dest: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(dest);
+  } catch {
+    return null;
+  }
+  const redir = u.searchParams.get("redir");
+  if (!redir) return null;
+  const q = redir.indexOf("?");
+  const path = q < 0 ? redir : redir.slice(0, q);
+  if (!isEnginePath(path)) return null;
+  const decoded = decodePath(path);
+  if (!decoded || !/^https?:\/\//.test(decoded)) return null;
+  const out = new URL(dest);
+  out.searchParams.set("redir", decoded + (q < 0 ? "" : redir.slice(q)));
+  return out.href;
 }

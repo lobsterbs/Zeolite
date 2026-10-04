@@ -225,6 +225,20 @@ When the response URL is the pass-challenge endpoint, the SW emits a
 diag event (category `CHALLENGE`, cause `challenge`, stage
 `UPSTREAM_RESPONSE`); hosts can watch it through `zl:getDiag`.
 
+One wrinkle the engine owns: the challenge page's return URL is
+rewritten into an engine route like every other URL literal, so the
+pass-challenge request carries `redir` pointing at the engine origin,
+which upstream anubis deployments reject
+(`redirect_domain_not_allowed`) - the challenge UI then fails right
+after completing. The SW repairs this at the request seam: when the
+target is the pass-challenge endpoint and its `redir` is a decodable
+engine route, the route is decoded and the query rebuilt with the
+plaintext upstream page URL (`passChallengeRedirFixed` in
+`app/src/codec.ts`, mirroring the server-side bridge), and the repair
+is logged as a `CHALLENGE` diag event (stage `REQUEST_INTERCEPTED`).
+Cookies still flow through the ordinary jar admission above; the
+repair only fixes where the challenge redirects.
+
 ## Honest limits
 
 - The challenge interstitial itself is not detected: there is no

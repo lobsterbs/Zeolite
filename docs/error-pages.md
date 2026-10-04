@@ -9,20 +9,32 @@ When a navigation request fails inside the engine (transport error,
 DNS failure, TLS failure, policy block, interrupted stream), the
 service worker answers with a minimal HTML page it owns:
 
-- one honest category line: dns / tls / timeout / blocked / stream.
-  The category comes from `classifyFailure` in `app/src/errorpage.ts`;
-  an unrecognized failure is reported as a stream error, a cause is
-  never invented;
+- one honest category line: dns / tls / timeout / blocked / stream /
+  route. The category comes from `classifyFailure` in
+  `app/src/errorpage.ts`; an unrecognized failure is reported as a
+  stream error, a cause is never invented;
+- a details card with the joinable diagnostics facts: category,
+  reason (URL-redacted), status, trace id and engine version;
 - one retry action, linking back to the same engine route;
 - a machine-readable `<meta name="zl-error">` payload (JSON:
-  category, engine version) for embedders and DevTools.
+  category, engine version, route, and when known: reason, traceId,
+  status) for embedders and DevTools.
 
 Since #32 the page never prints the destination URL. The address bar
 already shows the opaque engine route of the failed navigation;
 printing the plaintext destination on an engine-origin document would
 expose it to any script (or iframe) on that origin. The real
 destination stays visible in the privileged surfaces only: the netLog
-and diagnostics rings, and the embedder's own devtools.
+and diagnostics rings, and the embedder's own devtools. For the same
+reason the reason line is URL-redacted before it lands on the page or
+in the meta (a transport error string may quote a hop URL); the rings
+keep the unredacted string, and the trace id joins the page to them.
+
+Every navigation strand is also recorded in the netLog ring (status,
+reason, transport `engine`, fresh trace id) by the `navOutcome` seam
+in `app/src/sw.ts`, so the failure is visible in the embedder's
+DevTools network panel and joinable with the diagnostics rings; a
+strand is never a silent 404.
 
 The page is `color-scheme: light dark` aware, carries no stacks, no
 header dumps and no secrets: the structured rings (diag events, trace,

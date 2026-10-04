@@ -84,9 +84,9 @@
 
 /// <reference lib="webworker" />
 import {
-  mintableDest, b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, referrerDest, setRouteKey, setScheme, unwrapDest, currentPrefix } from "./codec";
+  mintableDest, b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, passChallengeRedirFixed, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
 import { mapRefreshHeader, stripHostile } from "./headers";
-import { loadRouteKey, saveRouteKey } from "./routekey";
+import { loadRouteHistory, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
 import { NAV } from "./bootstrap/navguard";
 import { initScript } from "./pageload";
@@ -970,15 +970,20 @@ const routeReady: Promise<void> = (async () => {
   /* #55: the opaque route key restores alongside the shape. First
      boot mints a fresh 16-byte key and persists it. Storage
      unavailable keeps the legacy codec for this worker lifetime:
-     routes stay browser-decodable, the documented degraded mode. */
+     routes stay browser-decodable, the documented degraded mode.
+     The full decode history also restores: minting uses the newest
+     key, decode accepts every key this deployment minted, so routes
+     already handed to pages, history and the address bar keep
+     working across a restart instead of stranding. */
   try {
-    let key = await loadRouteKey();
-    if (!key) {
-      key = crypto.getRandomValues(new Uint8Array(16));
-      await saveRouteKey(key);
+    let history = await loadRouteHistory();
+    if (history.length === 0) {
+      const fresh = crypto.getRandomValues(new Uint8Array(16));
+      await saveRouteKey(fresh);
+      history = [fresh];
     }
-    routeKeyB64 = b64uEncode(key);
-    setRouteKey(routeKeyB64);
+    routeKeyB64 = b64uEncode(history[0]!);
+    setRouteKeys(history.map(b64uEncode));
   } catch {
     /* storage unavailable: keyed codec stays off */
   }
@@ -999,7 +1004,11 @@ async function persistRoute(prefix: string): Promise<void> {
    error page, never on a bare text/plain strand. Route decode
    failures, disabled sites and policy blocks are all
    navigation-capable; subresources keep the honest short text body
-   (no UI, per issue #3). */
+   (no UI, per issue #3). Every strand also lands in the netLog ring
+   with a fresh trace id (status, reason, engine transport), so the
+   failure is visible in the embedder's DevTools network panel and
+   joinable with the diagnostics rings - a strand is never a silent
+   404. */
 function navOutcome(
   e: FetchEvent,
   url: URL,
@@ -1007,12 +1016,30 @@ function navOutcome(
   category: ErrorCategory,
   text: string,
 ): Response {
+  const traceId = DIAG.trace();
+  netLogPush({
+    method: e.request.method,
+    traceId,
+    path: url.pathname + url.search,
+    dest: url.href,
+    status,
+    rtype: classifyRtype(e.request.headers.get("sec-fetch-dest") ?? "", ""),
+    ms: 0,
+    bytes: -1,
+    err: text,
+    verdict: "engine: navigation strand",
+    transport: "engine",
+    detail: { internalUrl: url.pathname + url.search, ttfb: 0 },
+  });
   if (e.request.mode === "navigate") {
     return new Response(
       errorPage({
         route: url.pathname + url.search,
         category,
         engineVersion: ZEOLITE_VERSION,
+        reason: text,
+        traceId,
+        status,
       }),
       { status, headers: { "content-type": "text/html; charset=utf-8" } },
     );
@@ -1283,6 +1310,33 @@ self.addEventListener("fetch", (e: FetchEvent) => {
          before cache or transport; mixed-content subresources and
          redirect targets pass the same seam on their own fetch. */
       target = httpsUpgraded(target, httpsUpgrade);
+      /* #52 parity with the server-side anubis bridge: the challenge
+         page's return URL was rewritten into an engine route, so the
+         pass-challenge request carries redir pointing at the engine
+         origin - and the upstream deployment rejects a redirect target
+         outside its allowlist (redirect_domain_not_allowed), which
+         fails the challenge UI right after it completes. Carry the
+         decoded upstream page URL instead; the response hop chain
+         maps the redirect back to an engine route through the
+         ordinary pipeline. The CHALLENGE event is the log line hosts
+         see when this fires. */
+      if (isPassChallenge(target)) {
+        const fixed = passChallengeRedirFixed(target);
+        if (fixed && fixed !== target) {
+          const ctid = DIAG.trace();
+          DIAG.emit({
+            requestId: ctid,
+            traceId: ctid,
+            category: "CHALLENGE",
+            cause: "challenge",
+            severity: "info",
+            stage: "REQUEST_INTERCEPTED",
+            message: "pass-challenge redir rewritten to the upstream page URL",
+            url: target,
+          });
+          target = fixed;
+        }
+      }
 
       if (siteDisabled(target)) {
         /* #31: a disabled-site navigation lands on the error page
@@ -1941,18 +1995,22 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             detail: mkDetail(),
           });
           /* Issue #3: failed navigations answer with the engine-owned
-             error page (one honest category line, retry, zl-error
-             meta). Issue #32: the target URL is not printed - it
-             lives in the privileged rings (netLog / diagnostics) and
-             the embedder's devtools only. Every other destination
-             keeps the honest 502 plain text body - subresources get
-             no UI. */
+             error page (one honest category line, reason, trace id,
+             retry, zl-error meta). Issue #32: the target URL is not
+             printed - it lives in the privileged rings (netLog /
+             diagnostics) and the embedder's devtools only, and the
+             reason line is URL-redacted on the page. Every other
+             destination keeps the honest 502 plain text body -
+             subresources get no UI. */
           if (e.request.mode === "navigate") {
             return new Response(
               errorPage({
                 route: url.pathname + url.search,
                 category: classifyFailure(String(err)),
                 engineVersion: ZEOLITE_VERSION,
+                reason: String(err),
+                traceId,
+                status: 502,
               }),
               { status: 502, headers: { "content-type": "text/html; charset=utf-8" } },
             );
