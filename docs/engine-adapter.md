@@ -20,6 +20,15 @@ persisted per-site toggles, and navigates the frame to the encoded
 route. No changes to LobsterBrowse are needed to present the choice:
 both engines are just embed URLs.
 
+The `?url=` embed is on a deprecation path (#63): the plaintext
+target it puts in a browser-visible URL is the last decodable
+destination surface on the deployment. Hosts that adopt the handle
+flow send `zl:config { navHandles: true }`, then ask the worker for
+`zl:navHandle { dest }` and navigate the frame to the answered
+`/__zl_navh__/<keyed token>` route instead. While `navHandles` is
+off (or unset) the legacy embed keeps working, so migration is a
+host-side choice, not a flag day.
+
 One contract detail an embedder must keep: the engine's service worker
 is registered as a module worker
 (`navigator.serviceWorker.register("/sw.js", { scope: "/", type: "module" })`).
@@ -63,6 +72,7 @@ interface EngineConfig {
   pathPrefix?: string;                    // default "/j/"
   profile?: string;                       // cookie jar profile, default "default"
   httpsUpgrade?: boolean;                 // opt-in: upgrade http:// destinations before fetching (#53)
+  navHandles?: boolean;                   // opt-in: refuse the plaintext ?url= embed; hosts navigate via zl:navHandle routes instead (#63)
 }
 ```
 
@@ -74,9 +84,10 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 
 | message | payload | effect |
 | --- | --- | --- |
-| `zl:ping` | - | liveness probe (echoes version, degraded, route shape, httpsUpgrade) |
-| `zl:config` | `prefix`, `httpsUpgrade?` | rotate the route prefix at runtime; the scheme is fixed to `"b64u"` since #32, any other `scheme` value is rejected. `httpsUpgrade` toggles the opt-in engine-side upgrade of http:// destinations (#53): absent keeps the persisted choice, the ack echoes the live value |
+| `zl:ping` | - | liveness probe (echoes version, degraded, route shape, httpsUpgrade, navHandles) |
+| `zl:config` | `prefix`, `httpsUpgrade?`, `navHandles?` | rotate the route prefix at runtime; the scheme is fixed to `"b64u"` since #32, any other `scheme` value is rejected. `httpsUpgrade` toggles the opt-in engine-side upgrade of http:// destinations (#53): absent keeps the persisted choice, the ack echoes the live value. `navHandles` toggles the opt-in refusal of the plaintext `?url=` embed (#63): with it on, a scope-root `/?url=` navigation is answered 403 and the host must navigate via `zl:navHandle` routes instead; absent keeps the persisted choice |
 | `zl:mint` | `dest` | mint an opaque route for a destination (#55): answers `{ ok, route }`; the SW-realm key never leaves the worker. Admitted to proxied pages as the #54 page-realm mint seam: a page can construct a legacy route for any destination itself, so minting grants no new capability; `dest` is bounded to absolute http(s) URLs (`mintableDest`). Consumers (navguard markers, worker-prelude inputs, bootstrap re-emission) are not yet migrated, see the #54 residuals |
+| `zl:navHandle` | `dest` | mint an opaque initial-navigation handle for a destination (#63, #54 design D): answers `{ ok, url }` where `url` is `/__zl_navh__/<keyed token>`, valid for a short TTL (120s), navigable like any engine route and decodable by nothing but the worker (the destination appears on no browser-visible surface). Host-only: a proxied-page sender gets the host-only refusal. Stateless: nothing is persisted, so a handle survives a SW restart and a route-key rotation (decode walks the key history). Without a route key (storage degraded) it refuses (`ok: false`) rather than answering a decodable legacy shape |
 | `zl:adblock` | `enabled` | global toggle for the /rules.json block lists |
 | `zl:rules` | `ua`, `rules` (`host`, `adblock`, `ua`) | host-app per-site adblock + User-Agent overrides (rules.ts) |
 | `zl:jarProfile` | `profile` (or null) | switch the cookie jar to a throwaway session profile (incognito; cookies.ts) |

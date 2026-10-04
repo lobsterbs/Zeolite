@@ -311,6 +311,47 @@ Residuals, stated honestly:
   Opaque (data:, blob:) request URLs passthrough by construction.
 - WebSocket is already bridged and never browser-direct; unchanged.
 
+## Capture-dated leak inventory (issue #62)
+
+Every surface on which a destination URL can appear decodably, dated
+to this capture (keyed routes #55, keyed site tokens #32, navigation
+handles #63, marker-branch fix #62):
+
+Covered - no plaintext destination on the surface:
+
+- Engine routes (`/j/`, `/__zl_navh__/`): keyed tokens; the legacy
+  decode of the tail yields keystream garbage, never http(s). Pinned
+  by the browser e2e leak-inventory check and the navhandle unit
+  tests.
+- Initial navigation via `zl:navHandle` (#63): the handle route is a
+  keyed token with a TTL; the mint reply and the navigated URL carry
+  no decodable destination.
+- Storage tokens, WS retarget URLs, the error page: opaque or
+  engine-shaped; unchanged from the sections above.
+- The runtime navguard marker branch: the SW-side `/__zl_nav__/`
+  decode was broken from the first release (the branch matched the
+  bare marker path, which navEncode never emits); every marker
+  navigation fell into escaped-path recovery. Fixed and pinned by a
+  browser e2e marker navigation.
+
+Documented residuals - decodable, bounded, by design:
+
+- Navguard markers (`/__zl_nav__/`): b64u of the target, the #54
+  degrade when the keyed mint is unavailable. Counted and named by
+  the e2e inventory check, never failed.
+- Worker prelude inputs and bootstrap re-emission seams: legacy
+  shape where the receiver cannot hold the key (#54 residuals).
+- `importScripts` stays legacy for good: worker scripts cannot
+  await a mint before load.
+- The `?url=` initial embed: plaintext until a host adopts
+  `zl:navHandle` and flips `navHandles` (#63); the engine refuses it
+  only on the opt-in, so migration is the host's choice.
+
+Open: none at this capture date. The browser e2e leak-inventory
+check walks every captured request URL and the proxied page's
+resource-timing names and fails on any `/j/` or `/__zl_navh__/` tail
+that legacy-decodes to http(s); the list above is what it pins.
+
 ## Known open items (honest, not fixed by 3.0)
 
 - SameSite approximation quality: referrer-derived site context is

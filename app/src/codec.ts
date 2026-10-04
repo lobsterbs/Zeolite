@@ -225,12 +225,12 @@ function keyedToken(key: Uint8Array, dest: string): Uint8Array {
   return out;
 }
 
-/** Decode a v1 keyed token body. Fails closed (null) on: no key,
-    invalid UTF-8, an IV that does not reproduce (wrong key, tampered
-    token) or a non-http(s) destination - the engine routes nothing
-    else, so anything else is not a valid token. Mirrors keyed_decode
-    in crates/rewriter/src/encode.rs byte for byte. */
-function keyedDecode(key: Uint8Array | null, bytes: Uint8Array): string | null {
+/** Decode a v1 keyed token body to its MAC-verified payload string.
+    Fails closed (null) on: no key, invalid UTF-8 or an IV that does
+    not reproduce (wrong key, tampered token). The payload bound is
+    the caller's: route tokens require an http(s) destination, the
+    #63 navigation-handle payload carries its own tag. */
+function keyedPayload(key: Uint8Array | null, bytes: Uint8Array): string | null {
   if (!key || bytes.length < 17 || bytes[0] !== 1) return null;
   const iv = bytes.slice(1, 17);
   const ct = bytes.slice(17);
@@ -248,19 +248,26 @@ function keyedDecode(key: Uint8Array | null, bytes: Uint8Array): string | null {
     }
     d[i] = ct[i] ^ ks[i & 7];
   }
-  let dest: string;
+  let payload: string;
   try {
-    dest = DEC_STRICT.decode(d);
+    payload = DEC_STRICT.decode(d);
   } catch {
     return null;
   }
-  if (
-    concatBytes(destMac(key, d, 1), destMac(key, d, 2)).some((b, i) => b !== iv[i]) ||
-    !/^https?:\/\//.test(dest)
-  ) {
+  if (concatBytes(destMac(key, d, 1), destMac(key, d, 2)).some((b, i) => b !== iv[i])) {
     return null;
   }
-  return dest;
+  return payload;
+}
+
+/** Route-token decode: keyedPayload plus the http(s) destination
+    bound - the engine routes nothing else, so anything else is not a
+    valid token. Mirrors keyed_decode in crates/rewriter/src/encode.rs
+    byte for byte. */
+function keyedDecode(key: Uint8Array | null, bytes: Uint8Array): string | null {
+  const payload = keyedPayload(key, bytes);
+  if (payload === null || !/^https?:\/\//.test(payload)) return null;
+  return payload;
 }
 
 /** Absolute destination URL -> engine-local path. Keyed (opaque)
@@ -288,6 +295,56 @@ export function mintableDest(dest: string): boolean {
     return false;
   }
   return u.protocol === "http:" || u.protocol === "https:";
+}
+
+/* ---- opaque initial-navigation handles (issue #63, #54 design D) --- */
+
+/** Handle route marker: the engine-origin path a host navigates a
+    frame to instead of a plaintext ?url= embed. The tail is a keyed
+    token carrying the handle payload, so the address bar, history
+    and the network panel see an opaque token only. */
+export const NAVH = "/__zl_navh__";
+/** Payload tag: disjoint from any http(s) destination string, so a
+    handle token can never collide with a route token's payload. */
+const NAVH_TAG = "zl:navh:";
+/** Mint-to-navigate window (ms). Short by design: the handle covers
+    the initial load only. */
+export const NAVH_TTL_MS = 120_000;
+
+/** Mint an opaque navigation handle for an absolute http(s)
+    destination: b64u of a keyed token whose payload is
+    NAVH_TAG || expiry || ":" || dest. Stateless by construction -
+    nothing to persist, so a SW restart cannot strand it - and decode
+    walks the full route-key history, so a minted handle survives a
+    key rotation too. TTL-only, not single-use: the issue allows
+    either, and single-use would need SW-side state that a restart
+    could strand (the exact cold-start hazard it warns about). Null =
+    no route key (storage degraded) or a non-mintable destination:
+    the SW refuses instead of answering a legacy-shape handle, which
+    would carry the destination decodably - the leak #63 exists to
+    stop. */
+export function encodeNavHandle(dest: string, ttlMs: number = NAVH_TTL_MS): string | null {
+  if (!routeKey || !mintableDest(dest)) return null;
+  return b64uEncode(keyedToken(routeKey, NAVH_TAG + String(Date.now() + ttlMs) + ":" + dest));
+}
+
+/** Handle tail -> destination, or null (bad tail, no key held, wrong
+    tag, non-mintable destination, or expired). */
+export function decodeNavHandle(token: string): string | null {
+  const bytes = b64uDecode(token);
+  if (!bytes) return null;
+  for (const k of routeKeys) {
+    const payload = keyedPayload(k, bytes);
+    if (payload === null || !payload.startsWith(NAVH_TAG)) continue;
+    const rest = payload.slice(NAVH_TAG.length);
+    const colon = rest.indexOf(":");
+    if (colon < 0) continue;
+    const exp = Number(rest.slice(0, colon));
+    if (!Number.isFinite(exp) || Date.now() > exp) return null;
+    const dest = rest.slice(colon + 1);
+    if (mintableDest(dest)) return dest;
+  }
+  return null;
 }
 
 /** Keyed per-origin site identity (#32 hardening on #55's key): a

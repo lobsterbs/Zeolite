@@ -271,6 +271,23 @@ async function main() {
     return landing.url().slice(0, 44);
   });
 
+  await check("routing: a navguard marker route serves the target through the engine (#28 SW branch)", async () => {
+    const pg = await context.newPage();
+    attachRecorder(pg);
+    /* The worker-side NAV branch: the runtime guard writes
+       /__zl_nav__/<b64u target> and the SW decodes it back to the
+       destination. The branch shipped broken (it matched the bare
+       marker path, which navEncode never emits) and neither the unit
+       suite nor this e2e ever navigated a marker, so every marker
+       navigation silently fell into the escaped-path recovery. This
+       goto is the pin: serve the landing page AT the marker route. */
+    const tail = Buffer.from(ORIGIN_B + "/dir/landing.html", "utf8").toString("base64url");
+    await pg.goto(ENGINE + "/__zl_nav__/" + tail);
+    eq(await pg.locator("#zl-landing").textContent(), "zl-landing", "landing served through the marker route");
+    assert(pg.url().startsWith(ENGINE + "/__zl_nav__/"), "navigation left the marker route: " + pg.url());
+    return "served at " + pg.url().slice(0, 44) + "...";
+  });
+
   await check("routing: a relative link resolves against the virtual target", async () => {
     const { page } = await openProxied(ORIGIN_A + "/dir/page.html");
     await (await waitFor("frame", 10000, () => frameWith(page, "#zl-marker"))).locator("#rel").click();
@@ -306,6 +323,51 @@ async function main() {
     const frame = await waitFor("frame after reload", 45000, () => frameWith(page, "#zl-marker"));
     eq(await frame.locator("#zl-marker").textContent(), "zl-fixture-page", "marker after reload");
     return frame.url().slice(0, 44);
+  });
+
+  /* ---- #63: opaque initial-navigation handles ---------------------- */
+
+  await check("handle: zl:navHandle mints an opaque initial-navigation route (#63)", async () => {
+    const pg = await context.newPage();
+    attachRecorder(pg);
+    /* A host page at the engine scope root asks the worker for a
+       handle - the adoption path LobsterBrowse takes instead of the
+       plaintext ?url= embed. The reply URL must be a /__zl_navh__/
+       keyed route and must not carry the destination decodably. */
+    await pg.goto(ENGINE + "/");
+    const dest = ORIGIN_B + "/dir/landing.html";
+    const handle = await pg.evaluate((d) => new Promise((res) => {
+      const ch = new MessageChannel();
+      const ctl = navigator.serviceWorker.controller;
+      if (!ctl) return res({ ok: false, error: "no controller" });
+      ctl.postMessage({ type: "zl:navHandle", dest: d }, [ch.port2]);
+      ch.port1.onmessage = (e) => res(e.data);
+      setTimeout(() => res({ ok: false, error: "timeout" }), 5000);
+    }), dest);
+    assert(handle.ok, "navHandle refused: " + JSON.stringify(handle));
+    assert(String(handle.url).startsWith("/__zl_navh__/"), "handle route shape: " + handle.url);
+    assert(!JSON.stringify(handle).includes("7102"), "handle reply leaks the destination: " + JSON.stringify(handle));
+    const pg2 = await context.newPage();
+    attachRecorder(pg2);
+    await pg2.goto(ENGINE + handle.url);
+    eq(await pg2.locator("#zl-landing").textContent(), "zl-landing", "handle navigation served the target");
+    assert(pg2.url().startsWith(ENGINE + "/__zl_navh__/"), "handle navigation left the route: " + pg2.url());
+    return "navigated via /__zl_navh__/<keyed token>";
+  });
+
+  await check("handle: a proxied page cannot mint navigation handles (#63/#41 gate)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    /* zl:navHandle is host-only: a proxied-page sender must get the
+       generic host-only refusal, never a handle. */
+    const r = await evalIn(frame, "navHandle from a proxied page", `() => new Promise((res) => {
+      const ch = new MessageChannel();
+      navigator.serviceWorker.controller.postMessage({ type: "zl:navHandle", dest: ${JSON.stringify(ORIGIN_B + "/dir/landing.html")} }, [ch.port2]);
+      ch.port1.onmessage = (e) => res(e.data);
+      setTimeout(() => res({ ok: false, error: "timeout" }), 5000);
+    })`);
+    assert(!r.ok, "a proxied page minted a handle: " + JSON.stringify(r));
+    eq(r.error, "host-only control message", "refusal reason");
+    return "refused host-only";
   });
 
   /* ---- recovery (#31) --------------------------------------------- */
@@ -1068,6 +1130,49 @@ async function main() {
     assert(bads.length === 0, "browser-direct hits (engine-origin referer): " + bads.slice(0, 6).join(" | "));
     const n = (await fixtureHits(fixtureA)).length + (await fixtureHits(fixtureB)).length;
     return n + " fixture hits total, all engine-referered or refererless";
+  });
+
+  await check("privacy: no decodable destination on any captured URL surface (#62 inventory)", async () => {
+    /* Capture-dated leak inventory: every URL the CDP recorders saw
+       plus a proxied page's own resource-timing names, classified by
+       route tail. A /j/ or /__zl_navh__/ tail must never
+       legacy-decode to an http(s) destination (the #32/#63 opacity
+       contract); a /__zl_nav__/ tail that does is the documented
+       navguard degrade (#54: the marker falls back to b64u only when
+       the keyed mint is unavailable) - counted and named, not
+       failed. Fixture-origin URLs belong to the #34 escape checks. */
+    const urls = new Set();
+    for (const rec of recorders) for (const r of rec.requests) urls.add(r.url);
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const names = await evalIn(frame, "resource timing", `() => JSON.stringify(performance.getEntriesByType("resource").map((e) => e.name))`);
+    for (const n2 of JSON.parse(names)) urls.add(n2);
+    urls.add(frame.url());
+    let markers = 0, routes = 0, handles = 0;
+    const bad = [];
+    for (const u of urls) {
+      if (u.startsWith(ORIGIN_A) || u.startsWith(ORIGIN_B)) continue; // #34 owns the verdict
+      for (const [pfx, kind] of [
+        [ENGINE + "/j/", "route"],
+        [ENGINE + "/__zl_nav__/", "marker"],
+        [ENGINE + "/__zl_navh__/", "handle"],
+      ]) {
+        if (!u.startsWith(pfx)) continue;
+        const tail = u.slice(pfx.length).split(/[?#]/)[0];
+        if (!tail) continue;
+        const dec = Buffer.from(tail, "base64url").toString("utf8");
+        if (/^https?:\/\//.test(dec)) {
+          if (kind === "marker") {
+            markers++;
+            continue;
+          }
+          bad.push(u.slice(0, 80) + " -> " + dec.slice(0, 60));
+        } else if (kind === "route") routes++;
+        else handles++;
+        break;
+      }
+    }
+    assert(bad.length === 0, "decodable destinations on engine routes: " + bad.slice(0, 4).join(" | "));
+    return urls.size + " urls swept: " + routes + " opaque routes, " + handles + " keyed handles, " + markers + " nav markers (documented #54 degrade)";
   });
 
   /* ---- report ------------------------------------------------------ */

@@ -19,6 +19,11 @@
                                              mints with its realm-held
                                              key; the key never leaves
                                              the worker)
+     { type: "zl:navHandle", dest }         mint an opaque one-window
+                                             initial-navigation handle
+                                             (#63, #54 design D; host-
+                                             only: a proxied page sender
+                                             is refused)
      { type: "zl:rules", ua, rules }         host-app per-site overrides
                                              (host, adblock, ua)
      { type: "zl:jarProfile", profile }     switch the cookie jar to a
@@ -84,7 +89,8 @@
 
 /// <reference lib="webworker" />
 import {
-  mintableDest, b64uDecode, b64uEncode, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+  mintableDest, b64uDecode, b64uEncode, decodeNavHandle, decodePath, encodeDest, encodeDestLegacy, encodeNavHandle, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { PAGE_MESSAGES, senderIsProxiedPath } from "./cpgate";
 import { charsetFromHeader, decodeBody, makeDecoder, mapRefreshHeader, resolveCharset, stripHostile, utf8ContentType } from "./headers";
 import { loadRouteHistory, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
@@ -1088,18 +1094,26 @@ let routeKeyB64: string | null = null;
    cleartext while it is on. No silent downgrade: a failed
    https fetch fails through the normal error pipeline. */
 let httpsUpgrade = false;
+/* #63: opt-in refusal of the plaintext ?url= initial navigation.
+   Hosts adopt zl:navHandle and flip this so the legacy embed can no
+   longer appear browser-visible on the deployment. Persists with the
+   route shape; resets to false (legacy accepted) on a teardown/full
+   storage wipe, which is the documented migration window. */
+let navHandles = false;
 const ZL_ROUTE_CACHE = "zeolite-route-v1";
 const ZL_ROUTE_KEY = new URL("route-config.json", self.registration.scope).href;
 const routeReady: Promise<void> = (async () => {
   try {
     const hit = await (await caches.open(ZL_ROUTE_CACHE)).match(ZL_ROUTE_KEY);
     if (hit) {
-      const cfg = (await hit.json()) as { prefix?: string; scheme?: string; httpsUpgrade?: boolean };
+      const cfg = (await hit.json()) as { prefix?: string; scheme?: string; httpsUpgrade?: boolean; navHandles?: boolean };
       /* A pre-#32 deployment may have persisted scheme "mirror": it
          coerces to the default (mirror routes are gone, #32). */
       setScheme(cfg.prefix ?? "/j/");
       /* #53: the host's upgrade choice restores with the shape. */
       if (typeof cfg.httpsUpgrade === "boolean") httpsUpgrade = cfg.httpsUpgrade;
+      /* #63: the ?url= refusal choice restores with the shape. */
+      if (typeof cfg.navHandles === "boolean") navHandles = cfg.navHandles;
     }
   } catch {
     /* storage unavailable: defaults stay until the next zl:config */
@@ -1130,7 +1144,7 @@ async function persistRoute(prefix: string): Promise<void> {
   try {
     await (await caches.open(ZL_ROUTE_CACHE)).put(
       ZL_ROUTE_KEY,
-      new Response(JSON.stringify({ prefix, httpsUpgrade })),
+      new Response(JSON.stringify({ prefix, httpsUpgrade, navHandles })),
     );
   } catch {
     /* storage unavailable: the in-memory rotation still works */
@@ -1378,7 +1392,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           return new Response(null, { status: 204, headers: h });
         }
         dest0 = url.href;
-      } else if (url.pathname === NAV) {
+      } else if (url.pathname.startsWith(NAV + "/")) {
         /* Issue #28: the bootstrap nav guard rewrites absolute
            cross-origin URLs (window.open, anchor/area/iframe/form/link
            property and setAttribute assignments) to this marker route,
@@ -1389,13 +1403,30 @@ self.addEventListener("fetch", (e: FetchEvent) => {
            (same opacity level as every other engine route), so no
            plaintext destination appears in a DOM value, the address
            bar or history; only http(s) targets are accepted, anything
-           else is a bad route. */
-        const navBytes = b64uDecode(url.pathname.slice(NAV.length + 1));
+           else is a bad route.
+           #62: the branch matched the bare marker path only
+           (url.pathname === NAV), which never occurs - navEncode
+           always appends "/" + tail - so every marker navigation fell
+           into the escaped-path recovery and resolved the marker
+           segment against the page's virtual origin. Fixed to match
+           the emitted shape. */
+        const navBytes = b64uDecode(url.pathname.slice(NAV.length + 1).split(/[?#]/)[0]);
         const nav = navBytes ? new TextDecoder().decode(navBytes) : null;
         /* #31: a bad marker target is a navigation strand - the error
            page replaces the bare 404 text for navigations. */
         if (!nav || !/^https?:\/\//.test(nav)) return navOutcome(e, url, 404, "route", "zeolite: bad route");
         dest0 = nav;
+      } else if (url.pathname.startsWith(NAVH + "/")) {
+        /* #63 (#54 design D): the opaque initial-navigation handle.
+           The host asked for it over the host-gated zl:navHandle
+           message; the tail is a keyed token (decodeNavHandle walks
+           the route-key history, so a handle minted before a SW
+           restart or a key rotation still navigates). An expired,
+           tampered or wrong-key tail fails closed to the same
+           navigation strand a bad route gets - never a guess. */
+        const handleDest = decodeNavHandle(url.pathname.slice(NAVH.length + 1).split(/[?#]/)[0]);
+        if (!handleDest) return navOutcome(e, url, 404, "route", "zeolite: bad or expired navigation handle");
+        dest0 = handleDest;
       } else if (isEnginePath(url.pathname)) {
         let raw = decodePath(url.pathname);
         let carriesQuery = true;
@@ -1453,6 +1484,20 @@ self.addEventListener("fetch", (e: FetchEvent) => {
         routeCarriesQuery = carriesQuery;
       } else {
         if (isEngineAsset(url.pathname)) return fetch(e.request); // engine asset: passthrough
+        /* #63: with the navHandles opt-in on, the plaintext ?url=
+           embed is refused at the fetch handler - the destination must
+           arrive via a zl:navHandle route instead, so no plaintext
+           target is ever browser-visible on the deployment. Scope-root
+           only (the embed page's own URL): the bare landing page with
+           no ?url= keeps serving so an operator can read the hint. */
+        if (
+          navHandles &&
+          e.request.mode === "navigate" &&
+          url.pathname === new URL(self.registration.scope).pathname &&
+          url.searchParams.get("url")
+        ) {
+          return navOutcome(e, url, 403, "blocked", "zeolite: plaintext ?url= embed refused (navHandles opt-in; use zl:navHandle)");
+        }
         /* Issue #33: the requesting client's own virtual context is the
            primary recovery for an escaped same-origin path (right even
            with Referrer-Policy: no-referrer); referrer decoding
@@ -2321,6 +2366,7 @@ interface ControlMessage {
   type:
     | "zl:config"
     | "zl:mint"
+    | "zl:navHandle"
     | "zl:rules"
     | "zl:jarProfile"
     | "zl:siteRoute"
@@ -2366,6 +2412,12 @@ interface ControlMessage {
   /** zl:config: opt-in engine-side HTTPS upgrade (#53). Absent keeps
       the persisted choice; the ack echoes the live value. */
   httpsUpgrade?: boolean;
+  /** zl:config: opt-in refusal of the plaintext ?url= initial
+      navigation (#63). Absent keeps the persisted choice (legacy
+      ?url= accepted, the migration window); the ack echoes the live
+      value. Hosts that navigate via zl:navHandle set this so no
+      plaintext embed can appear on the deployment afterwards. */
+  navHandles?: boolean;
   /** zl:rules: default outgoing user-agent for hosts without an
       override (null/absent keeps the browser's own UA). */
   ua?: string | null;
@@ -2482,31 +2534,14 @@ function senderIsProxiedPage(e: ExtendableMessageEvent): boolean {
   const src = e.source as Client | null;
   if (!src || !src.url) return true;
   try {
-    const su = new URL(src.url, self.location.origin);
-    /* #48: /zl-ext/ and /zl-cs/ host extension code, never host
-       pages - untrusted for the control plane exactly like proxied
-       routes. */
-    return (
-      isEnginePath(su.pathname) ||
-      su.pathname.startsWith(NAV) ||
-      su.pathname.startsWith(EXT_ROUTE) ||
-      su.pathname.startsWith(CS_ROUTE)
-    );
+    return senderIsProxiedPath(new URL(src.url, self.location.origin).pathname);
   } catch {
     return true;
   }
 }
 
-/* Page-facing control messages: sent from inside proxied documents
-   and their workers (the bootstrap's docCookie/WS channels and the
-   content-script bridge). zl:ping stays open because its echo carries
-   no secrets and page code may probe liveness. */
-/* "zl:mint" (#54 residual 1, page-realm mint seam): a proxied
-   page can already construct a legacy route for any destination
-   (the codec is page-public), so admitting minting grants no new
-   capability; the zl:mint case bounds mints to absolute http(s)
-   destinations. */
-const PAGE_MESSAGES = new Set(["zl:mint", "zl:docCookie", "zl:wsOpen", "zl:ext", "zl:ping"]);
+/* Page-facing control messages and the pathname half of the sender
+   gate live in cpgate.ts (extracted for #63 so vitest can pin them). */
 
 self.addEventListener("message", async (e: ExtendableMessageEvent) => {
   /* Issue #17: the restored route shape settles asynchronously; a
@@ -2553,6 +2588,9 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
            old embedder probes that compare it stay compatible. */
         scheme: "b64u",
         httpsUpgrade,
+        /* #63: the live ?url= refusal choice, so an embedder detects a
+           revert to defaults and re-pushes its config. */
+        navHandles,
         profile: jarProfileState(),
       });
       break;
@@ -2568,10 +2606,12 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       }
       /* #53: absent leaves the persisted choice (old embedders). */
       if (typeof msg.httpsUpgrade === "boolean") httpsUpgrade = msg.httpsUpgrade;
+      /* #63: same migration-window rule for the ?url= refusal. */
+      if (typeof msg.navHandles === "boolean") navHandles = msg.navHandles;
       setScheme(msg.prefix ?? "/j/");
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
-      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade });
+      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade, navHandles });
       break;
     }
     case "zl:mint": {
@@ -2589,6 +2629,31 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
         break;
       }
       reply({ ok: true, route: encodeDest(msg.dest) });
+      break;
+    }
+    case "zl:navHandle": {
+      /* #63 (#54 design D): mint the opaque initial-navigation
+         handle. Host-only by the #41 gate: zl:navHandle is not in
+         PAGE_MESSAGES, so a proxied-page sender is refused above
+         before this case ever runs - a page must not be able to mint
+         initial-navigation handles for arbitrary destinations. The
+         handle is a keyed token with a short TTL, stateless by
+         construction: nothing is persisted, so it survives a SW
+         restart (decode walks the route-key history the same way
+         routes do). Without a route key (storage unavailable) this
+         refuses instead of answering a legacy-shape handle, which
+         would carry the destination decodably - exactly the leak
+         the handle exists to stop. */
+      if (typeof msg.dest !== "string" || !mintableDest(msg.dest)) {
+        reply({ ok: false, error: "navHandle needs an absolute http(s) dest" });
+        break;
+      }
+      const token = encodeNavHandle(msg.dest);
+      if (token === null) {
+        reply({ ok: false, error: "navHandle unavailable: no route key (storage degraded); keep the legacy ?url= embed" });
+        break;
+      }
+      reply({ ok: true, url: NAVH + "/" + token });
       break;
     }
     case "zl:adblock":
