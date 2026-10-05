@@ -109,7 +109,7 @@ import { runRequestInterception, runResponseInterception, BODY_LIMIT, type Inter
 import { DIAG, redactSecrets } from "./diag";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
 import { beginRecording, finishRecording, type RecordingState } from "./recording";
-import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket, setEngine, currentEngine } from "./libcurl-transport-vendored";
+import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket, setEngine, currentEngine, reset as zlCurlReset, isConnectClassError } from "./libcurl-transport-vendored";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
@@ -197,9 +197,31 @@ async function ensureCurl(): Promise<void> {
   return curlReady;
 }
 
+/* Issue #74: a dead or never-opened wisp websocket is transport state,
+   not a per-destination failure. Connect-class errors (libcurl error 55
+   send / 56 receive on the dead socket, "websocket did not open" from
+   either engine) reset the transport singleton and retry once before
+   the 502 page reaches the user. A request whose body stream was already
+   consumed may fail the retry and surface as before: honest fallback,
+   never a loop - each wispFetch call retries at most once. */
 async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
   await ensureCurl();
-  return zlCurlFetch(dest, init);
+  try {
+    return await zlCurlFetch(dest, init);
+  } catch (err) {
+    if (!isConnectClassError(err)) throw err;
+    DIAG.emit({
+      category: "TRANSPORT",
+      severity: "error",
+      message: "wisp connection lost; transport reset, retrying once",
+      technicalReason: String(err),
+      url: ZL_WISP_URL,
+    });
+    zlCurlReset();
+    curlReady = null; // force re-init inside the next ensureCurl()
+    await ensureCurl();
+    return zlCurlFetch(dest, init);
+  }
 }
 
 /* ---- Header surgery ------------------------------------------------

@@ -598,6 +598,27 @@ async function getClient(cfg: { websocket: string }): Promise<LibcurlClientLike>
   return client;
 }
 
+/* Issue #74: connect-class failure detection + transport reset. A dead
+   or never-opened wisp websocket is transport state, not a destination
+   failure. The SW resets the singleton here and retries once instead of
+   serving terminal 502s from a poisoned client. Pure surface, unit-gated
+   in __tests__/transport-select.test.ts. */
+const CONNECT_CLASS_RE =
+  /websocket did not open|failed sending data|failure when receiving data|error code (?:55|56)\b/i;
+
+export function isConnectClassError(err: unknown): boolean {
+  return CONNECT_CLASS_RE.test(String(err));
+}
+
+/** Drop the libcurl/epoxy singletons so the next init() brings up a
+    fresh transport with a new wisp websocket. Never throws. */
+export function reset(): void {
+  client = null;
+  initPromise = null;
+  epoxyClient = null;
+  epoxyInitPromise = null;
+}
+
 export async function init(cfg: { websocket: string }): Promise<void> {
   if (engine === "epoxy") {
     await getEpoxy(cfg);

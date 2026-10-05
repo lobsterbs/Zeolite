@@ -3,7 +3,7 @@
    cover the new pure surface only. */
 
 import { describe, it, expect } from "vitest";
-import { setEngine, currentEngine, stripEsmExports, inlineDataImports } from "../libcurl-transport-vendored";
+import { setEngine, currentEngine, stripEsmExports, inlineDataImports, reset, isConnectClassError } from "../libcurl-transport-vendored";
 
 describe("transport engine selection", () => {
   it("defaults to libcurl", () => {
@@ -68,5 +68,27 @@ describe("inlineDataImports (epoxy glue loader)", () => {
     expect(m.ws_key()).toBe("k");
     expect(m.tag).toBe(7);
     expect(m.used).toBe("k");
+  });
+});
+
+/* Issue #74: connect-class detection and singleton reset. */
+describe("transport reset (#74)", () => {
+  it("classifies wisp-connect failures as connect-class", () => {
+    expect(isConnectClassError("Wisp WebSocket failed to connect: websocket did not open")).toBe(true);
+    expect(isConnectClassError("Request failed with error code 55: Failed sending data to the peer")).toBe(true);
+    expect(isConnectClassError("Request failed with error code 56: Failure when receiving data from the peer")).toBe(true);
+    expect(isConnectClassError(new TypeError("Request failed with error code 55: Failed sending data to the peer"))).toBe(true);
+  });
+
+  it("leaves ordinary failures alone", () => {
+    expect(isConnectClassError("TypeError: Failed to fetch")).toBe(false);
+    expect(isConnectClassError(undefined)).toBe(false);
+    expect(isConnectClassError(null)).toBe(false);
+  });
+
+  it("reset() never throws and leaves the engine selection intact", () => {
+    setEngine("libcurl");
+    expect(() => reset()).not.toThrow();
+    expect(currentEngine()).toBe("libcurl");
   });
 });
