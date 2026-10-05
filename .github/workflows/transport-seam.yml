@@ -10,7 +10,9 @@ on:
 # wires setEngine/currentEngine into the vendored transport import;
 # patch B inserts the zl:transport control case ahead of zl:tracing
 # (poll / select / honest refuse; an engine switch takes effect on
-# the next init()); patch C flips the ci.yml epoxy vendoring from the
+# the next init()); patch D adds the zl:transport kind to the ControlMessage
+# union plus the engine field (the tsc gate needs both for patch B's case;
+# idempotent like the rest); patch C flips the ci.yml epoxy vendoring from the
 # minimal variant to the full one (WebSocket support lives only in
 # the full build; exactly-once assertions on every anchor). The
 # regions printed to the job log are the review evidence. Gates
@@ -112,6 +114,20 @@ jobs:
           if (didA || didB) {
             writeFileSync(swPath, sw);
             console.log("sw.ts patched");
+          }
+
+          /* --- Patch D: ControlMessage union member + engine field --- */
+          if (!sw.includes('| "zl:transport"')) {
+            const unionAnchor = '    | "zl:clearJar";';
+            if (sw.split(unionAnchor).length !== 2) throw new Error("zl:clearJar union anchor count != 1");
+            sw = sw.replace(unionAnchor, '    | "zl:clearJar"\n    | "zl:transport";');
+            const fieldAnchor = '  /** zl:rules: default outgoing user-agent for hosts without an';
+            if (sw.split(fieldAnchor).length !== 2) throw new Error("ua field anchor count != 1");
+            sw = sw.replace(fieldAnchor, '  /** zl:transport: engine selection (#64). Absent = a poll; the reply carries the live engine; "libcurl"|"epoxy" switches it on the next init(). */\n  engine?: "libcurl" | "epoxy";\n' + fieldAnchor);
+            writeFileSync(swPath, sw);
+            console.log("=== patch D applied ===");
+          } else {
+            console.log("patch D already applied");
           }
 
           /* --- Patch C: ci.yml vendors the FULL epoxy build --- */
