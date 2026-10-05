@@ -150,6 +150,28 @@ describe("refineWithContent", () => {
       fallbackReason: "DOCUMENT_REWRITE_REQUIRED",
     });
   });
+  /* The SW serve-time-transforms JS bodies on script destinations,
+     destination "" fetch/XHR and worker scripts (specifier pass +
+     rewriteJsBody literals + worker prelude); the decision must say
+     rewrite, not NativeTransit, or netLog lies about what happened. */
+  it("JS bodies on script/worker destinations are rewrite fallbacks", () => {
+    const native = { mode: "NativeTransit" as const };
+    for (const ct of [
+      "text/javascript",
+      "application/javascript",
+      "application/x-javascript",
+      "text/ecmascript; charset=utf-8",
+    ]) {
+      for (const dest of ["script", "", "worker", "sharedworker"]) {
+        expect(refineWithContent(native, ct, dest)).toEqual({
+          mode: "RewriteFallback",
+          fallbackReason: "JS_LITERAL_REWRITE_REQUIRED",
+        });
+      }
+    }
+    /* JS on a non-script destination is a plain native resource. */
+    expect(refineWithContent(native, "application/javascript", "image")).toEqual({ mode: "NativeTransit" });
+  });
 });
 
 describe("transitRecord", () => {

@@ -16,6 +16,7 @@ export type TransportMode = "NativeTransit" | "RewriteFallback";
 export type FallbackReason =
   | "DOCUMENT_REWRITE_REQUIRED"
   | "CSS_URL_REWRITE_REQUIRED"
+  | "JS_LITERAL_REWRITE_REQUIRED"
   | "XML_DOCUMENT_REWRITE_REQUIRED"
   | "UNSUPPORTED_PROTOCOL";
 
@@ -68,6 +69,15 @@ export function docKind(contentType: string): "html" | "css" | "none" {
   return "none";
 }
 
+/** JS body classification, ONE copy for the SW's isJs and the
+    post-response refinement: the SW serve-time-transforms these
+    bodies (import specifiers, URL-literal pass), so the transit
+    decision must know what the rewriter actually touches. */
+export function jsBody(contentType: string): boolean {
+  const ct = contentType.toLowerCase();
+  return ct.includes("javascript") || ct.includes("ecmascript");
+}
+
 /** Content-type-less responses to a document destination: sniff the
     head the way the browser's MIME sniffing would, because the
     browser sniffs html for such navigations and an unrewritten
@@ -112,6 +122,15 @@ export function refineWithContent(
   }
   if (kind === "css") {
     return { mode: "RewriteFallback", fallbackReason: "CSS_URL_REWRITE_REQUIRED" };
+  }
+  /* JS bodies on the destinations the SW serve-time-transforms
+     (script, destination "" fetch/XHR/eval, module and classic
+     workers) are rewritten: specifiers folded, URL literals routed,
+     worker prelude prepended. The decision used to say NativeTransit
+     for bodies the rewriter actually touched. */
+  const d = dest.toLowerCase();
+  if (jsBody(contentType) && (d === "script" || d === "" || d === "worker" || d === "sharedworker")) {
+    return { mode: "RewriteFallback", fallbackReason: "JS_LITERAL_REWRITE_REQUIRED" };
   }
   const ct = contentType.toLowerCase();
   const docDest = DOC_DESTS.has(dest.toLowerCase());

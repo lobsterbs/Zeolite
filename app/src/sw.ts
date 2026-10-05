@@ -100,7 +100,7 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, docKind, refineWithContent, sniffsAsHtml, transitRecord, transitStats, DOC_DESTS } from "./transit";
+import { decideTransport, docKind, jsBody, refineWithContent, sniffsAsHtml, transitRecord, transitStats, DOC_DESTS } from "./transit";
 import { ZL_WISP_URL, httpsUpgraded } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
@@ -285,8 +285,7 @@ function isCss(resp: Response): boolean {
   return docKind(resp.headers.get("content-type") ?? "") === "css";
 }
 function isJs(resp: Response): boolean {
-  const ct = (resp.headers.get("content-type") ?? "").toLowerCase();
-  return ct.includes("javascript") || ct.includes("ecmascript");
+  return jsBody(resp.headers.get("content-type") ?? "");
 }
 
 /** Concatenate held byte chunks (stream-head sniffing). */
@@ -1762,7 +1761,9 @@ self.addEventListener("fetch", (e: FetchEvent) => {
                   ? "html"
                   : hit.status === 200 && isCss(hit)
                     ? "css"
-                    : undefined,
+                    : hit.status === 200 && isJs(hit) && (dest === "script" || dest === "")
+                      ? "js"
+                      : undefined,
               transport: dec.mode,
               fallbackReason: dec.fallbackReason,
               detail: mkDetail(hit),
@@ -2018,7 +2019,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             bytes: Number(resp.headers.get("content-length") ?? -1),
             verdict: plugins?.length ? "pass:" + plugins.length : undefined,
             rtype: classifyRtype(dest, resp.headers.get("content-type") ?? ""),
-            rewritten: isHtml(resp) ? "html" : isCss(resp) ? "css" : undefined,
+            rewritten: isHtml(resp) ? "html" : isCss(resp) ? "css" : isJs(resp) && (dest === "script" || dest === "") ? "js" : undefined,
             transport: dec.mode,
             fallbackReason: dec.fallbackReason,
             finalDest,
