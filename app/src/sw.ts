@@ -109,7 +109,7 @@ import { runRequestInterception, runResponseInterception, BODY_LIMIT, type Inter
 import { DIAG, redactSecrets } from "./diag";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
 import { beginRecording, finishRecording, type RecordingState } from "./recording";
-import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket } from "./libcurl-transport-vendored";
+import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket, setEngine, currentEngine } from "./libcurl-transport-vendored";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { WsBridge, type PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
@@ -2402,7 +2402,8 @@ interface ControlMessage {
     | "zl:recordStop"
     | "zl:find"
     | "zl:getJars"
-    | "zl:clearJar";
+    | "zl:clearJar"
+    | "zl:transport";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -2418,6 +2419,8 @@ interface ControlMessage {
       value. Hosts that navigate via zl:navHandle set this so no
       plaintext embed can appear on the deployment afterwards. */
   navHandles?: boolean;
+  /** zl:transport: engine selection (#64). Absent = a poll; the reply carries the live engine; "libcurl"|"epoxy" switches it on the next init(). */
+  engine?: "libcurl" | "epoxy";
   /** zl:rules: default outgoing user-agent for hosts without an
       override (null/absent keeps the browser's own UA). */
   ua?: string | null;
@@ -2692,7 +2695,30 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       reply(r.ok ? { ok: true, jars: r.jars, cookies: r.cookies } : { ok: false, error: r.error });
       break;
     }
-    case "zl:tracing":
+        case "zl:transport": {
+      /* #64: host-side engine selection (the DevTools toggle).
+         No engine = a poll (devtools keeps its select in
+         sync, the same pattern as the tracing toggle); an
+         invalid engine refuses honestly; a valid one
+         switches the transport for the NEXT init(): the
+         running client keeps its engine until the service
+         worker restarts, and curlReady = null forces the
+         re-init on the next request. Ephemeral like the
+         other host toggles: resets to the deployment
+         default (ZL_TRANSPORT) on SW restart. */
+      const eng = (msg as { engine?: unknown }).engine;
+      if (eng === undefined) {
+        reply({ ok: true, engine: currentEngine() });
+      } else if (eng !== "libcurl" && eng !== "epoxy") {
+        reply({ ok: false, error: "transport needs engine libcurl|epoxy" });
+      } else {
+        setEngine(eng);
+        curlReady = null;
+        reply({ ok: true, engine: currentEngine() });
+      }
+      break;
+    }
+case "zl:tracing":
       /* 1.2 Halide: opt-in rewrite tracing ring. Off by default;
          resets to off on SW restart, so the host re-sends it. */
       setTracing(msg.enabled !== false);
