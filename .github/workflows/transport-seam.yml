@@ -1,0 +1,190 @@
+name: transport-seam
+
+on:
+  push:
+    branches: [transport-seam]
+  workflow_dispatch:
+
+# One-shot mechanical edits for #64 slice 3 (sw.ts is 156KB, the same
+# fetch-pipeline constraint that produced mint-seam.yml). Patch A
+# wires setEngine/currentEngine into the vendored transport import;
+# patch B inserts the zl:transport control case ahead of zl:tracing
+# (poll / select / honest refuse; an engine switch takes effect on
+# the next init()); patch D adds the zl:transport kind to the ControlMessage
+# union plus the engine field (the tsc gate needs both for patch B's case;
+# idempotent like the rest); patch C flips the ci.yml epoxy vendoring from the
+# minimal variant to the full one (WebSocket support lives only in
+# the full build; exactly-once assertions on every anchor). The
+# regions printed to the job log are the review evidence. Gates
+# before the commit: the wasm glue is built first (sw.ts imports it;
+# tsc needs it), the whole app typechecks, the transport unit tests
+# run, and the epoxy diag leg exercises the real full bundle against
+# a live local zeolite-server (suite/epoxy-diag.mjs, the same gate
+# merged main will run). Idempotent: a run on a fully patched tree
+# commits nothing.
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo install wasm-pack --version 0.13.1 || true
+      - name: Build rewriter wasm
+        run: |
+          wasm-pack build crates/rewriter --target web --release --out-name rewriter_wasm
+          mkdir -p app/src/rewriter_wasm
+          cp crates/rewriter/pkg/rewriter_wasm* app/src/rewriter_wasm/
+      - name: Build wisp wasm
+        run: |
+          wasm-pack build crates/wisp-wasm --target web --release --out-name wisp_wasm
+          mkdir -p app/src/wisp_wasm
+          cp crates/wisp-wasm/pkg/wisp_wasm* app/src/wisp_wasm/
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Print anchor regions and patch sw.ts + ci.yml
+        run: |
+          node --input-type=module - <<'EOF'
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          /* --- Patch A: extend the transport import --- */
+          const swPath = "app/src/sw.ts";
+          let sw = readFileSync(swPath, "utf8");
+          const importAnchor = 'import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket } from "./libcurl-transport-vendored";';
+          console.log("=== transport import (pre-edit) ===");
+          console.log(importAnchor);
+          if (sw.split(importAnchor).length !== 2) throw new Error("transport import anchor count != 1");
+          let didA = false;
+          if (!sw.includes("setEngine, currentEngine")) {
+            const patched = importAnchor.replace("openWebSocket }", "openWebSocket, setEngine, currentEngine }");
+            if (patched === importAnchor) throw new Error("import insertion failed");
+            sw = sw.replace(importAnchor, patched);
+            didA = true;
+            console.log("=== patch A applied ===");
+          } else {
+            console.log("patch A already applied");
+          }
+
+          /* --- Patch B: the zl:transport control case --- */
+          const caseAnchor = 'case "zl:tracing":';
+          if (sw.split(caseAnchor).length !== 2) throw new Error("zl:tracing case anchor count != 1");
+          console.log("=== zl:tracing case context (pre-edit) ===");
+          const ci = sw.indexOf(caseAnchor);
+          console.log(sw.slice(Math.max(0, ci - 200), ci + 300));
+          let didB = false;
+          if (!sw.includes('case "zl:transport"')) {
+            const body = [
+              '    case "zl:transport": {',
+              "      /* #64: host-side engine selection (the DevTools toggle).",
+              "         No engine = a poll (devtools keeps its select in",
+              "         sync, the same pattern as the tracing toggle); an",
+              "         invalid engine refuses honestly; a valid one",
+              "         switches the transport for the NEXT init(): the",
+              "         running client keeps its engine until the service",
+              "         worker restarts, and curlReady = null forces the",
+              "         re-init on the next request. Ephemeral like the",
+              "         other host toggles: resets to the deployment",
+              "         default (ZL_TRANSPORT) on SW restart. */",
+              '      const eng = (msg as { engine?: unknown }).engine;',
+              "      if (eng === undefined) {",
+              "        reply({ ok: true, engine: currentEngine() });",
+              '      } else if (eng !== "libcurl" && eng !== "epoxy") {',
+              '        reply({ ok: false, error: "transport needs engine libcurl|epoxy" });',
+              "      } else {",
+              "        setEngine(eng);",
+              "        curlReady = null;",
+              "        reply({ ok: true, engine: currentEngine() });",
+              "      }",
+              "      break;",
+              "    }",
+            ].join("\n");
+            sw = sw.replace(caseAnchor, body + "\n" + caseAnchor);
+            didB = true;
+            console.log("=== patch B applied ===");
+          } else {
+            console.log("patch B already applied");
+          }
+          if (didA || didB) {
+            writeFileSync(swPath, sw);
+            console.log("sw.ts patched");
+          }
+
+          /* --- Patch D: ControlMessage union member + engine field --- */
+          if (!sw.includes('| "zl:transport"')) {
+            const unionAnchor = '    | "zl:clearJar";';
+            if (sw.split(unionAnchor).length !== 2) throw new Error("zl:clearJar union anchor count != 1");
+            sw = sw.replace(unionAnchor, '    | "zl:clearJar"\n    | "zl:transport";');
+            const fieldAnchor = '  /** zl:rules: default outgoing user-agent for hosts without an';
+            if (sw.split(fieldAnchor).length !== 2) throw new Error("ua field anchor count != 1");
+            sw = sw.replace(fieldAnchor, '  /** zl:transport: engine selection (#64). Absent = a poll; the reply carries the live engine; "libcurl"|"epoxy" switches it on the next init(). */\n  engine?: "libcurl" | "epoxy";\n' + fieldAnchor);
+            writeFileSync(swPath, sw);
+            console.log("=== patch D applied ===");
+          } else {
+            console.log("patch D already applied");
+          }
+
+          /* --- Patch C: ci.yml vendors the FULL epoxy build --- */
+          const ciPath = ".github/workflows/ci.yml";
+          let ciy = readFileSync(ciPath, "utf8");
+          console.log("=== epoxy vendor lines (pre-edit) ===");
+          ciy.split("\n").forEach((l, i) => { if (l.includes("epoxy-tls/")) console.log(i + 1 + ": " + l); });
+          let didC = false;
+          const minimalJs = "epoxy-tls/minimal/epoxy.js";
+          const minimalWasm = "epoxy-tls/minimal/epoxy.wasm";
+          if (ciy.includes(minimalJs) || ciy.includes(minimalWasm)) {
+            const nJs = ciy.split(minimalJs).length - 1;
+            const nWasm = ciy.split(minimalWasm).length - 1;
+            if (nJs !== 2 || nWasm !== 2) throw new Error("minimal epoxy vendor lines: expected 2+2, found " + nJs + "+" + nWasm);
+            const commentOld = "Minimal variant:\n      # 48KB glue + 845KB wasm, HTTP/1.1 fetch + TLS/TCP/UDP streams.";
+            const commentNew = "Full variant (#64 slice 3): the WebSocket\n      # bridge + gzip/brotli + HTTP/2 sit behind the package \"full\"\n      # build; minimal has fetch only, so a WS open under the epoxy\n      # engine would fail on a minimal vendor.";
+            if (ciy.split(commentOld).length !== 2) throw new Error("minimal-variant comment count != 1");
+            ciy = ciy.split(minimalJs).join("epoxy-tls/full/epoxy.js").split(minimalWasm).join("epoxy-tls/full/epoxy.wasm").replace(commentOld, commentNew);
+            didC = true;
+            console.log("=== patch C applied ===");
+          } else {
+            console.log("patch C already applied");
+          }
+          if (didC) writeFileSync(ciPath, ciy);
+          if (!didA && !didB && !didC) console.log("nothing to do");
+          EOF
+      - name: Prove the patches landed
+        run: grep -n 'zl:transport\|setEngine\|currentEngine' app/src/sw.ts | head -8
+      - name: Typecheck the whole app (wasm glue present)
+        run: |
+          cd app
+          npm install
+          npx tsc --noEmit
+      - name: Transport unit tests
+        run: |
+          cd app
+          npx vitest run src/__tests__/transport-select.test.ts src/__tests__/epoxy-adapter.test.ts src/__tests__/transport-patch.test.ts
+      - name: Epoxy diag leg (real full bundle against a live server)
+        run: |
+          cargo build -p zeolite-server --release
+          ZL_TEST_ALLOW_PRIVATE_DESTS=1 PORT=6002 ./target/release/zeolite-server > server.log 2>&1 &
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6002/)
+            if [ "$code" != "000" ]; then echo "server up (http $code) after ${i}s"; break; fi
+            sleep 1
+          done
+          if [ "$code" = "000" ]; then echo "server never came up"; cat server.log; exit 1; fi
+          npm i @mercuryworkshop/epoxy-tls@2.1.18-1 ws
+          node suite/epoxy-diag.mjs
+      - name: Commit the patches (skipped when already applied)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src/sw.ts .github/workflows/ci.yml
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git commit -m "sw: zl:transport control case; ci: full epoxy vendor (#64 slice 3)"
+          git push

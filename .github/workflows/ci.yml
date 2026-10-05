@@ -117,15 +117,17 @@ jobs:
       # Vendor the epoxy transport (selectable second engine, #64).
       # Same never-committed rule as libcurl: the package is
       # AGPL-3.0-only too (verified in npm metadata 2.1.18-1), so the
-      # bundle is pulled pinned at build time only. Minimal variant:
-      # 48KB glue + 845KB wasm, HTTP/1.1 fetch + TLS/TCP/UDP streams.
+      # bundle is pulled pinned at build time only. Full variant (#64 slice 3): the WebSocket
+      # bridge + gzip/brotli + HTTP/2 sit behind the package "full"
+      # build; minimal has fetch only, so a WS open under the epoxy
+      # engine would fail on a minimal vendor.
       - name: Vendor epoxy transport
         run: |
           {
             npm install --prefix .vendor @mercuryworkshop/epoxy-tls@2.1.18-1 &&
             mkdir -p app/public/epoxy &&
-            cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/minimal/epoxy.js app/public/epoxy/epoxy.js &&
-            cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/minimal/epoxy.wasm app/public/epoxy/epoxy.wasm
+            cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/full/epoxy.js app/public/epoxy/epoxy.js &&
+            cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/full/epoxy.wasm app/public/epoxy/epoxy.wasm
           } 2>&1 | tee epoxy.out
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
@@ -427,8 +429,8 @@ jobs:
           cp -r .vendor/node_modules/@mercuryworkshop/libcurl-transport/dist/. app/public/libcurl/
           npm install --prefix .vendor @mercuryworkshop/epoxy-tls@2.1.18-1
           mkdir -p app/public/epoxy
-          cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/minimal/epoxy.js app/public/epoxy/epoxy.js
-          cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/minimal/epoxy.wasm app/public/epoxy/epoxy.wasm
+          cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/full/epoxy.js app/public/epoxy/epoxy.js
+          cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/full/epoxy.wasm app/public/epoxy/epoxy.wasm
       - name: Build engine bundle
         run: |
           cd app

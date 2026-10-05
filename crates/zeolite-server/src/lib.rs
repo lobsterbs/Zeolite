@@ -419,7 +419,35 @@ pub async fn wisp_handler(
     }
     tracing::info!(v2, "wisp connection opened");
     let max = sh.cfg.max_ws_message;
-    ws.protocols(["wisp"])
+    // Echo the client-offered wisp subprotocol on v1 handshakes
+    // (#64): epoxy-tls opens wisp v1 connections with a random UUID
+    // WebSocket subprotocol (ws_protocol()), and zeolite-server only
+    // ever selected "wisp", so a v1 client offering anything else got
+    // no Sec-WebSocket-Protocol back. Browsers tolerate the missing
+    // echo, but strict WebSocket clients (the ws package, which the
+    // epoxy CI gate uses) abort the handshake with "Server sent no
+    // subprotocol" and epoxy's string transport can never open a
+    // session against this server. RFC 6455 lets the server select
+    // any one offered protocol; epoxy's own demo wisp server does the
+    // same echo. axum echoes the first listed protocol the client
+    // offered, so the client's own string round-trips. v2 detection
+    // and the "wisp" selection are unchanged.
+    let echo = headers
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ps| {
+            ps.split(',')
+                .map(str::trim)
+                .find(|p| !p.is_empty() && !p.eq_ignore_ascii_case("wisp"))
+        });
+    let upgrade = if v2 {
+        ws.protocols(["wisp"])
+    } else if let Some(protocol) = echo {
+        ws.protocols([protocol.to_owned()])
+    } else {
+        ws
+    };
+    upgrade
         .max_message_size(max)
         .on_upgrade(move |socket| async move {
             let _guard = ConnGuard(sh.clone());
