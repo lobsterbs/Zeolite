@@ -3,7 +3,7 @@
    cover the new pure surface only. */
 
 import { describe, it, expect } from "vitest";
-import { setEngine, currentEngine, stripEsmExports, inlineDataImports, reset, isConnectClassError } from "../libcurl-transport-vendored";
+import { setEngine, currentEngine, stripEsmExports, inlineDataImports, reset, isConnectClassError, reconnectDelay, installWispWatcher } from "../libcurl-transport-vendored";
 
 describe("transport engine selection", () => {
   it("defaults to libcurl", () => {
@@ -90,5 +90,37 @@ describe("transport reset (#74)", () => {
     setEngine("libcurl");
     expect(() => reset()).not.toThrow();
     expect(currentEngine()).toBe("libcurl");
+  });
+});
+
+/* Issue #74 follow-up: wisp socket lifecycle watcher. */
+describe("wisp socket watcher (#74 follow-up)", () => {
+  it("reconnectDelay: 1s doubling, 60s ceiling, negatives clamp", () => {
+    expect(reconnectDelay(0)).toBe(1000);
+    expect(reconnectDelay(2)).toBe(4000);
+    expect(reconnectDelay(10)).toBe(60000);
+    expect(reconnectDelay(-3)).toBe(1000);
+  });
+
+  it("installWispWatcher: no-op without WebSocket, idempotent with it", () => {
+    expect(() => installWispWatcher({})).not.toThrow();
+    class FakeWS {
+      listeners: Record<string, Array<() => void>> = {};
+      addEventListener(ev: string, fn: () => void) {
+        (this.listeners[ev] ??= []).push(fn);
+      }
+      fire(ev: string) {
+        (this.listeners[ev] ?? []).forEach((f) => f());
+      }
+    }
+    const g: any = { WebSocket: FakeWS, location: { href: "https://sw.example/" } };
+    installWispWatcher(g);
+    const wrapped = g.WebSocket;
+    installWispWatcher(g);
+    expect(g.WebSocket).toBe(wrapped);
+    /* A socket that is not the wisp endpoint (no lastCfg was ever set)
+       must close without exploding or scheduling anything. */
+    const ws = new g.WebSocket("wss://other.example/ws");
+    ws.fire("close");
   });
 });

@@ -619,7 +619,83 @@ export function reset(): void {
   epoxyInitPromise = null;
 }
 
+/* ---- Wisp socket lifecycle watcher (#74 follow-up) ------------------
+   The wasm transports create the browser WebSocket to the wisp endpoint
+   and never surface its lifecycle. We cannot change the wasm - but the
+   socket comes from this scope's WebSocket constructor. installWispWatcher
+   wraps it once at module evaluation (before any transport init), observes
+   every socket whose URL matches the endpoint of the last init() config,
+   and when the last live one closes it drops the singletons and
+   proactively re-inits with capped exponential backoff, so the next
+   request finds a live transport instead of failing. Purely
+   observational: the transports keep owning their sockets' events.
+   ponytail: the timer glue is live-verified, not unit-gated; the pure
+   part (reconnectDelay) is unit-tested in transport-select.test.ts. */
+
+/** Capped exponential reconnect backoff: 1s doubling, 60s ceiling.
+    Negative attempts clamp to the first step. */
+export function reconnectDelay(attempt: number): number {
+  return Math.min(1000 * Math.pow(2, Math.max(0, attempt)), 60000);
+}
+
+interface WatcherGlobal {
+  WebSocket?: typeof WebSocket;
+  location?: { href: string };
+}
+
+const WATCH_FLAG = "__zlWispWatch";
+const liveWisp = new Set<WebSocket>();
+let lastCfg: { websocket: string } | null = null;
+let reconnectAttempt = 0;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleReconnect(): void {
+  if (reconnectTimer !== null) return; // one timer at most
+  const delay = reconnectDelay(reconnectAttempt++);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    /* A socket constructed since scheduling means someone re-initialized
+       already - do not kill a live transport. */
+    if (!lastCfg || liveWisp.size > 0) return;
+    reset();
+    init(lastCfg).catch(scheduleReconnect);
+  }, delay);
+}
+
+/** Wrap the scope's WebSocket so wisp-endpoint sockets can be observed.
+    Idempotent; a no-op where no WebSocket exists (tests, non-SW hosts). */
+export function installWispWatcher(g: WatcherGlobal = globalThis as WatcherGlobal): void {
+  const Orig = g.WebSocket;
+  if (!Orig || (Orig as unknown as Record<string, unknown>)[WATCH_FLAG]) return;
+  class ZlWispWebSocket extends Orig {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols);
+      try {
+        const base = g.location?.href ?? "https://localhost/";
+        const target = new URL(String(url), base);
+        const wisp = lastCfg ? new URL(lastCfg.websocket, base) : null;
+        if (!wisp || target.origin !== wisp.origin || target.pathname !== wisp.pathname) return;
+        liveWisp.add(this);
+        this.addEventListener("open", () => {
+          reconnectAttempt = 0; // healthy again: backoff restarts from 1s
+        });
+        this.addEventListener("close", () => {
+          liveWisp.delete(this);
+          if (liveWisp.size === 0 && lastCfg) scheduleReconnect();
+        });
+      } catch {
+        /* not a parseable URL: none of our business */
+      }
+    }
+  }
+  (ZlWispWebSocket as unknown as Record<string, unknown>)[WATCH_FLAG] = true;
+  g.WebSocket = ZlWispWebSocket as typeof WebSocket;
+}
+
+installWispWatcher();
+
 export async function init(cfg: { websocket: string }): Promise<void> {
+  lastCfg = cfg;
   if (engine === "epoxy") {
     await getEpoxy(cfg);
     return;
