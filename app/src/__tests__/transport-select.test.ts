@@ -3,7 +3,7 @@
    cover the new pure surface only. */
 
 import { describe, it, expect } from "vitest";
-import { setEngine, currentEngine, stripEsmExports } from "../libcurl-transport-vendored";
+import { setEngine, currentEngine, stripEsmExports, inlineDataImports } from "../libcurl-transport-vendored";
 
 describe("transport engine selection", () => {
   it("defaults to libcurl", () => {
@@ -49,5 +49,24 @@ describe("stripEsmExports (epoxy glue loader)", () => {
     expect(new m.A().x).toBe(1);
     expect(m.init("ok")).toBe("ok");
     expect(m.info.v).toBe(1);
+  });
+});
+
+describe("inlineDataImports (epoxy glue loader)", () => {
+  const helper = "export function ws_key() { return 'k'; }\nexport const tag = 7;\n";
+  const src = [
+    "import { ws_key, tag } from 'data:text/javascript;base64," + btoa(helper) + "';",
+    "const used = ws_key();",
+  ].join("\n");
+
+  it("splices the decoded data: module in place of the import statement", () => {
+    const out = stripEsmExports(inlineDataImports(src), "https://e.example/epoxy.wasm");
+    expect(out).not.toMatch(/\bimport\b/);
+    expect(out).not.toMatch(/\bexport\b/);
+    const factory = new Function(out + "\nreturn { ws_key, tag, used };");
+    const m = factory() as { ws_key: () => string; tag: number; used: string };
+    expect(m.ws_key()).toBe("k");
+    expect(m.tag).toBe(7);
+    expect(m.used).toBe("k");
   });
 });

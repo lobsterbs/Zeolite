@@ -19,7 +19,7 @@
  *   4. connect_websocket: full-build-only WS round-trip against a
  *      local ws echo server through the wisp relay.
  *
- * The loader keeps stripEsmExports in sync with
+ * The loader keeps stripEsmExports/inlineDataImports in sync with
  * app/src/libcurl-transport-vendored.ts. Any failure exits nonzero
  * and fails the workflow. */
 
@@ -39,6 +39,18 @@ function stripEsmExports(src, metaUrl) {
     .replace(/\bexport\s+\{/g, "{")
     .replace(/\bexport\s+(?=(?:async\s+)?(?:function|class|const|let|var)\b)/g, "")
     .replace(/import\.meta\.url/g, JSON.stringify(metaUrl));
+}
+
+/* Keep in sync with inlineDataImports in
+   app/src/libcurl-transport-vendored.ts: the full build imports its
+   wasm-bindgen JS helpers from a data: URL module; import statements
+   are SyntaxErrors inside a Function body, so decode and splice in
+   place. */
+function inlineDataImports(src) {
+  return src.replace(
+    /import\s*\{[^}]*\}\s*from\s*(["'])data:text\/javascript;base64,([A-Za-z0-9+/=]*)\1\s*;?/g,
+    (_m, _q, b64) => atob(b64),
+  );
 }
 
 const PKG = "node_modules/@mercuryworkshop/epoxy-tls/full";
@@ -80,7 +92,7 @@ await new Promise((r) => fixture.listen(FIXTURE_PORT, "127.0.0.1", r));
 const glue = readFileSync(PKG + "/epoxy.js", "utf8");
 const wasmModule = new WebAssembly.Module(readFileSync(PKG + "/epoxy.wasm"));
 const factory = new Function(
-  stripEsmExports(glue, PKG + "/epoxy.wasm") +
+  stripEsmExports(inlineDataImports(glue), PKG + "/epoxy.wasm") +
     '\nreturn { init: typeof __wbg_init === "function" ? __wbg_init : undefined, EpoxyClient, EpoxyClientOptions, EpoxyHandlers };',
 );
 const mod = factory();

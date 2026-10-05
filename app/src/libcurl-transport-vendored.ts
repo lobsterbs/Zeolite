@@ -161,14 +161,33 @@ function epoxyWasmUrl(): string {
    (export class/function/const and export default), unlike the libcurl
    bundle's single trailing export list, plus a default-branch
    new URL(..., import.meta.url) that is a SyntaxError inside a Function
-   body. Strip the export keywords and pin import.meta.url to the vendored
-   wasm URL. Pure, unit-tested (__tests__/transport-select.test.ts). */
+   body - and the full build statically imports its wasm-bindgen JS
+   helpers from a data: URL module, the same problem class: import
+   statements are SyntaxErrors inside a Function body too, and a service
+   worker cannot dynamic-import(). inlineDataImports below decodes each
+   data: module and splices it in place of the import statement. Strip
+   the export keywords and pin import.meta.url to the vendored wasm URL.
+   Pure, unit-tested (__tests__/transport-select.test.ts). */
 export function stripEsmExports(src: string, metaUrl: string): string {
   return src
     .replace(/\bexport\s+default\s+/g, "")
     .replace(/\bexport\s+\{/g, "{")
     .replace(/\bexport\s+(?=(?:async\s+)?(?:function|class|const|let|var)\b)/g, "")
     .replace(/import\.meta\.url/g, JSON.stringify(metaUrl));
+}
+
+/* The full epoxy build imports its wasm-bindgen JS helpers from a
+   data: URL module (the "inline helpers" build). import statements
+   are SyntaxErrors inside a Function body and a service worker cannot
+   dynamic-import(), so decode each data: module and splice its source
+   in place of the import statement; stripEsmExports, applied by the
+   caller over the combined source, strips the spliced module's export
+   keywords. Pure, unit-tested (__tests__/transport-select.test.ts). */
+export function inlineDataImports(src: string): string {
+  return src.replace(
+    /import\s*\{[^}]*\}\s*from\s*(["'])data:text\/javascript;base64,([A-Za-z0-9+/=]*)\1\s*;?/g,
+    (_match: string, _quote: string, b64: string) => atob(b64),
+  );
 }
 
 interface EpoxySocketLike {
@@ -330,7 +349,7 @@ let epoxyInitPromise: Promise<void> | null = null;
 async function loadEpoxyModule(): Promise<EpoxyModule> {
   const res = await globalThis.fetch(epoxyModuleUrl(), { cache: "no-store" });
   if (!res.ok) throw new Error(EPOXY_MISSING);
-  const src = stripEsmExports(await res.text(), epoxyWasmUrl());
+  const src = stripEsmExports(inlineDataImports(await res.text()), epoxyWasmUrl());
   const factory = new Function(
     src + "\nreturn { init: typeof __wbg_init === \"function\" ? __wbg_init : undefined, EpoxyClient, EpoxyClientOptions, EpoxyHandlers };",
   );
