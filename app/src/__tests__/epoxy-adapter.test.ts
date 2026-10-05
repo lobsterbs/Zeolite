@@ -109,7 +109,7 @@ function deferredConnect(): {
     seen = { constructed, url, protocols, headers };
     return promise;
   };
-  return { resolve, reject, connect, seen: null, get seenActual() { return seen; } } as never;
+  return { resolve, reject, connect, get seen() { return seen; } };
 }
 
 describe("epoxyRawHeadersToPairs", () => {
