@@ -58,6 +58,12 @@ export interface FingerprintProfile {
   /** Deterministic seed for canvas perturbation; fixed strings, never
       randomized per session. */
   canvasSeed: string;
+  /** Engine binding (#71): the transport engines this profile is
+      valid for. The TLS fingerprint (JA3/H2) is a property of the
+      transport engine, never of the profile, so a profile bound away
+      from the live engine is refused, not silently applied under a
+      different TLS stack. */
+  engines: Array<"libcurl" | "epoxy">;
 }
 
 /** A coherent, modern Chrome-on-Windows desktop profile. Every field
@@ -77,6 +83,7 @@ export const DEFAULT_PROFILE: FingerprintProfile = {
   webglRenderer:
     "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 (0x00001f83) Direct3D11 vs_5_0 ps_5_0, D3D11)",
   canvasSeed: "zeolite-telluride",
+  engines: ["libcurl", "epoxy"],
 };
 
 /** Platform a real browser would pair with the given UA string. */
@@ -180,6 +187,22 @@ export function resolveProfile(input: unknown): FingerprintProfile {
     throw new Error("canvasSeed must be a non-empty string (<= 128 chars)");
   } else canvasSeed = p.canvasSeed;
 
+  /* #71: optional engine binding. Absent = valid for both engines;
+     anything else must be a non-empty list of known engine names.
+     Duplicates collapse; order is preserved for the refusal message. */
+  let engines: Array<"libcurl" | "epoxy">;
+  if (p.engines === undefined || p.engines === null) {
+    engines = ["libcurl", "epoxy"];
+  } else if (
+    !Array.isArray(p.engines) ||
+    p.engines.length === 0 ||
+    !p.engines.every((e) => e === "libcurl" || e === "epoxy")
+  ) {
+    throw new Error("engines must be a non-empty array of libcurl|epoxy");
+  } else {
+    engines = [...new Set(p.engines)];
+  }
+
   return {
     userAgent: p.userAgent,
     platform,
@@ -192,7 +215,20 @@ export function resolveProfile(input: unknown): FingerprintProfile {
     webglVendor: (vendor as string | null) ?? null,
     webglRenderer: (renderer as string | null) ?? null,
     canvasSeed,
+    engines,
   };
+}
+
+/** #71: the refusal reason when a profile is bound away from the
+    given engine, or null when it applies. Refusal, never silent
+    application: the TLS handshake fingerprint changes with the
+    engine, so a bound profile under the wrong engine would lie about
+    the fingerprint context the session is actually in. */
+export function engineBindingError(p: FingerprintProfile, engine: string): string | null {
+  if (p.engines.includes(engine as "libcurl" | "epoxy")) return null;
+  return (
+    "profile is bound to " + p.engines.join("|") + "; current engine is " + engine
+  );
 }
 
 /* Deterministic canvas seed: FNV-1a over the profile seed. Two sessions

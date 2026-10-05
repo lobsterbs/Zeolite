@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PROFILE,
   canvasSeedHash,
+  engineBindingError,
   fingerprintScript,
   resolveProfile,
   workerFingerprintScript,
@@ -79,6 +80,29 @@ describe("resolveProfile", () => {
     expect(p.languages[0]).toBe("en-US");
     expect(p.timezoneName).toBe("UTC");
     expect(p.utcOffsetMin).toBe(0);
+  });
+
+  it("defaults the engine binding to both engines and validates it (#71)", () => {
+    const p = resolveProfile({ userAgent: DEFAULT_PROFILE.userAgent });
+    expect(p.engines).toEqual(["libcurl", "epoxy"]);
+    const bound = resolveProfile({ userAgent: DEFAULT_PROFILE.userAgent, engines: ["epoxy"] });
+    expect(bound.engines).toEqual(["epoxy"]);
+    const dedup = resolveProfile({ userAgent: DEFAULT_PROFILE.userAgent, engines: ["epoxy", "epoxy"] });
+    expect(dedup.engines).toEqual(["epoxy"]);
+    expect(() => resolveProfile({ userAgent: DEFAULT_PROFILE.userAgent, engines: [] })).toThrow("engines");
+    expect(() => resolveProfile({ userAgent: DEFAULT_PROFILE.userAgent, engines: ["scramjet"] })).toThrow("engines");
+  });
+});
+
+describe("engine binding (#71)", () => {
+  it("refuses profiles bound away from the live engine, applies bound ones", () => {
+    const epoxyOnly = resolveProfile({ userAgent: DEFAULT_PROFILE.userAgent, engines: ["epoxy"] });
+    expect(engineBindingError(epoxyOnly, "epoxy")).toBeNull();
+    const err = engineBindingError(epoxyOnly, "libcurl");
+    expect(err).toContain("epoxy");
+    expect(err).toContain("libcurl");
+    expect(engineBindingError(DEFAULT_PROFILE, "libcurl")).toBeNull();
+    expect(engineBindingError(DEFAULT_PROFILE, "epoxy")).toBeNull();
   });
 });
 

@@ -117,7 +117,7 @@ import { senderVirtualOrigin, virtualOriginHeaders } from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP, type VirtualContext } from "./vctx";
 import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, isPassChallenge, jarClear, jarClearScope, jarEnumeration, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
 import { DownloadTracker } from "./downloads";
-import { fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
+import { engineBindingError, fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
 import { decryptSession, encryptSession } from "./session";
 import {
   CS_ROUTE,
@@ -722,6 +722,12 @@ function setFingerprint(profile: unknown): { ok: true; profile?: FingerprintProf
   }
   try {
     const p = resolveProfile(profile);
+    /* #71: a profile bound away from the live engine is refused with
+       a reason (same refusal pattern as contradictory profiles), not
+       silently applied under a different TLS stack. The live engine
+       is the one zl:transport reports / switches on next init. */
+    const bindErr = engineBindingError(p, currentEngine());
+    if (bindErr) return { ok: false, error: bindErr };
     fpProfile = p;
     fpScript = fingerprintScript(p);
     fpWorkerScript = workerFingerprintScript(p);

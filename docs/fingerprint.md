@@ -44,6 +44,12 @@ native except what can be derived from the UA (`platform`).
 - `webglVendor`, `webglRenderer` - the UNMASKED_VENDOR /
   UNMASKED_RENDERER strings; both or neither.
 - `canvasSeed` - deterministic seed for canvas perturbation.
+- `engines` - optional engine binding: which transport engines
+  (`"libcurl"`, `"epoxy"`) the profile is valid for. Applying a
+  profile while the live engine (the `zl:transport` poll reports it)
+  is not in the list is refused with that reason, never silently
+  applied; omitted means valid for both. The TLS fingerprint itself
+  never comes from the profile (see the last section).
 
 The default profile (used when the host asks for the default rather
 than supplying one) is a coherent Chrome-on-Windows desktop.
@@ -104,4 +110,8 @@ and identically: the profile `User-Agent` and the `languages`-
 derived `Accept-Language`. Switching engines (the `zl:transport`
 control message, or the deployment `ZL_TRANSPORT` define) changes
 the handshake fingerprint; that is the whole point of offering two
-stacks, and it is the only way to change it.
+stacks, and it is the only way to change it. A profile can bind
+itself to specific engines with the `engines` field; under an
+unlisted engine `zl:fingerprint` refuses with the reason instead of
+silently applying. Measured JA3 values per engine are pending a
+parity run; none are invented here.
