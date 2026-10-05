@@ -12,7 +12,13 @@ path = "src/main.rs"
 [dependencies]
 wisp-core = { workspace = true }
 wisp-extensions = { workspace = true }
-tokio = { version = "1", features = ["full"] }
+# #65 S-tier: "full" compiled process/fs/io-util machinery the server never
+# calls. Direct usage set (grep-verified over src/): rt-multi-thread
+# (#[tokio::main]), macros (select!/#[tokio::test]), net (TcpListener/
+# TcpStream), time (sleep/interval), io-util (AsyncReadExt/AsyncWriteExt on
+# the wisp relay), sync (mpsc/oneshot). axum and tower pull their own tokio
+# needs on top by feature unification, so nothing downstream regresses.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync"] }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["fs"] }
 bytes = { workspace = true }
