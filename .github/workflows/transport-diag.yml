@@ -17,9 +17,11 @@ name: transport-gate
 # rawHeaders, an unfollowed 302) and the full-build-only websocket
 # round-trip.
 
+# ponytail: push trigger removed 2026-10-05 — the account is throttled to ~1-2
+# concurrent runners, so running this alongside the 5-job ci workflow queue-cancels
+# everything at 15 min. It just passed on 56df362; run manually when the transport
+# seam (libcurl-transport-vendored.ts or zeolite-server) changes.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -45,7 +47,8 @@ jobs:
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6002/)
             if [ "$code" != "000" ]; then
-              echo "server up (http $code) after ${i}s"
+              echo "server up (http
+ $code) after ${i}s"
               exit 0
             fi
             sleep 1
