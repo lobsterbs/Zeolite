@@ -257,7 +257,7 @@ describe("epoxyWsHandle", () => {
     const handle = epoxyWsHandle(rec.h, FakeHandlers, d.connect as never, "wss://w.example/", [], []);
     d.resolve(sock);
     await flush();
-    handle.send(new Uint8Array(new Uint8Array([0, 9, 8, 0]).buffer, 1, 2));
+    handle.send(new Uint8Array(new Uint8Array([0, 9, 8, 0]).buffer, 1, 2) as never);
     await flush();
     await flush();
     expect(sock.sends.length).toBe(1);
