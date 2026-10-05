@@ -114,6 +114,26 @@ jobs:
             exit 1
           fi
           ls -la app/public/libcurl
+      # Vendor the epoxy transport (selectable second engine, #64).
+      # Same never-committed rule as libcurl: the package is
+      # AGPL-3.0-only too (verified in npm metadata 2.1.18-1), so the
+      # bundle is pulled pinned at build time only. Minimal variant:
+      # 48KB glue + 845KB wasm, HTTP/1.1 fetch + TLS/TCP/UDP streams.
+      - name: Vendor epoxy transport
+        run: |
+          {
+            npm install --prefix .vendor @mercuryworkshop/epoxy-tls@2.1.18-1 &&
+            mkdir -p app/public/epoxy &&
+            cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/minimal/epoxy.js app/public/epoxy/epoxy.js &&
+            cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/minimal/epoxy.wasm app/public/epoxy/epoxy.wasm
+          } 2>&1 | tee epoxy.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            D=$(tail -c 700 epoxy.out | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error::EPOXY%0A$D"
+            exit 1
+          fi
+          ls -la app/public/epoxy
       - name: SW-scope loading lint (no dynamic import in SW-reachable code)
         # Chromium forbids import() on ServiceWorkerGlobalScope and the
         # failure only appears at runtime (commit 73463a4 fixed exactly
@@ -154,7 +174,10 @@ jobs:
             exit 1
           fi
       - name: Verify vendored transport made it into the build
-        run: test -f app/dist/libcurl/index.mjs
+        run: |
+          test -f app/dist/libcurl/index.mjs
+          test -f app/dist/epoxy/epoxy.js
+          test -f app/dist/epoxy/epoxy.wasm
       - name: Bootstrap size budget (must stay under 18 KiB minified)
         # Raised from 5120 for the #28 navigation guard (window.open,
         # anchor/area/iframe/form/link URL property + setAttribute
@@ -262,7 +285,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          rm -rf app/dist/libcurl
+          rm -rf app/dist/libcurl app/dist/epoxy
           # Fresh repo in a temp dir: only the dist files land on the
           # branch, no build intermediates from the checkout worktree.
           rm -rf /tmp/bundle && mkdir -p /tmp/bundle
@@ -402,6 +425,10 @@ jobs:
           npm install --prefix .vendor @mercuryworkshop/libcurl-transport@2.0.5
           mkdir -p app/public/libcurl
           cp -r .vendor/node_modules/@mercuryworkshop/libcurl-transport/dist/. app/public/libcurl/
+          npm install --prefix .vendor @mercuryworkshop/epoxy-tls@2.1.18-1
+          mkdir -p app/public/epoxy
+          cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/minimal/epoxy.js app/public/epoxy/epoxy.js
+          cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/minimal/epoxy.wasm app/public/epoxy/epoxy.wasm
       - name: Build engine bundle
         run: |
           cd app

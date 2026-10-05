@@ -79,6 +79,125 @@ function moduleUrl(): string {
 let client: LibcurlClientLike | null = null;
 let initPromise: Promise<void> | null = null;
 
+/* ---------------------------------------------------------------------------
+ * Epoxy engine (issue #64): selectable second TLS/HTTP engine.
+ *
+ * The engine is chosen by deployment (Vite define ZL_TRANSPORT reading
+ * globalThis.__ZL_TRANSPORT__, same pattern as ZL_WISP_URL) or by a host
+ * calling setEngine() before init(). Default stays "libcurl".
+ *
+ * Corrections this records up front (verified against npm metadata
+ * 2.1.18-1): @mercuryworkshop/epoxy-tls is AGPL-3.0-only, NOT MIT. There
+ * is no license win here; the win is payload size (minimal glue 48KB JS +
+ * 845KB wasm vs the 2.1MB libcurl bundle) and the rustls+hyper stack.
+ * Deployments serving either bundle inherit the same AGPL obligations.
+ *
+ * Honest limits of the minimal epoxy build (verified: minimal/epoxy.d.ts):
+ * - fetch() returns the platform Response, so set-cookie pairs lost to
+ *   the forbidden-header rule are NOT re-attached (no rawHeaders seam).
+ *   Cookie-dependent sites should stay on libcurl.
+ * - No WebSocket surface: openWebSocket() under epoxy throws unless the
+ *   libcurl engine is also initialized (documented mixed mode).
+ * - Parity is not claimed: the transport-diag gate still runs libcurl;
+ *   epoxy probes land with the rest of #64.
+ * ------------------------------------------------------------------------ */
+
+export type TransportEngine = "libcurl" | "epoxy";
+
+const ENGINE_DEFAULT: TransportEngine =
+  ((globalThis as typeof globalThis & { __ZL_TRANSPORT__?: string }).__ZL_TRANSPORT__ === "epoxy")
+    ? "epoxy"
+    : "libcurl";
+
+let engine: TransportEngine = ENGINE_DEFAULT;
+
+/** Select the TLS/HTTP engine. Takes effect on the next init() call;
+    an engine switch mid-session requires a service-worker restart. */
+export function setEngine(e: TransportEngine): void {
+  if (e !== "libcurl" && e !== "epoxy") {
+    throw new Error("zeolite: unknown transport engine " + String(e));
+  }
+  engine = e;
+}
+
+/** Currently selected engine (the one init() would bring up). */
+export function currentEngine(): TransportEngine {
+  return engine;
+}
+
+const EPOXY_MISSING = "zeolite: epoxy transport not vendored (CI must copy @mercuryworkshop/epoxy-tls minimal/ into app/public/epoxy)";
+
+function epoxyModuleUrl(): string {
+  const g = globalThis as Record<string, unknown>;
+  if (typeof g.__ZL_EPOXY_URL__ === "string") return g.__ZL_EPOXY_URL__ as string;
+  return new URL("epoxy/epoxy.js", self.location.origin + "/").href;
+}
+
+function epoxyWasmUrl(): string {
+  return new URL("epoxy/epoxy.wasm", self.location.origin + "/").href;
+}
+
+/* wasm-bindgen glue is an ES module with INLINE export statements
+   (export class/function/const and export default), unlike the libcurl
+   bundle's single trailing export list, plus a default-branch
+   new URL(..., import.meta.url) that is a SyntaxError inside a Function
+   body. Strip the export keywords and pin import.meta.url to the vendored
+   wasm URL. Pure, unit-tested (__tests__/transport-select.test.ts). */
+export function stripEsmExports(src: string, metaUrl: string): string {
+  return src
+    .replace(/\bexport\s+default\s+/g, "")
+    .replace(/\bexport\s+\{/g, "{")
+    .replace(/\bexport\s+(?=(?:async\s+)?(?:function|class|const|let|var)\b)/g, "")
+    .replace(/import\.meta\.url/g, JSON.stringify(metaUrl));
+}
+
+interface EpoxyClientLike {
+  fetch(url: string, options: object): Promise<Response>;
+}
+
+interface EpoxyModule {
+  init?: (o: { module_or_path: string }) => Promise<void>;
+  EpoxyClient?: new (transport: string, options: object) => EpoxyClientLike;
+  EpoxyClientOptions?: new () => { wisp_v2: boolean };
+}
+
+let epoxyClient: EpoxyClientLike | null = null;
+let epoxyInitPromise: Promise<void> | null = null;
+
+async function loadEpoxyModule(): Promise<EpoxyModule> {
+  const res = await globalThis.fetch(epoxyModuleUrl(), { cache: "no-store" });
+  if (!res.ok) throw new Error(EPOXY_MISSING);
+  const src = stripEsmExports(await res.text(), epoxyWasmUrl());
+  const factory = new Function(
+    src + "\nreturn { init: typeof __wbg_init === \"function\" ? __wbg_init : undefined, EpoxyClient, EpoxyClientOptions };",
+  );
+  return factory() as EpoxyModule;
+}
+
+async function getEpoxy(cfg: { websocket: string }): Promise<EpoxyClientLike> {
+  if (epoxyClient) return epoxyClient;
+  if (!epoxyInitPromise) {
+    epoxyInitPromise = (async () => {
+      const mod = await loadEpoxyModule();
+      if (!mod.init || !mod.EpoxyClient || !mod.EpoxyClientOptions) {
+        throw new Error("zeolite: epoxy bundle exports incomplete (init/EpoxyClient/EpoxyClientOptions)");
+      }
+      await mod.init({ module_or_path: epoxyWasmUrl() });
+      const options = new mod.EpoxyClientOptions();
+      options.wisp_v2 = true;
+      epoxyClient = new mod.EpoxyClient(cfg.websocket, options);
+    })();
+    epoxyInitPromise = epoxyInitPromise.catch((e) => {
+      epoxyInitPromise = null;
+      throw e;
+    });
+  }
+  await epoxyInitPromise;
+  if (!epoxyClient) throw new Error(EPOXY_MISSING);
+  return epoxyClient;
+}
+
+
 /* Load the vendored ESM bundle without `import()`.
  *
  * Service workers on Chromium do not support dynamic import() on
@@ -297,10 +416,28 @@ async function getClient(cfg: { websocket: string }): Promise<LibcurlClientLike>
 }
 
 export async function init(cfg: { websocket: string }): Promise<void> {
+  if (engine === "epoxy") {
+    await getEpoxy(cfg);
+    return;
+  }
   await getClient(cfg);
 }
 
 export async function fetch(url: string, init?: RequestInit): Promise<Response> {
+  if (engine === "epoxy") {
+    if (!epoxyClient) throw new Error("zeolite: transport not initialized (call init first)");
+    const method = (init?.method ?? "GET").toUpperCase();
+    const headers: Record<string, string> = {};
+    if (init?.headers) {
+      const h = new Headers(init.headers as HeadersInit);
+      h.forEach((value, key) => {
+        headers[key] = value;
+      });
+    }
+    /* Option shape beyond method/headers/body is unverified against the
+       epoxy client; the transport-diag gate for epoxy lands with #64. */
+    return epoxyClient.fetch(url, { method, headers, body: init?.body ?? null });
+  }
   if (!client) throw new Error("zeolite: transport not initialized (call init first)");
   const c = client;
   const method = (init?.method ?? "GET").toUpperCase();
@@ -346,6 +483,15 @@ export function openWebSocket(
   h: WsHandlers,
   requestHeaders: RawHeaders = [],
 ): WsHandle {
+  /* Epoxy engine: the minimal build has no WebSocket surface (verified
+     against minimal/epoxy.d.ts). No silent fallback and no faked API:
+     WS rides libcurl only when that engine is initialized too (mixed
+     mode, chosen by the host), otherwise this fails honestly. */
+  if (engine === "epoxy" && !client) {
+    throw new Error(
+      "zeolite: websocket unsupported on the epoxy engine (minimal epoxy has no WS API; initialize the libcurl engine for WS)",
+    );
+  }
   if (!client) throw new Error(MISSING);
   const [send, close] = client.connect(
     new URL(url),
