@@ -1,8 +1,8 @@
 /* Zeolite DevTools page: network inspector + per-request detail view +
    opt-in rewrite tracing + diagnostics feed (1.2 Halide). This page is
    served by the engine origin, so it is controlled by the same SW and
-   can postMessage it. Polls zl:getNetLog, zl:getDiag and zl:getTracing
-   once per second. */
+   can postMessage it. Polls zl:getNetLog, zl:getDiag, zl:getTracing and
+   zl:transport once per second. */
 
 interface NetDetail {
   internalUrl: string;
@@ -57,6 +57,7 @@ const statsEl = document.getElementById("stats")!;
 const detailEl = document.getElementById("detail")!;
 const traceRows = document.getElementById("traceRows")!;
 const traceToggle = document.getElementById("traceToggle") as HTMLInputElement;
+const transportSelect = document.getElementById("transportSelect") as HTMLSelectElement;
 const diagRows = document.getElementById("diagRows")!;
 
 let entries: NetEntry[] = [];
@@ -210,6 +211,14 @@ traceToggle.addEventListener("change", () => {
   ctl.postMessage({ type: "zl:tracing", enabled: traceToggle.checked }, [ch.port2]);
 });
 
+// Transport engine toggle (#64): switch the TLS/HTTP engine. Takes
+// effect on the NEXT init(): the SW nulls its transport-ready promise
+// and the next request re-initializes on the new engine; the running
+// client keeps its engine until the service worker restarts.
+transportSelect.addEventListener("change", () => {
+  post({ type: "zl:transport", engine: transportSelect.value }, () => undefined);
+});
+
 function post(msg: unknown, onReply: (data: any) => void): boolean {
   const ctl = navigator.serviceWorker?.controller;
   if (!ctl) return false;
@@ -266,6 +275,10 @@ function tick(): void {
       renderTrace();
     }
     traceLast = d.lastSeq ?? traceLast;
+  });
+  post({ type: "zl:transport" }, (data) => {
+    const d = (data ?? {}) as { engine?: string };
+    if (d.engine && document.activeElement !== transportSelect) transportSelect.value = d.engine;
   });
 }
 
