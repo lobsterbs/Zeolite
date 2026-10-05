@@ -28,7 +28,22 @@ import { createServer } from "node:http";
 
 if (typeof globalThis.WebSocket === "undefined") {
   const ws = await import("ws");
-  globalThis.WebSocket = ws.WebSocket ?? ws.default;
+  const RealWebSocket = ws.WebSocket ?? ws.default;
+  /* Logging subclass: the epoxy gate is young; when the wisp WS fails
+     to open, the URL, the requested subprotocol, and the close/error
+     all land in the CI log. */
+  class LoggingWebSocket extends RealWebSocket {
+    constructor(address, protocols, options) {
+      super(address, protocols, options);
+      console.log("epoxy-ws ->", String(address), "protocols:", JSON.stringify(protocols));
+      this.on("unexpected-response", (_req, res) =>
+        console.log("epoxy-ws unexpected-response", res.statusCode, String(res.statusMessage)));
+      this.on("error", (err) => console.log("epoxy-ws error:", String(err?.message ?? err)));
+      this.on("close", (code, reason) => console.log("epoxy-ws close:", code, String(reason)));
+      this.on("open", () => console.log("epoxy-ws OPEN"));
+    }
+  }
+  globalThis.WebSocket = LoggingWebSocket;
 }
 
 /* Keep in sync with stripEsmExports in
@@ -87,6 +102,28 @@ echo.on("connection", (ws) => {
   ws.on("message", (data, isBinary) => ws.send(data, { binary: isBinary }));
 });
 await new Promise((r) => fixture.listen(FIXTURE_PORT, "127.0.0.1", r));
+
+/* --- wisp WS sanity probe: separates shim/server failures from
+   epoxy-specific ones before the epoxy client is built. --- */
+const probeResult = await new Promise((resolve) => {
+  let settled = false;
+  const probe = new globalThis.WebSocket(WISP);
+  const finish = (what) => {
+    if (settled) return;
+    settled = true;
+    try { probe.close(); } catch {}
+    resolve(what);
+  };
+  probe.onopen = () => finish("open");
+  probe.onclose = () => finish("closed");
+  probe.onerror = () => finish("error");
+  setTimeout(() => finish("timeout"), 5000);
+});
+console.log("wisp probe:", probeResult);
+if (probeResult !== "open") {
+  console.log("FAIL: the WebSocket shim itself cannot open the wisp endpoint; not an epoxy problem");
+  process.exit(1);
+}
 
 /* --- load the full epoxy bundle the way the engine does --- */
 const glue = readFileSync(PKG + "/epoxy.js", "utf8");
