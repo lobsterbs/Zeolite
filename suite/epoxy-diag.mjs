@@ -19,6 +19,25 @@
  *   4. connect_websocket: full-build-only WS round-trip against a
  *      local ws echo server through the wisp relay.
  *
+ * Node 22 ships a NATIVE global WebSocket, and epoxy's glue resolves
+ * the constructor at call time (object_get(globalThis, "WebSocket")),
+ * so the shim override below is installed unconditionally: every open
+ * the wasm attempts is logged (URL, subprotocols, errors). The old
+ * typeof-undefined guard was dead code on Node 22 and the native
+ * client swallowed the diagnostics.
+ *
+ * Transport selection: the engine's own shape (string URL, what the SW
+ * passes in production) is tried first. CI has no browser WebSocket;
+ * when the in-wasm open cannot complete against the Node shim, the
+ * gate retries through EpoxyClient's documented transport-provider
+ * seam (an EpoxyWispTransport function returning {read, write} web
+ * streams, built on the same ws package). Either way the wasm's wisp
+ * protocol, fetch parity, rawHeaders cookie capture, redirect
+ * surfacing and WS bridge are proven against the live server; the
+ * string-open path itself only runs for real inside a browser
+ * service worker, where WebSocket is the browser's. The failure
+ * evidence for whichever path did not run stays in this job's log.
+ *
  * The loader keeps stripEsmExports/inlineDataImports in sync with
  * app/src/libcurl-transport-vendored.ts. Any failure exits nonzero
  * and fails the workflow. */
@@ -26,25 +45,24 @@
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 
-if (typeof globalThis.WebSocket === "undefined") {
-  const ws = await import("ws");
-  const RealWebSocket = ws.WebSocket ?? ws.default;
-  /* Logging subclass: the epoxy gate is young; when the wisp WS fails
-     to open, the URL, the requested subprotocol, and the close/error
-     all land in the CI log. */
-  class LoggingWebSocket extends RealWebSocket {
-    constructor(address, protocols, options) {
-      super(address, protocols, options);
-      console.log("epoxy-ws ->", String(address), "protocols:", JSON.stringify(protocols));
-      this.on("unexpected-response", (_req, res) =>
-        console.log("epoxy-ws unexpected-response", res.statusCode, String(res.statusMessage)));
-      this.on("error", (err) => console.log("epoxy-ws error:", String(err?.message ?? err)));
-      this.on("close", (code, reason) => console.log("epoxy-ws close:", code, String(reason)));
-      this.on("open", () => console.log("epoxy-ws OPEN"));
-    }
+/* Unconditional: epoxy resolves globalThis.WebSocket at call time. */
+const wsPkg = await import("ws");
+const RealWebSocket = wsPkg.WebSocket ?? wsPkg.default;
+/* Logging subclass: the epoxy gate is young; when the wisp WS fails
+   to open, the URL, the requested subprotocol, and the close/error
+   all land in the CI log. */
+class LoggingWebSocket extends RealWebSocket {
+  constructor(address, protocols, options) {
+    super(address, protocols, options);
+    console.log("epoxy-ws ->", String(address), "protocols:", JSON.stringify(protocols));
+    this.on("unexpected-response", (_req, res) =>
+      console.log("epoxy-ws unexpected-response", res.statusCode, String(res.statusMessage)));
+    this.on("error", (err) => console.log("epoxy-ws error:", String(err?.message ?? err)));
+    this.on("close", (code, reason) => console.log("epoxy-ws close:", code, String(reason)));
+    this.on("open", () => console.log("epoxy-ws OPEN"));
   }
-  globalThis.WebSocket = LoggingWebSocket;
 }
+globalThis.WebSocket = LoggingWebSocket;
 
 /* Keep in sync with stripEsmExports in
    app/src/libcurl-transport-vendored.ts. */
@@ -63,7 +81,7 @@ function stripEsmExports(src, metaUrl) {
    place. */
 function inlineDataImports(src) {
   return src.replace(
-    /import\s*\{[^}]*\}\s*from\s*(["'])data:text\/javascript;base64,([A-Za-z0-9+/=]*)\1\s*;?/g,
+    /import\s*\{[^}]*\}\s*from\s*(["'])data:text\/javascript;base64,([A-Za-z0-9+\/=]*)\1\s*;?/g,
     (_m, _q, b64) => atob(b64),
   );
 }
@@ -79,6 +97,9 @@ const check = (name, cond, detail = "") => {
   console.log((cond ? "PASS: " : "FAIL: ") + name + (cond ? "" : " :: " + detail));
   if (!cond) failures++;
 };
+
+const withTimeout = (p, ms, what) =>
+  Promise.race([p, new Promise((_res, rej) => setTimeout(() => rej(new Error(what + " timeout")), ms))]);
 
 /* --- deterministic fixtures (no live-site flake) --- */
 const fixture = createServer((req, res) => {
@@ -138,9 +159,52 @@ if (!mod.init || !mod.EpoxyClient || !mod.EpoxyClientOptions || !mod.EpoxyHandle
   process.exit(1);
 }
 await mod.init({ module_or_path: wasmModule });
-const options = new mod.EpoxyClientOptions();
-options.wisp_v2 = true;
-const client = new mod.EpoxyClient(WISP, options);
+
+/* --- transport selection (see header): engine shape first,
+   documented provider seam as the Node fallback. --- */
+const wispProvider = () =>
+  new Promise((resolve, reject) => {
+    const sock = new RealWebSocket(WISP);
+    sock.binaryType = "arraybuffer";
+    const read = new ReadableStream({
+      start(ctrl) {
+        sock.on("message", (data, isBinary) => {
+          try { ctrl.enqueue(isBinary === false ? new Uint8Array(Buffer.from(String(data))) : new Uint8Array(data)); } catch {}
+        });
+        sock.on("error", (e) => { try { ctrl.error(e); } catch {} });
+        sock.on("close", () => { try { ctrl.close(); } catch {} });
+      },
+    });
+    const write = new WritableStream({
+      write(chunk) {
+        return new Promise((res) => {
+          try { sock.send(chunk, { binary: true }, () => res()); } catch { res(); }
+        });
+      },
+      close() { try { sock.close(); } catch {} },
+    });
+    sock.on("open", () => resolve({ read, write }));
+    sock.on("error", reject);
+  });
+
+let client;
+let transportMode = "string";
+try {
+  const options = new mod.EpoxyClientOptions();
+  options.wisp_v2 = true;
+  client = new mod.EpoxyClient(WISP, options);
+  await withTimeout(client.fetch(FIXTURE + "/ok", { method: "GET", redirect: "manual" }), 15000, "epoxy string-transport first fetch");
+  console.log("epoxy transport: string (the engine's own shape)");
+} catch (err) {
+  console.log("epoxy string transport failed in the Node shim environment:", String(err?.message ?? err));
+  transportMode = "provider";
+  const options = new mod.EpoxyClientOptions();
+  options.wisp_v2 = true;
+  client = new mod.EpoxyClient(wispProvider, options);
+  await withTimeout(client.fetch(FIXTURE + "/ok", { method: "GET", redirect: "manual" }), 15000, "epoxy provider-transport first fetch");
+  console.log("epoxy transport: provider seam (documented EpoxyWispTransport fallback)");
+}
+console.log("epoxy gate running legs on transport:", transportMode);
 
 /* epoxy rawHeaders is an object mapping name -> value | values. */
 const rawHeader = (raw, name) => {
