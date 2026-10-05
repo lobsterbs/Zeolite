@@ -49,13 +49,22 @@ describe("unwrapDest", () => {
   });
 
   it("stops at the last decodable layer", () => {
-    // A layer that decodes to something that is not an http(s) URL stops
-    // the peel: the decoded value is returned as the final destination.
+    /* #73: a legacy layer whose tail decodes to a non-http(s) string
+       no longer decodes at all (fail-closed like keyedDecode), so the
+       peel stops and the wrapped route is returned unchanged. */
     const bad = "https://example.com" + encodeDest("hello");
-    expect(unwrapDest(bad)).toBe("hello");
+    expect(unwrapDest(bad)).toBe(bad);
     // A layer whose base64 tail cannot decode at all is left unchanged.
     const undecodable = "https://example.com/j/aGVsbG8~~~~~~";
     expect(unwrapDest(undecodable)).toBe(undecodable);
+  });
+
+  it("legacy tails fail closed on non-http(s) destinations (#73)", () => {
+    expect(decodePath(encodeDestLegacy("file:///etc/passwd"))).toBeNull();
+    expect(decodePath(encodeDestLegacy("javascript:alert(1)"))).toBeNull();
+    expect(decodePath(encodeDestLegacy("wss://attacker/"))).toBeNull();
+    // Invalid UTF-8 tail: the strict decoder fails closed, no mojibake.
+    expect(decodePath("/j/-A")).toBeNull();
   });
 
   it("returns non-http input unchanged", () => {

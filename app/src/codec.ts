@@ -82,7 +82,6 @@ export function b64uDecode(s: string): Uint8Array | null {
 }
 
 const ENC = new TextEncoder();
-const DEC = new TextDecoder();
 const DEC_STRICT = new TextDecoder("utf-8", { fatal: true });
 
 /* ---- keyed opaque routes (issue #55) ------------------------------- */
@@ -393,7 +392,17 @@ export function decodePath(path: string): string | null {
     }
     return null;
   }
-  return DEC.decode(bytes);
+  /* #73: the legacy branch fails closed exactly like keyedDecode -
+     the engine routes http(s) destinations only, so anything else
+     is not a valid destination. Strict UTF-8 too: the lossy decoder
+     handed back a replacement-character string for garbage tails. */
+  let dest: string;
+  try {
+    dest = DEC_STRICT.decode(bytes);
+  } catch {
+    return null;
+  }
+  return /^https?:\/\//.test(dest) ? dest : null;
 }
 
 /** Recover a concatenated route tail (the URL-literal gap). The JS
