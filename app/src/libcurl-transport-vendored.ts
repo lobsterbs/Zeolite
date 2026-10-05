@@ -318,7 +318,7 @@ export function epoxyWsHandle(
     },
     close(code, reason) {
       closed = true;
-      if (sock) void sock.close(code, reason).catch(() => undefined);
+      if (sock) void sock.close(code, reason ?? "").catch(() => undefined);
     },
   };
 }
