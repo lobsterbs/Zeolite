@@ -16,3 +16,5 @@ the backstop for mid-stream failures.
 Known gap, kept honest: the watcher is observational only. A request
 that lands in the sub-second window between socket death and the first
 reconnect attempt fails honestly; it does not wait.
+
+Verification note (2026-10-05): CI runner availability on this account is throttled; cancelled runs with no executed steps are queue cancels, not code failures. One retrigger once runners free up is the correct response.
