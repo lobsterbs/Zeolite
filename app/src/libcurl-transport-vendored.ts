@@ -83,23 +83,43 @@ let initPromise: Promise<void> | null = null;
  * Epoxy engine (issue #64): selectable second TLS/HTTP engine.
  *
  * The engine is chosen by deployment (Vite define ZL_TRANSPORT reading
- * globalThis.__ZL_TRANSPORT__, same pattern as ZL_WISP_URL) or by a host
- * calling setEngine() before init(). Default stays "libcurl".
+ * globalThis.__ZL_TRANSPORT__, same pattern as ZL_WISP_URL), by a host
+ * calling setEngine() before init(), or at runtime through the
+ * zl:transport control message (DevTools toggle). Default stays
+ * "libcurl".
  *
- * Corrections this records up front (verified against npm metadata
- * 2.1.18-1): @mercuryworkshop/epoxy-tls is AGPL-3.0-only, NOT MIT. There
- * is no license win here; the win is payload size (minimal glue 48KB JS +
- * 845KB wasm vs the 2.1MB libcurl bundle) and the rustls+hyper stack.
- * Deployments serving either bundle inherit the same AGPL obligations.
+ * Corrections recorded up front (verified against npm metadata 2.1.18-1
+ * and the upstream client/src/lib.rs): @mercuryworkshop/epoxy-tls is
+ * AGPL-3.0-only, NOT MIT. There is no license win here; the win is
+ * payload size and the rustls+hyper stack. Deployments serving either
+ * bundle inherit the same AGPL obligations.
  *
- * Honest limits of the minimal epoxy build (verified: minimal/epoxy.d.ts):
- * - fetch() returns the platform Response, so set-cookie pairs lost to
- *   the forbidden-header rule are NOT re-attached (no rawHeaders seam).
- *   Cookie-dependent sites should stay on libcurl.
- * - No WebSocket surface: openWebSocket() under epoxy throws unless the
- *   libcurl engine is also initialized (documented mixed mode).
- * - Parity is not claimed: the transport-diag gate still runs libcurl;
- *   epoxy probes land with the rest of #64.
+ * The vendored variant is the FULL build: fetch + connect_websocket +
+ * gzip/brotli decompression + HTTP/2 (the minimal build has fetch only
+ * and no WS surface). The wasm is fetched lazily, only when the epoxy
+ * engine is actually selected, so the default libcurl payload is
+ * unchanged.
+ *
+ * Verified against upstream lib.rs (2.1.18-1, branch "multiplexed"):
+ * - EpoxyClient.fetch(url, options) follows redirects by default; the
+ *   engine surfaces 3xx itself, so the adapter passes redirect:
+ *   "manual" for libcurl parity (the SW hop-follower owns redirect
+ *   mapping).
+ * - fetch() defines url/redirected/rawHeaders on the returned
+ *   Response; rawHeaders is an object mapping header name -> value or
+ *   array of values (set-cookie pairs survive there, past the
+ *   forbidden-header filter). The adapter rebuilds the response with
+ *   rawHeaders as pairs, the shape the Zeolite cookie jar reads.
+ * - connect_websocket(handlers, url, protocols, headers) is async;
+ *   EpoxyHandlers(onopen, onclose, onerror, onmessage) - note the
+ *   order differs from libcurl's connect(). onopen/onclose carry no
+ *   arguments: the peer close code is NOT surfaced, so a Close-frame
+ *   close reports 1000 (a completed close handshake is by definition
+ *   clean); an error-then-close reports 1006, matching the bridge's
+ *   abnormal-close convention.
+ * - AbortSignal is not part of the epoxy fetch options surface:
+ *   aborted requests run to completion under epoxy. Honest limit,
+ *   recorded, not faked.
  * ------------------------------------------------------------------------ */
 
 export type TransportEngine = "libcurl" | "epoxy";
@@ -125,7 +145,7 @@ export function currentEngine(): TransportEngine {
   return engine;
 }
 
-const EPOXY_MISSING = "zeolite: epoxy transport not vendored (CI must copy @mercuryworkshop/epoxy-tls minimal/ into app/public/epoxy)";
+const EPOXY_MISSING = "zeolite: epoxy transport not vendored (CI must copy @mercuryworkshop/epoxy-tls full/ into app/public/epoxy)";
 
 function epoxyModuleUrl(): string {
   const g = globalThis as Record<string, unknown>;
@@ -151,17 +171,160 @@ export function stripEsmExports(src: string, metaUrl: string): string {
     .replace(/import\.meta\.url/g, JSON.stringify(metaUrl));
 }
 
-interface EpoxyClientLike {
+interface EpoxySocketLike {
+  send(data: string | ArrayBuffer): Promise<void>;
+  close(code: number, reason: string): Promise<void>;
+}
+
+interface EpoxyFetchClient {
   fetch(url: string, options: object): Promise<Response>;
+  connect_websocket?(
+    handlers: unknown,
+    url: string,
+    protocols: string[],
+    headers: Record<string, string>,
+  ): Promise<EpoxySocketLike>;
+}
+
+interface EpoxyClientOptionsLike {
+  wisp_v2: boolean;
+}
+
+interface EpoxyHandlersCtor {
+  new (
+    onopen: () => void,
+    onclose: () => void,
+    onerror: (err: unknown) => void,
+    onmessage: (data: string | Uint8Array) => void,
+  ): unknown;
 }
 
 interface EpoxyModule {
-  init?: (o: { module_or_path: string }) => Promise<void>;
-  EpoxyClient?: new (transport: string, options: object) => EpoxyClientLike;
-  EpoxyClientOptions?: new () => { wisp_v2: boolean };
+  init?: (o: { module_or_path: string | WebAssembly.Module }) => Promise<void>;
+  EpoxyClient?: new (transport: string, options: EpoxyClientOptionsLike) => EpoxyFetchClient;
+  EpoxyClientOptions?: new () => EpoxyClientOptionsLike;
+  EpoxyHandlers?: EpoxyHandlersCtor;
 }
 
-let epoxyClient: EpoxyClientLike | null = null;
+/** epoxy's rawHeaders object -> the [name, value] pair list the Zeolite
+    cookie jar reads (multi-value names flatten; junk filters out).
+    Pure, unit-gated (__tests__/epoxy-adapter.test.ts). */
+export function epoxyRawHeadersToPairs(raw: unknown): RawHeaders {
+  const pairs: RawHeaders = [];
+  if (!raw || typeof raw !== "object") return pairs;
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === "string") pairs.push([name, value]);
+    else if (Array.isArray(value)) {
+      for (const v of value) if (typeof v === "string") pairs.push([name, v]);
+    }
+  }
+  return pairs;
+}
+
+/** Fetch options for the epoxy client, built for libcurl parity: 3xx
+    surfaces (redirect "manual"; the SW hop-follower owns redirect
+    mapping), method/headers/body passthrough. Pure, unit-gated. */
+export function epoxyFetchOptions(init?: RequestInit): Record<string, unknown> {
+  const headers: Record<string, string> = {};
+  if (init?.headers) {
+    const h = new Headers(init.headers as HeadersInit);
+    h.forEach((value, key) => {
+      headers[key] = value;
+    });
+  }
+  return {
+    method: (init?.method ?? "GET").toUpperCase(),
+    headers,
+    body: init?.body ?? null,
+    redirect: "manual",
+  };
+}
+
+/* WsHandle payloads are whatever the page posted; the epoxy socket
+   accepts string or ArrayBuffer. Blob and typed-array views are
+   converted once, here. */
+async function epoxyPayload(data: unknown): Promise<string | ArrayBuffer> {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return data;
+  if (ArrayBuffer.isView(data)) {
+    const view = data as ArrayBufferView;
+    return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer;
+  }
+  if (data instanceof Blob) return (await data.arrayBuffer()) as ArrayBuffer;
+  throw new Error("zeolite: epoxy ws payload must be string or binary");
+}
+
+/** Sync WsHandle over epoxy's async connect_websocket: sends buffer
+    until the socket resolves, a close before the socket resolves is
+    delivered to it, and the handler order/close-code mapping follows
+    the adapter contract documented above. Pure, unit-gated. */
+export function epoxyWsHandle(
+  h: WsHandlers,
+  handlersCtor: EpoxyHandlersCtor,
+  connect: (constructed: unknown, url: string, protocols: string[], headers: Record<string, string>) => Promise<EpoxySocketLike>,
+  url: string,
+  protocols: string[],
+  requestHeaders: RawHeaders,
+): WsHandle {
+  let errored = false;
+  let closed = false;
+  let sock: EpoxySocketLike | null = null;
+  const pending: Array<string | ArrayBuffer> = [];
+  const headers: Record<string, string> = Object.fromEntries(requestHeaders) as Record<string, string>;
+  const constructed = new handlersCtor(
+    () => h.onopen(""),
+    () => h.onclose(errored ? 1006 : 1000, ""),
+    (err) => {
+      errored = true;
+      h.onerror(String(err));
+    },
+    (data) => h.onmessage(data instanceof Uint8Array ? (data.slice().buffer as ArrayBuffer) : data),
+  );
+  connect(constructed, url, protocols, headers)
+    .then((s) => {
+      sock = s;
+      if (closed) {
+        void s.close(1000, "").catch(() => undefined);
+        return;
+      }
+      for (const d of pending.splice(0)) {
+        void s.send(d).catch((err) => {
+          errored = true;
+          h.onerror(String(err));
+        });
+      }
+    })
+    .catch((err) => {
+      errored = true;
+      h.onerror(String(err));
+    });
+  return {
+    send(data) {
+      void epoxyPayload(data)
+        .then((p) => {
+          if (sock) {
+            void sock.send(p).catch((err) => {
+              errored = true;
+              h.onerror(String(err));
+            });
+          } else if (!closed) {
+            pending.push(p);
+          }
+        })
+        .catch((err) => {
+          errored = true;
+          h.onerror(String(err));
+        });
+    },
+    close(code, reason) {
+      closed = true;
+      if (sock) void sock.close(code, reason).catch(() => undefined);
+    },
+  };
+}
+
+let epoxyClient: EpoxyFetchClient | null = null;
+let epoxyHandlers: EpoxyHandlersCtor | null = null;
 let epoxyInitPromise: Promise<void> | null = null;
 
 async function loadEpoxyModule(): Promise<EpoxyModule> {
@@ -169,12 +332,12 @@ async function loadEpoxyModule(): Promise<EpoxyModule> {
   if (!res.ok) throw new Error(EPOXY_MISSING);
   const src = stripEsmExports(await res.text(), epoxyWasmUrl());
   const factory = new Function(
-    src + "\nreturn { init: typeof __wbg_init === \"function\" ? __wbg_init : undefined, EpoxyClient, EpoxyClientOptions };",
+    src + "\nreturn { init: typeof __wbg_init === \"function\" ? __wbg_init : undefined, EpoxyClient, EpoxyClientOptions, EpoxyHandlers };",
   );
   return factory() as EpoxyModule;
 }
 
-async function getEpoxy(cfg: { websocket: string }): Promise<EpoxyClientLike> {
+async function getEpoxy(cfg: { websocket: string }): Promise<EpoxyFetchClient> {
   if (epoxyClient) return epoxyClient;
   if (!epoxyInitPromise) {
     epoxyInitPromise = (async () => {
@@ -186,6 +349,7 @@ async function getEpoxy(cfg: { websocket: string }): Promise<EpoxyClientLike> {
       const options = new mod.EpoxyClientOptions();
       options.wisp_v2 = true;
       epoxyClient = new mod.EpoxyClient(cfg.websocket, options);
+      epoxyHandlers = mod.EpoxyHandlers ?? null;
     })();
     epoxyInitPromise = epoxyInitPromise.catch((e) => {
       epoxyInitPromise = null;
@@ -426,17 +590,22 @@ export async function init(cfg: { websocket: string }): Promise<void> {
 export async function fetch(url: string, init?: RequestInit): Promise<Response> {
   if (engine === "epoxy") {
     if (!epoxyClient) throw new Error("zeolite: transport not initialized (call init first)");
-    const method = (init?.method ?? "GET").toUpperCase();
-    const headers: Record<string, string> = {};
-    if (init?.headers) {
-      const h = new Headers(init.headers as HeadersInit);
-      h.forEach((value, key) => {
-        headers[key] = value;
-      });
-    }
-    /* Option shape beyond method/headers/body is unverified against the
-       epoxy client; the transport-diag gate for epoxy lands with #64. */
-    return epoxyClient.fetch(url, { method, headers, body: init?.body ?? null });
+    const res = await epoxyClient.fetch(url, epoxyFetchOptions(init));
+    /* Rebuild so rawHeaders is the Zeolite pair shape (epoxy's own
+       rawHeaders object maps name -> value | values; set-cookie pairs
+       survive past the forbidden-header filter) and resp.headers
+       carries the same pairs. Abort signals are not part of the epoxy
+       surface; that limit is documented above, not faked. */
+    const pairs = epoxyRawHeadersToPairs((res as Response & { rawHeaders?: unknown }).rawHeaders);
+    const h = new Headers();
+    for (const [k, v] of pairs) h.append(k, v);
+    const resp = new Response(res.body as BodyInit | null, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: h,
+    });
+    (resp as Response & { rawHeaders?: RawHeaders }).rawHeaders = pairs;
+    return resp;
   }
   if (!client) throw new Error("zeolite: transport not initialized (call init first)");
   const c = client;
@@ -475,7 +644,7 @@ export interface WsHandlers {
 }
 export interface WsHandle {
   send(data: Blob | ArrayBuffer | string): void;
-  close(code: number, reason: string): void;
+  close(code: number, reason?: string): void;
 }
 export function openWebSocket(
   url: string,
@@ -483,13 +652,24 @@ export function openWebSocket(
   h: WsHandlers,
   requestHeaders: RawHeaders = [],
 ): WsHandle {
-  /* Epoxy engine: the minimal build has no WebSocket surface (verified
-     against minimal/epoxy.d.ts). No silent fallback and no faked API:
-     WS rides libcurl only when that engine is initialized too (mixed
-     mode, chosen by the host), otherwise this fails honestly. */
-  if (engine === "epoxy" && !client) {
-    throw new Error(
-      "zeolite: websocket unsupported on the epoxy engine (minimal epoxy has no WS API; initialize the libcurl engine for WS)",
+  /* Epoxy engine (#64): connect_websocket exists on the full build
+     (verified: websocket.rs sits behind the "full" feature). The
+     minimal build has no WS surface, so a deployment that vendored
+     minimal fails honestly here - no silent fallback, no faked API. */
+  if (engine === "epoxy") {
+    if (!epoxyClient) throw new Error(EPOXY_MISSING);
+    if (!epoxyHandlers || typeof epoxyClient.connect_websocket !== "function") {
+      throw new Error("zeolite: epoxy build has no WebSocket API (vendor the full epoxy variant)");
+    }
+    const handlers = epoxyHandlers;
+    const c = epoxyClient;
+    return epoxyWsHandle(
+      h,
+      handlers,
+      (constructed, u, p, hdrs) => c.connect_websocket!(constructed, u, p, hdrs),
+      url,
+      protocols,
+      requestHeaders,
     );
   }
   if (!client) throw new Error(MISSING);
@@ -509,4 +689,3 @@ export function openWebSocket(
      ping()/lastPongAt() pair here and the watchdog arms itself. */
   return { send, close };
 }
-
