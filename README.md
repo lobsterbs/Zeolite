@@ -1,5 +1,13 @@
 # Zeolite
-![Zeolite banner](assets/zeolite-banner.svg)
+
+```
+ _____              ___ __     
+/__  /  ___  ____  / (_) /____ 
+  / /  / _ \/ __ \/ / / __/ _ \
+ / /__/  __/ /_/ / / / /_/  __/
+/____/\___/\____/_/_/\__/\___/ 
+                              
+```
 **Current release: 2.0 Graphene** · Rust/WASM · Wisp v2.1
 
 > **Status: experimental.** Zeolite is experimental software. The engine, its API surface, and the embed contract can change or break at any time without a deprecation window. Do not treat any release as stable or production-ready; the honesty norms apply (known gaps stay written down), but stability guarantees do not exist yet.
