@@ -103,7 +103,7 @@ import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, refineWithContent, sniffsAsHtml, transitRecord, transitStats, DOC_DESTS } from "./transit";
 import { cssRewriteStream, initTransform, isCss, isHtml, isJs, prewarmRewriter, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
 import { httpsUpgraded } from "./config";
-import { ruleFor, ruleProfile, siteRules } from "./siteconfig";
+import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, setRulesEnabled, setSiteOverrides, siteUaFor, type ResourceType } from "./rules";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
@@ -118,10 +118,35 @@ import { currentEngine, initTransport, openWebSocket, wispTransport } from "./tr
 import { WsBridge, type PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
 import { senderVirtualOrigin, virtualOriginHeaders } from "./origin";
-import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP, type VirtualContext } from "./vctx";
+import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { applySetCookie, cookieHeaderFor, documentCookieRead, documentCookieWrite, isPassChallenge, jarClear, jarClearScope, jarEnumeration, jarHeaders, jarLoad, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy, type CookieRequestContext, type JarConflictRule } from "./cookies";
-import { DownloadTracker } from "./downloads";
-import { engineBindingError, fingerprintScript, resolveProfile, workerFingerprintScript, type FingerprintProfile } from "./fingerprint";
+/* #87: the shared service-worker runtime state (per-client virtual
+   contexts, degraded flag, route-shape toggles, route key, download
+   registry instance, fingerprint profile + per-site profile cache,
+   per-site route table, docCookie port registry) moved to ./swstate;
+   the SW, the request engine and the control plane are call sites. */
+import {
+  DL,
+  getEngineDegraded,
+  getFpProfile,
+  getFpScript,
+  getFpWorkerScript,
+  getRouteKey,
+  isHttpsUpgrade,
+  navHandlesEnabled,
+  pushDocCookieView,
+  registerDocCookiePort,
+  setEngineDegraded,
+  setFingerprint,
+  setHttpsUpgrade,
+  setNavHandles,
+  setRouteKey,
+  setSiteEnabled,
+  siteDisabled,
+  siteProfileFor,
+  VCTX,
+  ZEOLITE_VERSION,
+} from "./swstate";
 import { decryptSession, encryptSession } from "./session";
 import {
   CS_ROUTE,
@@ -157,15 +182,6 @@ import type { UiTab } from "./extensions/tabs";
 
 declare const self: ServiceWorkerGlobalScope;
 
-/* ---- Per-client virtual contexts (issue #33) ------------------------ */
-
-/* Keyed by FetchEvent clientId. Serving a client's document or worker
-   script from a decodable engine route establishes that client's
-   context; escaped same-origin paths resolve against it before the
-   referrer compat fallback. Memory-only by design: a restarted SW
-   starts empty and re-establishes per client (see ./vctx.ts). */
-const VCTX = new Map<string, VirtualContext>();
-
 /* ---- HTTP over wisp ----------------------------------------------- */
 /* Phase 1: libcurl wasm transport (BareMux-compatible), the same proven
    TLS-termination path ScramJet uses. The vendored bundle is loaded by
@@ -176,21 +192,12 @@ const VCTX = new Map<string, VirtualContext>();
    preload helper. Until the CI vendoring step runs, calls throw and
    the suite records transport-missing. */
 
-/* Finding 5 (SW half): when a core engine component fails to
-   initialize, record it once so zl:ping can report the degraded
-   state instead of a bare ok:true that hides the failure. Null =
-   fully operational. */
-let engineDegraded: string | null = null;
-
 /* #84: the wisp/libcurl transport lifecycle (init, connect-class
    reset + single retry, engine switch) moved to transport.ts; sw.ts
    depends on the Transport interface. The degraded-flag seam keeps
-   reporting init failures to zl:ping exactly as before. */
-initTransport({
-  setDegraded: (reason) => {
-    engineDegraded = reason;
-  },
-});
+   reporting init failures to zl:ping exactly as before (finding 5:
+   the flag itself lives in ./swstate). */
+initTransport({ setDegraded: setEngineDegraded });
 
 /* ---- Header surgery ------------------------------------------------
    stripHostile() and mapRefreshHeader() live in ./headers (unit-gated
@@ -205,12 +212,10 @@ const MAX_REDIRECT_HOPS = 10;
    moved to transform.ts. */
 initTransform({
   routeReady: () => routeReady,
-  routeKey: () => routeKeyB64,
-  fpScript: () => fpScript,
+  routeKey: () => getRouteKey(),
+  fpScript: () => getFpScript(),
   siteScript: async (base) => (await siteProfileFor(base))?.script ?? null,
-  setDegraded: (reason) => {
-    engineDegraded = reason;
-  },
+  setDegraded: setEngineDegraded,
 });
 
 
@@ -305,70 +310,11 @@ const wsBridge = new WsBridge(
    entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
-export const ZEOLITE_VERSION = "3.0 Diamond";
+export { ZEOLITE_VERSION };
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
-/* 1.7 Sulfide: download registry. Attachment responses pass through a
-   counting stream (nothing is ever buffered whole); entries carry the
-   engine-known network facts and are cancellable by id. */
-const DL = new DownloadTracker();
-
-/* 1.8 Telluride: fingerprinting resistance. The active profile is
-   compiled once into the document init script and mirrored onto the
-   upstream wire (User-Agent, Accept-Language). Null = fully native
-   surfaces, the honest default. Resets on SW restart, like the other
-   host toggles; a rejected profile never changes active state. */
-let fpProfile: FingerprintProfile | null = null;
 /* 1.9 Fullerene: active session recording, when any. */
 let rec: RecordingState | null = null;
-let fpScript: string | null = null;
-/* 2.3 Selenide: the same profile compiled for worker contexts
-   (WorkerNavigator + OffscreenCanvas; documents keep fpScript). */
-let fpWorkerScript: string | null = null;
-function setFingerprint(profile: unknown): { ok: true; profile?: FingerprintProfile } | { ok: false; error: string } {
-  if (profile === null || profile === undefined) {
-    fpProfile = null;
-    fpScript = null;
-    fpWorkerScript = null;
-    return { ok: true };
-  }
-  try {
-    const p = resolveProfile(profile);
-    /* #71: a profile bound away from the live engine is refused with
-       a reason (same refusal pattern as contradictory profiles), not
-       silently applied under a different TLS stack. The live engine
-       is the one zl:transport reports / switches on next init. */
-    const bindErr = engineBindingError(p, currentEngine());
-    if (bindErr) return { ok: false, error: bindErr };
-    fpProfile = p;
-    fpScript = fingerprintScript(p);
-    fpWorkerScript = workerFingerprintScript(p);
-    return { ok: true, profile: p };
-  } catch (e) {
-    return { ok: false, error: (e as Error).message };
-  }
-}
-
-/* #80: per-site FingerprintProfiles are siteconfig DATA. Resolved and
-   compiled once per host, then cached for the SW lifetime (the rules
-   fetch is already memoized). The global zl:fingerprint profile wins
-   over site data; invalid or engine-mismatched site data degrades to
-   null and never blocks a request. */
-type SiteFp = { p: FingerprintProfile; script: string; workerScript: string } | null;
-const siteFpCache = new Map<string, { p: FingerprintProfile; script: string; workerScript: string } | null>();
-async function siteProfileFor(target: string): Promise<SiteFp> {
-  let host = "";
-  try {
-    host = new URL(target).hostname.toLowerCase();
-  } catch {
-    return null;
-  }
-  if (siteFpCache.has(host)) return siteFpCache.get(host) ?? null;
-  const p = ruleProfile(ruleFor(await siteRules(), target), currentEngine());
-  const entry = p ? { p, script: fingerprintScript(p), workerScript: workerFingerprintScript(p) } : null;
-  siteFpCache.set(host, entry);
-  return entry;
-}
 
 const ZL_PAGES = "zeolite-pages-v1";
 const ZL_CACHED_AT = "x-zl-cached-at";
@@ -523,25 +469,6 @@ async function wispFetchCacheBypass(req: Request): Promise<Response> {
   const jarCookie = cookieHeaderFor(dest);
   if (jarCookie) headers.set("cookie", jarCookie);
   return wispTransport.fetch(dest, { method: "GET", headers });
-}
-
-/* ---- Per-site route table ------------------------------------------ */
-
-/** Sites the user disabled for this engine. Keyed by registrable-ish
-    host suffix (match on hostname or any parent domain). */
-const disabledSites = new Set<string>();
-
-function siteDisabled(target: string): boolean {
-  let host: string;
-  try {
-    host = new URL(target).hostname;
-  } catch {
-    return false;
-  }
-  for (const site of disabledSites) {
-    if (host === site || host.endsWith("." + site)) return true;
-  }
-  return false;
 }
 
 /* ---- Fetch interception -------------------------------------------- */
@@ -739,23 +666,6 @@ function csInjectUrls(target: string, req: Request): string[] {
    worker start; zl:ping and the zl:config ack also echo it so embedders
    can detect drift. zl:teardown drops every cache, this one included,
    which is the intended full reset. */
-/* Issue #55: base64url of the realm-held opaque route key, loaded in
-   routeReady below. null = no key (routeReady not settled yet, or
-   storage unavailable) = the legacy codec. */
-let routeKeyB64: string | null = null;
-/* Issue #53: opt-in engine-side HTTPS upgrade. The live toggle
-   lives here, persisted with the route shape; the pure transform
-   is config.ts:httpsUpgraded. Applied at the single destination
-   choke point and per redirect hop, so the engine never fetches
-   cleartext while it is on. No silent downgrade: a failed
-   https fetch fails through the normal error pipeline. */
-let httpsUpgrade = false;
-/* #63: opt-in refusal of the plaintext ?url= initial navigation.
-   Hosts adopt zl:navHandle and flip this so the legacy embed can no
-   longer appear browser-visible on the deployment. Persists with the
-   route shape; resets to false (legacy accepted) on a teardown/full
-   storage wipe, which is the documented migration window. */
-let navHandles = false;
 const ZL_ROUTE_CACHE = "zeolite-route-v1";
 const ZL_ROUTE_KEY = new URL("route-config.json", self.registration.scope).href;
 const routeReady: Promise<void> = (async () => {
@@ -767,9 +677,9 @@ const routeReady: Promise<void> = (async () => {
          coerces to the default (mirror routes are gone, #32). */
       setScheme(cfg.prefix ?? "/j/");
       /* #53: the host's upgrade choice restores with the shape. */
-      if (typeof cfg.httpsUpgrade === "boolean") httpsUpgrade = cfg.httpsUpgrade;
+      if (typeof cfg.httpsUpgrade === "boolean") setHttpsUpgrade(cfg.httpsUpgrade);
       /* #63: the ?url= refusal choice restores with the shape. */
-      if (typeof cfg.navHandles === "boolean") navHandles = cfg.navHandles;
+      if (typeof cfg.navHandles === "boolean") setNavHandles(cfg.navHandles);
     }
   } catch {
     /* storage unavailable: defaults stay until the next zl:config */
@@ -789,7 +699,7 @@ const routeReady: Promise<void> = (async () => {
       await saveRouteKey(fresh);
       history = [fresh];
     }
-    routeKeyB64 = b64uEncode(history[0]!);
+    setRouteKey(b64uEncode(history[0]!));
     setRouteKeys(history.map(b64uEncode));
   } catch {
     /* storage unavailable: keyed codec stays off */
@@ -800,7 +710,7 @@ async function persistRoute(prefix: string): Promise<void> {
   try {
     await (await caches.open(ZL_ROUTE_CACHE)).put(
       ZL_ROUTE_KEY,
-      new Response(JSON.stringify({ prefix, httpsUpgrade, navHandles })),
+      new Response(JSON.stringify({ prefix, httpsUpgrade: isHttpsUpgrade(), navHandles: navHandlesEnabled() })),
     );
   } catch {
     /* storage unavailable: the in-memory rotation still works */
@@ -1147,7 +1057,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
            only (the embed page's own URL): the bare landing page with
            no ?url= keeps serving so an operator can read the hint. */
         if (
-          navHandles &&
+          navHandlesEnabled() &&
           e.request.mode === "navigate" &&
           url.pathname === new URL(self.registration.scope).pathname &&
           url.searchParams.get("url")
@@ -1184,7 +1094,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
          same-origin paths, foreign-origin requests) resolves here
          before cache or transport; mixed-content subresources and
          redirect targets pass the same seam on their own fetch. */
-      target = httpsUpgraded(target, httpsUpgrade);
+      target = httpsUpgraded(target, isHttpsUpgrade());
       /* #52 parity with the server-side anubis bridge: the challenge
          page's return URL was rewritten into an engine route, so the
          pass-challenge request carries redir pointing at the engine
@@ -1388,7 +1298,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           });
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
         }
-        if (ruleDec.url || ic.url) target = httpsUpgraded(ic.url ?? ruleDec.url ?? target, httpsUpgrade);
+        if (ruleDec.url || ic.url) target = httpsUpgraded(ic.url ?? ruleDec.url ?? target, isHttpsUpgrade());
 
         /* Cache-first for proxied GETs. */
         if (e.request.method === "GET") {
@@ -1485,12 +1395,12 @@ self.addEventListener("fetch", (e: FetchEvent) => {
              fingerprint profile still wins: the wire surface must match
              the spoofed document surface (1.8 Telluride). */
           const ruleUa = siteUaFor(target);
-          if (ruleUa && !fpProfile) sendHeaders.set("user-agent", ruleUa);
+          if (ruleUa && !getFpProfile()) sendHeaders.set("user-agent", ruleUa);
           /* #80: a per-site FingerprintProfile from siteconfig data
              rides the same wire surfaces; it overrides the zl:rules
              UA (a full coherent surface beats one header), and the
              global profile still beats both. */
-          if (!fpProfile) {
+          if (!getFpProfile()) {
             const sp = await siteProfileFor(target);
             if (sp) {
               sendHeaders.set("user-agent", sp.p.userAgent);
@@ -1557,7 +1467,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             }
             /* #53: the engine-side hop chain bypasses the fetch
                choke point, so each hop upgrades here too. */
-            next = httpsUpgraded(next, httpsUpgrade);
+            next = httpsUpgraded(next, isHttpsUpgrade());
             if (resp.status === 307 || resp.status === 308) {
               if (hopBody) break; /* one-shot stream: cannot replay */
             } else if (resp.status === 303 || hopMethod === "POST") {
@@ -1833,7 +1743,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
                minted with the legacy codec on purpose - the prelude
                realm holds no route key, so a keyed token could never
                decode there (honest limit, issue text). */
-            const wFp = fpWorkerScript ?? (await siteProfileFor(target))?.workerScript ?? "";
+            const wFp = getFpWorkerScript() ?? (await siteProfileFor(target))?.workerScript ?? "";
             const head =
               "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
               (await workerPrelude()) +
@@ -1860,7 +1770,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
                (WorkerNavigator + OffscreenCanvas surfaces). Streaming is
                preserved: everything prepended is one extra first chunk. */
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude" });
-            const preludeW = fpWorkerScript ?? (await siteProfileFor(target))?.workerScript ?? "";
+            const preludeW = getFpWorkerScript() ?? (await siteProfileFor(target))?.workerScript ?? "";
             const prelude =
               "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
               (await workerPrelude()) +
@@ -2035,9 +1945,10 @@ function forwardedHeaders(req: Request, target: string, initiator?: string): Hea
   /* 1.8 Telluride: while a profile is active, the wire surface must
      match the document surface, so its UA and languages win over
      whatever the page sent. */
-  if (fpProfile) {
-    out.set("user-agent", fpProfile.userAgent);
-    out.set("accept-language", fpProfile.languages.join(","));
+  const profile = getFpProfile();
+  if (profile) {
+    out.set("user-agent", profile.userAgent);
+    out.set("accept-language", profile.languages.join(","));
   }
   return out;
 }
@@ -2197,19 +2108,6 @@ function senderOrigin(e: ExtendableMessageEvent): string | null {
    re-opening docCookie channels cannot grow the map without bound
    (the oldest entry is dropped, its port simply stops receiving
    pushes - reads still refresh on demand). */
-const docCookiePorts = new Map<string, { port: MessagePort; page: string }>();
-const DOC_COOKIE_PORTS_CAP = 128;
-function pushDocCookieView(clientId: string): void {
-  const entry = clientId ? docCookiePorts.get(clientId) : undefined;
-  if (!entry) return;
-  try {
-    entry.port.postMessage({ ok: true, cookie: documentCookieRead(entry.page) });
-  } catch {
-    /* port closed: the page is gone, stop tracking it */
-    docCookiePorts.delete(clientId);
-  }
-}
-
 /* #41: jar control is host-only. Proxied pages are SW clients too,
    and zl:getJars must never hand one target site every other site's
    cookies: the sender must be a host page (adapter, devtools), not a
@@ -2267,15 +2165,15 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       reply({
         ok: true,
         version: ZEOLITE_VERSION,
-        degraded: engineDegraded,
+        degraded: getEngineDegraded(),
         prefix: currentPrefix(),
         /* Fixed shape since #32 (mirror removed); kept in the reply so
            old embedder probes that compare it stay compatible. */
         scheme: "b64u",
-        httpsUpgrade,
+        httpsUpgrade: isHttpsUpgrade(),
         /* #63: the live ?url= refusal choice, so an embedder detects a
            revert to defaults and re-pushes its config. */
-        navHandles,
+        navHandles: navHandlesEnabled(),
         profile: jarProfileState(),
       });
       break;
@@ -2290,13 +2188,13 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
         break;
       }
       /* #53: absent leaves the persisted choice (old embedders). */
-      if (typeof msg.httpsUpgrade === "boolean") httpsUpgrade = msg.httpsUpgrade;
+      if (typeof msg.httpsUpgrade === "boolean") setHttpsUpgrade(msg.httpsUpgrade);
       /* #63: same migration-window rule for the ?url= refusal. */
-      if (typeof msg.navHandles === "boolean") navHandles = msg.navHandles;
+      if (typeof msg.navHandles === "boolean") setNavHandles(msg.navHandles);
       setScheme(msg.prefix ?? "/j/");
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
-      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade, navHandles });
+      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), navHandles: navHandlesEnabled() });
       break;
     }
     case "zl:mint": {
@@ -2418,8 +2316,7 @@ case "zl:tracing":
         reply({ ok: false, error: "missing site" });
         break;
       }
-      if (msg.enabled === false) disabledSites.add(msg.site);
-      else disabledSites.delete(msg.site);
+      setSiteEnabled(msg.site, msg.enabled !== false);
       reply({ ok: true });
       break;
     case "zl:wsOpen": {
@@ -2493,7 +2390,7 @@ case "zl:tracing":
         /* unparseable URL: the wss?: validation already answered */
       }
       const wsHeaders = wsIdentityHeaders(wsOrigin, wsUrl, {
-        profile: fpProfile,
+        profile: getFpProfile(),
       });
       wsBridge.open(port as unknown as PortLike, wsUrl, Array.isArray(msg.protocols) ? msg.protocols : [], wsHeaders);
       break;
@@ -2525,13 +2422,7 @@ case "zl:tracing":
          reads above: the jar was fixed by senderOrigin, the page can
          claim nothing. */
       const cid = (e.source as { id?: string } | null)?.id;
-      if (cid) {
-        if (docCookiePorts.size >= DOC_COOKIE_PORTS_CAP && !docCookiePorts.has(cid)) {
-          const oldest = docCookiePorts.keys().next();
-          if (!oldest.done && oldest.value !== undefined) docCookiePorts.delete(oldest.value);
-        }
-        docCookiePorts.set(cid, { port, page: origin });
-      }
+      if (cid) registerDocCookiePort(cid, port, origin);
       break;
     }
     case "zl:fingerprint":
