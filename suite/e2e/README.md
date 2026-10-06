@@ -85,3 +85,91 @@ node suite/e2e/e2e.mjs
 
 The script exits non-zero on any failed check and prints the engine
 server's output tail for diagnosis.
+
+# Torture battery (issue #92)
+
+`suite/e2e/torture.mjs` is the dedicated compatibility torture suite:
+web-semantics probes (not just "does it 200") that run the SAME probe
+browser-direct on the fixture origin and engine-proxied, then compare
+the two records. It boots its own engine + fixtures and runs as its
+own CI step right after the #35 suite.
+
+## Cause classes
+
+Every check declares the compatibility category a failure implicates,
+so a red run names the broken layer. The classes and what they mean:
+
+- `interception` - the request seam: methods, bodies, content-type,
+  Authorization, multipart forms, data:/blob: URLs.
+- `routing` - the engine route: unicode/percent-encoded paths,
+  double-encoded queries, 2 KB paths.
+- `transport` - wire semantics: gzip bodies, ~1 MiB chunked bodies,
+  slow TTFB, 204/418/500 status preservation, the 301/302/303/307/308
+  method+body table, and redirect chains (5 hops inside the engine
+  cap, 15 hops across it - the engine surfaces the 11th hop with a
+  mapped Location and the browser re-enters the engine).
+- `rewriting` - the streaming rewriter: the torture HTML page
+  (CRLF inside a tag, unquoted and padded attributes, a unicode src,
+  srcset, iframe, relative anchor), CSS @import + multiline url() +
+  @font-face, the JS string-literal URL pass.
+- `isolation` - virtual-origin behavior: cookie set/delete lifecycle,
+  the pinned Secure-cookie divergence (see below), cross-origin
+  preflight vs same-virtual-origin.
+- `browser-limitation` - documented gaps PINNED by asserts: a change
+  in the pinned behavior is caught, not silently absorbed.
+
+## NativeTransit vs RewriteFallback
+
+The fetch/XHR-shaped probes exercise the NativeTransit pass-through
+path (whose contract the #35 suite's #96 check enforces in detail);
+the torture-page probes exercise RewriteFallback (the streaming
+rewriter). Both classes are represented per the issue's acceptance
+criteria.
+
+## Pinned deviations (asserted, never papered over)
+
+- Secure cookies: the DIRECT browser treats 127.0.0.1 as trustworthy
+  and sends Secure cookies over plain http; the engine jar honors the
+  Secure attribute against the real target scheme, so an http target
+  never carries one. Both are correct per their own rules; the check
+  asserts the divergence itself.
+- Runtime-concatenated URLs: `pre + "img.png"` is invisible to every
+  static rewrite pass; the assembled relative URL resolves against the
+  opaque engine route and fails closed (404), never escaping
+  browser-direct. Pinned.
+- `location.pathname` is LegacyUnforgeable: the page keeps seeing the
+  opaque engine route. Pinned so any future virtualization change
+  (which must not leak destinations per #32) trips CI.
+
+## Machine-readable output
+
+The run ends with per-category pass/fail counts and failure names on
+the `== E2E-JSON ==` line, e.g.
+
+```
+== E2E-JSON == {"suite":"torture","passed":17,"failed":1,"categories":{"transport":{"passed":6,"failed":1,"failures":["..."]}}}
+```
+
+CI greps `[FAIL]` lines into `::error::TORTURE` annotations. Adding a
+regression test is one more `check(category, name, fn)` call - no
+infrastructure redesign (issue acceptance).
+
+## Honest gaps (not faked)
+
+- WebSocket: needs a TLS fixture (the engine upgrades ws to wss by
+  design); same gap as the #35 suite.
+- IDN hostnames: need a real domain; the fixtures are loopback IPs.
+- Downloads: the #90 registry is unit-tested; a fetch-shaped
+  attachment is just another body probe, and a UI-observable download
+  harness would be a new scope.
+- SW restart group: same as the #35 suite, not covered.
+
+## Run locally
+
+Same prerequisites as the #35 suite, then:
+
+```
+node suite/e2e/torture.mjs
+```
+
+(The two suites bind the same ports, so run them sequentially.)

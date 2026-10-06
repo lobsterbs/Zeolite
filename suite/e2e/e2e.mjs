@@ -607,52 +607,78 @@ async function main() {
      design. */
 
   await check("passthrough: NativeTransit preserves method, body, headers, cookies, range, conditionals, redirects, status and streaming (#96)", async () => {
+    /* Every probe step races a 6s cap: a step that hangs is NAMED in
+       the marks (and the failure detail) instead of eating the whole
+       evaluate as one opaque timeout. The first CI run of this check
+       hung 30s with zero transport activity and no indication which
+       fetch never settled; this instrumentation is permanent, not a
+       debugging leftover - a regression here must identify itself. */
     const probeJs = `async () => {
       const out = {};
-      const g = await fetch("/api/passthrough?p=get");
-      out.get = {
-        status: g.status,
-        ct: g.headers.get("content-type"),
-        fx: g.headers.get("x-zl-fx"),
-        etag: g.headers.get("etag"),
-        echo: JSON.parse(await g.text()),
+      const marks = [];
+      const cap = (label, ms) => new Promise((_, rej) => setTimeout(() => rej(new Error("HUNG:" + label + ":" + ms)), ms));
+      const step = async (label, fn) => {
+        try {
+          const v = await Promise.race([Promise.resolve().then(fn), cap(label, 6000)]);
+          marks.push(label + ":ok");
+          return v;
+        } catch (e) {
+          marks.push(label + ":" + String((e && e.message) || e).slice(0, 120));
+          return undefined;
+        }
       };
-      const p = await fetch("/api/passthrough?p=post", {
-        method: "POST",
-        headers: { "content-type": "text/zl-probe" },
-        body: "zl-probe-body",
+      out.get = await step("get", async () => {
+        const g = await fetch("/api/passthrough?p=get");
+        return { status: g.status, ct: g.headers.get("content-type"), fx: g.headers.get("x-zl-fx"), etag: g.headers.get("etag"), echo: JSON.parse(await g.text()) };
       });
-      out.post = JSON.parse(await p.text());
-      const r = await fetch("/api/passthrough?p=range", { headers: { range: "bytes=0-3" } });
-      out.range = { status: r.status, cr: r.headers.get("content-range"), body: await r.text() };
-      const c = await fetch("/api/passthrough?p=cond", { headers: { "if-none-match": out.get.etag } });
-      out.cond = { status: c.status };
-      await fetch("/setcookie2");
+      out.post = await step("post", async () => {
+        const p = await fetch("/api/passthrough?p=post", { method: "POST", headers: { "content-type": "text/zl-probe" }, body: "zl-probe-body" });
+        return JSON.parse(await p.text());
+      });
+      out.range = await step("range", async () => {
+        const r = await fetch("/api/passthrough?p=range", { headers: { range: "bytes=0-3" } });
+        return { status: r.status, cr: r.headers.get("content-range"), body: await r.text() };
+      });
+      out.cond = await step("cond", async () => {
+        const c = await fetch("/api/passthrough?p=cond", { headers: { "if-none-match": (out.get && out.get.etag) || '"zl-pt-1"' } });
+        return { status: c.status };
+      });
+      await step("setcookie", () => fetch("/setcookie2"));
       await new Promise((res) => setTimeout(res, 500));
-      out.cookie = JSON.parse(await (await fetch("/api/passthrough?p=cookie")).text()).cookie;
-      const s = await fetch("/api/stream");
-      const reader = s.body.getReader();
-      let text = "";
-      let chunks = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks++;
-        text += new TextDecoder().decode(value);
-      }
-      out.stream = { status: s.status, chunks, text };
-      const ac = new AbortController();
-      const af = fetch("/api/stream", { signal: ac.signal });
-      ac.abort();
-      try {
-        await af;
-        out.abort = "no-error";
-      } catch (e) {
-        out.abort = e.name;
-      }
-      const rd = await fetch("/redir");
-      out.redirect = { status: rd.status, body: (await rd.text()).includes("zl-landing") };
-      return JSON.stringify(out);
+      out.cookie = await step("cookie", async () => {
+        const ck = await fetch("/api/passthrough?p=cookie");
+        return JSON.parse(await ck.text()).cookie;
+      });
+      out.stream = await step("stream", async () => {
+        const s = await fetch("/api/stream");
+        marks.push("stream-opened:" + s.status);
+        const reader = s.body.getReader();
+        let text = "";
+        let chunks = 0;
+        for (;;) {
+          const rd = await Promise.race([reader.read(), cap("read" + chunks, 6000)]);
+          if (rd.done) break;
+          chunks++;
+          text += new TextDecoder().decode(rd.value);
+        }
+        return { status: s.status, chunks, text };
+      });
+      await step("abort", async () => {
+        const ac = new AbortController();
+        const af = fetch("/api/stream", { signal: ac.signal });
+        ac.abort();
+        try {
+          await af;
+          out.abort = "no-error";
+        } catch (e) {
+          out.abort = e.name;
+        }
+      });
+      out.redirect = await step("redir", async () => {
+        const rd = await fetch("/redir");
+        return { status: rd.status, body: (await rd.text()).includes("zl-landing") };
+      });
+      return JSON.stringify({ marks, out });
     }`;
     /* Direct browser behavior: a page on the fixture origin itself,
        no engine in the path anywhere. */
@@ -664,51 +690,56 @@ async function main() {
        #zl-marker openProxied waits for; every probe URL is an absolute
        path, so the page it runs from does not matter). */
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
-    const proxied = JSON.parse(await evalIn(frame, "passthrough probes", probeJs, 30000));
+    const proxied = JSON.parse(await evalIn(frame, "passthrough probes", probeJs, 90000));
+    const bad = (r) => r.marks.filter((m) => !m.endsWith(":ok"));
+    assert(bad(direct).length === 0, "direct model steps misbehaved (fixture regression?): " + bad(direct).join(" | "));
+    assert(bad(proxied).length === 0, "engine steps misbehaved: " + bad(proxied).join(" | ") + "; all marks: " + proxied.marks.join(","));
+    const d = direct.out;
+    const px = proxied.out;
     /* Method, URL, request body, content-type, origin semantics. */
-    eq(proxied.get.echo.method, direct.get.echo.method, "GET method forwarded");
-    eq(proxied.get.echo.url, direct.get.echo.url, "request URL with query");
-    eq(proxied.post.method, direct.post.method, "POST method forwarded");
-    eq(proxied.post.body, direct.post.body, "POST body bytes");
-    eq(proxied.post.ct, direct.post.ct, "request content-type forwarded");
-    eq(proxied.post.origin, direct.post.origin, "Origin on a same-origin POST (virtual-origin stamping)");
+    eq(px.get.echo.method, d.get.echo.method, "GET method forwarded");
+    eq(px.get.echo.url, d.get.echo.url, "request URL with query");
+    eq(px.post.method, d.post.method, "POST method forwarded");
+    eq(px.post.body, d.post.body, "POST body bytes");
+    eq(px.post.ct, d.post.ct, "request content-type forwarded");
+    eq(px.post.origin, d.post.origin, "Origin on a same-origin POST (virtual-origin stamping)");
     /* Response status + representative headers. */
-    eq(proxied.get.status, direct.get.status, "GET status");
-    eq(proxied.get.ct, direct.get.ct, "response content-type");
-    eq(proxied.get.fx, direct.get.fx, "custom response header preserved");
-    eq(proxied.get.etag, direct.get.etag, "etag preserved (conditional validators)");
+    eq(px.get.status, d.get.status, "GET status");
+    eq(px.get.ct, d.get.ct, "response content-type");
+    eq(px.get.fx, d.get.fx, "custom response header preserved");
+    eq(px.get.etag, d.get.etag, "etag preserved (conditional validators)");
     /* Range semantics. */
-    eq(proxied.range.status, direct.range.status, "range status (206)");
-    eq(proxied.range.cr, direct.range.cr, "content-range");
-    eq(proxied.range.body, direct.range.body, "range slice bytes");
+    eq(px.range.status, d.range.status, "range status (206)");
+    eq(px.range.cr, d.range.cr, "content-range");
+    eq(px.range.body, d.range.body, "range slice bytes");
     /* Conditional requests. */
-    eq(proxied.cond.status, direct.cond.status, "If-None-Match -> 304");
+    eq(px.cond.status, d.cond.status, "If-None-Match -> 304");
     /* Cookies (semantically: the Set-Cookie landed and the next request
        carried it; the jar rebuild is the documented deviation, the
        presence of the cookie is the invariant). */
     assert(
-      typeof proxied.cookie === "string" && proxied.cookie.includes("fx2=1"),
-      "engine-proxied cookie missing: " + JSON.stringify(proxied.cookie),
+      typeof px.cookie === "string" && px.cookie.includes("fx2=1"),
+      "engine-proxied cookie missing: " + JSON.stringify(px.cookie),
     );
     assert(
-      typeof direct.cookie === "string" && direct.cookie.includes("fx2=1"),
-      "direct cookie missing: " + JSON.stringify(direct.cookie),
+      typeof d.cookie === "string" && d.cookie.includes("fx2=1"),
+      "direct cookie missing: " + JSON.stringify(d.cookie),
     );
     /* Streaming: bytes arrive in order and complete; chunk boundaries
        are not an invariant (a transport may legitimately coalesce). */
-    eq(proxied.stream.status, direct.stream.status, "stream status");
-    eq(proxied.stream.text, direct.stream.text, "streamed bytes");
-    assert(proxied.stream.chunks >= 1, "engine stream produced no chunks");
-    assert(direct.stream.chunks >= 2, "direct stream was buffered whole (fixture regression)");
+    eq(px.stream.status, d.stream.status, "stream status");
+    eq(px.stream.text, d.stream.text, "streamed bytes");
+    assert(px.stream.chunks >= 1, "engine stream produced no chunks");
+    assert(d.stream.chunks >= 2, "direct stream was buffered whole (fixture regression)");
     /* Abort/cancellation semantics. */
-    eq(proxied.abort, direct.abort, "abort error name");
-    eq(proxied.abort, "AbortError", "aborted fetch rejects with AbortError");
+    eq(px.abort, d.abort, "abort error name");
+    eq(px.abort, "AbortError", "aborted fetch rejects with AbortError");
     /* Redirects: the engine resolves the hop chain itself, so the
        final status and body are the invariant (response.redirected and
        the Location the page never sees are documented deviations). */
-    eq(proxied.redirect.status, direct.redirect.status, "redirect-follow status");
-    eq(proxied.redirect.body, direct.redirect.body, "redirect final content");
-    return "12 probe groups matched direct vs proxied";
+    eq(px.redirect.status, d.redirect.status, "redirect-follow status");
+    eq(px.redirect.body, d.redirect.body, "redirect final content");
+    return "12 probe groups matched direct vs proxied; marks: " + proxied.marks.join(",");
   });
 
   await check("api: IndexedDB round-trips inside the virtual origin", async () => {

@@ -451,3 +451,11 @@ jobs:
             grep -E "^\[FAIL\]|HARNESS-ERROR" browser.out | head -20 | while IFS= read -r l; do echo "::error::E2E $l"; done
             exit 1
           fi
+      - name: Torture suite (issue #92)
+        run: |
+          node suite/e2e/torture.mjs 2>&1 | tee torture.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\[FAIL\]|HARNESS-ERROR" torture.out | head -40 | while IFS= read -r l; do echo "::error::TORTURE $l"; done
+            exit 1
+          fi

@@ -24,6 +24,7 @@
    test-only hatch the compat job uses). */
 
 import { createServer } from "node:http";
+import { gzipSync } from "node:zlib";
 
 export const PORT_A = 7101;
 export const PORT_B = 7102;
@@ -212,6 +213,152 @@ export function startFixture(port) {
         send(res, "text/plain", "cookie-set", { "set-cookie": "fx2=1; Path=/" });
       } else if (path === "/sw-probe.js") {
         send(res, "text/javascript", "self.addEventListener('install', () => {});\n");
+      } else if (path === "/api/methods") {
+        /* #92 torture battery: full-fidelity echo (method, selected
+           request headers, body) with REAL CORS answers so the direct
+           model can preflight. OPTIONS answers the preflight; the
+           actual response echoes the request Origin when present. */
+        if (req.method === "OPTIONS") {
+          res.writeHead(204, {
+            "access-control-allow-origin": req.headers.origin ?? "*",
+            "access-control-allow-methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+            "access-control-allow-headers": "content-type, x-zl-probe, authorization",
+            "access-control-max-age": "600",
+          });
+          res.end();
+        } else {
+          const extra = {};
+          if (req.headers.origin) {
+            extra["access-control-allow-origin"] = req.headers.origin;
+            extra.vary = "Origin";
+          }
+          send(res, "application/json", JSON.stringify({
+            zl: "methods",
+            method: req.method,
+            url: req.url,
+            ct: req.headers["content-type"] ?? null,
+            xzl: req.headers["x-zl-probe"] ?? null,
+            auth: req.headers.authorization ?? null,
+            cookie: req.headers.cookie ?? null,
+            body,
+          }), extra);
+        }
+      } else if (path === "/api/upload") {
+        /* #92: multipart echo. The boundary differs per request, so the
+           battery compares the semantic fields, not the raw bytes. */
+        send(res, "application/json", JSON.stringify({ zl: "upload", ct: req.headers["content-type"] ?? null, body }));
+      } else if (path === "/api/gzip") {
+        /* #92: content-encoding body. The invariant is the DECODED text
+           the page reads, whichever layer ends up decoding. */
+        const gz = gzipSync(Buffer.from("zl-gzip-body-0123456789", "utf8"));
+        res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip", "content-length": gz.length });
+        res.end(gz);
+      } else if (path === "/api/bigbody") {
+        /* #92: ~1 MiB deterministic body in 12 time-separated writes
+           with no content-length (chunked framing, EOF-delimited). */
+        const line = "zl-big-0123456789abcdef\r\n";
+        const block = Buffer.from(line.repeat(4096)); /* 96 KiB */
+        res.writeHead(200, { "content-type": "text/plain", "x-zl-fx": "big" });
+        let i = 0;
+        const tick = () => {
+          i++;
+          if (i > 11) {
+            res.end();
+            return;
+          }
+          res.write(block);
+          setTimeout(tick, 40);
+        };
+        tick();
+      } else if (path === "/api/slow") {
+        /* #92: 700ms TTFB - slow responses must complete, not time out. */
+        setTimeout(() => send(res, "text/plain", "zl-slow-ok"), 700);
+      } else if (path === "/api/teapot") {
+        res.writeHead(418, { "content-type": "text/plain", "content-length": 6 });
+        res.end("teapot");
+      } else if (path === "/api/fail") {
+        res.writeHead(500, { "content-type": "text/plain", "content-length": 11 });
+        res.end("server-boom");
+      } else if (path.startsWith("/api/redir")) {
+        /* #92: one endpoint per redirect code, all landing on the echo.
+           The battery POSTs to each and compares the method/body the
+           spec says the redirect must produce. */
+        const code = Number(path.slice("/api/redir".length));
+        if ([301, 302, 303, 307, 308].includes(code)) {
+          res.writeHead(code, { location: `${origin}/api/methods` });
+          res.end();
+        } else {
+          res.writeHead(404, { "content-type": "text/plain", "content-length": 4 });
+          res.end("nope");
+        }
+      } else if (path.startsWith("/api/chain/")) {
+        /* #92: N-hop 302 chain. 5 stays inside the engine's hop cap, 15
+           crosses it: the engine surfaces the 11th hop with a mapped
+           Location and the browser re-enters the engine for the rest. */
+        const n = Number(path.slice("/api/chain/".length));
+        if (Number.isInteger(n) && n >= 0) {
+          res.writeHead(302, { location: n === 0 ? `${origin}/api/methods` : `${origin}/api/chain/${n - 1}` });
+          res.end();
+        } else {
+          res.writeHead(404, { "content-type": "text/plain", "content-length": 4 });
+          res.end("nope");
+        }
+      } else if (path === "/api/cookiestart") {
+        send(res, "text/plain", "cookie-set", { "set-cookie": "zlt=1; Path=/" });
+      } else if (path === "/api/cookiedel") {
+        send(res, "text/plain", "cookie-del", { "set-cookie": "zlt=; Path=/; Max-Age=0" });
+      } else if (path === "/api/cookiesecure") {
+        /* #92: Secure+SameSite=Strict cookie. Loopback is a trustworthy
+           origin so the DIRECT browser stores and sends it over plain
+           http; the engine jar honors the Secure attribute against the
+           real target scheme and does not attach it - the battery pins
+           that divergence as documented behavior. */
+        send(res, "text/plain", "cookie-secure", { "set-cookie": "zls=1; Path=/; Secure; SameSite=Strict" });
+      } else if (path === "/dir/unicode/%C3%A5.png") {
+        res.writeHead(200, { "content-type": "image/png", "content-length": PNG.length });
+        res.end(PNG);
+      } else if (path === "/dir/torture.html") {
+        /* #92: the rewriter torture page. Edge constructs on purpose:
+           a CRLF inside a tag, an unquoted attribute value, padded
+           attribute spacing, a unicode path, srcset, an iframe, a
+           relative anchor, a JS string-literal URL (rewriter pass)
+           and a runtime-concatenated URL (the honest gap: no static
+           pass can see it). */
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><head><title>zl torture</title>
+<link rel="stylesheet" href="torture.css">
+<style>.tl-inl{background:url("img.png")}</style>
+</head><body>
+<p id="zl-marker">zl-torture-page</p>
+<div id="tl-inl" class="tl-inl">inl</div>
+<div id="tl-ext" class="tl-ext">ext</div>
+<div id="tl-imp" class="tl-imp">imp</div>
+<img id="crlf"${"\r\n"} src="img.png" alt="c">
+<img id="unq" src=img.png alt="u">
+<img id="spaced"    src   =   "img.png" alt="s">
+<img id="uni" src="unicode/å.png" alt="n">
+<img id="ss" srcset="img.png 1x, img.png 2x" alt="x">
+<iframe id="fru" src="inner.html"></iframe>
+<a id="relimg" href="./img.png">m</a>
+<script>
+var im2 = new Image(); im2.id = "tlit"; im2.src = "/dir/img.png"; document.body.appendChild(im2);
+var pre = "/dir/"; var im3 = new Image(); im3.id = "concat"; im3.src = pre + "img.png"; document.body.appendChild(im3);
+</script>
+</body></html>`);
+      } else if (path === "/dir/torture.css") {
+        send(res, "text/css", `@import url("timport.css");
+@font-face { font-family: zlt; src: url("zlfont.woff2") format("woff2"); }
+.tl-ext {
+  background: url(
+    "img.png"
+  );
+}
+`);
+      } else if (path === "/dir/timport.css") {
+        send(res, "text/css", `.tl-imp{background:url("img.png")}`);
+      } else if (path === "/dir/zlfont.woff2") {
+        const woff = Buffer.from("wOFFzl-torture-font-bytes", "utf8");
+        res.writeHead(200, { "content-type": "font/woff2", "content-length": woff.length });
+        res.end(woff);
       } else if (path === "/__hits") {
         send(res, "application/json", JSON.stringify(hits));
       } else {
