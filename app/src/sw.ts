@@ -107,7 +107,11 @@ import { ruleFor, ruleProfile, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, setRulesEnabled, setSiteOverrides, siteUaFor, type ResourceType } from "./rules";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
-import { DIAG, redactSecrets } from "./diag";
+import { DIAG } from "./diag";
+/* #89: the network inspector ring moved to ./netlog (bounded storage,
+   redaction, generation stamp); the SW and the extracted engine /
+   control plane are call sites. */
+import { flatRed, netLog, netLogCursor, netLogGeneration, netLogPush, netLogSince, stampNetGeneration, type NetDetail, type NetEntry } from "./netlog";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
 import { beginRecording, finishRecording, type RecordingState } from "./recording";
 import { currentEngine, initTransport, openWebSocket, wispTransport } from "./transport";
@@ -209,89 +213,6 @@ initTransform({
   },
 });
 
-
-/* ---- Network inspector log (Phase 4) -------------------------------- */
-/* Fixed-size ring buffer of proxied requests. The devtools page polls
-   zl:getNetLog; a snapshot plus a monotonically increasing sequence
-   lets it drop entries it has already seen. */
-
-export interface NetEntry {
-  seq: number;
-  ts: number;
-  method: string;
-  /** Engine-local request path (the full URL for foreign-origin
-      requests the engine routes, #34). */
-  path: string;
-  /** Real destination URL. */
-  dest: string;
-  status: number;
-  /** Time until response headers (TTFB through the wisp hop), ms. */
-  ms: number;
-  /** Response body size: content-length when present, else -1. */
-  bytes: number;
-  /** Plugin verdict from the onRequest hooks, when any plugin ran. */
-  verdict?: string;
-  /** Resource type classification (DOCUMENT/SCRIPT/STYLE/...). fetch()
-      and XHR are not distinguishable without initiator info, so both
-      are reported as FETCH rather than guessed apart. */
-  rtype: string;
-  /** Rewrite applied to this response, when any: "html" | "css". */
-  rewritten?: string;
-  err?: string;
-  /** Diagnostics trace identifier, joinable with zl:getDiag events. */
-  traceId?: string;
-  /** Transport mode decision (NativeTransit Alpha / RewriteFallback), or
-      "browser" for a cross-origin passthrough the engine declines
-      (issue #30: escape telemetry, not proxied traffic), or "engine"
-      for an engine-answered request that never touched the transport
-      (the #34 CORS preflight). */
-  transport?: "NativeTransit" | "RewriteFallback" | "browser" | "engine";
-  /** Machine-readable reason when the decision was RewriteFallback. */
-  fallbackReason?: string;
-  /** Final destination after redirects, when the transport exposed it. */
-  finalDest?: string;
-  /** Inspector detail record (1.2 Halide), for the detail view. */
-  detail?: NetDetail;
-}
-
-/** Per-request inspector detail (1.2 Halide): the original target
-    URL lives in the entry itself; this adds the internal engine URL,
-    timing, initiator and redacted header/cookie records. Values of
-    secrets are never stored (redactSecrets on entry). */
-export interface NetDetail {
-  /** Internal engine URL as the browser requested it (path + query). */
-  internalUrl: string;
-  /** Time until response headers, ms. */
-  ttfb: number;
-  /** Destination of the controlling page, when the SW can resolve it. */
-  initiator?: string;
-  /** Redacted request headers. */
-  reqHeaders?: Record<string, string>;
-  /** Redacted response headers, when a response was produced. */
-  respHeaders?: Record<string, string>;
-  /** Set-Cookie names seen on the response (values never stored). */
-  cookies?: string[];
-  /** True when the request arrived on a foreign origin and the engine
-      routed it through the transport instead of letting the browser
-      go direct (issue #34). */
-  crossOrigin?: boolean;
-}
-
-const NET_LIMIT = 256;
-const netLog: NetEntry[] = [];
-let netSeq = 0;
-
-function netLogPush(entry: Omit<NetEntry, "seq" | "ts">): void {
-  netLog.push({ ...entry, seq: ++netSeq, ts: Date.now() });
-  if (netLog.length > NET_LIMIT) netLog.shift();
-}
-
-/** Flatten headers into a redacted record for the inspector detail. */
-function flatRed(headers: Headers): Record<string, string> {
-  const out: Record<string, string> = {};
-  headers.forEach((v, k) => (out[k] = redactSecrets(v)));
-  return out;
-}
 
 /* ---- WebSocket bridge (1.3 Carbide) -------------------------------- */
 /* Pages route ws(s):// through the zl:wsOpen control message; the
@@ -666,13 +587,6 @@ self.addEventListener("install", () => {
   prewarmRewriter();
 });
 
-/* NetLog generation is an epoch stamped per worker evaluation, not a
-   count from zero: a restarted worker used to come back with
-   generation 1 again, so a devtools that reconnected after a restart
-   could see an unchanged generation and skip the ring reset its
-   entries+cursor needed. */
-let netGeneration = Date.now();
-
 /* Restart-safe engine init (runs once per worker evaluation). A
    terminated worker restarts by re-evaluating this module WITHOUT a
    new install/activate pair, so activate-only init left every
@@ -686,7 +600,7 @@ let netGeneration = Date.now();
 const initReady = (async () => {
   /* Generation stamp per worker evaluation: a restart resets the
      netLog ring, and the devtools delta-sync resets on it. */
-  netGeneration = Date.now();
+  stampNetGeneration();
   /* 1.4 Boride: restore the persisted cookie jar. Storage failure
      means an in-memory jar, never an init failure. */
   try {
@@ -2496,7 +2410,7 @@ case "zl:tracing":
          included so a devtools that reconnected across a worker
          restart resets its tracing cursor like the netLog one. */
       const since = (msg as { since?: number }).since ?? 0;
-      reply({ ok: true, generation: netGeneration, ...tracingSnapshot(since) });
+      reply({ ok: true, generation: netLogGeneration(), ...tracingSnapshot(since) });
       break;
     }
     case "zl:siteRoute":
@@ -2637,7 +2551,7 @@ case "zl:tracing":
       rec = beginRecording({
         id: msg.recId,
         now: Date.now(),
-        netCursor: netSeq,
+        netCursor: netLogCursor(),
         traceCursor: snap.lastSeq,
         tracingWasEnabled: snap.enabled,
       });
@@ -2655,7 +2569,7 @@ case "zl:tracing":
       const record = finishRecording(r, {
         now: Date.now(),
         engine: ZEOLITE_VERSION,
-        netEntries: netLog.filter((x) => x.seq > r.netCursor),
+        netEntries: netLogSince(r.netCursor),
         traceEntries: tracingSnapshot(r.traceCursor).entries,
         cookieJar: [...jarSnapshot()],
       });
@@ -2867,7 +2781,7 @@ case "zl:tracing":
       // Delta sync: the devtools page sends the last seq it has seen and
       // gets only newer entries, so polling stays cheap at any ring size.
       const since = (msg as { since?: number }).since ?? 0;
-      reply({ entries: netLog.filter((x) => x.seq > since), lastSeq: netSeq, generation: netGeneration,
+      reply({ entries: netLogSince(since), lastSeq: netLogCursor(), generation: netLogGeneration(),
           version: ZEOLITE_VERSION, stats: transitStats() });
       break;
     }
@@ -3231,4 +3145,5 @@ async function handleExtMessage(
   }, m.msg);
   return { ok: true, response };
 }
+
 
