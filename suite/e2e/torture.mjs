@@ -480,7 +480,7 @@ async function main() {
         const ssEl = document.getElementById("ss");
         out.ss = await (async () => {
           const set = ssEl?.getAttribute("srcset") ?? "";
-          const first = (set.split(",")[0] ?? "").trim().split(/\s+/)[0] ?? "";
+          const first = (set.split(",")[0] ?? "").trim().split(/\\s+/)[0] ?? "";
           if (!first) return { set, url: "", status: 0, bytes: 0 };
           const url = new URL(first, document.baseURI).href;
           const r = await fetch(url);
