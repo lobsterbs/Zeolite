@@ -467,26 +467,26 @@ async function main() {
         out.unq = await imgState("unq");
         out.spaced = await imgState("spaced");
         out.uni = await imgState("uni");
-        /* #ss is srcset-only: a renderer can reuse a cancelled
-           srcset entry from its in-process image cache, so the
-           ELEMENT's own decode is not a rewriter fact (the e2e
-           assets check documents the same flake). The contract this
-           battery pins: the candidates are routed (the selected URL
-           carries no plaintext fixture origin) and the selected URL
-           decodes on a FRESH load. */
+        /* #ss is srcset-only: decode-based probing of it is not a
+           deterministic rewriter fact - the renderer can leave a
+           srcset image undecoded via its in-process image cache (the
+           e2e assets check documents the same flake, and CI hit it
+           on the direct oracle twice, with both the element's own
+           decode and a fresh-copy decode). The deterministic
+           contract: the served srcset attribute carries the
+           candidates and its first candidate SERVES through the
+           page's own origin (a plain fetch is not subject to decode
+           skipping). The record is printed on failure. */
         const ssEl = document.getElementById("ss");
-        out.ss = await new Promise((res) => {
-          const im = document.createElement("img");
-          im.style.width = "1px";
-          im.style.height = "1px";
+        out.ss = await (async () => {
           const set = ssEl?.getAttribute("srcset") ?? "";
-          if (set) im.setAttribute("srcset", set);
-          const read = () => ({ nw: im.naturalWidth, src: String(im.currentSrc || "").slice(0, 300) });
-          im.onload = () => res(read());
-          im.onerror = () => res(read());
-          setTimeout(() => res(read()), 10000);
-          document.body.appendChild(im);
-        });
+          const first = (set.split(",")[0] ?? "").trim().split(/\s+/)[0] ?? "";
+          if (!first) return { set, url: "", status: 0, bytes: 0 };
+          const url = new URL(first, document.baseURI).href;
+          const r = await fetch(url);
+          const bytes = (await r.arrayBuffer()).byteLength;
+          return { set, url, status: r.status, bytes };
+        })();
         const a = document.getElementById("relimg");
         out.relimg = a ? a.getAttribute("href") : null;
         /* The proxied frame is live as soon as the marker paints, which
@@ -511,14 +511,21 @@ async function main() {
     /* The iframe: the nested document must render through the engine. */
     const nested = await waitFor("proxied torture iframe", 20000, () => frameWith(prox.page, "#zl-inner-marker"));
     assert(nested, "torture page iframe did not render the proxied inner document");
-    /* Direct sanity: every construct must load without the engine. */
-    for (const id of ["crlf", "unq", "spaced", "uni", "ss"]) {
+    /* Direct sanity: every construct must serve without the engine
+       (#ss is checked by fetch, not decode - see the probe above). */
+    for (const id of ["crlf", "unq", "spaced", "uni"]) {
       assert(direct[id] && direct[id].nw > 0, "direct model failed to load img#" + id + " (fixture regression)");
     }
-    for (const id of ["crlf", "unq", "spaced", "uni", "ss"]) {
+    assert(direct.ss && direct.ss.set, "direct model lost the srcset attribute (fixture regression): " + JSON.stringify(direct.ss));
+    assert(direct.ss.status === 200 && direct.ss.bytes > 0, "direct srcset candidate does not serve (fixture regression): " + JSON.stringify(direct.ss));
+    for (const id of ["crlf", "unq", "spaced", "uni"]) {
       assert(proxied[id] && proxied[id].nw > 0, "img#" + id + " did not load through the engine");
       assert(!proxied[id].src.includes(ORIGIN_A), "img#" + id + " resolved browser-direct to the fixture: " + proxied[id].src);
     }
+    assert(proxied.ss && proxied.ss.set, "served page lost the srcset attribute: " + JSON.stringify(proxied.ss));
+    assert(!proxied.ss.set.includes(ORIGIN_A), "served srcset kept a plaintext fixture URL: " + proxied.ss.set);
+    assert(proxied.ss.status === 200 && proxied.ss.bytes > 0, "the served srcset candidate does not load through the engine: " + JSON.stringify(proxied.ss));
+    assert(!proxied.ss.url.includes(ORIGIN_A), "srcset candidate resolved browser-direct: " + proxied.ss.url);
     for (const sel of ["inl", "ext", "imp"]) {
       assert(proxied[sel].includes("url("), "computed background for " + sel + " lost its url(): " + proxied[sel]);
       assert(!proxied[sel].includes(ORIGIN_A), "computed background for " + sel + " kept the plaintext fixture URL: " + proxied[sel]);
@@ -604,19 +611,25 @@ async function main() {
 
   /* ---- browser-limitation (pinned gaps) ---------------------------- */
 
-  await check("browser-limitation", "runtime-concatenated URL stays unrewritten (pinned: no static pass can see it)", async () => {
+  await check("rewriting", "runtime-concatenated URL loads through the engine (literal-prefix pass + bare-path resolution, former pinned gap)", async () => {
     const { directPage, prox } = await torturePages();
     const probe = `async () => JSON.stringify(await (${IMG_STATE_JS})("concat"))`;
     const d = JSON.parse(await directPage.evaluate("(" + probe + ")()"));
     const px = JSON.parse(await evalIn(prox.frame, "concat img", probe, 20000));
     assert(d.nw > 0, "direct model failed the runtime-concat image (oracle sanity)");
-    /* The honest gap: "/dir/" + "img.png" is assembled at runtime, no
-       rewriter pass can rewrite it, and the relative result resolves
-       against the opaque engine route (404). PINNED: the image must
-       fail CLOSED (engine route 404), never escape browser-direct. */
-    eq(px.nw, 0, "runtime-concat image suddenly loads - the pinned gap changed, update this check");
+    /* The former pinned gap (the assembled URL is invisible to every
+       static pass, so it must fail closed) closed from two directions:
+       the JS literal pass rewrites the "/dir/" prefix to an absolute
+       engine URL (the #tlit probe pins the same pass), and an
+       assembled ABSOLUTE bare path is served to the bound client
+       anyway - the page's own runtime fetch("/dir/torture.css")
+       rides the same resolution. The pinned contract now: the
+       assembled image LOADS through the engine and never escapes
+       browser-direct. If nw drops back to 0, the literal pass or
+       the bare-path resolution regressed. */
+    assert(px.nw > 0, "runtime-concat image no longer loads through the engine (literal pass or bare-path resolution regressed)");
     assert(!px.src.includes(ORIGIN_A), "runtime-concat image escaped browser-direct: " + px.src);
-    return "gap held: failed closed at " + px.src.slice(0, 50);
+    return "assembled URL loads via " + px.src.slice(0, 50);
   });
 
   await check("browser-limitation", "location.pathname stays the opaque engine route (LegacyUnforgeable, pinned)", async () => {

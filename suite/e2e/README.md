@@ -113,7 +113,8 @@ so a red run names the broken layer. The classes and what they mean:
 - `rewriting` - the streaming rewriter: the torture HTML page
   (CRLF inside a tag, unquoted and padded attributes, a unicode src,
   srcset, iframe, relative anchor), CSS @import + multiline url() +
-  @font-face, the JS string-literal URL pass.
+  @font-face, the JS string-literal URL pass, and the
+  runtime-concatenated URL it closes.
 - `isolation` - virtual-origin behavior: cookie set/delete lifecycle,
   the pinned Secure-cookie divergence (see below), cross-origin
   preflight vs same-virtual-origin.
@@ -135,10 +136,14 @@ criteria.
   Secure attribute against the real target scheme, so an http target
   never carries one. Both are correct per their own rules; the check
   asserts the divergence itself.
-- Runtime-concatenated URLs: `pre + "img.png"` is invisible to every
-  static rewrite pass; the assembled relative URL resolves against the
-  opaque engine route and fails closed (404), never escaping
-  browser-direct. Pinned.
+- Runtime-concatenated URLs: the former pinned gap (an assembled URL
+  is invisible to every static rewrite pass, so it must fail closed)
+  closed from two directions - the JS literal pass rewrites the
+  literal prefix to an absolute engine URL, and an assembled absolute
+  bare path is served to the bound client anyway. The check pins the
+  closed state: the assembled image loads through the engine and
+  never escapes browser-direct. If it fails closed again, CI catches
+  the regression.
 - `location.pathname` is LegacyUnforgeable: the page keeps seeing the
   opaque engine route. Pinned so any future virtualization change
   (which must not leak destinations per #32) trips CI.
