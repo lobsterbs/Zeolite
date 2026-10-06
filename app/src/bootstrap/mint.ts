@@ -94,6 +94,11 @@ export function applyReemit(w: Record<string, unknown>): void {
       if (url === null) return OF(input, init);
       const d = crossDest(url);
       if (!d) return OF(input, init);
+      /* #77 runtime half: the SW returns the rewritten body, which
+         never matches the upstream hash; SRI in the init would fail
+         the re-emitted fetch as a network error. Request objects
+         stay native (documented one-shot-body residual). */
+      if (init?.integrity) init = { ...init, integrity: undefined };
       return mintRoute(d).then((route) => OF((route ?? url) as RequestInfo, init));
     };
   }

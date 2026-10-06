@@ -100,6 +100,14 @@ describe("initSplicePoint (quirks fix)", () => {
     expect(initSplicePoint("<!--a--><!--b--><!doctype html>")).toBe(31);
   });
 
+  it("skips an XML prolog (bogus comment) before the doctype", () => {
+    const prolog = '<?xml version="1.0" encoding="UTF-8"?>';
+    expect(initSplicePoint(prolog + "<!DOCTYPE html><p>")).toBe(prolog.length + 15);
+    expect(initSplicePoint("<?xml version='1.0'?>\n<!doctype html><p>")).toBe(37);
+    expect(initSplicePoint("<?xml version=\"1.0\"?><p>")).toBe(0); /* prolog, then no doctype */
+    expect(initSplicePoint("<?xml version=\"1.0\"")).toBeNull(); /* prolog not closed yet */
+  });
+
   it("returns null while a doctype is split across chunks", () => {
     expect(initSplicePoint("<!doctype ht")).toBeNull();
     expect(initSplicePoint("<!doctype html")).toBeNull(); /* no ">" yet */

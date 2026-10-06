@@ -277,6 +277,44 @@ export function applyNavGuard(
     safe(() => guardProp(META.prototype, "content", "sync", rewireMeta));
     safe(() => guardAttr(META.prototype, "content", "sync", rewireMeta));
   }
+  /* Runtime-set SRI (#77 runtime half): the browser hashes the body
+     the SW returns - the rewritten one - so a runtime integrity write
+     fails the load as a network error. Swallow the write on script
+     and link elements; reads stay page-truthful so feature-detecting
+     code still sees its own value. innerHTML-injected markup and
+     Request objects keep SRI (documented residuals). */
+  const sriGuard = (C: AnyRecord | undefined): void => {
+    const proto = C && C.prototype;
+    if (!proto) return;
+    const d = Object.getOwnPropertyDescriptor(proto, "integrity");
+    if (d && d.set && d.get) {
+      Object.defineProperty(proto, "integrity", {
+        configurable: true,
+        enumerable: true,
+        get(this: AnyRecord) {
+          return raw.get(this)?.["integrity"] ?? d.get!.call(this);
+        },
+        set(this: AnyRecord, v: string) {
+          const s = String(v);
+          const m = raw.get(this);
+          if (m) m["integrity"] = s;
+          else raw.set(this, { integrity: s });
+        },
+      });
+    }
+    const O = proto.setAttribute;
+    if (typeof O !== "function") return;
+    proto.setAttribute = function (this: AnyRecord, n: string, v: string) {
+      if (String(n).toLowerCase() !== "integrity") return O.call(this, n, v);
+      const s = String(v);
+      const m = raw.get(this);
+      if (m) m["integrity"] = s;
+      else raw.set(this, { integrity: s });
+    };
+  };
+  safe(() => sriGuard(w.HTMLScriptElement as AnyRecord | undefined));
+  safe(() => sriGuard(w.HTMLLinkElement as AnyRecord | undefined));
+
   const OW = w.open;
   if (typeof OW === "function") {
     safe(() => {

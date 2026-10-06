@@ -67,6 +67,17 @@ export function initSplicePoint(head: string, eos = false): number | null {
       i = end + 3;
       continue;
     }
+    if (head.startsWith("<?", i)) {
+      /* "<?xml ...?>" is a bogus comment in HTML parsing: it ends at
+         the first ">" and a doctype after it is still honored. Skip it
+         like a comment so XHTML served as text/html keeps the splice
+         after the doctype instead of regressing to quirks mode. */
+      const gt = head.indexOf(">", i + 2);
+      if (gt === -1) return eos ? 0 : null;
+      i = gt + 1;
+      continue;
+    }
+
     if (/^<!doctype/i.test(head.slice(i))) {
       const gt = head.indexOf(">", i);
       if (gt === -1) return eos ? 0 : null;

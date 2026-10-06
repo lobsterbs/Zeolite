@@ -440,24 +440,37 @@ impl Rewriter {
         // <meta http-equiv=refresh> carries its navigation target in
         // the content attribute (issue #36): "5; url=/next". The
         // http-equiv attribute can appear before or after content,
-        // so decide with a pre-scan before rewriting any value.
-        let is_refresh = if name == "meta" {
+        // so decide with a pre-scan before rewriting any value. The
+        // same scan flags CSP meta tags: the header form is stripped
+        // in app/src/headers (HOSTILE list) because rewritten
+        // subresources ride engine-origin routes the original
+        // directives never allow, and a surviving meta CSP would
+        // block them the same way (bug-scout issue 3). Dropping the
+        // tag matches the header policy; rewriting a policy to match
+        // engine routes is out of scope for the streaming pass.
+        let mut is_csp_meta = false;
+        let mut is_refresh = false;
+        if name == "meta" {
             let mut scan = rest;
-            let mut found = false;
             while let Some(a) = next_attr(scan) {
-                if a.name.eq_ignore_ascii_case("http-equiv")
-                    && a.value
-                        .as_deref()
-                        .is_some_and(|val| val.trim().eq_ignore_ascii_case("refresh"))
-                {
-                    found = true;
+                if a.name.eq_ignore_ascii_case("http-equiv") {
+                    if let Some(val) = a.value.as_deref() {
+                        let v = val.trim().to_ascii_lowercase();
+                        if v == "refresh" {
+                            is_refresh = true;
+                        } else if v == "content-security-policy"
+                            || v == "content-security-policy-report-only"
+                        {
+                            is_csp_meta = true;
+                        }
+                    }
                 }
                 scan = &scan[a.consumed..];
             }
-            found
-        } else {
-            false
-        };
+        }
+        if is_csp_meta {
+            return String::new();
+        }
         let mut first_url: Option<String> = None;
         while let Some(attr) = next_attr(rest) {
             let Attr {
@@ -1528,6 +1541,28 @@ mod tests {
             }
         }
         String::new()
+    }
+
+    #[test]
+    fn meta_csp_tags_dropped_report_only_too() {
+        // Bug-scout issue 3: header CSP is stripped (HOSTILE list)
+        // because rewritten subresources ride engine-origin routes
+        // the original directives never allow; a meta CSP must not
+        // survive either. The whole tag goes; unrelated meta tags
+        // (charset, content-type http-equiv) stay untouched.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/page.html");
+        let full = format!(
+            "{}{}",
+            r.process(
+                "<head><meta http-equiv='Content-Security-Policy' content='script-src https://cdn.x.com'><meta http-equiv='content-security-policy-report-only' content='default-src self'><meta charset='utf-8'><meta http-equiv='content-type' content='text/html; charset=utf-8'></head>",
+            ),
+            r.finish()
+        );
+        let low = full.to_ascii_lowercase();
+        assert!(!low.contains("content-security"), "got: {}", full);
+        assert!(full.contains("charset"), "got: {}", full);
+        assert!(full.contains("content-type"), "got: {}", full);
     }
 
     #[test]

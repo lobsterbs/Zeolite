@@ -288,3 +288,20 @@ describe("worker mint relay (#54 residual 5)", () => {
     expect(await mintUrlViaRelay(post, "https://worker.example/x?t=14", 20)).toBeNull();
   });
 });
+describe("fetch init SRI (#77 runtime half)", () => {
+  it("strips init.integrity from re-emitted cross-origin fetches", async () => {
+    stubMint("/j/f9");
+    const e = fakeWindow();
+    applyReemit(e.w);
+    await e.w.fetch("https://sri.example/chunk?t=9", { integrity: "sha384-abc", mode: "cors" });
+    expect(e.calls[0].init).toEqual({ integrity: undefined, mode: "cors" });
+  });
+
+  it("leaves init untouched for native (engine-local) fetches", async () => {
+    const e = fakeWindow();
+    applyReemit(e.w);
+    const init = { integrity: "sha384-abc" };
+    await e.w.fetch("/local", init);
+    expect(e.calls[0].init).toBe(init);
+  });
+});

@@ -53,6 +53,7 @@ function makeEnv() {
   const iframe = makeClass("src");
   const form = makeClass("action");
   const link = makeClass("href");
+  const script = makeClass("integrity");
   const submitted: string[] = [];
   const opened: unknown[][] = [];
   const wins: Array<{ location: { href: string }; _hrefs: string[] }> = [];
@@ -82,11 +83,12 @@ function makeEnv() {
     HTMLIFrameElement: { prototype: iframe.proto },
     HTMLFormElement: { prototype: form.proto },
     HTMLLinkElement: { prototype: link.proto },
+    HTMLScriptElement: { prototype: script.proto },
     RTCPeerConnection: function RTCPeerConnection() {},
     open: openFake,
   };
   applyNavGuard(w, LOC, ENGINE);
-  return { w, anchor, iframe, form, link, opened, wins, submitted };
+  return { w, anchor, iframe, form, link, script, opened, wins, submitted };
 }
 
 describe("navEncode", () => {
@@ -908,5 +910,22 @@ describe("navguard mint seams (#54 residual 3)", () => {
     expect(e.iframe.read(f)).toBe("");
     await settle();
     expect(e.iframe.read(f)).toBe(navEncode("https://mint7.site/x"));
+  });
+});
+describe("runtime SRI neutralization (#77)", () => {
+  it("swallows integrity writes; reads stay page-truthful", () => {
+    const e = makeEnv();
+    const s = e.script.make();
+    s.integrity = "sha384-abc";
+    expect(e.script.read(s)).toBeUndefined(); /* the browser attribute never gets the hash */
+    expect(s.integrity).toBe("sha384-abc"); /* the page read sees its own write */
+    s.setAttribute("integrity", "sha384-def");
+    expect(s.getAttribute("integrity")).toBeNull();
+    expect(s.integrity).toBe("sha384-def");
+    const l = e.link.make();
+    l.setAttribute("integrity", "sha384-xyz");
+    expect(l.getAttribute("integrity")).toBeNull(); /* swallowed, not stored */
+    l.setAttribute("href", REAL); /* the chained href guard still routes */
+    expect(l.getAttribute("href")).not.toBe(REAL);
   });
 });
