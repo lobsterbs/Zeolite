@@ -34,7 +34,8 @@ honest no-listener errors. This pass adds runtime.alarms (in-memory timers in th
 - `crates/wisp-extensions/` — auth/lifecycle/server extensions.
 - `crates/zeolite-server/` — standalone Wisp/static server and destination protection.
 - `crates/wisp-wasm/` — WASM Wisp bindings.
-- `app/src/sw.ts` — service-worker/interception entrypoint.
+- `app/src/sw.ts` — service-worker entrypoint and composition root: runtime boot (jar, download registry, extension startup), transport/transform init, event wiring (issue #82).
+- `app/src/request.ts` — request engine: the proxied request lifecycle (route decode/resolution, page cache, upstream hop chain, header surgery, rewrite branches, navigation strands) behind `handleFetch` (issue #82).
 - `app/src/control.ts` — control plane: zl: message dispatch, sender gates, session recording state.
 - `app/src/extensions/control.ts` — extension control facade: extension message dispatch + content-script bridge handler.
 - `app/src/transform.ts` — response transformation: wasm rewriter lifecycle, worker prelude, streaming HTML/CSS rewrite pipelines (issue #86).
