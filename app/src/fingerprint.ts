@@ -333,27 +333,36 @@ try {
       data[idx] = (data[idx] + (((zlSeed >>> (k * 3)) & 1) ? 1 : 255)) & 255;
     }
   }
+  /* #98: read-time perturbation on a throwaway copy. The live canvas
+     is never written back (native toDataURL/toBlob are side-effect
+     free), and every read starts from the pristine pixels, so two
+     consecutive reads are byte-identical - the old write-back made
+     repeated reads drift, which is itself a one-line anti-fingerprint
+     detector. */
+  var zlPerturbedCopy = function (src) {
+    var ctx = src.getContext("2d");
+    if (!ctx || !src.width || !src.height) return null;
+    var img = ctx.getImageData(0, 0, src.width, src.height);
+    zlPerturb(img.data);
+    var copy = document.createElement("canvas");
+    copy.width = src.width;
+    copy.height = src.height;
+    copy.getContext("2d").putImageData(img, 0, 0);
+    return copy;
+  };
   var origToDataURL = HTMLCanvasElement.prototype.toDataURL;
   HTMLCanvasElement.prototype.toDataURL = function () {
     try {
-      var ctx = this.getContext("2d");
-      if (ctx) {
-        var img = ctx.getImageData(0, 0, this.width, this.height);
-        zlPerturb(img.data);
-        ctx.putImageData(img, 0, 0);
-      }
+      var copy = zlPerturbedCopy(this);
+      if (copy) return origToDataURL.apply(copy, arguments);
     } catch (e) {}
     return origToDataURL.apply(this, arguments);
   };
   var origToBlob = HTMLCanvasElement.prototype.toBlob;
   HTMLCanvasElement.prototype.toBlob = function () {
     try {
-      var ctx = this.getContext("2d");
-      if (ctx) {
-        var img = ctx.getImageData(0, 0, this.width, this.height);
-        zlPerturb(img.data);
-        ctx.putImageData(img, 0, 0);
-      }
+      var copy = zlPerturbedCopy(this);
+      if (copy) return origToBlob.apply(copy, arguments);
     } catch (e) {}
     return origToBlob.apply(this, arguments);
   };
@@ -460,20 +469,25 @@ prop(zlNav, "languages", function () { return ${JSON.stringify(p.languages)}; })
   }
   var OOC = globalThis.OffscreenCanvas;
   if (OOC && OOC.prototype) {
+    /* #98: same read-time fix as documents - perturb a fresh
+       OffscreenCanvas copy, never write back into the source. */
     var zlPerturbCanvas = function (c) {
       try {
         var ctx = c.getContext("2d");
-        if (ctx) {
-          var img = ctx.getImageData(0, 0, c.width, c.height);
-          zlPerturb(img.data);
-          ctx.putImageData(img, 0, 0);
-        }
-      } catch (e) {}
+        if (!ctx || !c.width || !c.height) return null;
+        var img = ctx.getImageData(0, 0, c.width, c.height);
+        zlPerturb(img.data);
+        var copy = new OOC(c.width, c.height);
+        copy.getContext("2d").putImageData(img, 0, 0);
+        return copy;
+      } catch (e) {
+        return null;
+      }
     };
     var origBlob = OOC.prototype.convertToBlob;
-    if (origBlob) OOC.prototype.convertToBlob = function () { zlPerturbCanvas(this); return origBlob.apply(this, arguments); };
+    if (origBlob) OOC.prototype.convertToBlob = function () { var cp = zlPerturbCanvas(this); return origBlob.apply(cp || this, arguments); };
     var origTIB = OOC.prototype.transferToImageBitmap;
-    if (origTIB) OOC.prototype.transferToImageBitmap = function () { zlPerturbCanvas(this); return origTIB.apply(this, arguments); };
+    if (origTIB) OOC.prototype.transferToImageBitmap = function () { var cp = zlPerturbCanvas(this); return origTIB.apply(cp || this, arguments); };
     var OC2D = globalThis.OffscreenCanvasRenderingContext2D;
     if (OC2D) {
       var origGID = OC2D.prototype.getImageData;

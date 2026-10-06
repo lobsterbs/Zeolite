@@ -38,8 +38,22 @@ interface PluginModule {
 
 const loaded = new Map<string, Promise<PluginHooks | null>>();
 
-/** Load one plugin module by name; memoized, failure-tolerant. */
+/** #97: the name is interpolated into a dynamic import that
+    @vite-ignore exempts from static analysis, and it arrives from
+    siteconfig rules (untrusted-shaped input). Anything outside
+    [A-Za-z0-9_-] is refused before the import is ever attempted, so
+    traversal ("../") and absolute-URL names cannot smuggle a
+    cross-origin or off-root module in. Exported for tests. */
+export function pluginNameOk(name: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(name);
+}
+
+/** Load one plugin module by name. Successful loads are memoized;
+    a failed load is dropped from the cache (#97: a transient import
+    failure used to be memoized as a sticky null until the whole
+    worker restarted, so a plugin that failed once never came back). */
 export function loadPlugin(name: string): Promise<PluginHooks | null> {
+  if (!pluginNameOk(name)) return Promise.resolve(null);
   let p = loaded.get(name);
   if (!p) {
     p = (async () => {
@@ -55,6 +69,11 @@ export function loadPlugin(name: string): Promise<PluginHooks | null> {
       }
     })();
     loaded.set(name, p);
+    // Only a successful load is sticky; drop a failure so the next
+    // call retries the import instead of caching the null forever.
+    void p.then((hooks) => {
+      if (hooks === null) loaded.delete(name);
+    });
   }
   return p;
 }
