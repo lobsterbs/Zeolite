@@ -111,11 +111,12 @@ import { DIAG } from "./diag";
 /* #89: the network inspector ring moved to ./netlog (bounded storage,
    redaction, generation stamp); the SW and the extracted engine /
    control plane are call sites. */
-import { flatRed, netLog, netLogCursor, netLogGeneration, netLogPush, netLogSince, stampNetGeneration, type NetDetail, type NetEntry } from "./netlog";
+import { flatRed, netLogCursor, netLogGeneration, netLogPush, netLogSince, stampNetGeneration, type NetDetail } from "./netlog";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
 import { beginRecording, finishRecording, type RecordingState } from "./recording";
-import { currentEngine, initTransport, openWebSocket, wispTransport } from "./transport";
-import { WsBridge, type PortLike } from "./wsbridge";
+import { currentEngine, initTransport, wispTransport } from "./transport";
+import type { PortLike } from "./wsbridge";
+import { wsBridge } from "./ws-runtime";
 import { wsIdentityHeaders } from "./wsidentity";
 import { senderVirtualOrigin, virtualOriginHeaders } from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
@@ -218,91 +219,6 @@ initTransform({
   setDegraded: setEngineDegraded,
 });
 
-
-/* ---- WebSocket bridge (1.3 Carbide) -------------------------------- */
-/* Pages route ws(s):// through the zl:wsOpen control message; the
-   connection runs on the libcurl transport (TLS terminates there)
-   over a raw wisp TCP stream. ws:// is upgraded to wss:// before the
-   transport sees it. One netlog row lands at open (status 101), one
-   with the final close code and byte totals at close. */
-
-const wsBridge = new WsBridge(
-  {
-    open: (url, protocols, h, headers) =>
-      openWebSocket(
-        url,
-        protocols,
-        {
-          onopen: (p) => h.onopen(p),
-          onmessage: (d) => h.onmessage(d),
-          onclose: (c, r) => h.onclose(c, r),
-          onerror: (e) => h.onerror(e),
-        },
-        headers,
-      ),
-  },
-  {
-    attempt: (url, upgraded) => ({
-      url,
-      upgraded,
-      entry: null as NetEntry | null,
-      bytes: 0,
-      traceId: DIAG.trace(),
-    }),
-    onReady: (token, protocol, ms) => {
-      const t = token as { url: string; entry: NetEntry | null; traceId: string };
-      netLogPush({
-        method: "WS",
-        traceId: t.traceId,
-        path: "(ws bridge)",
-        dest: t.url,
-        status: 101,
-        ms,
-        bytes: 0,
-        verdict: "ws" + (protocol ? " proto " + protocol : ""),
-        rtype: "WEBSOCKET",
-        transport: "NativeTransit",
-        detail: { internalUrl: "(wisp stream)", ttfb: ms },
-      });
-      t.entry = netLog[netLog.length - 1];
-    },
-    onBytes: (token, rx, tx) => {
-      const t = token as { entry: NetEntry | null; bytes: number };
-      t.bytes += rx + tx;
-      if (t.entry) t.entry.bytes = t.bytes;
-    },
-    onClose: (token, code, clean, ms) => {
-      const t = token as { url: string; bytes: number; traceId: string };
-      if (!clean) {
-        DIAG.emit({
-          category: "WEBSOCKET",
-          cause: "failure",
-          severity: "error",
-          message: "websocket closed abnormally",
-          technicalReason: "close code " + code,
-          url: t.url,
-          traceId: t.traceId,
-          requestId: t.traceId,
-        });
-      }
-      netLogPush({
-        method: "WS",
-        traceId: t.traceId,
-        path: "(ws bridge)",
-        dest: t.url,
-        status: code,
-        ms,
-        bytes: t.bytes,
-        verdict: clean ? "ws:closed" : "ws:aborted",
-        err: clean ? undefined : "abnormal close " + code,
-        rtype: "WEBSOCKET",
-        transport: "NativeTransit",
-        detail: { internalUrl: "(wisp stream)", ttfb: ms },
-      });
-    },
-    trace: (d) => void traceDecision(d),
-  },
-);
 
 /* ---- Page cache (ported from the v3 worker) -------------------- */
 /* Cache-first for proxied GETs with stale-while-revalidate. Freshness
