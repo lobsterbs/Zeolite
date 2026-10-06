@@ -6,7 +6,7 @@
   manipulating raw bindings.
 
   What lives here is the SHARED mutable engine state: the per-client
-  virtual-context map, the download registry instance, the active
+  virtual-context map, the active
   fingerprint profile (+ its per-site profile cache), the degraded
   flag, the persisted route-shape toggles (https upgrade, navHandles),
   the route key, the per-site interception table and the docCookie
@@ -19,7 +19,6 @@
 
 import type { VirtualContext } from "./vctx";
 import { documentCookieRead } from "./cookies";
-import { DownloadTracker } from "./downloads";
 import {
   engineBindingError,
   fingerprintScript,
@@ -125,14 +124,13 @@ export function setSiteEnabled(site: string, enabled: boolean): void {
   else disabledSites.delete(site);
 }
 
-/* ---- Download registry (1.7 Sulfide) -------------------------------- */
+/* ---- Download registry ----------------------------------------------- */
 
-/* Attachment responses pass through a counting stream (nothing is ever
-   buffered whole); entries carry the engine-known network facts and
-   are cancellable by id. The instance is shared state: initReady
-   loads it, the request engine feeds it, the control plane lists and
-   cancels entries. */
-export const DL = new DownloadTracker();
+/* #90: the download registry instance (DL) now lives in ./downloads.ts
+   with its domain logic - the downloads subsystem owns its own state.
+   initReady loads it, the request engine feeds it through the
+   adoptResponse seam, and the control plane lists and cancels entries
+   by importing it from ./downloads directly. */
 
 /* ---- Fingerprinting resistance (1.8 Telluride) ----------------------- */
 

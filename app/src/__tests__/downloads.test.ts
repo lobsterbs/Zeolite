@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { DownloadTracker, downloadFilename } from "../downloads";
+import { DL, DownloadTracker, adoptResponse, downloadFilename } from "../downloads";
 import { openDb, idbClear, idbGetAllKeys, idbPut, STORE_DOWNLOADS } from "../extensions/idb";
 
 function headers(h: Record<string, string>): Headers {
@@ -229,5 +229,116 @@ describe("download registry persistence (2.2)", () => {
     expect(snap[0].id).toBe("dl2");
     expect(Number.isFinite(snap[0].speed)).toBe(true);
     t.reset();
+  });
+});
+
+describe("adoptResponse seam (#90)", () => {
+  it("adopts attachment responses into the shared registry", async () => {
+    DL.reset();
+    const resp = new Response(streamOf([new Uint8Array(10), new Uint8Array(15)]), {
+      status: 200,
+      headers: headers({ "content-disposition": 'attachment; filename="big.bin"', "content-length": "25" }),
+    });
+    const outHeaders = new Headers({
+      "content-disposition": 'attachment; filename="big.bin"',
+      "content-type": "application/octet-stream",
+    });
+    const adopted = adoptResponse("https://x.test/big.bin", resp, outHeaders, 200);
+    expect(adopted).not.toBeNull();
+    expect(adopted!.status).toBe(200);
+    expect(adopted!.headers.get("content-type")).toBe("application/octet-stream");
+    expect(await drain(adopted!.body as ReadableStream<Uint8Array>)).toBe(25);
+    const snap = DL.snapshot();
+    expect(snap).toHaveLength(1);
+    expect(snap[0].filename).toBe("big.bin");
+    expect(snap[0].size).toBe(25);
+    expect(snap[0].received).toBe(25);
+    expect(snap[0].status).toBe("done");
+    DL.reset();
+  });
+
+  it("leaves non-attachment and bodyless responses on the normal path", () => {
+    DL.reset();
+    const inline = new Response("hello", { status: 200, headers: headers({ "content-disposition": "inline" }) });
+    expect(adoptResponse("https://x.test/a", inline, new Headers({ "content-disposition": "inline" }), 200)).toBeNull();
+    const attachNoBody = new Response(null, { status: 200, headers: headers({ "content-disposition": "attachment" }) });
+    expect(adoptResponse("https://x.test/b", attachNoBody, new Headers({ "content-disposition": "attachment" }), 200)).toBeNull();
+    expect(DL.snapshot()).toHaveLength(0);
+    DL.reset();
+  });
+
+  it("streams a large download chunk-by-chunk with live progress and headers intact", async () => {
+    DL.reset();
+    /* 4 MiB in 64 KiB chunks: many chunks, each forwarded the moment
+       it arrives - nothing buffered whole. Progress stays live and
+       the engine's outgoing headers (cookies included) are served
+       untouched (#90 acceptance: large downloads, progress, cookies). */
+    const chunk = new Uint8Array(64 * 1024).fill(7);
+    const chunks: Uint8Array[] = [];
+    for (let i = 0; i < 64; i++) chunks.push(chunk);
+    const total = 64 * 1024 * 64;
+    const resp = new Response(streamOf(chunks), {
+      status: 200,
+      headers: headers({ "content-disposition": "attachment", "content-length": String(total) }),
+    });
+    const outHeaders = new Headers({
+      "content-disposition": "attachment",
+      "content-type": "application/octet-stream",
+      "set-cookie": "sid=abc; Path=/; Secure",
+    });
+    const adopted = adoptResponse("https://x.test/huge.bin", resp, outHeaders, 200);
+    expect(adopted).not.toBeNull();
+    expect(adopted!.headers.get("set-cookie")).toBe("sid=abc; Path=/; Secure");
+    const reader = (adopted!.body as ReadableStream<Uint8Array>).getReader();
+    let n = 0;
+    let sawActive = false;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      n += value.byteLength;
+      const snap = DL.snapshot();
+      /* chunk-forwarded: the counter is at or past what the page read */
+      expect(snap[0].received).toBeGreaterThanOrEqual(n);
+      if (snap[0].status === "active") sawActive = true;
+    }
+    expect(n).toBe(total);
+    expect(sawActive).toBe(true);
+    const snap = DL.snapshot();
+    expect(snap[0].status).toBe("done");
+    expect(snap[0].received).toBe(total);
+    DL.reset();
+  });
+
+  it("cancels a seam-adopted download through the registry", async () => {
+    DL.reset();
+    const body = new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        ctrl.enqueue(new Uint8Array(4));
+      },
+    });
+    const resp = new Response(body, { status: 200, headers: headers({ "content-disposition": "attachment" }) });
+    const adopted = adoptResponse(
+      "https://x.test/cancel.bin",
+      resp,
+      new Headers({ "content-disposition": "attachment", "content-type": "application/octet-stream" }),
+      200,
+    )!;
+    const reader = (adopted.body as ReadableStream<Uint8Array>).getReader();
+    await reader.read();
+    const id = DL.snapshot()[0].id;
+    expect(DL.cancel(id)).toBe(true);
+    /* queued chunks may still resolve first; a bounded number of reads
+       must reach the rejection, same contract as the tracker tests. */
+    let severed = false;
+    for (let i = 0; i < 4 && !severed; i++) {
+      try {
+        if ((await reader.read()).done) break;
+      } catch {
+        severed = true;
+      }
+    }
+    expect(severed).toBe(true);
+    expect(DL.snapshot()[0].status).toBe("cancelled");
+    DL.reset();
   });
 });

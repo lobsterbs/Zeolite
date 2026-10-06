@@ -305,3 +305,39 @@ export class DownloadTracker {
     this.seq = 0;
   }
 }
+
+/* ---- shared instance + request-engine seam (#90) -------------------- */
+
+/* The one registry instance for this worker evaluation. It lived in
+   swstate.ts while the modularization was in flight; the downloads
+   subsystem now owns its own state (issue #90): the request engine
+   feeds it through adoptResponse, initReady loads it, the control
+   plane lists and cancels entries through this module. */
+export const DL = new DownloadTracker();
+
+/** Request-engine seam (issue #90): the single place that decides a
+    proxied response is a downloadable attachment. Returns the
+    registry-wrapped Response the engine must serve, or null when the
+    response is not an attachment - the engine then keeps its normal
+    path and stays unaware of download tracking internals. Detection
+    is on the OUTGOING content-disposition; filename and size come
+    from the UPSTREAM headers, the MIME from the outgoing
+    content-type. The body stays a stream: a counting passthrough
+    forwards every chunk untouched, so nothing is ever buffered whole
+    and the browser keeps writing the file to disk. */
+export function adoptResponse(
+  target: string,
+  resp: Response,
+  outHeaders: Headers,
+  status: number,
+): Response | null {
+  if (!resp.body) return null;
+  if (!(outHeaders.get("content-disposition") ?? "").toLowerCase().includes("attachment")) return null;
+  const id = DL.begin(
+    target,
+    resp.headers,
+    outHeaders.get("content-type") ?? "application/octet-stream",
+    Number(resp.headers.get("content-length") ?? -1),
+  );
+  return new Response(DL.wrap(id, resp.body), { status, headers: outHeaders });
+}

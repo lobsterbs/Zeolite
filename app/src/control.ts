@@ -7,6 +7,9 @@ import type { JarConflictRule } from "./cookies";
 import { documentCookieRead, documentCookieWrite, jarClear, jarClearScope, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy } from "./cookies";
 import { PAGE_MESSAGES, senderIsProxiedPath } from "./cpgate";
 import { DIAG } from "./diag";
+/* #90: the download registry instance lives in ./downloads; the
+   control plane lists and cancels entries through the subsystem. */
+import { DL } from "./downloads";
 import { EXT_CONTROL_TYPES, dispatchExtControl } from "./extensions/control";
 import { pageClientOf } from "./extensions/serve";
 import type { UiTab } from "./extensions/tabs";
@@ -17,7 +20,7 @@ import type { RecordingState } from "./recording";
 import { beginRecording, finishRecording } from "./recording";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
-import { DL, VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, navHandlesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setNavHandles, setSiteEnabled } from "./swstate";
+import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, navHandlesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setNavHandles, setSiteEnabled } from "./swstate";
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
 import { currentEngine, wispTransport } from "./transport";

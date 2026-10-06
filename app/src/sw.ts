@@ -107,6 +107,10 @@ import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, siteUaFor, type ResourceType } from "./rules";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
 import { DIAG } from "./diag";
+/* #90: the download registry (DL) and the adoptResponse seam moved to
+   ./downloads; the downloads subsystem owns its own state and the
+   request engine stays unaware of download tracking internals. */
+import { DL, adoptResponse } from "./downloads";
 /* #89: the network inspector ring moved to ./netlog (bounded storage,
    redaction, generation stamp); the SW and the extracted engine /
    control plane are call sites. */
@@ -121,11 +125,11 @@ import { virtualOriginHeaders } from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { applySetCookie, cookieHeaderFor, isPassChallenge, jarHeaders, jarLoad, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
-   contexts, degraded flag, route-shape toggles, route key, download
-   registry instance, fingerprint profile + per-site profile cache,
+   contexts, degraded flag, route-shape toggles, route key,
+   fingerprint profile + per-site profile cache,
    per-site route table, docCookie port registry) moved to ./swstate;
    the SW, the request engine and the control plane are call sites. */
-import { DL, getFpProfile, getFpScript, getFpWorkerScript, getRouteKey, isHttpsUpgrade, navHandlesEnabled, pushDocCookieView, setEngineDegraded, setHttpsUpgrade, setNavHandles, setRouteKey, siteDisabled, siteProfileFor, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { getFpProfile, getFpScript, getFpWorkerScript, getRouteKey, isHttpsUpgrade, navHandlesEnabled, pushDocCookieView, setEngineDegraded, setHttpsUpgrade, setNavHandles, setRouteKey, siteDisabled, siteProfileFor, VCTX, ZEOLITE_VERSION } from "./swstate";
 
 import { CS_ROUTE, EXT_ROUTE, TABS, SCRIPTING, WEBNAV, WEBREQ, wrType, wakeExtension, DOWNLOADS, NOTIFY, PERMS, ALARMS, MGMT, bootEnabled, extensions, resolveContentScripts, serveExtensionAsset } from "./extensions";
 
@@ -1705,13 +1709,13 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           }
           WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
           /* 1.7 Sulfide: attachment responses join the download
-             registry. The body stays a stream - a counting passthrough
-             forwards every chunk untouched, so the browser keeps
-             writing the file to disk and nothing is buffered whole. */
-          if (resp.body && (outHeaders.get("content-disposition") ?? "").toLowerCase().includes("attachment")) {
-            const id = DL.begin(target, resp.headers, outHeaders.get("content-type") ?? "application/octet-stream", Number(resp.headers.get("content-length") ?? -1));
-            return new Response(DL.wrap(id, resp.body), { status: resp.status, headers: outHeaders });
-          }
+             registry. #90: the detection + registration now live in the
+             downloads subsystem (adoptResponse); the body stays a
+             stream - a counting passthrough forwards every chunk
+             untouched, so the browser keeps writing the file to disk
+             and nothing is buffered whole. */
+          const dl = adoptResponse(target, resp, outHeaders, resp.status);
+          if (dl) return dl;
           return new Response(resp.body, { status: resp.status, headers: outHeaders });
         } catch (err) {
           DIAG.failure({
