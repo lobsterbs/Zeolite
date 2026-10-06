@@ -468,6 +468,17 @@ impl Rewriter {
                 quote,
             } = attr;
             let lower = attr_name.to_ascii_lowercase();
+            // SRI hashes are computed over the upstream bytes; the
+            // rewritten subresource always differs (URLs folded
+            // into engine routes), so the browser silently refuses
+            // it on integrity mismatch (issue #77). Recomputing
+            // hashes over streamed rewritten output is impractical,
+            // so drop the attribute instead. crossorigin stays
+            // untouched.
+            if lower == "integrity" {
+                rest = &rest[consumed..];
+                continue;
+            }
             match attr_value {
                 Some(v) => {
                     // Attribute values reach the DOM entity-decoded; the
@@ -1077,6 +1088,37 @@ mod tests {
             "got: {}",
             full
         );
+    }
+
+    #[test]
+    fn integrity_stripped_but_cors_and_urls_survive() {
+        // SRI hashes are computed over the upstream bytes; the
+        // rewritten subresource always differs, so the browser
+        // silently refuses it on mismatch (issue #77). The rewriter
+        // must drop integrity but keep crossorigin and the
+        // rewritten src/href.
+        let base = "https://example.com/page.html";
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let full = format!(
+            "{}{}{}",
+            r.process(
+                "<script src=\"/app.js\" integrity=\"sha384-X\" crossorigin=\"anonymous\"></script>"
+            ),
+            r.process(
+                "<link rel=\"stylesheet\" href=\"/s.css\" integrity=\"sha384-Y\" crossorigin=\"anonymous\">"
+            ),
+            r.finish()
+        );
+        let low = full.to_ascii_lowercase();
+        assert!(!low.contains("integrity"), "got: {}", full);
+        assert!(low.contains("crossorigin"), "got: {}", full);
+        let enc = |u: &str| {
+            let abs = resolve(u, base);
+            cfg().encode_url(&abs)
+        };
+        assert!(full.contains(&enc("/app.js")), "got: {}", full);
+        assert!(full.contains(&enc("/s.css")), "got: {}", full);
     }
 
     #[test]
