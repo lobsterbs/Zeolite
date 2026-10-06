@@ -26,6 +26,8 @@ import { wsBridge } from "./ws-runtime";
 import type { PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
 
+declare const self: ServiceWorkerGlobalScope;
+
 /* 1.9 Fullerene: active session recording, when any. */
 let rec: RecordingState | null = null;
 
@@ -476,7 +478,7 @@ case "zl:tracing":
         port.postMessage({ ok: true, cookie: documentCookieRead(origin) });
       };
       handle(msg.set);
-      port.onmessage = (ev) => handle((ev.data as { set?: unknown }).set);
+      port.onmessage = (ev: MessageEvent) => handle((ev.data as { set?: unknown }).set);
       /* #35: keep the port so the fetch path can push jar updates
          (Set-Cookie on a proxied response) into this client's
          optimistic document.cookie copy. Same origin-trust rule as the

@@ -84,7 +84,11 @@ describe("ws-runtime wiring (#88)", () => {
     const before = DIAG.snapshot(0).events.length;
     const p = fakePort();
     wsBridge.open(p, "wss://drop.example/", []);
-    mock.handlers[mock.handlers.length - 1]!.onclose(1006, "boom");
+    /* Transport onclose is always a clean end (wsbridge wires
+       onclose => end(..., true)); the abnormal path is an onerror
+       BEFORE the handshake completes, which the bridge converts into
+       a dirty 1006 close. */
+    mock.handlers[mock.handlers.length - 1]!.onerror("boom");
     const events = DIAG.snapshot(0).events;
     expect(events.length).toBeGreaterThan(before);
     const ev = events[events.length - 1];
