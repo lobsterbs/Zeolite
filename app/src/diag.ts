@@ -5,7 +5,14 @@
    share traceIds with the network log entries, so the devtools UI can
    join a request with its full lifecycle. Memory is bounded: 512
    events, 256 trace references. Secrets (authorization headers, cookie
-   values, bearer tokens) are redacted before anything is stored. */
+   values, bearer tokens) are redacted before anything is stored.
+
+   #95: the request engine tracks the lifecycle stage a request is in
+   and failure events name that stage; classifyStageFailure maps the
+   stage to the honest category/cause (a rewrite failure is not an
+   upstream failure). A transit decision that leaves the native path is
+   an explainable TRANSPORT_FALLBACK stage event; native is the
+   default and stays row/counter-only. */
 
 export type DiagSeverity = "info" | "warning" | "error" | "critical";
 
@@ -92,6 +99,20 @@ let diagSeq = 0;
 const traceIndex = new Map<string, number>();
 
 let traceCounter = 0;
+
+/** #95: map the lifecycle stage a failure broke at to the honest
+    category and cause. One table, used by the request engine's catch:
+    a failure while rewriting is a rewrite failure, one before the
+    engine handed the request upstream is a proxy failure, and
+    everything between is upstream. */
+export function classifyStageFailure(stage: DiagStage): {
+  category: DiagCategory;
+  cause: DiagCause;
+} {
+  if (stage.startsWith("REWRITE")) return { category: "REWRITE", cause: "rewrite" };
+  if (stage === "REQUEST_CREATED" || stage === "REQUEST_INTERCEPTED") return { category: "TRANSPORT", cause: "proxy" };
+  return { category: "TRANSPORT", cause: "upstream" };
+}
 
 /** Redact secrets from any string before it enters the ring. */
 export function redactSecrets(s: string): string {

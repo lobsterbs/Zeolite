@@ -32,7 +32,7 @@ import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, siteUaFor, type ResourceType } from "./rules";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
-import { DIAG } from "./diag";
+import { DIAG, classifyStageFailure, type DiagStage } from "./diag";
 /* #90: the adoptResponse seam lives in ./downloads; the downloads
    subsystem owns its own state and the request engine stays unaware
    of download tracking internals. */
@@ -975,6 +975,12 @@ export function handleFetch(e: FetchEvent): void {
           if (hit) {
             const dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
             transitRecord(traceId, target, dec);
+            /* #95: a decision that leaves the native path is an
+               explainable event on the always-on diag stream (the
+               fallback ring + netLog row stay the per-request record;
+               native is the default and stays row-only). */
+            if (dec.mode === "RewriteFallback")
+              DIAG.stage(traceId, "TRANSPORT_FALLBACK", { url: target, message: dec.reason });
             /* Bug-scout fix: cache-hit navigations used to skip the
                webNavigation lifecycle entirely. */
             if (
@@ -1048,6 +1054,11 @@ export function handleFetch(e: FetchEvent): void {
         const rules = await siteRules();
         const rule = ruleFor(rules, target);
         const plugins = rule.plugins;
+        /* #95: track where the upstream lifecycle currently is, so a
+           failure names the stage it broke at instead of one generic
+           label (the hop chain, response surgery and every rewrite
+           branch shared a single REWRITE_FAILED stage before). */
+        let curStage: DiagStage = "UPSTREAM_REQUEST";
         try {
           DIAG.stage(traceId, "UPSTREAM_REQUEST", { url: target });
           const fwd = forwardedHeaders(e.request, target, initiator);
@@ -1154,6 +1165,7 @@ export function handleFetch(e: FetchEvent): void {
             hopUrl = next;
             resp = await wispTransport.fetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
           }
+          curStage = "UPSTREAM_RESPONSE";
           DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
           /* A 3xx that escaped the hop loop - cap reached, a hop whose
              one-shot body cannot replay, or no resolvable Location - is
@@ -1253,6 +1265,12 @@ export function handleFetch(e: FetchEvent): void {
           mapRefreshHeader(outHeaders, finalDest ?? target);
           void applyOnResponse(plugins, target, resp.status, outHeaders);
           const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "", dest);
+          /* #95: same explainable-decision event on the response path
+             (every document, stylesheet and transformed script body
+             lands here, so the reason is in the diag stream, not just
+             the opt-in tracing ring). */
+          if (dec.mode === "RewriteFallback")
+            DIAG.stage(traceId, "TRANSPORT_FALLBACK", { url: target, message: dec.reason });
           traceDecision({ subsystem: "transport", rule: dec.mode, original: target, result: reasonOf(dec) ?? dec.mode, resource: rtype, traceId });
           if (finalDest)
             traceDecision({ subsystem: "transport", rule: "redirect", original: target, result: finalDest, resource: rtype, traceId });
@@ -1326,6 +1344,7 @@ export function handleFetch(e: FetchEvent): void {
             void pageCacheStore(e.request, resp.clone());
           }
           if ((isHtml(resp) || (respCt === "" && DOC_DESTS.has(dest) && resp.body)) && resp.body) {
+            curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
             traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });
             /* Main-frame document loads feed the webNavigation bridge;
@@ -1380,6 +1399,7 @@ export function handleFetch(e: FetchEvent): void {
                buffered body). Completion events fire at stream end, like
                the HTML path. Issue B: decoded with the upstream charset,
                served UTF-8 with the header saying so. */
+            curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "css rewrite stream wired" });
             traceDecision({ subsystem: "rewriter", rule: "css", original: target, result: "streaming", resource: rtype, traceId });
             outHeaders.set("content-type", utf8ContentType(respCt));
@@ -1402,6 +1422,7 @@ export function handleFetch(e: FetchEvent): void {
              cannot run on a chunked stream, so the body is buffered;
              worker scripts are not first-paint documents. */
           if (isWorkerDestination(e.request.destination) && e.request.mode === "cors" && resp.body) {
+            curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "module worker specifier pass" });
             traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
             const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, decodeBody(await resp.arrayBuffer(), respCt));
@@ -1438,6 +1459,7 @@ export function handleFetch(e: FetchEvent): void {
                into a worker-context init script and prepended too
                (WorkerNavigator + OffscreenCanvas surfaces). Streaming is
                preserved: everything prepended is one extra first chunk. */
+            curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude" });
             const preludeW = getFpWorkerScript() ?? (await siteProfileFor(target))?.workerScript ?? "";
             const prelude =
@@ -1479,6 +1501,7 @@ export function handleFetch(e: FetchEvent): void {
              gate, JS alone was gated. Inline module scripts are a
              rewriter gap (#36): the parser path, not this seam. */
           if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body) {
+            curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
             let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, decodeBody(await resp.arrayBuffer(), respCt));
@@ -1518,12 +1541,17 @@ export function handleFetch(e: FetchEvent): void {
           if (dl) return dl;
           return new Response(resp.body, { status: resp.status, headers: outHeaders });
         } catch (err) {
+          /* #95: the failure names the stage the request actually
+             broke at; the classifier maps that stage to an honest
+             category and cause (a rewrite failure was mislabeled
+             TRANSPORT/upstream before). */
+          const failure = classifyStageFailure(curStage);
           DIAG.failure({
             traceId,
-            category: "TRANSPORT",
-            cause: "upstream",
-            stage: "REWRITE_FAILED",
-            message: "proxied request failed",
+            category: failure.category,
+            cause: failure.cause,
+            stage: curStage,
+            message: "proxied request failed at " + curStage.toLowerCase().replace(/_/g, " "),
             technicalReason: String(err),
             url: target,
           });
