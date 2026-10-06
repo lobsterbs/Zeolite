@@ -43,6 +43,11 @@ const LENGTH_DELIMITED_200 = enc.encode(
 const EMPTY_LENGTH_200 = enc.encode(
   "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
 );
+const KEEPALIVE_304 = enc.encode(
+  'HTTP/1.1 304 Not Modified\r\nETag: "v1"\r\n\r\n',
+);
+const KEEPALIVE_204 = enc.encode("HTTP/1.1 204 No Content\r\n\r\n");
+const INTERIM_100 = enc.encode("HTTP/1.1 100 Continue\r\n\r\n");
 
 type Seam = {
   stream_response: (
@@ -213,6 +218,115 @@ describe("applyTransportEOF", () => {
     );
     controller.abort();
     expect(headerCalls).toHaveLength(0);
+    expect(ends).toEqual([-1]);
+  });
+
+  it("a keep-alive 304 surfaces the moment its header block completes (#92/#96)", async () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: ReadableStream[] = [];
+    const ends: number[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      (error) => ends.push(error),
+    );
+    /* the phantom-body wait: the server keeps the connection alive,
+       so end(56) arrives only at the keep-alive timeout - long
+       after the response was already complete at the header block */
+    cbs.headers(KEEPALIVE_304);
+    expect(headerCalls).toHaveLength(1);
+    expect(await readAll(headerCalls[0])).toEqual([]);
+    cbs.end(56);
+    expect(headerCalls).toHaveLength(1);
+    expect(ends).toEqual([56]);
+  });
+
+  it("a keep-alive 204 surfaces the same way (the body is definitively empty)", async () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: ReadableStream[] = [];
+    const ends: number[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      (error) => ends.push(error),
+    );
+    cbs.headers(KEEPALIVE_204);
+    expect(headerCalls).toHaveLength(1);
+    expect(await readAll(headerCalls[0])).toEqual([]);
+    cbs.end(0);
+    expect(headerCalls).toHaveLength(1);
+    expect(ends).toEqual([0]);
+  });
+
+  it("an interim 100 Continue block never fires; the final 304 does", () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: ReadableStream[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      () => {},
+    );
+    cbs.headers(INTERIM_100);
+    expect(headerCalls).toHaveLength(0);
+    cbs.headers(KEEPALIVE_304);
+    expect(headerCalls).toHaveLength(1);
+  });
+
+  it("a bodiless block split across chunks waits for the terminator", () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: ReadableStream[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      () => {},
+    );
+    cbs.headers(KEEPALIVE_304.slice(0, 20));
+    expect(headerCalls).toHaveLength(0);
+    cbs.headers(KEEPALIVE_304.slice(20));
+    expect(headerCalls).toHaveLength(1);
+  });
+
+  it("a throwing headers callback on a bodiless surface falls back to the end-callback paths", () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: ReadableStream[] = [];
+    const ends: number[] = [];
+    const cbs = start(
+      seam,
+      () => {
+        throw new RangeError("Failed to construct 'Response'");
+      },
+      (error) => ends.push(error),
+    );
+    cbs.headers(KEEPALIVE_304);
+    expect(headerCalls).toHaveLength(0);
+    /* the close-delimited salvage path still runs and hits the same
+       throw, so the rejection keeps its original shape */
+    cbs.end(56);
+    expect(ends).toEqual([56]);
+  });
+
+  it("abort after a bodiless surface closes the stream instead of throwing", () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const controller = new AbortController();
+    const headerCalls: ReadableStream[] = [];
+    const ends: number[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      (error) => ends.push(error),
+      controller.signal,
+    );
+    cbs.headers(KEEPALIVE_304);
+    expect(headerCalls).toHaveLength(1);
+    /* controller.error() on the already-closed stream is a no-op,
+       not an exception inside the abort listener */
+    controller.abort();
     expect(ends).toEqual([-1]);
   });
 });

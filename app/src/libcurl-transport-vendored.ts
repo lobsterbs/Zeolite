@@ -438,8 +438,8 @@ async function loadBundle(url: string): Promise<{ LibcurlClient?: unknown; defau
  *
  * Gates: __tests__/transport-patch.test.ts (callback ordering and
  * scoping) and the transport-gate workflow (suite/transport-diag.mjs:
- * the real craigslist 302 through a local wisp relay, every push to
- * main). */
+ * the real craigslist 302 through a local wisp relay; dispatch-only
+ * since 2026-10-05, run manually when the transport seam changes). */
 interface StreamResponseThis {
   create_request(
     url: string,
@@ -474,6 +474,44 @@ function patchedStreamResponse(
       text += String.fromCharCode(chunk[i]);
     }
     raw_header_text += text;
+    /* RFC 9110 bodiless statuses (#92/#96): a 204 or 304 response
+       ends at the header block - the response IS the headers. The
+       wasm curl does not special-case them: with no content-length
+       and no chunked framing (the normal shape of a 304) it waits
+       for a phantom body until the peer closes the connection, so a
+       keep-alive 204/304 stalls the fetch for the server's whole
+       keep-alive window (5s on the CI fixture) before the error-56
+       salvage in real_end_callback finally surfaces it. Fire the
+       headers callback the moment a complete 204/304 block arrives.
+       Only the LAST complete block counts: a followed redirect or
+       an interim 1xx accumulates earlier blocks ahead of the final
+       status, and 1xx blocks are never terminal. */
+    if (headers_received) return;
+    const blocks = raw_header_text.split("\r\n\r\n");
+    /* the final element is the not-yet-terminated block ("" right
+       after a terminator); complete blocks precede it */
+    if (blocks.length < 2) return;
+    const statusMatch = /^HTTP\/\d(?:\.\d)?\s+(\d{3})/.exec(
+      blocks[blocks.length - 2],
+    );
+    if (!statusMatch) return;
+    const status = Number(statusMatch[1]);
+    if (status !== 204 && status !== 304) return;
+    headers_received = true;
+    try {
+      headers_callback(stream);
+      /* the body is definitively empty and complete */
+      try {
+        stream_controller?.close();
+      } catch {
+        /* already closed or errored */
+      }
+    } catch {
+      /* no constructible response (status 0): restore the flag so
+         the end-callback paths below keep their original rejection
+         and salvage behavior */
+      headers_received = false;
+    }
   };
   const real_data_callback = (new_data: Uint8Array) => {
     if (!headers_received) {
@@ -531,7 +569,13 @@ function patchedStreamResponse(
       if (aborted) return;
       aborted = true;
       if (headers_received) {
-        stream_controller?.error("The operation was aborted.");
+        try {
+          stream_controller?.error("The operation was aborted.");
+        } catch {
+          /* already closed (bodiless surface) or errored: the
+             stream reached its terminal state, abort is a no-op
+             on it */
+        }
       }
       real_end_callback(-1);
     });
