@@ -859,6 +859,11 @@ async function rangeFromEntry(hit: Response, rangeHeader: string): Promise<Respo
   return new Response(slice, { status: 206, headers });
 }
 
+/* Once-per-lifetime STORAGE warnings (scout report): both fire at
+   most once per worker restart or they would spam the diag ring. */
+let pageCacheTrimWarned = false;
+let pageCacheStoreWarned = false;
+
 async function pageCacheStore(req: Request, resp: Response): Promise<void> {
   const ttl = cacheTtl(resp.headers);
   if (!ttl || resp.status !== 200) return;
@@ -883,10 +888,30 @@ async function pageCacheStore(req: Request, resp: Response): Promise<void> {
     await cache.put(req, stored);
     let keys = await cache.keys();
     while (keys.length > ZL_PAGE_LIMIT) {
-      await cache.delete(keys[0]);
+      const gone = await cache.delete(keys[0]);
+      /* Scout report: a failed eviction used to pass silently and the
+         cache rode over the limit until entries expired. Once per
+         worker lifetime is enough - it is a storage condition, not a
+         per-request defect. */
+      if (!gone && !pageCacheTrimWarned) {
+        pageCacheTrimWarned = true;
+        DIAG.emit({
+          category: "STORAGE",
+          severity: "warning",
+          message: "page cache eviction failed; cache may exceed the page limit until entries expire",
+        });
+      }
       keys = keys.slice(1);
     }
   } catch {
+    if (!pageCacheStoreWarned) {
+      pageCacheStoreWarned = true;
+      DIAG.emit({
+        category: "STORAGE",
+        severity: "warning",
+        message: "page cache store failed (storage full or unavailable); caching skipped",
+      });
+    }
     /* storage full or unavailable: skip caching */
   }
 }
@@ -2403,6 +2428,18 @@ function forwardedHeaders(req: Request, target: string, initiator?: string): Hea
        direct browsing sends (issue #20). */
     const ref = decodePath(refU.pathname);
     if (ref) out.set("referer", ref + refU.search);
+    /* Scout report (2026-10-06): a referrer whose path is not a
+       decodable engine route used to drop the Referer silently.
+       Referrer-dependent CSRF and analytics then misbehave with no
+       trace why. Sending the raw engine route would leak the proxy
+       origin upstream, so the header stays omitted - but the event
+       is recorded instead of being swallowed. */
+    else DIAG.emit({
+      category: "TRANSPORT",
+      severity: "warning",
+      message: "engine-route referrer did not decode; Referer omitted",
+      url: req.referrer,
+    });
   }
   /* Issue #23: the virtual origin. Every request the page makes is
      same-origin on the engine side, so the browser Origin and
