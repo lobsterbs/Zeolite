@@ -102,7 +102,7 @@ import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, refineWithContent, sniffsAsHtml, transitRecord, transitStats, DOC_DESTS } from "./transit";
 import { cssRewriteStream, initTransform, isCss, isHtml, isJs, prewarmRewriter, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
-import { ZL_WISP_URL, httpsUpgraded } from "./config";
+import { httpsUpgraded } from "./config";
 import { ruleFor, ruleProfile, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, setRulesEnabled, setSiteOverrides, siteUaFor, type ResourceType } from "./rules";
@@ -110,8 +110,7 @@ import { runRequestInterception, runResponseInterception, BODY_LIMIT, type Inter
 import { DIAG, redactSecrets } from "./diag";
 import { setTracing, traceDecision, tracingSnapshot } from "./tracing";
 import { beginRecording, finishRecording, type RecordingState } from "./recording";
-import { fetch as zlCurlFetch, init as zlCurlInit, openWebSocket, setEngine, currentEngine, reset as zlCurlReset, isConnectClassError } from "./libcurl-transport-vendored";
-import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
+import { currentEngine, initTransport, openWebSocket, wispTransport } from "./transport";
 import { WsBridge, type PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
 import { senderVirtualOrigin, virtualOriginHeaders } from "./origin";
@@ -179,51 +178,15 @@ const VCTX = new Map<string, VirtualContext>();
    fully operational. */
 let engineDegraded: string | null = null;
 
-let curlReady: Promise<void> | null = null;
-async function ensureCurl(): Promise<void> {
-  if (!curlReady) {
-    curlReady = zlCurlInit({ websocket: ZL_WISP_URL }).catch((err) => {
-      engineDegraded = "libcurl transport: " + String(err);
-      curlReady = null; // allow retry on next request
-      DIAG.emit({
-        category: "TRANSPORT",
-        severity: "error",
-        message: "libcurl transport init failed",
-        technicalReason: String(err),
-        url: ZL_WISP_URL,
-      });
-      throw err;
-    });
-  }
-  return curlReady;
-}
-
-/* Issue #74: a dead or never-opened wisp websocket is transport state,
-   not a per-destination failure. Connect-class errors (libcurl error 55
-   send / 56 receive on the dead socket, "websocket did not open" from
-   either engine) reset the transport singleton and retry once before
-   the 502 page reaches the user. A request whose body stream was already
-   consumed may fail the retry and surface as before: honest fallback,
-   never a loop - each wispFetch call retries at most once. */
-async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
-  await ensureCurl();
-  try {
-    return await zlCurlFetch(dest, init);
-  } catch (err) {
-    if (!isConnectClassError(err)) throw err;
-    DIAG.emit({
-      category: "TRANSPORT",
-      severity: "error",
-      message: "wisp connection lost; transport reset, retrying once",
-      technicalReason: String(err),
-      url: ZL_WISP_URL,
-    });
-    zlCurlReset();
-    curlReady = null; // force re-init inside the next ensureCurl()
-    await ensureCurl();
-    return zlCurlFetch(dest, init);
-  }
-}
+/* #84: the wisp/libcurl transport lifecycle (init, connect-class
+   reset + single retry, engine switch) moved to transport.ts; sw.ts
+   depends on the Transport interface. The degraded-flag seam keeps
+   reporting init failures to zl:ping exactly as before. */
+initTransport({
+  setDegraded: (reason) => {
+    engineDegraded = reason;
+  },
+});
 
 /* ---- Header surgery ------------------------------------------------
    stripHostile() and mapRefreshHeader() live in ./headers (unit-gated
@@ -638,7 +601,7 @@ async function wispFetchCacheBypass(req: Request): Promise<Response> {
   const headers = new Headers();
   const jarCookie = cookieHeaderFor(dest);
   if (jarCookie) headers.set("cookie", jarCookie);
-  return wispFetch(dest, { method: "GET", headers });
+  return wispTransport.fetch(dest, { method: "GET", headers });
 }
 
 /* ---- Per-site route table ------------------------------------------ */
@@ -817,7 +780,7 @@ self.addEventListener("activate", (e) => {
       /* Warm the transport so the first proxied request skips libcurl
          init. A missing vendored build just logs, as before. */
       try {
-        await ensureCurl();
+        await wispTransport.ready();
       } catch {
         /* transport-missing: the suite records it, as before */
       }
@@ -1662,7 +1625,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
           let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
             ? undefined
             : e.request.body;
-          let resp = await wispFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
+          let resp = await wispTransport.fetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
           for (let hops = 0; resp.status >= 300 && resp.status < 400 && hops < MAX_REDIRECT_HOPS; hops++) {
             /* Capture this hop's Set-Cookie against the URL it came from.
                #35: any admission also pushes the jar view to the
@@ -1696,7 +1659,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
             else sendHeaders.delete("cookie");
             DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
             hopUrl = next;
-            resp = await wispFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
+            resp = await wispTransport.fetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
           }
           DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
           /* A 3xx that escaped the hop loop - cap reached, a hop whose
@@ -2507,7 +2470,7 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
          invalid engine refuses honestly; a valid one
          switches the transport for the NEXT init(): the
          running client keeps its engine until the service
-         worker restarts, and curlReady = null forces the
+         worker restarts, and the switchEngine seam forces the
          re-init on the next request. Ephemeral like the
          other host toggles: resets to the deployment
          default (ZL_TRANSPORT) on SW restart. */
@@ -2517,8 +2480,7 @@ self.addEventListener("message", async (e: ExtendableMessageEvent) => {
       } else if (eng !== "libcurl" && eng !== "epoxy") {
         reply({ ok: false, error: "transport needs engine libcurl|epoxy" });
       } else {
-        setEngine(eng);
-        curlReady = null;
+        wispTransport.switchEngine(eng);
         reply({ ok: true, engine: currentEngine() });
       }
       break;
@@ -2561,7 +2523,7 @@ case "zl:tracing":
          1006. Wait for the transport here (sends queue at the bridge
          until the handshake completes). */
       try {
-        await ensureCurl();
+        await wispTransport.ready();
       } catch {
         port.postMessage({ ev: "error", error: "transport unavailable" });
         port.postMessage({ ev: "close", code: 1006, clean: false });
