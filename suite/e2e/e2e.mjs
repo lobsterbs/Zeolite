@@ -594,6 +594,123 @@ async function main() {
     return out;
   });
 
+  /* ---- pass-through invariant (#96) --------------------------------
+     The NativeTransit contract: a request classified native leaves
+     the browser's semantics intact. The identical probe suite runs
+     browser-direct on the fixture origin and engine-proxied, and the
+     two records must agree. Comparisons are semantic: header values
+     the browser itself varies (byte-level fetch metadata) are not
+     compared, only the facts the fixture controls. Documented
+     deviations (cookie jar rebuild, opaque route URLs, decoded
+     bodies, hostile-header stripping) live in docs/passthrough.md
+     and are deliberately not asserted equal where they differ by
+     design. */
+
+  await check("passthrough: NativeTransit preserves method, body, headers, cookies, range, conditionals, redirects, status and streaming (#96)", async () => {
+    const probeJs = `async () => {
+      const out = {};
+      const g = await fetch("/api/passthrough?p=get");
+      out.get = {
+        status: g.status,
+        ct: g.headers.get("content-type"),
+        fx: g.headers.get("x-zl-fx"),
+        etag: g.headers.get("etag"),
+        echo: JSON.parse(await g.text()),
+      };
+      const p = await fetch("/api/passthrough?p=post", {
+        method: "POST",
+        headers: { "content-type": "text/zl-probe" },
+        body: "zl-probe-body",
+      });
+      out.post = JSON.parse(await p.text());
+      const r = await fetch("/api/passthrough?p=range", { headers: { range: "bytes=0-3" } });
+      out.range = { status: r.status, cr: r.headers.get("content-range"), body: await r.text() };
+      const c = await fetch("/api/passthrough?p=cond", { headers: { "if-none-match": out.get.etag } });
+      out.cond = { status: c.status };
+      await fetch("/setcookie2");
+      await new Promise((res) => setTimeout(res, 500));
+      out.cookie = JSON.parse(await (await fetch("/api/passthrough?p=cookie")).text()).cookie;
+      const s = await fetch("/api/stream");
+      const reader = s.body.getReader();
+      let text = "";
+      let chunks = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks++;
+        text += new TextDecoder().decode(value);
+      }
+      out.stream = { status: s.status, chunks, text };
+      const ac = new AbortController();
+      const af = fetch("/api/stream", { signal: ac.signal });
+      ac.abort();
+      try {
+        await af;
+        out.abort = "no-error";
+      } catch (e) {
+        out.abort = e.name;
+      }
+      const rd = await fetch("/redir");
+      out.redirect = { status: rd.status, body: (await rd.text()).includes("zl-landing") };
+      return JSON.stringify(out);
+    }`;
+    /* Direct browser behavior: a page on the fixture origin itself,
+       no engine in the path anywhere. */
+    const directPage = await context.newPage();
+    await directPage.goto(ORIGIN_A + "/dir/landing.html");
+    const direct = JSON.parse(await directPage.evaluate("(" + probeJs + ")()"));
+    await directPage.close();
+    /* The same probes through the engine (page.html carries the
+       #zl-marker openProxied waits for; every probe URL is an absolute
+       path, so the page it runs from does not matter). */
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const proxied = JSON.parse(await evalIn(frame, "passthrough probes", probeJs, 30000));
+    /* Method, URL, request body, content-type, origin semantics. */
+    eq(proxied.get.echo.method, direct.get.echo.method, "GET method forwarded");
+    eq(proxied.get.echo.url, direct.get.echo.url, "request URL with query");
+    eq(proxied.post.method, direct.post.method, "POST method forwarded");
+    eq(proxied.post.body, direct.post.body, "POST body bytes");
+    eq(proxied.post.ct, direct.post.ct, "request content-type forwarded");
+    eq(proxied.post.origin, direct.post.origin, "Origin on a same-origin POST (virtual-origin stamping)");
+    /* Response status + representative headers. */
+    eq(proxied.get.status, direct.get.status, "GET status");
+    eq(proxied.get.ct, direct.get.ct, "response content-type");
+    eq(proxied.get.fx, direct.get.fx, "custom response header preserved");
+    eq(proxied.get.etag, direct.get.etag, "etag preserved (conditional validators)");
+    /* Range semantics. */
+    eq(proxied.range.status, direct.range.status, "range status (206)");
+    eq(proxied.range.cr, direct.range.cr, "content-range");
+    eq(proxied.range.body, direct.range.body, "range slice bytes");
+    /* Conditional requests. */
+    eq(proxied.cond.status, direct.cond.status, "If-None-Match -> 304");
+    /* Cookies (semantically: the Set-Cookie landed and the next request
+       carried it; the jar rebuild is the documented deviation, the
+       presence of the cookie is the invariant). */
+    assert(
+      typeof proxied.cookie === "string" && proxied.cookie.includes("fx2=1"),
+      "engine-proxied cookie missing: " + JSON.stringify(proxied.cookie),
+    );
+    assert(
+      typeof direct.cookie === "string" && direct.cookie.includes("fx2=1"),
+      "direct cookie missing: " + JSON.stringify(direct.cookie),
+    );
+    /* Streaming: bytes arrive in order and complete; chunk boundaries
+       are not an invariant (a transport may legitimately coalesce). */
+    eq(proxied.stream.status, direct.stream.status, "stream status");
+    eq(proxied.stream.text, direct.stream.text, "streamed bytes");
+    assert(proxied.stream.chunks >= 1, "engine stream produced no chunks");
+    assert(direct.stream.chunks >= 2, "direct stream was buffered whole (fixture regression)");
+    /* Abort/cancellation semantics. */
+    eq(proxied.abort, direct.abort, "abort error name");
+    eq(proxied.abort, "AbortError", "aborted fetch rejects with AbortError");
+    /* Redirects: the engine resolves the hop chain itself, so the
+       final status and body are the invariant (response.redirected and
+       the Location the page never sees are documented deviations). */
+    eq(proxied.redirect.status, direct.redirect.status, "redirect-follow status");
+    eq(proxied.redirect.body, direct.redirect.body, "redirect final content");
+    return "12 probe groups matched direct vs proxied";
+  });
+
   await check("api: IndexedDB round-trips inside the virtual origin", async () => {
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "idb", `async () => {

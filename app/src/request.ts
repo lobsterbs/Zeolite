@@ -1176,7 +1176,7 @@ export function handleFetch(e: FetchEvent): void {
              hops, until the browser's own redirect cap kills the
              chain). Mark the surface so DevTools can explain the
              reload cycle instead of leaving it mysterious. */
-          if (resp.status >= 300 && resp.status < 400) {
+          if (resp.status >= 300 && resp.status < 400 && resp.headers.get("location")) {
             DIAG.emit({
               traceId,
               requestId: traceId,

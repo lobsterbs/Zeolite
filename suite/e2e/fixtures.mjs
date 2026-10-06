@@ -36,6 +36,14 @@ const PNG = Buffer.from(
   "base64",
 );
 
+/* #96: fixed probe body + etag for the pass-through invariant
+   (single-range slicing + conditional GETs behave like a spec origin). */
+const PT_BODY = Buffer.from(
+  "zl-pt-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDEFGHIJKLMNOPQRSTUV",
+  "utf8",
+);
+const PT_ETAG = '"zl-pt-1"';
+
 function pageHtml(origin) {
   const other = origin === ORIGIN_A ? ORIGIN_B : ORIGIN_A;
   return `<!doctype html><html><head><title>zl fixture</title>
@@ -129,6 +137,65 @@ export function startFixture(port) {
         res.write("data: zl-sse-1\n\n");
         res.write("data: zl-sse-2\n\n");
         sseStreams.push(res);
+      } else if (path === "/api/passthrough") {
+        /* #96: pass-through invariant probe. Echoes the request facts the
+           NativeTransit contract must preserve (method, content-type,
+           origin, cookie) and owns range + conditional semantics like a
+           spec origin. The E2E harness fetches the exact same probes
+           browser-direct and engine-proxied and compares the two. */
+        const range = req.headers.range;
+        const inm = req.headers["if-none-match"];
+        if (range) {
+          const m = /^bytes=(\d+)-(\d+)$/.exec(range);
+          const total = PT_BODY.length;
+          if (m && Number(m[1]) <= Number(m[2]) && Number(m[1]) < total) {
+            const end = Math.min(Number(m[2]), total - 1);
+            const slice = PT_BODY.subarray(Number(m[1]), end + 1);
+            res.writeHead(206, {
+              "content-type": "text/plain",
+              "content-range": `bytes ${m[1]}-${end}/${total}`,
+              "content-length": slice.length,
+              "x-zl-fx": "passthrough",
+            });
+            res.end(slice);
+          } else {
+            res.writeHead(416, { "content-range": `bytes */${total}` });
+            res.end();
+          }
+        } else if (inm === PT_ETAG) {
+          res.writeHead(304, { etag: PT_ETAG });
+          res.end();
+        } else {
+          send(
+            res,
+            "application/json",
+            JSON.stringify({
+              zl: "pt",
+              url: req.url,
+              method: req.method,
+              ct: req.headers["content-type"] ?? null,
+              origin: req.headers.origin ?? null,
+              cookie: req.headers.cookie ?? null,
+              body,
+            }),
+            { "x-zl-fx": "passthrough", etag: PT_ETAG },
+          );
+        }
+      } else if (path === "/api/stream") {
+        /* #96: three time-separated chunks - the pass-through invariant
+           is that streaming stays streaming, not buffered whole. */
+        res.writeHead(200, { "content-type": "text/plain", "x-zl-fx": "passthrough" });
+        let i = 0;
+        const tick = () => {
+          i++;
+          if (i > 3) {
+            res.end();
+            return;
+          }
+          res.write(`zl-stream-${i}`);
+          setTimeout(tick, 60);
+        };
+        tick();
       } else if (path === "/beacon") {
         res.writeHead(204);
         res.end();
@@ -137,6 +204,12 @@ export function startFixture(port) {
         res.end();
       } else if (path === "/setcookie") {
         send(res, "text/plain", "cookie-set", { "set-cookie": "fx=1; Path=/" });
+      } else if (path === "/setcookie2") {
+        /* #96: a distinct cookie so the pass-through probe never rides
+           another check's cached /setcookie response (the engine page
+           cache would serve it without an upstream hit, so the jar
+           admission the probe needs would never run). */
+        send(res, "text/plain", "cookie-set", { "set-cookie": "fx2=1; Path=/" });
       } else if (path === "/sw-probe.js") {
         send(res, "text/javascript", "self.addEventListener('install', () => {});\n");
       } else if (path === "/__hits") {

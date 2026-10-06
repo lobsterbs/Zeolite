@@ -37,6 +37,14 @@ fixture pages through `/?url=<target>` and asserts:
   BroadcastChannel delivers same-site only while .name keeps the
   page's spelling, storage events deliver same-site with
   prefix-stripped keys, cookieStore is absent (removed, not faked).
+- Pass-through invariant (#96): the identical probe suite runs
+  browser-direct on the fixture origin and engine-proxied, and the two
+  records are compared for semantic equivalence - method, request
+  body, content-type, Origin stamping, response status and headers,
+  Range slices (206 + content-range), conditional GETs (If-None-Match
+  -> 304), Set-Cookie round-trip, streaming bytes, abort semantics and
+  redirect-follow final content. The contract and its documented
+  deviations live in docs/passthrough.md.
 
 ## How a browser-direct escape is distinguished from an engine request
 
