@@ -9,9 +9,22 @@
    engine paths before any script runs. NativeTransit is the first
    case, RewriteFallback the second, and every fallback carries a
    machine-readable reason. This module classifies and records only:
-   no second network stack, no second cookie store. */
+   no second network stack, no second cookie store.
 
-export type TransportMode = "NativeTransit" | "RewriteFallback";
+   #94: the model is ONE explainable, discriminated decision per
+   request - NativeTransit | RewriteFallback | Blocked, each carrying
+   a machine-readable reason. The request engine constructs the
+   blocked decisions at its deny gates (rules, intercept handlers,
+   extension webRequest) and reads reasonOf() for telemetry; nothing
+   downstream re-derives classification. Redirects are deliberately
+   NOT a mode: a redirect is an upstream-execution fact surfaced
+   through the hop chain (netLog finalDest), never a change in
+   whether a resource needs rewriting. The passthrough classes
+   (opaque schemes, engine assets, the wisp endpoint, host-app
+   cross-origin traffic) are the browser's own requests the engine
+   never transports, so they are not transit decisions either. */
+
+export type TransportMode = "NativeTransit" | "RewriteFallback" | "Blocked";
 
 export type FallbackReason =
   | "DOCUMENT_REWRITE_REQUIRED"
@@ -19,6 +32,14 @@ export type FallbackReason =
   | "JS_LITERAL_REWRITE_REQUIRED"
   | "XML_DOCUMENT_REWRITE_REQUIRED"
   | "UNSUPPORTED_PROTOCOL";
+
+/* #94: the reason taxonomy. A native decision explains itself too
+   (the unremarkable default), and a blocked request carries the gate
+   that denied it, so every decision is explainable without
+   re-reading the call site. */
+export type NativeReason = "NON_DOCUMENT_RESOURCE";
+export type BlockReason = "BLOCKED_RULES" | "BLOCKED_INTERCEPT" | "BLOCKED_WEBREQUEST";
+export type TransitReason = FallbackReason | NativeReason | BlockReason;
 
 export interface OriginContext {
   scheme: string;
@@ -39,9 +60,20 @@ export function originOf(url: string): OriginContext | null {
   }
 }
 
-export interface TransitDecision {
-  mode: TransportMode;
-  fallbackReason?: FallbackReason;
+/* #94: one authoritative, explainable decision per request. The
+   discriminated union keeps each mode's reason type honest: a
+   fallback always carries a FallbackReason, a block a BlockReason,
+   a native transport the default's own reason. */
+export type TransitDecision =
+  | { mode: "NativeTransit"; reason: NativeReason }
+  | { mode: "RewriteFallback"; reason: FallbackReason }
+  | { mode: "Blocked"; reason: BlockReason };
+
+/** The telemetry view of a decision's reason: fallbacks and blocks
+    explain themselves; native is the unremarkable default and stays
+    silent (every netLog row would otherwise read the same). */
+export function reasonOf(dec: TransitDecision): string | undefined {
+  return dec.mode === "NativeTransit" ? undefined : dec.reason;
 }
 
 /** Request destinations that load a document, one list for the
@@ -78,6 +110,21 @@ export function jsBody(contentType: string): boolean {
   return ct.includes("javascript") || ct.includes("ecmascript");
 }
 
+/* #94: the destinations whose JS bodies the engine serve-time
+    transforms (specifiers, URL literals, worker prelude). ONE copy:
+    the request engine's transform branch and cache-store skip used
+    to re-derive this set inline (two `destination === "script" ||
+    destination === ""` checks that could drift from the refinement
+    below). Worker destinations are intercepted by the engine's own
+    worker branches before the page-script branch, so sharing the
+    set there is order-safe. */
+export const JS_TRANSFORM_DESTS: ReadonlySet<string> = new Set([
+  "script",
+  "",
+  "worker",
+  "sharedworker",
+]);
+
 /** Content-type-less responses to a document destination: sniff the
     head the way the browser's MIME sniffing would, because the
     browser sniffs html for such navigations and an unrewritten
@@ -96,12 +143,12 @@ export function sniffsAsHtml(head: Uint8Array): boolean {
 export function decideTransport(target: string, dest: string): TransitDecision {
   const o = originOf(target);
   if (!o || (o.scheme !== "http" && o.scheme !== "https")) {
-    return { mode: "RewriteFallback", fallbackReason: "UNSUPPORTED_PROTOCOL" };
+    return { mode: "RewriteFallback", reason: "UNSUPPORTED_PROTOCOL" };
   }
   if (DOC_DESTS.has(dest.toLowerCase())) {
-    return { mode: "RewriteFallback", fallbackReason: "DOCUMENT_REWRITE_REQUIRED" };
+    return { mode: "RewriteFallback", reason: "DOCUMENT_REWRITE_REQUIRED" };
   }
-  return { mode: "NativeTransit" };
+  return { mode: "NativeTransit", reason: "NON_DOCUMENT_RESOURCE" };
 }
 
 /** Post-response refinement: an HTML or CSS body forces the rewrite
@@ -115,13 +162,15 @@ export function refineWithContent(
   contentType: string,
   dest = "",
 ): TransitDecision {
-  if (dec.mode === "RewriteFallback") return dec;
+  /* #94: refinement only demotes a native decision to a fallback;
+     decided requests (fallback, blocked) pass through untouched. */
+  if (dec.mode !== "NativeTransit") return dec;
   const kind = docKind(contentType);
   if (kind === "html") {
-    return { mode: "RewriteFallback", fallbackReason: "DOCUMENT_REWRITE_REQUIRED" };
+    return { mode: "RewriteFallback", reason: "DOCUMENT_REWRITE_REQUIRED" };
   }
   if (kind === "css") {
-    return { mode: "RewriteFallback", fallbackReason: "CSS_URL_REWRITE_REQUIRED" };
+    return { mode: "RewriteFallback", reason: "CSS_URL_REWRITE_REQUIRED" };
   }
   /* JS bodies on the destinations the SW serve-time-transforms
      (script, destination "" fetch/XHR/eval, module and classic
@@ -129,19 +178,19 @@ export function refineWithContent(
      worker prelude prepended. The decision used to say NativeTransit
      for bodies the rewriter actually touched. */
   const d = dest.toLowerCase();
-  if (jsBody(contentType) && (d === "script" || d === "" || d === "worker" || d === "sharedworker")) {
-    return { mode: "RewriteFallback", fallbackReason: "JS_LITERAL_REWRITE_REQUIRED" };
+  if (jsBody(contentType) && JS_TRANSFORM_DESTS.has(d)) {
+    return { mode: "RewriteFallback", reason: "JS_LITERAL_REWRITE_REQUIRED" };
   }
   const ct = contentType.toLowerCase();
   const docDest = DOC_DESTS.has(dest.toLowerCase());
   if (docDest && ct.includes("xml")) {
-    return { mode: "RewriteFallback", fallbackReason: "XML_DOCUMENT_REWRITE_REQUIRED" };
+    return { mode: "RewriteFallback", reason: "XML_DOCUMENT_REWRITE_REQUIRED" };
   }
   /* No content type at all on a document destination: the browser
      sniffs html for such navigations, so the SW sniffs the body bytes
      itself (sniffsAsHtml) and records the rewrite requirement. */
   if (docDest && ct === "") {
-    return { mode: "RewriteFallback", fallbackReason: "DOCUMENT_REWRITE_REQUIRED" };
+    return { mode: "RewriteFallback", reason: "DOCUMENT_REWRITE_REQUIRED" };
   }
   return dec;
 }
@@ -181,9 +230,13 @@ export function transitRecord(traceId: string, url: string, dec: TransitDecision
     nativeCount++;
     return;
   }
+  /* #94: a blocked request never completed, so it is not transit
+     telemetry (issue E: its netLog row carries the verdict).
+     Defensive: the engine returns before transitRecord on block
+     exits. */
+  if (dec.mode === "Blocked") return;
   fallbackCount++;
-  const reason = dec.fallbackReason ?? "DOCUMENT_REWRITE_REQUIRED";
-  fallbacks.push({ ts: Date.now(), url, reason, traceId });
+  fallbacks.push({ ts: Date.now(), url, reason: dec.reason, traceId });
   if (fallbacks.length > FALLBACK_LIMIT) fallbacks.shift();
 }
 

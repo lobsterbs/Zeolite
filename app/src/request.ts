@@ -25,7 +25,7 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, refineWithContent, sniffsAsHtml, transitRecord, DOC_DESTS } from "./transit";
+import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
 import { httpsUpgraded } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
@@ -120,9 +120,11 @@ async function pageCacheMatch(req: Request): Promise<Response | null> {
          bypasses - storing raw here would regress the entry. Drop the
          stale entry instead: this hit serves from memory, the next
          request re-fetches and re-transforms. */
+      /* #94: ONE copy of the JS-transform destination set (the refresh
+         skip must match the serve-time transform branches). */
       const jsServe =
         isWorkerDestination(req.destination) ||
-        ((req.destination === "script" || req.destination === "") && isJs(hit));
+        (JS_TRANSFORM_DESTS.has(req.destination) && isJs(hit));
       if (jsServe) {
         await (await caches.open(ZL_PAGES)).delete(req);
       } else {
@@ -878,6 +880,10 @@ export function handleFetch(e: FetchEvent): void {
           /* Issue E: no transitRecord on blocked exits - a cancelled
              request never completed, so it must not count as
              NativeTransit; the netLog row below carries the block. */
+          /* #94: the deny is an explicit transit decision, not just a
+             verdict string: the row reads the same discriminated
+             model the transport decision uses. */
+          const webreqDecision: TransitDecision = { mode: "Blocked", reason: "BLOCKED_WEBREQUEST" };
           netLogPush({
             method: e.request.method, traceId,
             path: internalUrl,
@@ -887,8 +893,8 @@ export function handleFetch(e: FetchEvent): void {
             ms: Date.now() - t0,
             bytes: -1,
             verdict: "blocked",
-            transport: decision.mode,
-            fallbackReason: decision.fallbackReason,
+            transport: webreqDecision.mode,
+            fallbackReason: reasonOf(webreqDecision),
             detail: mkDetail(),
           });
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked by extension");
@@ -941,6 +947,9 @@ export function handleFetch(e: FetchEvent): void {
             traceId,
             requestId: traceId,
           });
+          /* #94: the deny is an explicit transit decision (rules vs
+             programmatic intercept gate). */
+          const blockDecision: TransitDecision = { mode: "Blocked", reason: ruleDec.action === "block" ? "BLOCKED_RULES" : "BLOCKED_INTERCEPT" };
           /* Issue E: no transitRecord - blocked, never completed (the
              netLog row carries the block). */
           netLogPush({
@@ -952,8 +961,8 @@ export function handleFetch(e: FetchEvent): void {
             ms: Date.now() - t0,
             bytes: -1,
             verdict: ruleDec.action === "block" ? "blocked:rules" : "blocked:intercept",
-            transport: decision.mode,
-            fallbackReason: decision.fallbackReason,
+            transport: blockDecision.mode,
+            fallbackReason: reasonOf(blockDecision),
             detail: mkDetail(),
           });
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
@@ -992,7 +1001,7 @@ export function handleFetch(e: FetchEvent): void {
                       ? "js"
                       : undefined,
               transport: dec.mode,
-              fallbackReason: dec.fallbackReason,
+              fallbackReason: reasonOf(dec),
               detail: mkDetail(hit),
             });
             WEBREQ.completed({ ...wrDetails, statusCode: hit.status });
@@ -1244,7 +1253,7 @@ export function handleFetch(e: FetchEvent): void {
           mapRefreshHeader(outHeaders, finalDest ?? target);
           void applyOnResponse(plugins, target, resp.status, outHeaders);
           const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "", dest);
-          traceDecision({ subsystem: "transport", rule: dec.mode, original: target, result: dec.fallbackReason ?? dec.mode, resource: rtype, traceId });
+          traceDecision({ subsystem: "transport", rule: dec.mode, original: target, result: reasonOf(dec) ?? dec.mode, resource: rtype, traceId });
           if (finalDest)
             traceDecision({ subsystem: "transport", rule: "redirect", original: target, result: finalDest, resource: rtype, traceId });
           transitRecord(traceId, target, dec);
@@ -1259,7 +1268,7 @@ export function handleFetch(e: FetchEvent): void {
             rtype: classifyRtype(dest, resp.headers.get("content-type") ?? ""),
             rewritten: isHtml(resp) ? "html" : isCss(resp) ? "css" : isJs(resp) && (dest === "script" || dest === "") ? "js" : undefined,
             transport: dec.mode,
-            fallbackReason: dec.fallbackReason,
+            fallbackReason: reasonOf(dec),
             finalDest,
             detail: mkDetail(resp),
           });
@@ -1307,7 +1316,7 @@ export function handleFetch(e: FetchEvent): void {
           /* #47: destination "" JS (fetch/XHR + eval) transforms too,
              so its raw store must be skipped exactly like script-dest
              JS - the branch below stores the transformed copy. */
-          const scriptServe = (e.request.destination === "script" || e.request.destination === "") && isJs(resp) && !!resp.body;
+          const scriptServe = JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && !!resp.body;
           if (
             e.request.method === "GET" &&
             !workerServe &&
@@ -1469,7 +1478,7 @@ export function handleFetch(e: FetchEvent): void {
              HTML and CSS rewrite by content type with no destination
              gate, JS alone was gated. Inline module scripts are a
              rewriter gap (#36): the parser path, not this seam. */
-          if ((e.request.destination === "script" || e.request.destination === "") && isJs(resp) && resp.body) {
+          if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body) {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
             let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, decodeBody(await resp.arrayBuffer(), respCt));
@@ -1531,7 +1540,7 @@ export function handleFetch(e: FetchEvent): void {
             bytes: -1,
             err: String(err),
             transport: decision.mode,
-            fallbackReason: decision.fallbackReason,
+            fallbackReason: reasonOf(decision),
             detail: mkDetail(),
           });
           /* Issue #3: failed navigations answer with the engine-owned
