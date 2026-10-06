@@ -96,6 +96,14 @@ import { DL } from "./downloads";
    the generation and the request engine / control plane push rows. */
 import { stampNetGeneration } from "./netlog";
 import { initTransport, wispTransport } from "./transport";
+/* #86: the streaming rewrite pipelines + wasm rewriter lifecycle
+   live in ./transform; this entrypoint wires the state seam and
+   prewarms the rewriter wasm on install. */
+import { initTransform, prewarmRewriter } from "./transform";
+/* The tabs.sendMessage dispatch decodes a client's engine path to
+   match the target tab's destination (codec is shared with the
+   request engine). */
+import { decodePath } from "./codec";
 /* #87: the shared service-worker runtime state (degraded flag, route
    key, fingerprint scripts, per-site profile cache) lives in
    ./swstate; this entrypoint and the request engine are call sites. */
