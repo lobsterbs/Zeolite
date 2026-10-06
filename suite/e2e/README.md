@@ -41,8 +41,10 @@ fixture pages through `/?url=<target>` and asserts:
   browser-direct on the fixture origin and engine-proxied, and the two
   records are compared for semantic equivalence - method, request
   body, content-type, Origin stamping, response status and headers,
-  Range slices (206 + content-range), conditional GETs (If-None-Match
-  -> 304), Set-Cookie round-trip, streaming bytes, abort semantics and
+  Range slices (206 + content-range), conditional GETs (If-None-Match:
+  the engine surfaces not-modified as a marked 200 because a bare 304
+  in respondWith() never settles in Chromium - documented deviation),
+  Set-Cookie round-trip, streaming bytes, abort semantics and
   redirect-follow final content. The contract and its documented
   deviations live in docs/passthrough.md.
 

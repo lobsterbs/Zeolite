@@ -641,7 +641,7 @@ async function main() {
       });
       out.cond = await step("cond", async () => {
         const c = await fetch("/api/passthrough?p=cond", { headers: { "if-none-match": (out.get && out.get.etag) || '"zl-pt-1"' } });
-        return { status: c.status };
+        return { status: c.status, etag: c.headers.get("etag"), nm: c.headers.get("x-zl-not-modified") };
       });
       await step("setcookie", () => fetch("/setcookie2"));
       await new Promise((res) => setTimeout(res, 500));
@@ -712,8 +712,16 @@ async function main() {
     eq(px.range.status, d.range.status, "range status (206)");
     eq(px.range.cr, d.range.cr, "content-range");
     eq(px.range.body, d.range.body, "range slice bytes");
-    /* Conditional requests. */
-    eq(px.cond.status, d.cond.status, "If-None-Match -> 304");
+    /* Conditional requests. Platform constraint: a bare 304 handed to
+       respondWith() never settles in Chromium (the browser cache
+       normally converts wire 304s into cached 200s; a SW-served 304
+       has no cached body to splice), so the engine converts the
+       revalidation result to a marked 200 - a documented deviation,
+       see docs/passthrough.md. */
+    eq(px.cond.status, 200, "not-modified surfaces as engine-cache 200 (documented deviation)");
+    eq(px.cond.etag, d.get.etag, "etag preserved on the not-modified conversion");
+    eq(px.cond.nm, "1", "x-zl-not-modified marker present");
+    assert(d.cond.status === 304 || d.cond.status === 200, "direct conditional sanity: " + d.cond.status);
     /* Cookies (semantically: the Set-Cookie landed and the next request
        carried it; the jar rebuild is the documented deviation, the
        presence of the cookie is the invariant). */

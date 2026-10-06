@@ -27,7 +27,8 @@ What the invariant covers, per class:
   page's real origin to its own backend.
 - Redirects: the engine resolves the hop chain itself, so the page sees
   the final status and body a direct browser sees after following.
-- Response status: preserved, including 206, 304 and 416.
+- Response status: preserved, including 206 and 416; a 304 surfaces as
+  a marked 200 (documented deviation below).
 - Relevant response headers: preserved except the documented deviations.
 - Streaming: response bodies are never buffered whole; the bytes arrive
   complete and in order (chunk boundaries are not an invariant - a
@@ -45,6 +46,19 @@ These are deliberate; the #96 check does not assert them equal.
 - Content-Encoding / Content-Length stripped from responses: the
   transport delivers decoded bodies; a preserved encoding label would
   make fetch() consumers decode plaintext twice.
+- Not-modified responses surface as 200: a bare 304 handed to
+  respondWith() never settles in Chromium. The browser's own cache
+  converts wire 304s into cached 200s by splicing a stored body; a
+  service-worker-served 304 has no stored body to splice, so the
+  fetch promise hangs forever (the engine's E2E suite hit exactly
+  this: the relay completed, the response resolved, the page never
+  settled). The engine therefore plays the cache role: a
+  revalidation 304 is answered as a synthesized 200 with a null body,
+  the preserved validator headers (ETag), and an
+  `x-zl-not-modified: 1` marker so consumers can detect the
+  conversion. The engine page cache is cache-first and only stores
+  fresh 200s, so a revalidation that reaches upstream has no stored
+  copy to splice; a null-body 200 is the honest answer.
 - Security/isolation headers stripped (CSP, HSTS, X-Frame-Options,
   COOP/COEP/CORP, Permissions-Policy, Clear-Site-Data, NEL/Report-To,
   Set-Cookie on the page view): isolation and privacy are the engine's

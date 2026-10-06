@@ -225,6 +225,22 @@ async function pageCacheStore(req: Request, resp: Response): Promise<void> {
   }
 }
 
+/** #96: a wire 304 can never be handed to respondWith() bare:
+    Chromium's fetch pipeline only settles a 304 after splicing in a
+    cached body (the browser's own cache turns wire 304s into cached
+    200s), and a SW-served 304 has none, so the promise hangs
+    forever. The engine page cache is cache-first and never stores a
+    copy for the resource being revalidated (only fresh 200s enter
+    it), so there is no stored body to splice here either. The honest
+    conversion is a synthesized 200 with a null body, the preserved
+    validator headers, and an x-zl-not-modified marker consumers can
+    check. */
+export function surfaceNotModified(h: Headers): Response {
+  const out = new Headers(h);
+  out.set("x-zl-not-modified", "1");
+  return new Response(null, { status: 200, headers: out });
+}
+
 /** Re-fetch a cached request straight through the wisp transport. The
     transport adapter ignores the fetch redirect option (3xx responses
     surface to the caller), so no redirect hint is passed. */
@@ -1013,6 +1029,11 @@ export function handleFetch(e: FetchEvent): void {
             WEBREQ.completed({ ...wrDetails, statusCode: hit.status });
             /* Range replies (206/416) own their header surgery (slice
                length, content-range): serve them untouched. */
+            /* Defensive: the store gate only admits 200s, so a cached
+               304 should be impossible - if one ever surfaces (legacy
+               entries), serve it through the same marked-200
+               conversion instead of hanging the page. */
+            if (hit.status === 304) return surfaceNotModified(hit.headers);
             if (hit.status !== 200) return hit;
             /* Legacy entries predate the content-encoding strip and
                carry a stale upstream encoding over a decoded body:
@@ -1531,6 +1552,10 @@ export function handleFetch(e: FetchEvent): void {
             return out;
           }
           WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+          /* #96: surfaceNotModified above - a bare 304 in
+             respondWith() never settles in Chromium, so the
+             revalidation result is converted to a marked 200. */
+          if (resp.status === 304) return surfaceNotModified(outHeaders);
           /* 1.7 Sulfide: attachment responses join the download
              registry. #90: the detection + registration now live in the
              downloads subsystem (adoptResponse); the body stays a
