@@ -32,13 +32,21 @@ const SITES = [
   { name: "wikipedia", host: "en.wikipedia.org" },
   { name: "github", host: "github.com" },
   { name: "discord", host: "discord.com" },
+  // Issue #81: google probes, report-only. Raw-HTTP rows only; the
+  // browser-level rows the issue lists (image results, XHR tiles,
+  // the SW registration shim) need a real browser, which this
+  // suite forbids by design; those stay covered by the app unit
+  // suite, never claimed here.
+  { name: "google-home", host: "www.google.com", path: "/" },
+  { name: "google-search", host: "www.google.com", path: "/search?q=test" },
+  { name: "google-consent", host: "consent.google.com", path: "/" },
 ];
 
-const rawGet = (host) =>
-  `GET / HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: zeolite-compat/2.5\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
+const rawGet = (host, path = "/") =>
+  `GET ${path} HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: zeolite-compat/2.6\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
 
 /* Direct baseline: the same raw request over a plain socket. */
-function directProbe(host) {
+function directProbe(host, path = "/") {
   return new Promise((resolve) => {
     const t0 = performance.now();
     let ttfb = null;
@@ -55,13 +63,23 @@ function directProbe(host) {
     sock.on("error", (e) => {
       finish("direct: " + e.message);
     });
-    sock.on("connect", () => sock.write(rawGet(host)));
+    sock.on("connect", () => sock.write(rawGet(host, path)));
     sock.on("data", (c) => {
       if (ttfb === null) ttfb = Math.round(performance.now() - t0);
       buf = Buffer.concat([buf, c]);
     });
     sock.on("close", () => finish(null));
   });
+}
+
+/* Issue #81: honest failure categories. A failure the direct
+   baseline also sees (site gating: consent redirects, 403/429/451
+   against datacenter IPs) is an egress-gate, not an engine defect;
+   only direct-works-engine-fails rows are client defects. */
+function failureCategory(r) {
+  const d = r.statusDirect ?? 0;
+  const gated = (d >= 300 && d < 400) || d === 403 || d === 429 || d === 451;
+  return gated ? "egress-gate" : "client-defect";
 }
 
 const session = await wispSession(BASE);
@@ -79,13 +97,13 @@ for (const site of SITES) {
     statusProxy: null,
     error: null,
   };
-  const direct = await directProbe(site.host);
+  const direct = await directProbe(site.host, site.path ?? "/");
   r.ttfbDirect = direct.ttfb;
   r.statusDirect = direct.status;
   if (direct.error) r.error = direct.error;
   try {
     const t0 = performance.now();
-    const resp = await streamRequest(session, site.host, 80, rawGet(site.host), {
+    const resp = await streamRequest(session, site.host, 80, rawGet(site.host, site.path ?? "/"), {
       first: () => {
         if (r.ttfbProxy === null) r.ttfbProxy = Math.round(performance.now() - t0);
       },
@@ -105,8 +123,36 @@ for (const site of SITES) {
   } catch (e) {
     r.error = (r.error ? r.error + "; " : "") + "engine probe failed: " + e.message;
   }
+  if (r.status !== "pass") r.category = failureCategory(r);
   process.stdout.write(r.status + "\n");
   results.push(r);
+}
+
+/* Issue #79: follow the consent.google.com redirect chain through
+   the engine and record each hop's Set-Cookie headers. Report-only;
+   raw HTTP only, no browser, per suite policy. */
+const consentHops = [];
+try {
+  let hop = { host: "consent.google.com", path: "/" };
+  for (let i = 0; i < 4 && hop; i++) {
+    const resp = await streamRequest(session, hop.host, 80, rawGet(hop.host, hop.path), {});
+    const text = resp.bytes.toString("latin1");
+    const head = text.slice(0, text.indexOf("\r\n\r\n") + 4);
+    const status = statusLine(resp);
+    const headers = head.split("\r\n");
+    const setCookie = headers.filter((l) => /^set-cookie:/i.test(l));
+    consentHops.push({ ...hop, status, setCookie });
+    const loc = headers.find((l) => /^location:/i.test(l));
+    if (status && Math.floor(status / 100) === 3 && loc) {
+      const target = loc.slice(loc.indexOf(":") + 1).trim();
+      const u = new URL(target, `http://${hop.host}`);
+      hop = { host: u.host, path: u.pathname + u.search };
+    } else {
+      hop = null;
+    }
+  }
+} catch (e) {
+  consentHops.push({ error: "consent chain probe failed: " + e.message });
 }
 
 session.close();
@@ -117,6 +163,7 @@ const scoreboard = {
   transport: "wisp v2.1 over /wisp/ (raw HTTP/1.1 on port 80)",
   generated: new Date().toISOString(),
   summary: { pass: passed, total: results.length },
+  consentChain: consentHops,
   results: results.map((r) => ({
     ...r,
     ratio: r.ttfbDirect && r.ttfbProxy ? +(r.ttfbProxy / r.ttfbDirect).toFixed(2) : null,
@@ -130,11 +177,18 @@ const md = [
   `Generated: ${scoreboard.generated}`,
   `Engine: ${BASE} - wisp v2.1 transport, raw HTTP/1.1 on port 80`,
   "",
-  "| site | status | ttfb direct | ttfb proxy | ratio | status d/p | notes |",
-  "| --- | --- | --- | --- | --- | --- | --- |",
+  "| site | status | ttfb direct | ttfb proxy | ratio | status d/p | cat | notes |",
+  "| --- | --- | --- | --- | --- | --- | --- | --- |",
   ...scoreboard.results.map(
     (r) =>
-      `| ${r.name} | ${r.status === "pass" ? "PASS" : "FAIL"} | ${r.ttfbDirect ?? "-"}ms | ${r.ttfbProxy ?? "-"}ms | ${r.ratio ?? "-"}x | ${r.statusDirect ?? "-"}/${r.statusProxy ?? "-"} | ${(r.error ?? "").replace(/\|/g, "/")} |`
+      `| ${r.name} | ${r.status === "pass" ? "PASS" : "FAIL"} | ${r.ttfbDirect ?? "-"}ms | ${r.ttfbProxy ?? "-"}ms | ${r.ratio ?? "-"}x | ${r.statusDirect ?? "-"}/${r.statusProxy ?? "-"} | ${r.category ?? "-"} | ${(r.error ?? "").replace(/\|/g, "/")} |`
+  ),
+  "",
+  "## consent.google.com redirect chain (issue #79, report-only)",
+  "",
+  ...consentHops.map(
+    (h) =>
+      `- ${h.host ?? "?"}${h.path ?? ""}: status ${h.status ?? "-"}, set-cookie x${(h.setCookie ?? []).length}${h.error ? " - " + h.error : ""}`
   ),
   "",
   "Report-only since 2.5 Iodide: failures open issues, they never gate",
