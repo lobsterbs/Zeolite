@@ -238,12 +238,16 @@ async function main() {
   });
 
   await check("interception", "forms: multipart FormData POST with a file lands field and file bytes", async () => {
+    /* dualProbe JSON-parses the probe's return value, so the probe
+       must return the echo's JSON TEXT - returning the parsed object
+       would die as "[object Object]" on the direct side before the
+       engine is ever tested. */
     const probe = `async () => {
       const fd = new FormData();
       fd.append("zlfield", "zl-val");
       fd.append("zlfile", new File(["zl-file-bytes"], "zl.txt", { type: "text/plain" }));
       const r = await fetch("/api/upload", { method: "POST", body: fd });
-      return JSON.parse(await r.text());
+      return await r.text();
     }`;
     const { direct, proxied } = await dualProbe(probe);
     assert(String(direct.ct).startsWith("multipart/form-data"), "direct model lost its multipart content-type (fixture regression)");
@@ -256,9 +260,10 @@ async function main() {
   });
 
   await check("interception", "auth: an Authorization header reaches the upstream request line", async () => {
+    /* Same dualProbe contract: the probe returns a JSON string. */
     const probe = `async () => {
       const r = await fetch("/api/methods", { headers: { authorization: "Bearer zl-tok" } });
-      return JSON.parse(await r.text()).auth;
+      return JSON.stringify(JSON.parse(await r.text()).auth);
     }`;
     const { direct, proxied } = await dualProbe(probe);
     eq(direct, "Bearer zl-tok", "direct model dropped the Authorization header (fixture regression)");
@@ -404,12 +409,17 @@ async function main() {
   /* ---- routing ---------------------------------------------------- */
 
   await check("routing", "unicode and percent-encoded paths route exactly (encoded and literal spellings)", async () => {
+    /* The delivered BYTES are the invariant, not the content-length
+       header: the engine strips content-length by design (the
+       transport delivers decoded bodies, see HOSTILE in
+       app/src/headers.ts), so the direct oracle's header can never
+       be compared against the proxied response's. */
     const probe = `async () => {
       const out = {};
       const u1 = await fetch("/dir/unicode/%C3%A5.png");
-      out.enc = { status: u1.status, len: u1.headers.get("content-length") };
+      out.enc = { status: u1.status, len: String((await u1.arrayBuffer()).byteLength) };
       const u2 = await fetch("/dir/unicode/å.png");
-      out.raw = { status: u2.status, len: u2.headers.get("content-length") };
+      out.raw = { status: u2.status, len: String((await u2.arrayBuffer()).byteLength) };
       return JSON.stringify(out);
     }`;
     const { direct, proxied } = await dualProbe(probe);
@@ -457,7 +467,26 @@ async function main() {
         out.unq = await imgState("unq");
         out.spaced = await imgState("spaced");
         out.uni = await imgState("uni");
-        out.ss = await imgState("ss");
+        /* #ss is srcset-only: a renderer can reuse a cancelled
+           srcset entry from its in-process image cache, so the
+           ELEMENT's own decode is not a rewriter fact (the e2e
+           assets check documents the same flake). The contract this
+           battery pins: the candidates are routed (the selected URL
+           carries no plaintext fixture origin) and the selected URL
+           decodes on a FRESH load. */
+        const ssEl = document.getElementById("ss");
+        out.ss = await new Promise((res) => {
+          const im = document.createElement("img");
+          im.style.width = "1px";
+          im.style.height = "1px";
+          const set = ssEl?.getAttribute("srcset") ?? "";
+          if (set) im.setAttribute("srcset", set);
+          const read = () => ({ nw: im.naturalWidth, src: String(im.currentSrc || "").slice(0, 300) });
+          im.onload = () => res(read());
+          im.onerror = () => res(read());
+          setTimeout(() => res(read()), 10000);
+          document.body.appendChild(im);
+        });
         const a = document.getElementById("relimg");
         out.relimg = a ? a.getAttribute("href") : null;
         /* The proxied frame is live as soon as the marker paints, which
@@ -501,7 +530,11 @@ async function main() {
 
   await check("rewriting", "JS pass: a string-literal URL in an inline script is rewritten to an engine route and loads", async () => {
     const { prox } = await torturePages();
-    const probe = `async () => (${IMG_STATE_JS.replace("async (id) =>", "async () =>")})("tlit")`;
+    /* IMG_STATE_JS takes the element id as its parameter; the old
+       .replace() stripped the parameter but kept the body, so the
+       probe died with ReferenceError: id. Keep the arrow intact and
+       stringify its object result (evalIn results are JSON-parsed). */
+    const probe = `async () => JSON.stringify(await (${IMG_STATE_JS})("tlit"))`;
     const state = JSON.parse(await evalIn(prox.frame, "literal img state", probe, 20000));
     assert(state && state.nw > 0, "the string-literal image did not load (rewriter URL-literal pass broken?): " + JSON.stringify(state));
     assert(!state.src.includes(ORIGIN_A), "string-literal image went browser-direct: " + state.src);
@@ -573,7 +606,7 @@ async function main() {
 
   await check("browser-limitation", "runtime-concatenated URL stays unrewritten (pinned: no static pass can see it)", async () => {
     const { directPage, prox } = await torturePages();
-    const probe = `async () => (${IMG_STATE_JS.replace("async (id) =>", "async () =>")})("concat")`;
+    const probe = `async () => JSON.stringify(await (${IMG_STATE_JS})("concat"))`;
     const d = JSON.parse(await directPage.evaluate("(" + probe + ")()"));
     const px = JSON.parse(await evalIn(prox.frame, "concat img", probe, 20000));
     assert(d.nw > 0, "direct model failed the runtime-concat image (oracle sanity)");

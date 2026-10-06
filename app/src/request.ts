@@ -1172,8 +1172,13 @@ export function handleFetch(e: FetchEvent): void {
             if (resp.status === 307 || resp.status === 308) {
               if (hopBody) break; /* one-shot stream: cannot replay */
             } else if (resp.status === 303 || hopMethod === "POST") {
+              /* The method rewrite drops the body, and the direct
+                 browser oracle drops its content-type with it (the
+                 #92 redirect check pins this against the direct
+                 model): the re-issued GET carries no content-type. */
               hopMethod = "GET";
               hopBody = undefined;
+              sendHeaders.delete("content-type");
             } else if (hopBody) {
               break; /* one-shot stream: cannot replay */
             }

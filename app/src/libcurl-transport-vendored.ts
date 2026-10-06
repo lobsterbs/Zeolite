@@ -441,6 +441,11 @@ async function loadBundle(url: string): Promise<{ LibcurlClient?: unknown; defau
  * the real craigslist 302 through a local wisp relay; dispatch-only
  * since 2026-10-05, run manually when the transport seam changes). */
 interface StreamResponseThis {
+  /* Stashed by the request_async wrapper (see applyTransportEOF):
+     the request method, captured once at the synchronous entry of
+     this call. Default "GET" when no wrapper ran (a bare
+     stream_response call keeps the pre-patch behavior). */
+  __zl_req_method?: unknown;
   create_request(
     url: string,
     data: (chunk: Uint8Array) => void,
@@ -465,6 +470,13 @@ function patchedStreamResponse(
       stream_controller = controller;
     },
   });
+  /* The request method is not an argument here: request_async hands it
+     to the wasm only after this call (via _http_set_options), so the
+     request_async wrapper in applyTransportEOF stashes it on the
+     session for the synchronous duration of this call. Captured once,
+     at entry - nothing can interleave between the stash and this
+     synchronous body. */
+  const reqMethod = String(this.__zl_req_method ?? "GET").toUpperCase();
   /* Upstream hands the raw header text to a no-op callback; keep
      collecting it (header tokens are ASCII, so latin-1 assembly is
      exact for the framing check below, never decoded as data). */
@@ -474,7 +486,7 @@ function patchedStreamResponse(
       text += String.fromCharCode(chunk[i]);
     }
     raw_header_text += text;
-    /* RFC 9110 bodiless statuses (#92/#96): a 204 or 304 response
+    /* RFC 9110 bodiless responses (#92/#96): a 204 or 304 response
        ends at the header block - the response IS the headers. The
        wasm curl does not special-case them: with no content-length
        and no chunked framing (the normal shape of a 304) it waits
@@ -483,9 +495,16 @@ function patchedStreamResponse(
        keep-alive window (5s on the CI fixture) before the error-56
        salvage in real_end_callback finally surfaces it. Fire the
        headers callback the moment a complete 204/304 block arrives.
-       Only the LAST complete block counts: a followed redirect or
-       an interim 1xx accumulates earlier blocks ahead of the final
-       status, and 1xx blocks are never terminal. */
+       The same framing hole hits HEAD (#92): the wasm sends the
+       method as a custom request string, so a HEAD answer that
+       declares content-length (the normal HEAD shape) also waits
+       for a phantom body until the keep-alive close, and the page
+       sees a 502 after the whole window. A HEAD response ends at
+       the header block by definition, so any complete HEAD block
+       surfaces the same way. Only the LAST complete block counts: a
+       followed redirect or an interim 1xx accumulates earlier
+       blocks ahead of the final status, and 1xx blocks are never
+       terminal (the >= 200 bound excludes them for HEAD). */
     if (headers_received) return;
     const blocks = raw_header_text.split("\r\n\r\n");
     /* the final element is the not-yet-terminated block ("" right
@@ -496,7 +515,13 @@ function patchedStreamResponse(
     );
     if (!statusMatch) return;
     const status = Number(statusMatch[1]);
-    if (status !== 204 && status !== 304) return;
+    if (
+      status !== 204 &&
+      status !== 304 &&
+      !(reqMethod === "HEAD" && status >= 200)
+    ) {
+      return;
+    }
     headers_received = true;
     let surfaced = false;
     try {
@@ -504,7 +529,10 @@ function patchedStreamResponse(
          all - even a closed, empty stream is a body and makes the
          upstream Response construction throw TypeError - so the
          headers callback must receive null, not the stream;
-         create_response then builds the only legal shape. */
+         create_response then builds the only legal shape. The HEAD
+         surface passes null for the same reason: the phantom body is
+         empty by definition, and an empty stream body would surface
+         a "complete" stream the wasm then errors on. */
       headers_callback(null as unknown as ReadableStream);
       surfaced = true;
     } catch {
@@ -611,9 +639,51 @@ export function applyTransportEOF(session: object): boolean {
     | { stream_response?: unknown; __zl_eof_patched?: boolean }
     | null;
   if (!proto || typeof proto.stream_response !== "function") return false;
-  if (proto.__zl_eof_patched) return true;
+  /* The HEAD surface needs the request method at stream_response time,
+     but the wasm only learns it afterwards (request_async passes it
+     through _http_set_options once the handle exists). Wrap
+     request_async on the HTTPSession prototype to stash the method on
+     the session for the duration of its synchronous body;
+     patchedStreamResponse reads and captures it at entry. A missing
+     request_async seam is bundle layout drift, same policy as a
+     missing stream_response: hard failure. */
+  const httpProto = Object.getPrototypeOf(session) as
+    | {
+        request_async?: unknown;
+        __zl_method_patched?: boolean;
+      }
+    | null;
+  if (!httpProto || typeof httpProto.request_async !== "function") {
+    return false;
+  }
+  if (proto.__zl_eof_patched && httpProto.__zl_method_patched) return true;
+  const orig = httpProto.request_async as (
+    this: { __zl_req_method?: string },
+    url: string,
+    params: { method?: string },
+    body: unknown,
+  ) => Promise<unknown>;
   proto.stream_response = patchedStreamResponse;
   proto.__zl_eof_patched = true;
+  httpProto.request_async = function (
+    this: { __zl_req_method?: string },
+    url: string,
+    params: { method?: string },
+    body: unknown,
+  ): Promise<unknown> {
+    /* request_async's body runs synchronously through
+       this.stream_response() (a new Promise executor, no await before
+       it), so nothing can interleave between this stash and the
+       patched capture. Reset afterwards so a later bare
+       stream_response call cannot inherit a stale method. */
+    this.__zl_req_method = String(params?.method ?? "GET").toUpperCase();
+    try {
+      return orig.call(this, url, params, body);
+    } finally {
+      this.__zl_req_method = "GET";
+    }
+  };
+  httpProto.__zl_method_patched = true;
   return true;
 }
 

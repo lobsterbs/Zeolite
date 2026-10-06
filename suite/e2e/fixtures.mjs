@@ -227,7 +227,12 @@ export function startFixture(port) {
           });
           res.end();
         } else {
-          const extra = {};
+          /* no-store: the engine page cache is cache-first with a
+             10-minute fallback TTL when no Cache-Control is present,
+             so a cached echo would answer the cookie-lifecycle reads
+             without an upstream hit and the jar admission under test
+             would never run. The echo must always hit the fixture. */
+          const extra = { "cache-control": "no-store" };
           if (req.headers.origin) {
             extra["access-control-allow-origin"] = req.headers.origin;
             extra.vary = "Origin";
@@ -245,8 +250,9 @@ export function startFixture(port) {
         }
       } else if (path === "/api/upload") {
         /* #92: multipart echo. The boundary differs per request, so the
-           battery compares the semantic fields, not the raw bytes. */
-        send(res, "application/json", JSON.stringify({ zl: "upload", ct: req.headers["content-type"] ?? null, body }));
+           battery compares the semantic fields, not the raw bytes.
+           no-store for the same page-cache reason as /api/methods. */
+        send(res, "application/json", JSON.stringify({ zl: "upload", ct: req.headers["content-type"] ?? null, body }), { "cache-control": "no-store" });
       } else if (path === "/api/gzip") {
         /* #92: content-encoding body. The invariant is the DECODED text
            the page reads, whichever layer ends up decoding. */
@@ -304,16 +310,19 @@ export function startFixture(port) {
           res.end("nope");
         }
       } else if (path === "/api/cookiestart") {
-        send(res, "text/plain", "cookie-set", { "set-cookie": "zlt=1; Path=/" });
+        /* no-store: a page-cached Set-Cookie response would be served
+           without an upstream hit, so the jar admission under test
+           would never run. */
+        send(res, "text/plain", "cookie-set", { "cache-control": "no-store", "set-cookie": "zlt=1; Path=/" });
       } else if (path === "/api/cookiedel") {
-        send(res, "text/plain", "cookie-del", { "set-cookie": "zlt=; Path=/; Max-Age=0" });
+        send(res, "text/plain", "cookie-del", { "cache-control": "no-store", "set-cookie": "zlt=; Path=/; Max-Age=0" });
       } else if (path === "/api/cookiesecure") {
         /* #92: Secure+SameSite=Strict cookie. Loopback is a trustworthy
            origin so the DIRECT browser stores and sends it over plain
            http; the engine jar honors the Secure attribute against the
            real target scheme and does not attach it - the battery pins
            that divergence as documented behavior. */
-        send(res, "text/plain", "cookie-secure", { "set-cookie": "zls=1; Path=/; Secure; SameSite=Strict" });
+        send(res, "text/plain", "cookie-secure", { "cache-control": "no-store", "set-cookie": "zls=1; Path=/; Secure; SameSite=Strict" });
       } else if (path === "/dir/unicode/%C3%A5.png") {
         res.writeHead(200, { "content-type": "image/png", "content-length": PNG.length });
         res.end(PNG);

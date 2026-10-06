@@ -29,8 +29,24 @@ function makeSeam() {
       return captured.length - 1;
     },
   };
-  const session = Object.create(Object.create(curlProto));
-  return { session, captured };
+  /* The real chain is session -> HTTPSession.prototype (request_async)
+     -> CurlSession.prototype (stream_response, create_request); the
+     wrapper's stash is observable through this recording original. */
+  const seenMethods: Array<string | undefined> = [];
+  const httpProto: Record<string, unknown> = {
+    request_async(
+      this: { __zl_req_method?: string },
+      _url: string,
+      params: { method?: string },
+      _body: unknown,
+    ) {
+      seenMethods.push(this.__zl_req_method);
+      return Promise.resolve(null);
+    },
+  };
+  Object.setPrototypeOf(httpProto, curlProto);
+  const session = Object.create(httpProto);
+  return { session, captured, httpProto, seenMethods };
 }
 
 const enc = new TextEncoder();
@@ -48,6 +64,9 @@ const KEEPALIVE_304 = enc.encode(
 );
 const KEEPALIVE_204 = enc.encode("HTTP/1.1 204 No Content\r\n\r\n");
 const INTERIM_100 = enc.encode("HTTP/1.1 100 Continue\r\n\r\n");
+const HEAD_200_WITH_LENGTH = enc.encode(
+  "HTTP/1.1 200 OK\r\nContent-Length: 68\r\n\r\n",
+);
 
 type Seam = {
   stream_response: (
@@ -341,5 +360,77 @@ describe("applyTransportEOF", () => {
        not an exception inside the abort listener */
     controller.abort();
     expect(ends).toEqual([-1]);
+  });
+
+  it("returns false when the request_async seam is missing (bundle layout changed)", () => {
+    const seam = makeSeam();
+    delete (seam.httpProto as Record<string, unknown>).request_async;
+    expect(applyTransportEOF(seam.session)).toBe(false);
+  });
+
+  it("wraps request_async to stash the method for the synchronous stream_response entry", async () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const s = seam.session as unknown as {
+      request_async: (url: string, params: { method?: string }, body: unknown) => Promise<unknown>;
+      __zl_req_method?: string;
+    };
+    await s.request_async("https://example.org/", { method: "head" }, null);
+    /* the original saw the stashed method during its synchronous
+       body (the patched stream_response reads the same slot) */
+    expect(seam.seenMethods).toEqual(["HEAD"]);
+    /* the stash is reset afterwards, so a later bare stream_response
+       call cannot inherit a stale method */
+    expect(s.__zl_req_method).toBe("GET");
+  });
+
+  it("a HEAD response surfaces the moment its header block completes, with a null body (#92)", () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    (seam.session as { __zl_req_method?: string }).__zl_req_method = "HEAD";
+    const headerCalls: (ReadableStream | null)[] = [];
+    const ends: number[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      (error) => ends.push(error),
+    );
+    /* the declared content-length belongs to the GET answer; a HEAD
+       response ends at the header block, and the wasm would wait for
+       the phantom body until the keep-alive close */
+    cbs.headers(HEAD_200_WITH_LENGTH);
+    expect(headerCalls).toEqual([null]);
+    cbs.end(56);
+    expect(headerCalls).toEqual([null]);
+    expect(ends).toEqual([56]);
+  });
+
+  it("a HEAD interim 100 block never fires; the final HEAD block does", () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    (seam.session as { __zl_req_method?: string }).__zl_req_method = "HEAD";
+    const headerCalls: (ReadableStream | null)[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      () => {},
+    );
+    cbs.headers(INTERIM_100);
+    expect(headerCalls).toHaveLength(0);
+    cbs.headers(HEAD_200_WITH_LENGTH);
+    expect(headerCalls).toEqual([null]);
+  });
+
+  it("a length-delimited 200 on a non-HEAD request keeps waiting for body chunks", () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: (ReadableStream | null)[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      () => {},
+    );
+    cbs.headers(LENGTH_DELIMITED_200);
+    expect(headerCalls).toHaveLength(0);
   });
 });

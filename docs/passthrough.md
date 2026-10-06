@@ -27,6 +27,10 @@ What the invariant covers, per class:
   page's real origin to its own backend.
 - Redirects: the engine resolves the hop chain itself, so the page sees
   the final status and body a direct browser sees after following.
+  A 301/302/303 (or a POST answered by 301/302) rewrites the method to
+  GET and drops the body and its content-type, as the direct browser
+  does; 307/308 preserve the method and body, surfacing to the page
+  when a one-shot stream body cannot replay.
 - Response status: preserved, including 206 and 416; a 304 surfaces as
   a marked 200 (documented deviation below).
 - Relevant response headers: preserved except the documented deviations.
@@ -60,7 +64,10 @@ These are deliberate; the #96 check does not assert them equal.
   the honest answer. (Transport note: the vendored wasm curl does
   not special-case bodiless statuses - it waits for a phantom body
   until connection close - so the vendored transport patch also
-  surfaces 204/304 responses at the header block; see
+  surfaces 204/304 responses at the header block, and likewise any
+  complete HEAD response block: a HEAD answer has no body either,
+  but the wasm waits for one, so an unpatched HEAD surfaces as a 502
+  after the whole keep-alive window; see
   `app/src/libcurl-transport-vendored.ts` and its unit tests.)
 - Security/isolation headers stripped (CSP, HSTS, X-Frame-Options,
   COOP/COEP/CORP, Permissions-Policy, Clear-Site-Data, NEL/Report-To,
