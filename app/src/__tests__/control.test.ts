@@ -23,6 +23,7 @@ import {
   type ControlMessage,
 } from "../control";
 import { EXT_CONTROL_TYPES, dispatchExtControl } from "../extensions/control";
+import { documentCookieRead, documentCookieWrite } from "../cookies";
 
 /* Derives the case labels from the dispatcher's own source, the way the
    wiring sees it after vitest's transform (unminified). */
@@ -130,5 +131,34 @@ describe("dispatch seams", () => {
     const r = replies[0] as { ok: boolean; extensions: unknown[] };
     expect(r.ok).toBe(true);
     expect(r.extensions).toEqual([]);
+  });
+});
+
+describe("zl:teardown clears engine state (#87)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("self", {
+      location: { origin: "https://w.example.org" },
+      registration: { unregister: async () => undefined },
+    });
+    vi.stubGlobal("caches", { keys: async () => ["c1"], delete: async () => true });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("clears the jar, drops the caches, and unregisters the worker", async () => {
+    documentCookieWrite("https://x.example/", "a=1");
+    expect(documentCookieRead("https://x.example/")).toContain("a=1");
+    const { ev, posted } = mkEvent("https://w.example.org/", { type: "zl:teardown" });
+    const waits: Promise<unknown>[] = [];
+    (ev as unknown as { waitUntil: (p: Promise<unknown>) => void }).waitUntil = (p) => {
+      waits.push(p);
+    };
+    await handleControlEvent(ev, deps);
+    for (const p of waits) await p;
+    expect(posted).toContainEqual({ ok: true });
+    /* 1.4 Boride: cookies do not survive an engine switch - the jar
+       the teardown cleared is the same one document.cookie reads. */
+    expect(documentCookieRead("https://x.example/")).toBe("");
   });
 });

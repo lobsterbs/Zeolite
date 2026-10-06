@@ -11,9 +11,7 @@ vi.mock("../transport", () => ({
 }));
 
 import { DEFAULT_PROFILE } from "../fingerprint";
-import { DownloadTracker } from "../downloads";
 import {
-  DL,
   VCTX,
   getEngineDegraded,
   getFpProfile,
@@ -206,10 +204,6 @@ describe("docCookie port registry (#35)", () => {
 });
 
 describe("shared instances", () => {
-  it("exports the single DownloadTracker the engine feeds", () => {
-    expect(DL).toBeInstanceOf(DownloadTracker);
-  });
-
   it("exports the per-client virtual context map", () => {
     expect(VCTX).toBeInstanceOf(Map);
   });
