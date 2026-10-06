@@ -498,18 +498,33 @@ function patchedStreamResponse(
     const status = Number(statusMatch[1]);
     if (status !== 204 && status !== 304) return;
     headers_received = true;
+    let surfaced = false;
     try {
-      headers_callback(stream);
-      /* the body is definitively empty and complete */
+      /* A Response with a null-body status may not carry a body at
+         all - even a closed, empty stream is a body and makes the
+         upstream Response construction throw TypeError - so the
+         headers callback must receive null, not the stream;
+         create_response then builds the only legal shape. */
+      headers_callback(null as unknown as ReadableStream);
+      surfaced = true;
+    } catch {
+      /* Bundle-shape fallback: hand over the (closed, empty) stream
+         in case a different build accepts it. */
+      try {
+        headers_callback(stream);
+        surfaced = true;
+      } catch {
+        /* no constructible response (status 0): fall through to the
+           end-callback rejection and salvage paths below */
+      }
+    }
+    if (surfaced) {
       try {
         stream_controller?.close();
       } catch {
         /* already closed or errored */
       }
-    } catch {
-      /* no constructible response (status 0): restore the flag so
-         the end-callback paths below keep their original rejection
-         and salvage behavior */
+    } else {
       headers_received = false;
     }
   };
@@ -781,7 +796,13 @@ export async function fetch(url: string, init?: RequestInit): Promise<Response> 
   const res = await c.request(new URL(url), method, init?.body ?? null, headers, signal);
   const h2 = new Headers();
   for (const [k, v] of res.headers) h2.append(k, v);
-  const resp = new Response(res.body as BodyInit | null, {
+  /* Null-body statuses (#92/#96): a 204/304 Response may not carry
+     even an empty stream (TypeError), and the client hands back
+     whatever the session built - normalize to the only legal
+     shape. Semantically identical: these statuses have no body by
+     definition. */
+  const nullBody = res.status === 204 || res.status === 304;
+  const resp = new Response(nullBody ? null : (res.body as BodyInit | null), {
     status: res.status,
     statusText: res.statusText,
     headers: h2,

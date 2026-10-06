@@ -712,12 +712,11 @@ async function main() {
     eq(px.range.status, d.range.status, "range status (206)");
     eq(px.range.cr, d.range.cr, "content-range");
     eq(px.range.body, d.range.body, "range slice bytes");
-    /* Conditional requests. Platform constraint: a bare 304 handed to
-       respondWith() never settles in Chromium (the browser cache
-       normally converts wire 304s into cached 200s; a SW-served 304
-       has no cached body to splice), so the engine converts the
-       revalidation result to a marked 200 - a documented deviation,
-       see docs/passthrough.md. */
+    /* Conditional requests. Platform constraint: a SW-served 304
+       cannot complete a page fetch (the browser cache normally
+       splices a stored body into a wire 304; a SW response has none),
+       so the engine converts the revalidation result to a marked 200
+       - a documented deviation, see docs/passthrough.md. */
     eq(px.cond.status, 200, "not-modified surfaces as engine-cache 200 (documented deviation)");
     eq(px.cond.etag, d.get.etag, "etag preserved on the not-modified conversion");
     eq(px.cond.nm, "1", "x-zl-not-modified marker present");

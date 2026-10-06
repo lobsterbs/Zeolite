@@ -221,10 +221,10 @@ describe("applyTransportEOF", () => {
     expect(ends).toEqual([-1]);
   });
 
-  it("a keep-alive 304 surfaces the moment its header block completes (#92/#96)", async () => {
+  it("a keep-alive 304 surfaces the moment its header block completes, with a null body (#92/#96)", () => {
     const seam = makeSeam();
     expect(applyTransportEOF(seam.session)).toBe(true);
-    const headerCalls: ReadableStream[] = [];
+    const headerCalls: (ReadableStream | null)[] = [];
     const ends: number[] = [];
     const cbs = start(
       seam,
@@ -235,17 +235,18 @@ describe("applyTransportEOF", () => {
        so end(56) arrives only at the keep-alive timeout - long
        after the response was already complete at the header block */
     cbs.headers(KEEPALIVE_304);
-    expect(headerCalls).toHaveLength(1);
-    expect(await readAll(headerCalls[0])).toEqual([]);
+    /* null body: a Response with a null-body status may not carry
+       even an empty stream */
+    expect(headerCalls).toEqual([null]);
     cbs.end(56);
-    expect(headerCalls).toHaveLength(1);
+    expect(headerCalls).toEqual([null]);
     expect(ends).toEqual([56]);
   });
 
-  it("a keep-alive 204 surfaces the same way (the body is definitively empty)", async () => {
+  it("a keep-alive 204 surfaces the same way (the body is definitively empty)", () => {
     const seam = makeSeam();
     expect(applyTransportEOF(seam.session)).toBe(true);
-    const headerCalls: ReadableStream[] = [];
+    const headerCalls: (ReadableStream | null)[] = [];
     const ends: number[] = [];
     const cbs = start(
       seam,
@@ -253,11 +254,23 @@ describe("applyTransportEOF", () => {
       (error) => ends.push(error),
     );
     cbs.headers(KEEPALIVE_204);
-    expect(headerCalls).toHaveLength(1);
-    expect(await readAll(headerCalls[0])).toEqual([]);
+    expect(headerCalls).toEqual([null]);
     cbs.end(0);
-    expect(headerCalls).toHaveLength(1);
+    expect(headerCalls).toEqual([null]);
     expect(ends).toEqual([0]);
+  });
+
+  it("a bodiless surface falls back to the closed stream when null is rejected", async () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: (ReadableStream | null)[] = [];
+    const cbs = start(seam, (stream) => {
+      if (stream === null) throw new TypeError("bundle shape");
+      headerCalls.push(stream);
+    }, () => {});
+    cbs.headers(KEEPALIVE_304);
+    expect(headerCalls).toHaveLength(1);
+    expect(await readAll(headerCalls[0] as ReadableStream)).toEqual([]);
   });
 
   it("an interim 100 Continue block never fires; the final 304 does", () => {

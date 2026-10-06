@@ -46,19 +46,22 @@ These are deliberate; the #96 check does not assert them equal.
 - Content-Encoding / Content-Length stripped from responses: the
   transport delivers decoded bodies; a preserved encoding label would
   make fetch() consumers decode plaintext twice.
-- Not-modified responses surface as 200: a bare 304 handed to
-  respondWith() never settles in Chromium. The browser's own cache
-  converts wire 304s into cached 200s by splicing a stored body; a
-  service-worker-served 304 has no stored body to splice, so the
-  fetch promise hangs forever (the engine's E2E suite hit exactly
-  this: the relay completed, the response resolved, the page never
-  settled). The engine therefore plays the cache role: a
-  revalidation 304 is answered as a synthesized 200 with a null body,
-  the preserved validator headers (ETag), and an
-  `x-zl-not-modified: 1` marker so consumers can detect the
-  conversion. The engine page cache is cache-first and only stores
-  fresh 200s, so a revalidation that reaches upstream has no stored
-  copy to splice; a null-body 200 is the honest answer.
+- Not-modified responses surface as 200: a conditional GET that the
+  origin answers with 304 can never reach the page as a 304 through
+  the engine. The browser's own cache turns wire 304s into cached
+  200s by splicing a stored body; a service-worker-served 304 has no
+  stored body to splice, so it cannot complete a page fetch. The
+  engine therefore plays the cache role: a revalidation 304 is
+  answered as a synthesized 200 with a null body, the preserved
+  validator headers (ETag), and an `x-zl-not-modified: 1` marker so
+  consumers can detect the conversion. The engine page cache is
+  cache-first and only stores fresh 200s, so a revalidation that
+  reaches upstream has no stored copy to splice; a null-body 200 is
+  the honest answer. (Transport note: the vendored wasm curl does
+  not special-case bodiless statuses - it waits for a phantom body
+  until connection close - so the vendored transport patch also
+  surfaces 204/304 responses at the header block; see
+  `app/src/libcurl-transport-vendored.ts` and its unit tests.)
 - Security/isolation headers stripped (CSP, HSTS, X-Frame-Options,
   COOP/COEP/CORP, Permissions-Policy, Clear-Site-Data, NEL/Report-To,
   Set-Cookie on the page view): isolation and privacy are the engine's
