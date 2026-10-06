@@ -329,7 +329,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       reply(setJarProfile(msg.profile));
       break;
     case "zl:getJars":
-      /* #41: jar enumeration for the host (LobsterBrowse Settings
+      /* #41: jar enumeration for the host (the host settings UI
          renders and manages cookie-jar state). Host-only: the
          proxied-sender gate above refuses target-site pages. */
       reply({ ok: true, active: jarProfileState(), profiles: jarEnumeration() });

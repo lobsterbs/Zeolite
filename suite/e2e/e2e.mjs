@@ -331,7 +331,7 @@ async function main() {
     const pg = await context.newPage();
     attachRecorder(pg);
     /* A host page at the engine scope root asks the worker for a
-       handle - the adoption path LobsterBrowse takes instead of the
+       handle - the adoption path a host app takes instead of the
        plaintext ?url= embed. The reply URL must be a /__zl_navh__/
        keyed route and must not carry the destination decodably. */
     await pg.goto(ENGINE + "/");
@@ -651,7 +651,7 @@ async function main() {
       });
       out.stream = await step("stream", async () => {
         const s = await fetch("/api/stream");
-        marks.push("stream-opened:" + s.status);
+        if (s.status !== 200) marks.push("stream-opened:" + s.status);
         const reader = s.body.getReader();
         let text = "";
         let chunks = 0;
