@@ -8,53 +8,186 @@
 /____/\___/\____/_/_/\__/\___/ 
                               
 ```
-**Current release: 2.0 Graphene** · Rust/WASM · Wisp v2.1
 
-> **Status: experimental.** Zeolite is experimental software. The engine, its API surface, and the embed contract can change or break at any time without a deprecation window. Do not treat any release as stable or production-ready; the honesty norms apply (known gaps stay written down), but stability guarantees do not exist yet.
-Zeolite is a standalone, reusable web interception/proxy engine providing a browser service-worker runtime, streaming rewriting, Wisp transport, diagnostics, and WebExtension compatibility.
-## Current architecture
-The 1.0 release is interception + rewriting. The rewriter is production code.
-    Host application -> Zeolite -> service worker -> interception/runtime -> streaming rewriter -> Wisp v2.1 -> upstream
-## NativeTransit direction
-NativeTransit is the next architecture: transport/interception first, with the existing rewriter retained as RewriteFallback.
-    Zeolite -> Transport API -> NativeTransit
-             \-> RewriteFallback -> Wisp -> Network
-> Keep the website native whenever the browser architecture allows it. Rewrite only when necessary.
-NativeTransit is a design direction, not a claim that the current release has already replaced rewriting. If it proves stable across serious real-world compatibility tests, rewriting can eventually become optional for integrations that do not need it.
-NativeTransit reuses existing transport, cookie/session and diagnostics infrastructure. It does not add Gecko-specific architecture.
-## Current capabilities
-Rust/WASM streaming rewriting; Wisp v2.1; service-worker interception; interception API + rules engine; bounded diagnostics; opt-in rewrite tracing; runtime WebSocket; virtual origins with per-origin cookie jars; per-origin storage virtualization (localStorage/sessionStorage/IndexedDB/Cache API, document.cookie); worker + service-worker virtualization; download registry (streamed, cancellable); encrypted session export/import; fingerprinting resistance (one consistent profile, no per-session randomization); deterministic session recording + replay harness; capability scoreboard; WebExtension compatibility; extension resource protection; standalone server; compatibility probes; SSRF/destination protection. Runtime navigation guard (cross-origin URL rewrites at the DOM seams; WebRTC removed). In-page find (zl:find): accurate n-of-m ordinals, open shadow roots, CSS Custom Highlight painting, shipped to the page on demand. Opaque page identity (#32): real destinations stay engine-side; pages, the address bar and history see only base64url routes, b64u nav markers and opaque per-site tokens, and the mirror scheme is gone. Cross-origin subresource routing (#34): every foreign-origin HTTP(S) request a proxied page or engine-served worker makes at runtime is served by the engine (CORS preflights answered engine-side); only host-app traffic keeps the direct browser path. Rewriter URL-construct coverage (#36): links, iframes, img src/srcset (comma-carrying data: candidates preserved byte-exact), CSS url() in both quote forms plus @import, meta refresh, base href, iframe srcdoc bodies and script/worker import specifiers fold through deterministic streaming rewrites (Rust-gated); srcset candidate selection stays the browser's.
+**Current release: 3.0 Diamond** · Rust/WASM · Wisp v2.1
+
+> **Status: experimental.** Zeolite is not production-ready. Its engine, API surface, and embed contract may change or break without a deprecation window. Known limitations are documented rather than hidden.
+
+Zeolite is a standalone web interception and proxy engine for browser-based hosts. It combines a service-worker runtime, streaming HTML/CSS/JS rewriting, Wisp transport, virtual origins, storage and cookie isolation, diagnostics, session recording, and partial WebExtension compatibility.
+
+## Why Zeolite
+
+Zeolite is built around one rule:
+
+> **Keep the website native whenever the browser architecture allows it. Rewrite only when necessary.**
+
+The engine owns interception, transport, rewriting, isolation, and diagnostics. Host applications such as LobsterBrowse integrate through the public engine adapter instead of importing Zeolite internals.
+
+## Architecture
+
+The current runtime is:
+
+```
+Host application
+      │
+      ▼
+ZeoliteEngine adapter
+      │
+      ▼
+Service Worker
+      │
+      ├── interception + rules
+      ├── origin / cookie / storage isolation
+      ├── navigation + worker handling
+      ├── diagnostics + tracing
+      │
+      ├── NativeTransit / transport decision path
+      │
+      └── RewriteFallback
+              │
+              ▼
+          Wisp v2.1
+              │
+              ▼
+           Upstream
+```
+
+NativeTransit is the transport/interception-first direction of the engine. It is intended to make rewriting optional where the browser can preserve the site's native behavior. The existing rewriter remains the fallback path.
+
+Zeolite does not depend on LobsterBrowse and can be built as a standalone engine.
+
+## Features
+
+- **Streaming rewriting** — HTML, CSS, and selected JavaScript URL/module constructs through Rust/WASM.
+- **Service-worker interception** — routing, request/response handling, rules, navigation guards, and worker support.
+- **Wisp v2.1 transport** — proxied traffic uses the engine's Wisp transport path.
+- **Virtual origins** — per-site cookie jars and storage namespaces.
+- **Cross-origin subresource routing** — proxied clients route foreign HTTP(S) requests through the engine; host-app traffic remains direct.
+- **Opaque page identity** — destination URLs can remain engine-side while pages use opaque routes.
+- **WebSocket bridge** — page WebSockets can be carried through the engine; plaintext `ws://` is upgraded to `wss://` by design.
+- **Downloads** — streamed, cancellable download tracking with persistent registry state.
+- **Session export/import** — encrypted AES-256-GCM session data with replace and merge modes.
+- **Fingerprinting resistance** — consistent document/worker fingerprint profiles rather than per-session randomization.
+- **Recording and replay** — deterministic `zlRecord` artifacts with contract-level WebSocket and cookie-jar checks.
+- **Diagnostics and tracing** — bounded network logs, diagnostic events, and opt-in rewrite tracing with secret redaction.
+- **WebExtension compatibility** — runtime support for a substantial subset of extension APIs.
+- **SSRF/destination protection** — destination validation and rebinding-safe IP checks.
+- **In-page find** — `zl:find` with shadow-root traversal and CSS Custom Highlight support.
+- **Compatibility testing** — fixture probes, real-destination probes, replay tests, and Chromium E2E coverage.
+
 ## Important limitations
-Zeolite is not a full browser engine. Some WebExtension APIs, true isolated extension worlds, true service-worker script execution for proxied sites (registrations are virtual records) and advanced browser networking remain partial or planned; WebSocket targets without TLS fail (ws:// is upgraded to wss:// by design). Inline module script specifiers are not rewritten (documented rewriter gap, #36); srcdoc iframes are rewritten but Chromium does not route their subresources through the service worker (crbug.com/41411856), so the extension host is the gap-free runtime there.
+
+Zeolite is **not a browser engine**. It runs inside a browser's service-worker environment and works within the capabilities and restrictions of that environment.
+
+Known gaps include:
+
+- Some WebExtension APIs, true isolated extension worlds, and true service-worker execution for proxied sites are still partial or unsupported.
+- Proxied-site service-worker registrations are virtual records; Zeolite does not execute the site's real service-worker script.
+- Inline module-script specifiers remain a documented rewriting gap.
+- `ws://` targets are not sent as plaintext WebSockets; they are upgraded to `wss://`.
+- `about:srcdoc` subresource routing is limited by Chromium's service-worker client behavior. The extension-host path does not have the same client-bound limitation.
+- Fingerprinting resistance is intentionally deterministic and has known limits around timezone/DST behavior.
+- The plugin API is currently documented but its ServiceWorkerGlobalScope dynamic-import loader remains a known implementation gap; no shipped site currently depends on it.
+
+See the full support matrix for exact behavior and per-feature status.
+
 ## Repository layout
-- crates/rewriter — Rust/WASM rewriter
-- crates/wisp-core — Wisp v2.1
-- crates/wisp-extensions — server extensions
-- crates/zeolite-server — standalone server
-- app/src/sw.ts — service worker
-- app/src/extensions — WebExtension runtime
-- app/src/diag.ts — diagnostics
-- app/src/tracing.ts — opt-in rewrite tracing
-- app/src/wsbridge.ts — page WebSocket bridge
-- app/src/cookies.ts — virtual origins + per-origin cookie jars
-- app/src/swshim.ts — navigator.serviceWorker shim
-- app/src/worker-prelude.ts — in-worker importScripts routing + WebSocket bridge
-- app/src/downloads.ts — download registry (counting passthrough, cancellation)
-- app/src/session.ts — encrypted session export/import (AES-GCM + PBKDF2)
-- app/src/fingerprint.ts — fingerprint profiles (consistent UA/platform/screen/timezone/canvas/WebGL spoofing)
-- app/src/recording.ts — deterministic session recording (zlRecord artifacts)
-- app/src/finder.ts — in-page find module (zl:find; find-core.ts holds the tested logic)
-- suite — compatibility probes, capability scoreboard, replay harness, Chromium E2E (suite/e2e)
-- docs — architecture/versioning/roadmap
-## Diagnostics
-Current bounds: 512 diagnostic events, 256 trace references and 512 tracing decisions, with one trace ID per request. Secrets are redacted on entry.
-## Development
+
+| Path | Purpose |
+| --- | --- |
+| `crates/rewriter` | Rust/WASM HTML, CSS, and JS-literal rewriting |
+| `crates/wisp-core` | Wisp v2.1 protocol implementation |
+| `crates/wisp-wasm` | WASM wrapper used by the browser runtime |
+| `crates/wisp-extensions` | Server-side Wisp extensions |
+| `crates/zeolite-server` | Standalone Wisp relay and static engine server |
+| `app/src/sw.ts` | Main service worker runtime |
+| `app/src/engine.ts` | Public host/engine adapter |
+| `app/src/extensions` | WebExtension runtime |
+| `app/src/cookies.ts` | Virtual origins and cookie jars |
+| `app/src/diag.ts` | Bounded diagnostics |
+| `app/src/tracing.ts` | Opt-in rewrite tracing |
+| `app/src/downloads.ts` | Download registry |
+| `app/src/session.ts` | Encrypted session export/import |
+| `app/src/fingerprint.ts` | Fingerprint profiles |
+| `app/src/recording.ts` | Deterministic session recording |
+| `app/src/finder.ts` | In-page find |
+| `suite` | Compatibility probes, replay harness, capability scoreboard, and Chromium E2E |
+| `docs` | Architecture, support matrix, security, performance, versioning, and roadmap |
+
+## Quick start
+
+### Prerequisites
+
+- Rust toolchain with the `wasm32-unknown-unknown` target
+- Node.js and npm
+- A browser with service-worker support for runtime testing
+
+### Build the WASM crates
+
+```bash
 cargo build -p zeolite-rewriter -p zeolite-wisp --target wasm32-unknown-unknown --release
-cd app && npx vitest run && npm run build
-cargo run -p zeolite-server -- --port 6002 --static ../app/dist
+```
+
+### Build and test the app
+
+```bash
+cd app
+npm install
+npm run check
+npm test
+npm run build
+```
+
+### Run the standalone server
+
+From the repository root:
+
+```bash
+cargo run -p zeolite-server -- --port 6002 --static app/dist
+```
+
+Then run the compatibility probe suite:
+
+```bash
 node suite/probe.mjs --base http://localhost:6002
-## Roadmap
-The roadmap is complete through 2.0: interception APIs/rules, diagnostics, WebSockets, downloads/session export, fingerprinting consistency, compatibility recording/replay, per-feature support matrix and the final security/performance audits (docs/matrix.md, docs/security.md, docs/performance.md).
-See docs/matrix.md for the full per-feature support/limitation matrix,
-docs/security.md for the security audit and docs/performance.md for the
-performance audit. See docs/versioning.md, docs/roadmap.md, docs/engine-adapter.md and docs/plugins.md.
+```
+
+The exact generated WASM assets and transport bundle used by the browser runtime are produced by the repository's build/CI pipeline.
+
+## Diagnostics
+
+Runtime diagnostics are deliberately bounded:
+
+- 256 network-log entries
+- 512 diagnostic events
+- 256 trace references
+- 512 tracing decisions
+- 512 KiB interception-body cap
+
+Secrets are redacted when diagnostic data enters the engine.
+
+## Documentation
+
+- [Support and limitation matrix](docs/matrix.md)
+- [Security audit](docs/security.md)
+- [Performance audit](docs/performance.md)
+- [Versioning](docs/versioning.md)
+- [Roadmap](docs/roadmap.md)
+- [Engine adapter](docs/engine-adapter.md)
+- [Plugin API](docs/plugins.md)
+
+GitHub also generates a table of contents for the README from these headings, so the document intentionally keeps detailed API/reference material in `docs/` rather than turning this page into a wall of text.
+
+## Roadmap and status
+
+The original feature roadmap is complete through **3.0 Diamond**. The 3.x public API is frozen around the documented control plane, `ZeoliteEngine` adapter, rewriter WASM interface, and route codec surface.
+
+The project still has known compatibility limitations and ongoing hardening work. The roadmap being complete does **not** mean Zeolite is production-ready.
+
+## Contributing
+
+Bug reports, compatibility findings, and improvements are welcome through GitHub issues and pull requests. When reporting a compatibility problem, include the affected feature, browser/runtime, reproduction steps, and relevant diagnostics when possible.
+
+## License
+
+Zeolite is licensed under **AGPL-3.0-only**. See [LICENSE](LICENSE).
