@@ -100,7 +100,8 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, docKind, jsBody, refineWithContent, sniffsAsHtml, transitRecord, transitStats, DOC_DESTS } from "./transit";
+import { decideTransport, refineWithContent, sniffsAsHtml, transitRecord, transitStats, DOC_DESTS } from "./transit";
+import { cssRewriteStream, initTransform, isCss, isHtml, isJs, prewarmRewriter, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
 import { ZL_WISP_URL, httpsUpgraded } from "./config";
 import { ruleFor, ruleProfile, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
@@ -233,313 +234,18 @@ async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
    the page with a mapped Location instead of looping forever. */
 const MAX_REDIRECT_HOPS = 10;
 
-/* ---- Streaming rewriter wiring ------------------------------------- */
+/* #86: the streaming rewrite pipelines + wasm rewriter lifecycle
+   moved to transform.ts. */
+initTransform({
+  routeReady: () => routeReady,
+  routeKey: () => routeKeyB64,
+  fpScript: () => fpScript,
+  siteScript: async (base) => (await siteProfileFor(base))?.script ?? null,
+  setDegraded: (reason) => {
+    engineDegraded = reason;
+  },
+});
 
-interface JsRewriter {
-  process(chunk: string): string;
-  finish(): string;
-  add_injection(path: string): void;
-  set_blocked_hosts(hosts: string[]): void;
-}
-interface JsCssRewriter {
-  process(chunk: string): string;
-  finish(): string;
-}
-interface RewriterMod {
-  JsRewriter: new (origin: string, base: string, prefix: string, scheme: string, key?: string) => JsRewriter;
-  JsCssRewriter: new (origin: string, base: string, prefix: string, scheme: string, key?: string) => JsCssRewriter;
-  rewriteCss(css: string, origin: string, base: string, prefix: string, scheme: string, key?: string): string;
-  /* #46: one-shot external script body pass (URL literals +
-     frame-buster neutralization), used by the script-destination
-     serve seam. */
-  rewriteJsBody(js: string, origin: string, base: string, prefix: string, scheme: string, key?: string): string;
-  /* wasm-pack --target web output: `default` is the async init that
-     fetches and instantiates the .wasm binary. Without it every
-     JsRewriter call dies on an unbound wasm table. */
-  default(path?: unknown): Promise<unknown>;
-}
-let rewriterMod: Promise<RewriterMod> | null = null;
-function rewriter(): Promise<RewriterMod> {
-  if (!rewriterMod) {
-    rewriterMod = (async () => {
-      const mod = rewriterWasm as unknown as RewriterMod;
-      // Vite freezes the wasm-pack default URL to the origin root, which 404s
-      // when the bundle is aliased under a subpath (LobsterBrowse /zlsw/).
-      // Resolve the wasm URL against the SW script URL instead.
-      if (typeof mod.default === "function") {
-        await mod.default(new URL("rewriter_wasm_bg.wasm", self.location.href));
-      }
-      return mod;
-    })().catch((err) => {
-      engineDegraded = "rewriter wasm: " + String(err);
-      rewriterMod = null; // allow retry on next response
-      DIAG.emit({
-        category: "REWRITE",
-        severity: "error",
-        message: "rewriter wasm init failed",
-        technicalReason: String(err),
-      });
-      throw err;
-    });
-  }
-  return rewriterMod;
-}
-
-/* 1.6 Hydride: the worker prelude asset is fetched once and cached in
-   memory; the live route prefix and the upstream worker URL are baked
-   into the injected first line at serve time. */
-let preludeCache: string | null = null;
-async function workerPrelude(): Promise<string> {
-  if (preludeCache === null) {
-    const r = await fetch(new URL("worker-prelude.js", self.location.href).href);
-    preludeCache = await r.text();
-  }
-  return preludeCache;
-}
-
-function isHtml(resp: Response): boolean {
-  /* One classification (transit.docKind) for the rewrite branches and
-     the transit refinement; XHTML documents are HTML to the rewriter
-     (issue C). */
-  return docKind(resp.headers.get("content-type") ?? "") === "html";
-}
-function isCss(resp: Response): boolean {
-  return docKind(resp.headers.get("content-type") ?? "") === "css";
-}
-function isJs(resp: Response): boolean {
-  return jsBody(resp.headers.get("content-type") ?? "");
-}
-
-/** Concatenate held byte chunks (stream-head sniffing). */
-function cat(chunks: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
-  let o = 0;
-  for (const c of chunks) {
-    out.set(c, o);
-    o += c.length;
-  }
-  return out;
-}
-
-/** Raw passthrough of an already-started body: one held chunk plus
-    the rest of the reader, bytes untouched. */
-function rawFrom(
-  head: Uint8Array | undefined,
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    async start(c) {
-      if (head) c.enqueue(head);
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) c.enqueue(value);
-      }
-      c.close();
-    },
-  });
-}
-
-/** HTML bodies: pipe response chunks through the wasm rewriter. The
-    bootstrap needs a per-site identity on window.__ZL (an opaque
-    token since #32; the real destination never enters the page), so
-    a tiny inline script is spliced into the stream head AFTER the
-    doctype (quirks fix: it used to ride the very first chunk, before
-    the doctype, which forced quirks mode on every proxied document
-    that declared one; a doctype-less page keeps the stream-start
-    placement and its quirks mode). SiteConfig per-site rules are
-    applied to this rewriter instance: injections (Phase 3 hooks) and
-    blocked hosts (ad stripping). Issue B: the body decodes with the
-    upstream charset (header, BOM, meta prescan, spec default), never
-    assumed UTF-8 in; the served copy is re-encoded UTF-8 and the
-    caller rewrites the served content-type to charset=utf-8. */
-function rewriteStream(
-  body: ReadableStream<Uint8Array> | ReadableStreamDefaultReader<Uint8Array>,
-  base: string,
-  rule: { inject?: string[]; block?: string[] },
-  csInject: string[],
-  contentType: string,
-  onDone?: () => void,
-): ReadableStream<Uint8Array> {
-  const encoder = new TextEncoder();
-  const modP = rewriter();
-  /* Issue #32: the injected contract is { site: <opaque token> },
-    computed SW-side from the destination; an active fingerprint
-    profile rides the same splice (1.8 Telluride). #55
-    follow-up: with a route key the token is a keyed MAC of the
-    origin, so the mint waits for routeReady - a token minted before
-    the key settled would split one site's storage across both the
-    keyed and the legacy prefix. */
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      await routeReady;
-      const init = initScript(base, fpScript ?? (await siteProfileFor(base))?.script ?? null);
-      const emit = (out: string) => {
-        if (out) controller.enqueue(encoder.encode(out));
-      };
-      const reader = body instanceof ReadableStream ? body.getReader() : body;
-      try {
-        // Rewriter init and construction live inside the try: an init failure
-        // (e.g. a wasm 404) used to reject outside the try and kill every fresh
-        // HTML response with no diag event and no console error.
-        const mod = await modP;
-        const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", routeKeyB64 ?? undefined); // scheme fixed since #32 (mirror removed)
-        for (const path of rule.inject ?? []) rw.add_injection(path);
-        if (rule.block?.length) rw.set_blocked_hosts(rule.block);
-        for (const u of csInject) rw.add_injection(u);
-        /* Stream-head hold (quirks splice + charset): raw bytes
-           accumulate until the charset resolves (header label, else
-           BOM/meta prescan over the first 1024 bytes), decoded text
-           until the doctype splice point resolves (initSplicePoint).
-           Bounded: 2KB of still-undecided head falls back to
-           stream-start injection, the old placement - never an
-           unbounded hold. */
-        const headerLabel = charsetFromHeader(contentType);
-        let decoder: TextDecoder | null = headerLabel ? makeDecoder(headerLabel) : null;
-        let held: Uint8Array[] = [];
-        let heldLen = 0;
-        let head = "";
-        let injected = false;
-        const splice = (at: number) => {
-          emit(rw.process(head.slice(0, at)));
-          controller.enqueue(encoder.encode(init));
-          emit(rw.process(head.slice(at)));
-          head = "";
-          injected = true;
-        };
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) {
-            /* Flush the decoder's incomplete tail: a multi-byte
-               sequence truncated at end-of-stream used to be dropped
-               silently (issue B). */
-            let rest = decoder === null ? "" : decoder.decode();
-            if (!injected) {
-              if (decoder === null) {
-                decoder = makeDecoder(resolveCharset(contentType, cat(held), true));
-                head = decoder.decode(cat(held), { stream: true });
-                held = [];
-                rest = decoder.decode();
-              } else {
-                head += rest;
-                rest = "";
-              }
-              splice(initSplicePoint(head, true) ?? 0);
-            }
-            if (rest) emit(rw.process(rest));
-            const tail = rw.finish();
-            if (tail) controller.enqueue(encoder.encode(tail));
-            controller.close();
-            onDone?.();
-            return;
-          }
-          if (injected) {
-            emit(rw.process(decoder!.decode(value, { stream: true })));
-            continue;
-          }
-          if (decoder !== null) {
-            head += decoder.decode(value, { stream: true });
-          } else {
-            held.push(value);
-            heldLen += value.length;
-            if (heldLen < 1024) continue;
-            decoder = makeDecoder(resolveCharset(contentType, cat(held), true));
-            head += decoder.decode(cat(held), { stream: true });
-            held = [];
-          }
-          const at = initSplicePoint(head);
-          if (at !== null) splice(at);
-          else if (head.length > 2048) splice(0);
-        }
-      } catch (e) {
-        DIAG.emit({
-          category: "REWRITE",
-          severity: "error",
-          message: "html rewrite stream failed",
-          technicalReason: String(e),
-          url: base,
-        });
-        controller.error(e);
-      }
-    },
-  });
-}
-
-/* 2.4 Bromide: standalone stylesheet bodies stream chunk by chunk
-   through the wasm CSS rewriter (2.3 buffered the whole body for a
-   one-shot pass, so large CSS delayed first paint). No window.__ZL
-   init is injected here: CSS is not a document, the bootstrap never
-   runs in a stylesheet context. The rewriter retains only the
-   incomplete url( tail between chunks. Issue B: the body decodes
-   with the upstream charset (header, BOM or a leading @charset, all
-   within the first bytes, so the head is held only until the
-   charset resolves); the served copy is UTF-8 and the caller
-   declares it on the served content-type. */
-function cssRewriteStream(
-  body: ReadableStream<Uint8Array>,
-  base: string,
-  contentType: string,
-  onDone?: () => void,
-): ReadableStream<Uint8Array> {
-  const encoder = new TextEncoder();
-  const modP = rewriter();
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        const mod = await modP;
-        const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix(), "b64u", routeKeyB64 ?? undefined); // scheme fixed since #32 (mirror removed)
-        const reader = body.getReader();
-        const emit = (out: string) => {
-          if (out) controller.enqueue(encoder.encode(out));
-        };
-        const headerLabel = charsetFromHeader(contentType);
-        let decoder: TextDecoder | null = headerLabel ? makeDecoder(headerLabel) : null;
-        let held: Uint8Array[] = [];
-        let heldLen = 0;
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) {
-            let text = "";
-            if (decoder === null) {
-              decoder = makeDecoder(resolveCharset(contentType, cat(held), false));
-              text = decoder.decode(cat(held), { stream: true });
-              held = [];
-            }
-            /* Flush the decoder's incomplete tail: a multi-byte
-               sequence truncated at end-of-stream used to be dropped
-               silently (issue B). */
-            text += decoder.decode();
-            if (text) emit(rw.process(text));
-            const tail = rw.finish();
-            if (tail) controller.enqueue(encoder.encode(tail));
-            controller.close();
-            onDone?.();
-            return;
-          }
-          if (decoder !== null) {
-            emit(rw.process(decoder.decode(value, { stream: true })));
-            continue;
-          }
-          held.push(value);
-          heldLen += value.length;
-          if (heldLen < 64) continue; /* @charset must sit at the very start */
-          decoder = makeDecoder(resolveCharset(contentType, cat(held), false));
-          emit(rw.process(decoder.decode(cat(held), { stream: true })));
-          held = [];
-        }
-      } catch (e) {
-        DIAG.emit({
-          category: "REWRITE",
-          severity: "error",
-          message: "css rewrite stream failed",
-          technicalReason: String(e),
-          url: base,
-        });
-        controller.error(e);
-      }
-    },
-  });
-}
 
 /* ---- Network inspector log (Phase 4) -------------------------------- */
 /* Fixed-size ring buffer of proxied requests. The devtools page polls
@@ -994,7 +700,7 @@ self.addEventListener("install", () => {
   self.skipWaiting();
   /* Prewarm: instantiate the rewriter wasm during install, not on the
      first HTML response (instantiation is the slowest cold-path step). */
-  void rewriter().catch(() => undefined);
+  prewarmRewriter();
 });
 
 /* NetLog generation is an epoch stamped per worker evaluation, not a
@@ -2326,8 +2032,7 @@ self.addEventListener("fetch", (e: FetchEvent) => {
                literal pass leaves them alone. A wasm load failure must
                not 502 the script - the specifier output still serves. */
             try {
-              const mod = await rewriter();
-              src = mod.rewriteJsBody(src, self.location.origin, target, currentPrefix(), "b64u", routeKeyB64 ?? undefined);
+              src = await rewriteJsBody(src, target);
             } catch (err) {
               DIAG.emit({
                 category: "REWRITE",
