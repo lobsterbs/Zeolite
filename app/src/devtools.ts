@@ -241,7 +241,18 @@ function tick(): void {
       generation?: number;
       stats?: { native: number; fallback: number };
     };
-    statsEl.textContent = stats ? "native " + stats.native + " / fallback " + stats.fallback : "";
+    /* #103: the generation is the worker's restart epoch (stamped at
+       init), so the transit counters are "since that restart" - the
+       label says so. */
+    statsEl.textContent = stats
+      ? "native " +
+        stats.native +
+        " / fallback " +
+        stats.fallback +
+        " (since restart " +
+        new Date(generation ?? 0).toLocaleTimeString() +
+        ")"
+      : "";
     if (generation !== lastGeneration) {
       lastGeneration = generation ?? 0;
       lastSeq = 0;

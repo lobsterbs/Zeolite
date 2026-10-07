@@ -305,3 +305,60 @@ describe("fetch init SRI (#77 runtime half)", () => {
     expect(e.calls[0].init).toBe(init);
   });
 });
+
+describe("parent-relative re-emission (#101)", () => {
+  /* A same-origin child realm (an about:blank iframe the page's JS
+     created) is anchored to the parent page's engine route path;
+     root-relative and relative inputs re-emit through the
+     parent-relative marker instead of escaping to the engine
+     origin. */
+  const PARENT = "/j/abc123";
+
+  it("rewrites root-relative and relative fetch inputs to the marker route", async () => {
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT);
+    await e.w.fetch("/async/hpba");
+    await e.w.fetch("api/v1/x");
+    expect(e.calls[0].input).toBe(PARENT + "/__zl_prel__/" + encodeURIComponent("/async/hpba"));
+    expect(e.calls[1].input).toBe(PARENT + "/__zl_prel__/" + encodeURIComponent("api/v1/x"));
+  });
+
+  it("leaves engine-route-shaped inputs native", async () => {
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT);
+    await e.w.fetch("/j/already-a-route");
+    expect(e.calls[0].input).toBe("/j/already-a-route");
+  });
+
+  it("without an anchor nothing changes", async () => {
+    const e = fakeWindow();
+    applyReemit(e.w);
+    await e.w.fetch("/local");
+    expect(e.calls[0].input).toBe("/local");
+  });
+
+  it("rewrites an async XHR open to the marker route", () => {
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT);
+    const x = new e.w.XMLHttpRequest();
+    x.open("GET", "/api/x", true);
+    expect(e.xhrLog[0]).toBe(
+      "open:GET|" + PARENT + "/__zl_prel__/" + encodeURIComponent("/api/x") + "|true|null|null",
+    );
+  });
+
+  it("rewrites a sendBeacon target to the marker route", () => {
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT);
+    expect(e.w.navigator.sendBeacon("/beacon", "d")).toBe(true);
+    expect(e.beacons.length).toBe(0);
+    expect(e.calls[0].input).toBe(PARENT + "/__zl_prel__/" + encodeURIComponent("/beacon"));
+  });
+
+  it("constructs an EventSource on the marker route", () => {
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT);
+    new e.w.EventSource("/events");
+    expect(e.esMade[0].url).toBe(PARENT + "/__zl_prel__/" + encodeURIComponent("/events"));
+  });
+});

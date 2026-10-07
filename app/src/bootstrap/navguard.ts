@@ -54,9 +54,15 @@
      requested. A refused or failed mint falls back to the marker:
      the documented degrade, never a hang. */
 
-import { mintRoute } from "./mint";
+import { applyReemit, mintRoute } from "./mint";
 
 export const NAV = "/__zl_nav__";
+/* #101: parent-relative marker. A same-origin child realm (an
+   about:blank iframe created by page JS) re-emits its root-relative
+   fetch inputs as <parent engine route>/__zl_prel__/<encodeURIComponent(input)>;
+   the SW decodes the parent route and resolves the tail against its
+   destination. */
+export const NAVP = "/__zl_prel__";
 
 /* Opaque marker encoding (issue #32): the marker carries the target
    base64url-encoded - the same opacity level as every other engine
@@ -385,6 +391,21 @@ export function applyNavGuard(
     guardedDocs.add(doc);
     try {
       applyNavGuard(win, String(doc.baseURI ?? loc), engineOrigin);
+      /* #101: the child realm gets the reemit patch too, anchored to
+         the guarding page's engine route path, so its root-relative
+         fetch/XHR/beacon inputs re-emit as parent-relative marker
+         routes instead of escaping to the proxy origin. A realm
+         guarded from an about:blank parent passes no path: its own
+         loc is not a route, so the grandchild keeps the honest
+         native degrade. */
+      let routePath: string | undefined;
+      try {
+        const p = new URL(loc).pathname;
+        routePath = p.startsWith("/") && p.length > 1 ? p : undefined;
+      } catch {
+        /* not a URL: no parent route to anchor to */
+      }
+      applyReemit(win, routePath);
     } catch {
       /* a realm that refuses hooks stays native */
     }

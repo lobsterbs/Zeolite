@@ -21,6 +21,7 @@
    request); a failed mint is deleted from the memo so a retry after
    the worker settles can succeed. */
 
+import { NAVP } from "./navguard";
 import { swc } from "./siteid";
 
 type AnyRecord = Record<string, any>;
@@ -67,7 +68,7 @@ export function mintRoute(dest: string, timeout = 5000): Promise<string | null> 
 
 /** #54 residual 2: wrap the page's subresource seams so cross-origin
     inputs ride minted engine routes instead of plaintext URLs. */
-export function applyReemit(w: Record<string, unknown>): void {
+export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string): void {
   const loc = w.location as { href: string; origin: string } | undefined;
   if (!loc || typeof loc.href !== "string") return;
   /* Absolute http(s) URL off the page origin, resolved against the
@@ -84,6 +85,23 @@ export function applyReemit(w: Record<string, unknown>): void {
     return u.href;
   };
 
+  /* #101: a same-origin child realm (an about:blank iframe the
+     page's own JS created) carries no virtual context and its
+     about:blank referrer is undecodable, so root-relative and
+     relative inputs used to escape to the engine origin and 404.
+     Anchored to the parent page's engine route path, such inputs
+     re-emit as <parent route>/<NAVP>/<encodeURIComponent(input)>:
+     the SW decodes the parent route and resolves the tail against
+     its destination. Absolute and scheme inputs are unchanged
+     (crossDest / native), engine-route-shaped paths stay native,
+     and without an anchor nothing changes. */
+  const engPrefix = parentRoutePath?.match(/^\/[^/]+\//)?.[0];
+  const relRoute = (v: string): string | null => {
+    if (!engPrefix || !parentRoutePath || v.startsWith(engPrefix)) return null;
+    if (v.startsWith("//") || /^[a-z][a-z0-9+.-]*:/i.test(v)) return null;
+    return parentRoutePath + NAVP + "/" + encodeURIComponent(v);
+  };
+
   /* fetch(): string/URL inputs re-emit through the minted route;
      Request objects carry one-shot bodies (native, documented
      residual); engine-local inputs stay native. */
@@ -92,6 +110,14 @@ export function applyReemit(w: Record<string, unknown>): void {
     w.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : null;
       if (url === null) return OF(input, init);
+      const rel = relRoute(url);
+      if (rel) {
+        /* #101: the parent-relative marker needs no mint; the SW
+           decodes the parent route directly. SRI is stripped for
+           the same reason as a minted route (#77). */
+        if (init?.integrity) init = { ...init, integrity: undefined };
+        return OF(rel, init);
+      }
       const d = crossDest(url);
       if (!d) return OF(input, init);
       /* #77 runtime half: the SW returns the rewritten body, which
@@ -129,6 +155,14 @@ export function applyReemit(w: Record<string, unknown>): void {
     navg.sendBeacon = function (u: string | URL, d?: BodyInit | null): boolean {
       const s = typeof u === "string" ? u : u instanceof URL ? u.href : null;
       if (s === null) return native(u, d);
+      const rel = relRoute(s);
+      if (rel) {
+        /* #101: a parent-relative beacon needs no mint; the same
+           optimistic-true contract as the minted path. */
+        if (!OF || unloading) return native(u, d);
+        OF(rel, { method: "POST", body: d ?? null, keepalive: true }).catch(() => native(u, d));
+        return true;
+      }
       const dest = crossDest(s);
       if (!dest || unloading) return native(u, d);
       mintRoute(dest).then((route) => {
@@ -163,6 +197,19 @@ export function applyReemit(w: Record<string, unknown>): void {
       const s =
         typeof a[1] === "string" ? a[1] : a[1] instanceof URL ? (a[1] as URL).href : String(a[1] ?? "");
       const dest = a[2] === undefined || a[2] === true ? crossDest(s) : null;
+      /* #101: a parent-relative open rewrites the URL directly; no
+         mint, no deferred re-open - the SW decodes the parent route.
+         Sync opens stay native (the async flag is a[2]). */
+      if (!dest && (a[2] === undefined || a[2] === true)) {
+        const rel = relRoute(s);
+        if (rel) {
+          pend.delete(this);
+          delete this.readyState;
+          const args = a.slice();
+          args[1] = rel;
+          return OOpen.apply(this, args);
+        }
+      }
       if (!dest) {
         pend.delete(this);
         delete this.readyState;
@@ -323,7 +370,9 @@ export function applyReemit(w: Record<string, unknown>): void {
         },
       });
       const dest = crossDest(target0);
-      if (!dest) attach(target0);
+      const rel = relRoute(target0);
+      if (rel) attach(rel);
+      else if (!dest) attach(target0);
       else
         mintRoute(dest).then((route) => {
           if (!closed) attach(route ?? target0);

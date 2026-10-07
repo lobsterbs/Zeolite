@@ -205,6 +205,20 @@ describe("keyed opaque routes (issue #55)", () => {
     expect(route).not.toContain("private");
   });
 
+  it("roundtrips a >512-byte destination (#100 long-dest interop vector)", () => {
+    /* Pinned interop with the Rust codec (crates/rewriter/src/
+       encode.rs): same key, same 639-byte destination, same token.
+       A long destination spans many keystream blocks, so the token
+       format is pinned at that shape too. */
+    const LONG = "https://example.com/long/destination?q=" + "x".repeat(600);
+    setRouteKey(KEY);
+    const route = encodeDest(LONG);
+    expect(route).toBe(
+      "/j/AU5Yu8quyIPehcTDkGs9lSmUz-vU4HwN0kDyHco1BvLBOU9Hi4bthk9KvCt7G2atQN-25Yl3p9WBTYhb1JQLdcIlxf62NBcFGQ8LbxiaziEuLbK2disqogS8phoDw0rQbRUrn2fEStWkwpsUOrqCePxBxLdQJcAa9PuaKo6QA9L3vwXORFuKVd5_jq7tXEZvIc82pXNi1Xo0TzAAj6h40Bd_ickV_3maVA10U3jeGeldM54heL6iYsYtc2_mZ7jsXQn2E7tIz6ELUi_dhJN7J2wugo159vovPiGslh0UinmQVp_aYr1R5QYH-wJ8B75sobH6e2UEj3Oq_ljlYyBzjFxoVe-fIbxh7VVxKMnEmmMOuzyPv2Ggj5vzAcR5bdlbYmwRLrC6iVqmzQm-8wwh_DzPOLhrPoEi0wcEn5wecQK42JUgg6Mf5bDOAQyoRCQFGGaO54a_rqICmpzAPaDgpTwyPfjwfOAldEqvWJHvGQmV48X2rYOj1Wri96hP1mmsDgHDbkNtDnhVgDDKPl4QSNuiiGoBzmOXgeZ1O3jvdlpVapsaBphATzOAlHoTXz8q7m4WSBp8ldjDO8B8Y1Uy3ZgeMdRi2EViQaIZYDpXVfQaFMx3HpKUHIvTWwwkmWvFZf_AHJSRD1KpttBID3S-LYjtcttJRbVJXvxWpeUbtKDDQOCjPLS6S_baMw6AfZZh5aDAYzznqfQU1aI_43LpiIpRjApd2mQn9WPfBcTjdU_NpjeIRvAwDxz5lzHQfTDjge68RMGrkLxlIBo5bBv2rGXNbTykuyWkF49mKKW2d8e75iySEOu1kNWm97C-HM-v7Yk3AuDa1Me-B660RoYAbBVJ3bkyphKiuE6vWiaWQ2Y",
+    );
+    expect(decodePath(route)).toBe(LONG);
+  });
+
   it("looksKeyedToken flags token shape without needing the key", () => {
     setRouteKey(KEY);
     expect(looksKeyedToken(encodeDest(DEST))).toBe(true);

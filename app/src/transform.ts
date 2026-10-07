@@ -8,6 +8,7 @@
    getters are lazy and resolved at request time, never at module
    eval, so the call may precede the declarations it closes over. */
 import { DIAG } from "./diag";
+import { streamAlive, streamDone } from "./streams-alive";
 import { charsetFromHeader, makeDecoder, resolveCharset } from "./headers";
 import { docKind, jsBody } from "./transit";
 import { initScript, initSplicePoint } from "./pageload";
@@ -131,13 +132,18 @@ export function rawFrom(
 ): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     async start(c) {
-      if (head) c.enqueue(head);
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) c.enqueue(value);
+      streamAlive(); // #99: the pump below dispatches no events; keep the worker alive
+      try {
+        if (head) c.enqueue(head);
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) c.enqueue(value);
+        }
+        c.close();
+      } finally {
+        streamDone();
       }
-      c.close();
     },
   });
 }
@@ -174,6 +180,7 @@ export function rewriteStream(
     keyed and the legacy prefix. */
   return new ReadableStream<Uint8Array>({
     async start(controller) {
+      streamAlive(); // #99: the pump below dispatches no events; keep the worker alive
       await deps!.routeReady();
       const init = initScript(base, deps!.fpScript() ?? (await deps!.siteScript(base)));
       const emit = (out: string) => {
@@ -262,6 +269,8 @@ export function rewriteStream(
           url: base,
         });
         controller.error(e);
+      } finally {
+        streamDone(); // #99: every exit path settles the stream
       }
     },
   });
@@ -287,6 +296,7 @@ export function cssRewriteStream(
   const modP = rewriter();
   return new ReadableStream<Uint8Array>({
     async start(controller) {
+      streamAlive(); // #99: the pump below dispatches no events; keep the worker alive
       try {
         const mod = await modP;
         const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
@@ -338,6 +348,8 @@ export function cssRewriteStream(
           url: base,
         });
         controller.error(e);
+      } finally {
+        streamDone(); // #99: every exit path settles the stream
       }
     },
   });

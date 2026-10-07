@@ -82,3 +82,19 @@ describe("handleFetch synchronous pass-through checks (#82 seam)", () => {
     expect(armed).toEqual([]);
   });
 });
+
+
+describe("classifyRtype document destinations (#103)", () => {
+  it("classifies iframe/frame/fencedframe/embed/object/xslt as DOCUMENT", () => {
+    for (const d of ["iframe", "frame", "fencedframe", "embed", "object", "xslt"]) {
+      expect(classifyRtype(d, "")).toBe("DOCUMENT");
+    }
+    expect(classifyRtype("document", "")).toBe("DOCUMENT");
+  });
+
+  it("destination still wins over content type; empty stays FETCH", () => {
+    expect(classifyRtype("iframe", "text/html")).toBe("DOCUMENT");
+    expect(classifyRtype("style", "text/html")).toBe("STYLE");
+    expect(classifyRtype("empty", "")).toBe("FETCH");
+  });
+});

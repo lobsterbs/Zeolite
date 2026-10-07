@@ -17,9 +17,10 @@
 import { b64uDecode, b64uEncode, decodeNavHandle, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
+import { parseKdl } from "./kdl";
 import { loadRouteHistory, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
-import { NAV } from "./bootstrap/navguard";
+import { NAV, NAVP } from "./bootstrap/navguard";
 
 import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
@@ -296,6 +297,11 @@ export function classifyRtype(destHeader: string, contentType: string): string {
   const d = destHeader.toLowerCase();
   const ct = contentType.toLowerCase();
   if (d === "document") return "DOCUMENT";
+  /* #103: iframe/frame/fencedframe/embed/object/xslt are document
+     destinations too (a subframe entry navigation carries
+     sec-fetch-dest "iframe"); DOC_DESTS is the one classification
+     table, shared with the transit refinement. */
+  if (DOC_DESTS.has(d)) return "DOCUMENT";
   if (d === "style" || ct.includes("text/css")) return "STYLE";
   if (d === "script" || /javascript|ecmascript/.test(ct)) return "SCRIPT";
   if (d === "image" || ct.startsWith("image/")) return "IMAGE";
@@ -353,19 +359,30 @@ const ZL_ROUTE_CACHE = "zeolite-route-v1";
    stays importable under vitest (node has no self.registration);
    the value is identical for the worker lifetime (the registration
    scope never changes mid-evaluation). */
-const routeKeyUrl = () => new URL("route-config.json", self.registration.scope).href;
+const routeKeyUrl = () => new URL("route-config.kdl", self.registration.scope).href;
+/* The pre-KDL deployment persisted the shape as JSON; the restore
+   still reads that entry, the persist writes KDL only. */
+const routeKeyUrlLegacy = () => new URL("route-config.json", self.registration.scope).href;
 export const routeReady: Promise<void> = (async () => {
   try {
-    const hit = await (await caches.open(ZL_ROUTE_CACHE)).match(routeKeyUrl());
+    const cache = await caches.open(ZL_ROUTE_CACHE);
+    const hit = await cache.match(routeKeyUrl());
     if (hit) {
-      const cfg = (await hit.json()) as { prefix?: string; scheme?: string; httpsUpgrade?: boolean; navHandles?: boolean };
-      /* A pre-#32 deployment may have persisted scheme "mirror": it
-         coerces to the default (mirror routes are gone, #32). */
-      setScheme(cfg.prefix ?? "/j/");
-      /* #53: the host's upgrade choice restores with the shape. */
-      if (typeof cfg.httpsUpgrade === "boolean") setHttpsUpgrade(cfg.httpsUpgrade);
-      /* #63: the ?url= refusal choice restores with the shape. */
-      if (typeof cfg.navHandles === "boolean") setNavHandles(cfg.navHandles);
+      /* KDL shape: route-config prefix "/j/" https-upgrade #true nav-handles #false */
+      const [node] = parseKdl(await hit.text());
+      if (node && node.name === "route-config") {
+        setScheme(typeof node.props.prefix === "string" ? node.props.prefix : "/j/");
+        if (typeof node.props["https-upgrade"] === "boolean") setHttpsUpgrade(node.props["https-upgrade"]);
+        if (typeof node.props["nav-handles"] === "boolean") setNavHandles(node.props["nav-handles"]);
+      }
+    } else {
+      const legacy = await cache.match(routeKeyUrlLegacy());
+      if (legacy) {
+        const cfg = (await legacy.json()) as { prefix?: string; httpsUpgrade?: boolean; navHandles?: boolean };
+        setScheme(cfg.prefix ?? "/j/");
+        if (typeof cfg.httpsUpgrade === "boolean") setHttpsUpgrade(cfg.httpsUpgrade);
+        if (typeof cfg.navHandles === "boolean") setNavHandles(cfg.navHandles);
+      }
     }
   } catch {
     /* storage unavailable: defaults stay until the next zl:config */
@@ -396,7 +413,14 @@ export async function persistRoute(prefix: string): Promise<void> {
   try {
     await (await caches.open(ZL_ROUTE_CACHE)).put(
       routeKeyUrl(),
-      new Response(JSON.stringify({ prefix, httpsUpgrade: isHttpsUpgrade(), navHandles: navHandlesEnabled() })),
+      new Response(
+        "route-config prefix " +
+          JSON.stringify(prefix) +
+          " https-upgrade " +
+          (isHttpsUpgrade() ? "#true" : "#false") +
+          " nav-handles " +
+          (navHandlesEnabled() ? "#true" : "#false"),
+      ),
     );
   } catch {
     /* storage unavailable: the in-memory rotation still works */
@@ -686,6 +710,36 @@ export function handleFetch(e: FetchEvent): void {
         const handleDest = decodeNavHandle(url.pathname.slice(NAVH.length + 1).split(/[?#]/)[0]);
         if (!handleDest) return navOutcome(e, url, 404, "route", "zeolite: bad or expired navigation handle");
         dest0 = handleDest;
+      } else if (url.pathname.includes(NAVP)) {
+        /* #101: a same-origin child realm (an about:blank iframe the
+           page's own JS created) has no virtual context and an
+           undecodable about:blank referrer, so its root-relative
+           fetches used to fall through the escaped-path recovery to
+           a silent passthrough and 404 on the proxy origin. The
+           child's reemit patch rewrites them to <parent route>/
+           <NAVP>/<encoded relative input>; decode the parent route
+           and resolve the tail against its destination. A tampered
+           or undecodable parent is a bad route, exactly like the
+           NAV and NAVH markers - never a guess. */
+        const navpCut = url.pathname.indexOf(NAVP);
+        const navpBase = decodePath(url.pathname.slice(0, navpCut));
+        let navpRel: string | null = null;
+        try {
+          navpRel = decodeURIComponent(url.pathname.slice(navpCut + NAVP.length).split(/[?#]/)[0]);
+        } catch {
+          /* a malformed escape stays a bad route */
+        }
+        let navpDest: string | null = null;
+        if (navpBase && navpRel !== null) {
+          try {
+            navpDest = new URL(navpRel, navpBase).href;
+          } catch {
+            /* an unresolvable tail stays a bad route */
+          }
+        }
+        if (!navpDest || !/^https?:\/\//.test(navpDest))
+          return navOutcome(e, url, 404, "route", "zeolite: bad route");
+        dest0 = navpDest;
       } else if (isEnginePath(url.pathname)) {
         let raw = decodePath(url.pathname);
         let carriesQuery = true;
@@ -729,7 +783,21 @@ export function handleFetch(e: FetchEvent): void {
            under a key this worker no longer holds - a key rotation
            strands every old route - so it gets its own reason instead
            of the generic bad-route text. */
-        if (!raw)
+        if (!raw) {
+          /* #100: a token-shaped tail no held key decodes is a
+             stranded route (a rotation) or a corrupt/mis-minted token;
+             the path alone cannot tell them apart, so the diag event
+             names the honest cause: unknown. Tail length recorded -
+             a truncation or a mis-appended literal shows up there. */
+          if (looksKeyedToken(url.pathname))
+            DIAG.emit({
+              category: "REWRITE",
+              severity: "warning",
+              cause: "unknown",
+              message: "keyed route decode failed (route key rotated?)",
+              technicalReason:
+                "tail " + url.pathname.slice(currentPrefix().length).split(/[?#]/)[0].length + " chars",
+            });
           return navOutcome(
             e,
             url,
@@ -739,6 +807,7 @@ export function handleFetch(e: FetchEvent): void {
               ? "zeolite: undecodable keyed route (route key rotated?)"
               : "zeolite: bad route",
           );
+        }
         dest0 = unwrapDest(raw);
         routeCarriesQuery = carriesQuery;
       } else {
@@ -768,7 +837,29 @@ export function handleFetch(e: FetchEvent): void {
           const refDest = e.request.referrer
             ? referrerDest(e.request.referrer, url.pathname + url.search)
             : null;
-          if (!refDest) return fetch(e.request); // unknown same-origin path: passthrough
+          if (!refDest) {
+            /* #101: the silent passthrough. Neither the client's
+               virtual context nor the referrer names a home for this
+               same-origin path (an unrewritten embed page, a client
+               the context cap dropped, or a child realm the guard
+               never reached), so the browser serves it - on the
+               proxy origin that is a 404. Escape row, not a guess:
+               dest records what the browser will actually request. */
+            netLogPush({
+              method: e.request.method,
+              traceId: DIAG.trace(),
+              path: url.pathname + url.search,
+              dest: e.request.url,
+              status: 0,
+              rtype: classifyRtype(reqDest(e.request), ""),
+              ms: -1,
+              bytes: -1,
+              verdict: "escape: same-origin unknown home",
+              transport: "browser",
+              detail: { internalUrl: url.pathname + url.search, ttfb: -1 },
+            });
+            return fetch(e.request);
+          }
           dest0 = refDest;
         }
       }
@@ -1576,6 +1667,23 @@ export function handleFetch(e: FetchEvent): void {
              complete a page fetch, so the revalidation result is
              converted to a marked 200. */
           if (resp.status === 304) return surfaceNotModified(outHeaders);
+          /* #102: a 204/205 answering a navigation commits an empty
+             document - the embedder sees a blank frame and no error,
+             the exact intermittent-blank the beta reported. No
+             Content is not a navigable response; surface the honest
+             error page instead of the silent empty commit. */
+          if (e.request.mode === "navigate" && (resp.status === 204 || resp.status === 205))
+            return new Response(
+              errorPage({
+                route: url.pathname + url.search,
+                category: "route",
+                engineVersion: ZEOLITE_VERSION,
+                reason: "upstream answered the navigation with " + resp.status + " No Content",
+                traceId,
+                status: 502,
+              }),
+              { status: 502, headers: { "content-type": "text/html; charset=utf-8" } },
+            );
           /* 1.7 Sulfide: attachment responses join the download
              registry. #90: the detection + registration now live in the
              downloads subsystem (adoptResponse); the body stays a

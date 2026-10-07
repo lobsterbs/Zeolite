@@ -575,6 +575,27 @@ mod tests {
         assert_eq!(decode_path(&plain, "", &path), None);
     }
 
+    /// #100: long-destination interop vector with the TS codec
+    /// (app/src/__tests__/codec.test.ts): same key, same 639-byte
+    /// destination, same token string. A long destination spans
+    /// many keystream blocks, so the token format is pinned at that
+    /// shape too.
+    #[test]
+    fn keyed_token_long_dest_vector() {
+        let key: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let dest = format!("https://example.com/long/destination?q={}", "x".repeat(600));
+        let path = format!("/j/{}", b64u_encode(&keyed_token(&key, dest.as_bytes())));
+        assert_eq!(
+            path,
+            "/j/AU5Yu8quyIPehcTDkGs9lSmUz-vU4HwN0kDyHco1BvLBOU9Hi4bthk9KvCt7G2atQN-25Yl3p9WBTYhb1JQLdcIlxf62NBcFGQ8LbxiaziEuLbK2disqogS8phoDw0rQbRUrn2fEStWkwpsUOrqCePxBxLdQJcAa9PuaKo6QA9L3vwXORFuKVd5_jq7tXEZvIc82pXNi1Xo0TzAAj6h40Bd_ickV_3maVA10U3jeGeldM54heL6iYsYtc2_mZ7jsXQn2E7tIz6ELUi_dhJN7J2wugo159vovPiGslh0UinmQVp_aYr1R5QYH-wJ8B75sobH6e2UEj3Oq_ljlYyBzjFxoVe-fIbxh7VVxKMnEmmMOuzyPv2Ggj5vzAcR5bdlbYmwRLrC6iVqmzQm-8wwh_DzPOLhrPoEi0wcEn5wecQK42JUgg6Mf5bDOAQyoRCQFGGaO54a_rqICmpzAPaDgpTwyPfjwfOAldEqvWJHvGQmV48X2rYOj1Wri96hP1mmsDgHDbkNtDnhVgDDKPl4QSNuiiGoBzmOXgeZ1O3jvdlpVapsaBphATzOAlHoTXz8q7m4WSBp8ldjDO8B8Y1Uy3ZgeMdRi2EViQaIZYDpXVfQaFMx3HpKUHIvTWwwkmWvFZf_AHJSRD1KpttBID3S-LYjtcttJRbVJXvxWpeUbtKDDQOCjPLS6S_baMw6AfZZh5aDAYzznqfQU1aI_43LpiIpRjApd2mQn9WPfBcTjdU_NpjeIRvAwDxz5lzHQfTDjge68RMGrkLxlIBo5bBv2rGXNbTykuyWkF49mKKW2d8e75iySEOu1kNWm97C-HM-v7Yk3AuDa1Me-B660RoYAbBVJ3bkyphKiuE6vWiaWQ2Y"
+        );
+        let c = Codec::Keyed {
+            prefix: "/j/".into(),
+            key,
+        };
+        assert_eq!(decode_path(&c, "", &path).unwrap(), dest);
+    }
+
     /// #55: dual decode - legacy tails still decode under the keyed
     /// codec, so routes minted before the key existed keep working.
     #[test]
