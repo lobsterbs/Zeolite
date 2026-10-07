@@ -97,8 +97,20 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
      and without an anchor nothing changes. */
   const engPrefix = parentRoutePath?.match(/^\/[^/]+\//)?.[0];
   const relRoute = (v: string): string | null => {
-    if (!engPrefix || !parentRoutePath || v.startsWith(engPrefix)) return null;
-    if (v.startsWith("//") || /^[a-z][a-z0-9+.-]*:/i.test(v)) return null;
+    /* engine-route-shaped paths stay native; scheme and
+       protocol-relative inputs are crossDest's or the native
+       path's job; empty and fragment-only inputs resolve to the
+       child's own base natively and are not re-emitted. */
+    if (
+      !engPrefix ||
+      !parentRoutePath ||
+      v.startsWith(engPrefix) ||
+      !v ||
+      v[0] === "#" ||
+      v.startsWith("//") ||
+      /^[a-z][a-z0-9+.-]*:/i.test(v)
+    )
+      return null;
     return parentRoutePath + NAVP + "/" + encodeURIComponent(v);
   };
 
@@ -111,20 +123,15 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : null;
       if (url === null) return OF(input, init);
       const rel = relRoute(url);
-      if (rel) {
-        /* #101: the parent-relative marker needs no mint; the SW
-           decodes the parent route directly. SRI is stripped for
-           the same reason as a minted route (#77). */
-        if (init?.integrity) init = { ...init, integrity: undefined };
-        return OF(rel, init);
-      }
-      const d = crossDest(url);
+      const d = rel ? null : crossDest(url);
+      /* #77 runtime half, minted and #101 marker routes alike: the
+         SW returns a rewritten body that never matches the upstream
+         hash, so SRI in the init would fail the re-emitted fetch as
+         a network error. Request objects stay native (documented
+         one-shot-body residual). */
+      if ((rel || d) && init?.integrity) init = { ...init, integrity: undefined };
+      if (rel) return OF(rel, init);
       if (!d) return OF(input, init);
-      /* #77 runtime half: the SW returns the rewritten body, which
-         never matches the upstream hash; SRI in the init would fail
-         the re-emitted fetch as a network error. Request objects
-         stay native (documented one-shot-body residual). */
-      if (init?.integrity) init = { ...init, integrity: undefined };
       return mintRoute(d).then((route) => OF((route ?? url) as RequestInfo, init));
     };
   }
@@ -154,23 +161,20 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
     };
     navg.sendBeacon = function (u: string | URL, d?: BodyInit | null): boolean {
       const s = typeof u === "string" ? u : u instanceof URL ? u.href : null;
-      if (s === null) return native(u, d);
-      const rel = relRoute(s);
-      if (rel) {
-        /* #101: a parent-relative beacon needs no mint; the same
-           optimistic-true contract as the minted path. */
-        if (!OF || unloading) return native(u, d);
-        OF(rel, { method: "POST", body: d ?? null, keepalive: true }).catch(() => native(u, d));
+      if (s === null || unloading) return native(u, d);
+      /* one POST helper for the minted and the #101 parent-relative
+         path: optimistic true, native fallback on a refused POST */
+      const post = (t: string): boolean => {
+        if (!OF) return false;
+        OF(t, { method: "POST", body: d ?? null, keepalive: true }).catch(() => native(u, d));
         return true;
-      }
+      };
+      const rel = relRoute(s);
+      if (rel) return post(rel) || native(u, d);
       const dest = crossDest(s);
-      if (!dest || unloading) return native(u, d);
+      if (!dest) return native(u, d);
       mintRoute(dest).then((route) => {
-        if (!route || !OF || unloading) {
-          native(u, d);
-          return;
-        }
-        OF(route, { method: "POST", body: d ?? null, keepalive: true }).catch(() => native(u, d));
+        if (!route || unloading || !post(route)) native(u, d);
       });
       return true;
     };
@@ -196,23 +200,16 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
     OX.prototype.open = function (this: AnyRecord, ...a: unknown[]) {
       const s =
         typeof a[1] === "string" ? a[1] : a[1] instanceof URL ? (a[1] as URL).href : String(a[1] ?? "");
-      const dest = a[2] === undefined || a[2] === true ? crossDest(s) : null;
-      /* #101: a parent-relative open rewrites the URL directly; no
-         mint, no deferred re-open - the SW decodes the parent route.
-         Sync opens stay native (the async flag is a[2]). */
-      if (!dest && (a[2] === undefined || a[2] === true)) {
-        const rel = relRoute(s);
-        if (rel) {
-          pend.delete(this);
-          delete this.readyState;
-          const args = a.slice();
-          args[1] = rel;
-          return OOpen.apply(this, args);
-        }
-      }
+      const isAsync = a[2] === undefined || a[2] === true;
+      const dest = isAsync ? crossDest(s) : null;
       if (!dest) {
         pend.delete(this);
         delete this.readyState;
+        /* #101: a parent-relative open rewrites the URL directly;
+           no mint, no deferred re-open - the SW decodes the parent
+           route. Sync opens stay native (the async flag is a[2]). */
+        const rel = isAsync ? relRoute(s) : null;
+        if (rel) return OOpen.call(this, a[0], rel, a[2], a[3], a[4]);
         return OOpen.apply(this, a);
       }
       pend.set(this, {

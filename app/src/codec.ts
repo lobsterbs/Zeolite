@@ -187,7 +187,11 @@ function siphash24(key: Uint8Array, msg: Uint8Array): bigint {
     sipround(v);
     v[0] ^= m;
   }
-  let last = BigInt(msg.length) << 56n;
+  /* #100: the u64 length word keeps only the length's low byte
+     ((len as u64) << 56 on the Rust side); an unmasked BigInt kept
+     the high bits, so destinations >= 255 bytes minted an IV the
+     Rust decode rejected as a rotation. */
+  let last = BigInt(msg.length & 0xff) << 56n;
   for (let j = 0; i + j < msg.length; j++) last |= BigInt(msg[i + j]) << BigInt(8 * j);
   v[3] ^= last;
   sipround(v);

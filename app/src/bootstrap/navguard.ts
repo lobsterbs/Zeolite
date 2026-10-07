@@ -400,8 +400,10 @@ export function applyNavGuard(
          native degrade. */
       let routePath: string | undefined;
       try {
-        const p = new URL(loc).pathname;
-        routePath = p.startsWith("/") && p.length > 1 ? p : undefined;
+        /* the pathname carries no validation of its own: relRoute's
+           engine-prefix check rejects non-route pages (an
+           about:blank parent), an empty path anchors nothing. */
+        routePath = new URL(loc).pathname;
       } catch {
         /* not a URL: no parent route to anchor to */
       }

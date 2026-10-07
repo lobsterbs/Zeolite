@@ -209,12 +209,16 @@ describe("keyed opaque routes (issue #55)", () => {
     /* Pinned interop with the Rust codec (crates/rewriter/src/
        encode.rs): same key, same 639-byte destination, same token.
        A long destination spans many keystream blocks, so the token
-       format is pinned at that shape too. */
+       format is pinned at that shape too - and the MAC message
+       crosses the 256-byte line where the length word's u64
+       shift truncates it to its low byte (#100: an unmasked
+       BigInt kept the high bits, so TS-minted long destinations
+       carried an IV the Rust decode rejected as a rotation). */
     const LONG = "https://example.com/long/destination?q=" + "x".repeat(600);
     setRouteKey(KEY);
     const route = encodeDest(LONG);
     expect(route).toBe(
-      "/j/AU5Yu8quyIPehcTDkGs9lSmUz-vU4HwN0kDyHco1BvLBOU9Hi4bthk9KvCt7G2atQN-25Yl3p9WBTYhb1JQLdcIlxf62NBcFGQ8LbxiaziEuLbK2disqogS8phoDw0rQbRUrn2fEStWkwpsUOrqCePxBxLdQJcAa9PuaKo6QA9L3vwXORFuKVd5_jq7tXEZvIc82pXNi1Xo0TzAAj6h40Bd_ickV_3maVA10U3jeGeldM54heL6iYsYtc2_mZ7jsXQn2E7tIz6ELUi_dhJN7J2wugo159vovPiGslh0UinmQVp_aYr1R5QYH-wJ8B75sobH6e2UEj3Oq_ljlYyBzjFxoVe-fIbxh7VVxKMnEmmMOuzyPv2Ggj5vzAcR5bdlbYmwRLrC6iVqmzQm-8wwh_DzPOLhrPoEi0wcEn5wecQK42JUgg6Mf5bDOAQyoRCQFGGaO54a_rqICmpzAPaDgpTwyPfjwfOAldEqvWJHvGQmV48X2rYOj1Wri96hP1mmsDgHDbkNtDnhVgDDKPl4QSNuiiGoBzmOXgeZ1O3jvdlpVapsaBphATzOAlHoTXz8q7m4WSBp8ldjDO8B8Y1Uy3ZgeMdRi2EViQaIZYDpXVfQaFMx3HpKUHIvTWwwkmWvFZf_AHJSRD1KpttBID3S-LYjtcttJRbVJXvxWpeUbtKDDQOCjPLS6S_baMw6AfZZh5aDAYzznqfQU1aI_43LpiIpRjApd2mQn9WPfBcTjdU_NpjeIRvAwDxz5lzHQfTDjge68RMGrkLxlIBo5bBv2rGXNbTykuyWkF49mKKW2d8e75iySEOu1kNWm97C-HM-v7Yk3AuDa1Me-B660RoYAbBVJ3bkyphKiuE6vWiaWQ2Y",
+      "/j/AS47tiqdnePs_GuktV3gabh1I7dgEuqPlNhBH2GbcqRVSbUAW5xQdtP-xoivMUG6t52dR9qQS9O_1DU52m5JAGevWIl1h2p82C3qjVN8DLdNdIANyUymea-ciGVtap50cm71MWS1rj6cP6lM33DONceehugrf61FZrkKk4xZ1AvEOM_HPp3mWvxoanyvBG60PHJfmvx7HG-PirksflE1r7EFl9vIpuuED7X57F-cjQgQmoBjmcQpOFL1KT6tEWV3SYKFwwKmu4UoG8D-b3kDL_SMR9Q2DQ8ViVAgULUxX-SZBnIfNTaFWJk2VZbh3KyoU41_4p_fjp71mNZ4phFRXfRLF9YihudeW7BDdIoECUkRyAdR4JssfOO_zcMQYjOE9XTbUiTL0Koc5SUYCO7XuyGUD_iwz7obIyh2W7eiF-nngmgISslYXaWqaJwquGg_g_1vrrJvcXiZgMP5IuJIzHNjmDD7-7-Bck5ECq4SPHJHtRvbNS4CLRdCuy_LMpGZfb6-Tzjx6HkHUeh4A8PZRyeJ9D9Tz-i7Y7atU0NF3s3Kd6bAlcCDR-TqbzQrl9wum7NYjC2_eRcSeGhuV8AaN4HoPhnTBeh9O7t7UmAGDaeL_swqj4NGdv8WjWznS9g6yfBSBZTxCZahs9snd0SHrZnSWSJI6jjADBb3ymamSBy5VLndWtTWolmJUn9DNFHIfu3utyVROmJsyTJ3YBaKqG94iIaNT9xyqvIhGKF0ODGMKIuA-Zfeoblzz7WAyHQHK2N0e5IMnovtIc19IfYyjxK4HhKrX_hGDmK3u-UFO8qbxz8EC_Sk613Ju_sOH9aurBB8L0a5sxM1NW0mpjfSbAsFypSkY_kE7FPIaAgWuEc",
     );
     expect(decodePath(route)).toBe(LONG);
   });
