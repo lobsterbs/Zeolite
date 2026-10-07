@@ -82,8 +82,8 @@ const MAX_REDIRECT_HOPS = 10;
 
 /* ---- Page cache (ported from the v3 worker) -------------------- */
 /* Cache-first for proxied GETs with stale-while-revalidate. Freshness
-   honors Cache-Control: max-age when present (no-store skips the cache
-   entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
+   honors Cache-Control: max-age when present (no-store and no-cache
+   skip the cache entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
    eviction. x-zl-cached-at carries the stored-at time. */
 
 
@@ -92,15 +92,21 @@ const ZL_CACHED_AT = "x-zl-cached-at";
 const ZL_DEFAULT_TTL = 10 * 60 * 1000;
 const ZL_PAGE_LIMIT = 60;
 
-function cacheTtl(headers: Headers): number {
+export function cacheTtl(headers: Headers): number {
   const cc = (headers.get("cache-control") ?? "").toLowerCase();
-  if (/\bno-store\b/.test(cc)) return 0;
+  /* no-cache must revalidate before every use; this cache serves
+     stored copies without revalidation, so the honest reading is to
+     skip the entry entirely: never stored, never served. */
+  if (/\bno-store\b|\bno-cache\b/.test(cc)) return 0;
   const m = /(?:^|[,\s])max-age=(\d+)/.exec(cc);
   if (m) return Math.min(Number(m[1]) * 1000, 24 * 60 * 60 * 1000);
   return ZL_DEFAULT_TTL;
 }
 
-async function pageCacheMatch(req: Request): Promise<Response | null> {
+export async function pageCacheMatch(
+  req: Request,
+  keepAlive: (p: Promise<unknown>) => void = () => {},
+): Promise<Response | null> {
   let hit: Response | undefined;
   try {
     hit = await (await caches.open(ZL_PAGES)).match(req);
@@ -112,28 +118,37 @@ async function pageCacheMatch(req: Request): Promise<Response | null> {
   const ttl = cacheTtl(hit.headers);
   if (!ttl) return null;
   if (Date.now() - at >= ttl) {
-    /* Stale: serve it now, refresh in the background. */
-    try {
-      /* #35: a background refresh fetches the RAW upstream body. For
-         serve-time-transformed JS (worker/script destinations) the
-         composed copy is built on the fetch path, which this refresh
-         bypasses - storing raw here would regress the entry. Drop the
-         stale entry instead: this hit serves from memory, the next
-         request re-fetches and re-transforms. */
-      /* #94: ONE copy of the JS-transform destination set (the refresh
-         skip must match the serve-time transform branches). */
-      const jsServe =
-        isWorkerDestination(req.destination) ||
-        (JS_TRANSFORM_DESTS.has(req.destination) && isJs(hit));
-      if (jsServe) {
-        await (await caches.open(ZL_PAGES)).delete(req);
-      } else {
-        const fresh = await wispFetchCacheBypass(req);
-        if (fresh.ok) await pageCacheStore(req, fresh);
+    /* Stale: serve it now, refresh without blocking the response.
+       The refresh used to be awaited inline, so a stale hit paid the
+       full upstream latency before the page saw its first byte. The
+       keepAlive callback hands the promise to the fetch event's
+       waitUntil, so the worker outlives the refresh instead of the
+       refresh dying with the worker the moment the response is
+       served. */
+    const refresh = (async () => {
+      try {
+        /* #35: a background refresh fetches the RAW upstream body. For
+           serve-time-transformed JS (worker/script destinations) the
+           composed copy is built on the fetch path, which this refresh
+           bypasses - storing raw here would regress the entry. Drop the
+           stale entry instead: this hit serves from memory, the next
+           request re-fetches and re-transforms. */
+        /* #94: ONE copy of the JS-transform destination set (the refresh
+           skip must match the serve-time transform branches). */
+        const jsServe =
+          isWorkerDestination(req.destination) ||
+          (JS_TRANSFORM_DESTS.has(req.destination) && isJs(hit));
+        if (jsServe) {
+          await (await caches.open(ZL_PAGES)).delete(req);
+        } else {
+          const fresh = await wispFetchCacheBypass(req);
+          if (fresh.ok) await pageCacheStore(req, fresh);
+        }
+      } catch {
+        /* offline: the stale copy stays served */
       }
-    } catch {
-      /* offline: the stale copy stays served */
-    }
+    })();
+    keepAlive(refresh);
   }
   /* Issues #13 + #18: a Range request is answered from the stored full
      entry only when exactly one byte range names a slice the engine can
@@ -987,7 +1002,7 @@ export function handleFetch(e: FetchEvent): void {
 
         /* Cache-first for proxied GETs. */
         if (e.request.method === "GET") {
-          const hit = await pageCacheMatch(e.request);
+          const hit = await pageCacheMatch(e.request, (p) => e.waitUntil(p));
           if (hit) {
             const dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
             transitRecord(traceId, target, dec);
