@@ -427,18 +427,14 @@ impl Config {
                 "bind" => cfg.bind = kdl_string(node, "bind")?,
                 "port" => cfg.port = kdl_u16(node, "port", 1)?,
                 "static" => cfg.static_dir = kdl_string(node, "static")?,
-                "max_connections" => {
-                    cfg.max_connections = kdl_usize(node, "max_connections", 1)?
-                }
+                "max_connections" => cfg.max_connections = kdl_usize(node, "max_connections", 1)?,
                 "max_connections_per_ip" => {
                     cfg.max_connections_per_ip = kdl_usize(node, "max_connections_per_ip", 0)?
                 }
                 "max_streams_per_connection" => {
                     cfg.max_streams_per_conn = kdl_usize(node, "max_streams_per_connection", 1)?
                 }
-                "connect_timeout" => {
-                    cfg.connect_timeout = kdl_secs(node, "connect_timeout")?
-                }
+                "connect_timeout" => cfg.connect_timeout = kdl_secs(node, "connect_timeout")?,
                 "stream_idle_timeout" => {
                     cfg.stream_idle_timeout = kdl_secs(node, "stream_idle_timeout")?
                 }
@@ -453,9 +449,7 @@ impl Config {
                 "max_ws_message" => cfg.max_ws_message = kdl_usize(node, "max_ws_message", 2048)?,
                 "motd" => cfg.motd = kdl_opt_string(node, "motd")?,
                 "allowed_origins" => cfg.allowed_origins = kdl_strings(node, "allowed_origins")?,
-                "frame_ancestors" => {
-                    cfg.frame_ancestors = kdl_opt_string(node, "frame_ancestors")?
-                }
+                "frame_ancestors" => cfg.frame_ancestors = kdl_opt_string(node, "frame_ancestors")?,
                 "auth" => {
                     let user = kdl_auth_field(node, "user");
                     let pass = kdl_auth_field(node, "password");
@@ -2506,10 +2500,7 @@ mod tests {
             cfg.allowed_origins,
             vec!["https://a.example", "https://b.example"]
         );
-        assert_eq!(
-            cfg.frame_ancestors.as_deref(),
-            Some("https://host.example")
-        );
+        assert_eq!(cfg.frame_ancestors.as_deref(), Some("https://host.example"));
         assert_eq!(cfg.password.unwrap().0, "ada");
         assert_eq!(cfg.key_hex, Some("00".repeat(32)));
     }
