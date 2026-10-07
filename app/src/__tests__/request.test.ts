@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const transportMock = vi.hoisted(() => ({
   calls: 0,
   gate: undefined as undefined | Promise<void>,
+  urls: [] as string[],
+  queue: [] as Response[],
 }));
 
 /* The transport fetch is controllable: the stale-cache tests gate the
@@ -20,15 +22,21 @@ vi.mock("../transport", () => ({
   currentEngine: () => "libcurl",
   wispTransport: {
     ready: async () => {},
-    fetch: async () => {
+    fetch: async (url: string) => {
       transportMock.calls++;
+      transportMock.urls.push(url);
       if (transportMock.gate) await transportMock.gate;
+      const queued = transportMock.queue.shift();
+      if (queued) return queued;
       return new Response("mock", { headers: { "content-type": "text/html" } });
     },
   },
 }));
 
 import { classifyRtype, handleFetch, pageCacheMatch, reqDest, withDeadline } from "../request";
+import { establishContext, resolveRelative } from "../vctx";
+import { VCTX } from "../swstate";
+import { encodeDestLegacy } from "../codec";
 
 describe("reqDest (#82 seam)", () => {
   it("falls back to sec-fetch-dest when destination is empty (Firefox, #40)", () => {
@@ -218,5 +226,101 @@ describe("pageCacheMatch stale-while-revalidate dedup", () => {
       kept.push(p);
     });
     expect(transportMock.calls).toBe(2);
+  });
+});
+
+/* #110: a navigation the hop chain redirects must leave the client's
+   virtual context on the final destination, or every relative URL the
+   page builds resolves against the pre-redirect origin (google.com vs
+   www.google.com: the apex 404s /async/hpba where www serves the AI
+   Mode panel batch). Plain-object requests/events like the pass-through
+   tests above: mode "navigate" is constructor-illegal on a node Request,
+   and the navigation path reads FetchEvent fields only. */
+describe("redirect finalization updates the client virtual context (#110)", () => {
+  const ORIGIN = "https://w.example.org";
+
+  const mkEvent = (routeUrl: string, clientId: string, mode: string, destination: string) => {
+    const armed: Promise<Response>[] = [];
+    const ev = {
+      request: {
+        url: routeUrl,
+        method: "GET",
+        mode,
+        destination,
+        credentials: "same-origin",
+        referrer: "",
+        body: null,
+        headers: new Headers(),
+      },
+      clientId,
+      resultingClientId: clientId + "-new",
+      respondWith: (p: Promise<Response>) => void armed.push(p),
+      waitUntil: () => {},
+    } as unknown as FetchEvent;
+    return { ev, armed };
+  };
+
+  beforeEach(() => {
+    transportMock.calls = 0;
+    transportMock.gate = undefined;
+    transportMock.urls = [];
+    transportMock.queue = [];
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN },
+      registration: { scope: ORIGIN + "/" },
+      clients: { get: async () => null },
+    });
+    /* no cache storage: the cache-first lookup misses, the store warns once */
+    vi.stubGlobal("caches", {
+      open: async () => {
+        throw new Error("no cache storage");
+      },
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("replaces the context with the post-redirect destination after a 301", async () => {
+    transportMock.queue = [
+      new Response(null, {
+        status: 301,
+        headers: { location: "https://www.site.example/" },
+      }),
+      new Response("ok", { headers: { "content-type": "text/plain" } }),
+    ];
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "nav-1", "navigate", "document");
+    handleFetch(ev);
+    expect(armed.length).toBe(1);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(transportMock.urls).toEqual(["https://site.example/", "https://www.site.example/"]);
+    expect(resolveRelative(VCTX, "nav-1-new", "/async/hpba?yv=3")).toBe(
+      "https://www.site.example/async/hpba?yv=3",
+    );
+  });
+
+  it("keeps the pre-redirect target when the chain does not redirect", async () => {
+    transportMock.queue = [new Response("ok", { headers: { "content-type": "text/plain" } })];
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "nav-2", "navigate", "document");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(transportMock.urls).toEqual(["https://site.example/"]);
+    expect(resolveRelative(VCTX, "nav-2-new", "/x")).toBe("https://site.example/x");
+  });
+
+  it("never rewrites the document context from a subresource redirect", async () => {
+    establishContext(VCTX, "doc-1", "https://site.example/");
+    transportMock.queue = [
+      new Response(null, { status: 302, headers: { location: "https://cdn.site.example/m.js" } }),
+      new Response("js", { headers: { "content-type": "text/plain" } }),
+    ];
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/lib.js"), "doc-1", "cors", "script");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(resolveRelative(VCTX, "doc-1", "/y")).toBe("https://site.example/y");
   });
 });

@@ -1378,6 +1378,28 @@ export function handleFetch(e: FetchEvent): void {
           const finalDest = hopUrl !== target ? hopUrl : finalUrl && finalUrl !== target ? finalUrl : undefined;
           if (finalDest) {
             DIAG.stage(traceId, "REDIRECTED", { url: target, message: "final destination " + finalDest });
+            /* #110: the hop chain is also the authority on where the
+               served document actually lives. The context established
+               before the upstream fetch carries the pre-redirect target,
+               so a navigation that landed on a different origin
+               (google.com -> www.google.com is the live case) left every
+               relative URL the page builds resolving against the
+               pre-redirect origin, and origin-specific upstream endpoints
+               (google.com/async/hpba 404s where www.google.com serves the
+               AI Mode panel batch) silently die. Replace the client's
+               context with the final destination - the same atomic
+               establish-or-update the pre-fetch establishment is, at the
+               seam where the truth is first known. Subresource redirects
+               keep the document's entry (rule: subresource routes never
+               touch it). */
+            if (
+              e.request.mode === "navigate" ||
+              isWorkerDestination(e.request.destination)
+            ) {
+              const navClient = e.resultingClientId || e.clientId;
+              if (navClient && establishContext(VCTX, navClient, finalDest))
+                capContexts(VCTX, VCTX_CAP);
+            }
           }
           /* 1.4 Boride: capture Set-Cookie into the per-origin jar before
              hostile-header surgery strips it from the page view. A 3xx
