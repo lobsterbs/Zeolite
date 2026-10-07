@@ -115,6 +115,25 @@ impl ServerHandshake {
             .cloned()
             .collect()
     }
+
+    /// Extensions both sides declared, with the CLIENT's payloads -
+    /// the credential data an authenticator verifies. The server's
+    /// INFO metadata (common_extensions) says what the server
+    /// demands; it is never what the client sends back, so feeding
+    /// it to verify_payload rejects every honest attempt.
+    pub fn client_extensions(&self) -> Vec<(ExtensionId, Vec<u8>)> {
+        let Some(Packet::Info { extensions, .. }) = &self.client_info else {
+            return Vec::new();
+        };
+        extensions
+            .iter()
+            .filter_map(|(cid, meta)| {
+                let id = ExtensionId::from_u8(*cid).ok()?;
+                let declared = self.server_extensions.iter().any(|(sid, _)| *sid == id);
+                declared.then(|| (id, meta.clone()))
+            })
+            .collect()
+    }
 }
 
 /// Convenience: build a CLOSE packet for stream 0 (handshake rejection).
@@ -181,6 +200,30 @@ mod tests {
         assert_eq!(buffer_remaining, INITIAL_BUFFER_SIZE);
         assert_eq!(hs.version(), Some(NegotiatedVersion::V2));
         assert_eq!(hs.common_extensions().len(), 1);
+    }
+
+    #[test]
+    fn client_extensions_carry_client_payloads() {
+        // common_extensions answers the server's INFO metadata for
+        // the shared IDs; client_extensions answers the client's
+        // payloads. Only the latter is what an authenticator can
+        // verify.
+        let mut hs = ServerHandshake::new(vec![(ExtensionId::PasswordAuth, vec![1])]);
+        hs.handle(&info_packet(2, vec![(0x02, vec![3, b'a', b'd', b'a'])]))
+            .unwrap();
+        assert_eq!(
+            hs.common_extensions(),
+            vec![(ExtensionId::PasswordAuth, vec![1])]
+        );
+        assert_eq!(
+            hs.client_extensions(),
+            vec![(ExtensionId::PasswordAuth, vec![3, b'a', b'd', b'a'])]
+        );
+        // An extension the server does not declare is not common.
+        let mut hs2 = ServerHandshake::new(vec![]);
+        hs2.handle(&info_packet(2, vec![(0x02, vec![9])])).unwrap();
+        assert!(hs2.client_extensions().is_empty());
+        assert!(hs2.common_extensions().is_empty());
     }
 
     #[test]

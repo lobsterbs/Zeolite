@@ -649,8 +649,8 @@ enum AuthState {
 }
 
 /// Check the client's declared extension payloads against the
-/// configured authenticators. Called with the intersection of the
-/// server and client extension lists. The KeyAuth instance must be
+/// configured authenticators. Called with the client's payloads
+/// for the extensions both sides listed. The KeyAuth instance must be
 /// the SAME one whose challenge went out in the server INFO, otherwise
 /// the client's signature verifies against the wrong challenge.
 fn check_auth(
@@ -926,7 +926,7 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                     // an auth extension is configured: no stream creation
                     // for unauthenticated clients.
                     if !auth_verified && shared.auth_required() {
-                        match check_auth(&shared, keyauth.as_ref(), &handshake.common_extensions())
+                        match check_auth(&shared, keyauth.as_ref(), &handshake.client_extensions())
                         {
                             AuthState::Reject(reason) => {
                                 let _ =
