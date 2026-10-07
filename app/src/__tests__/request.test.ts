@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /* The request lifecycle moved out of sw.ts (issue #82): the engine
    module no longer registers the service worker, so its seams are
@@ -9,12 +9,26 @@ import { describe, expect, it, vi } from "vitest";
    the vendored libcurl bundle is a browser/wasm artifact, and these
    tests pin classification and pass-through, not transport. */
 
-vi.mock("../transport", () => ({
-  currentEngine: () => "libcurl",
-  wispTransport: { ready: async () => {}, fetch: async () => new Response("mock") },
+const transportMock = vi.hoisted(() => ({
+  calls: 0,
+  gate: undefined as undefined | Promise<void>,
 }));
 
-import { classifyRtype, handleFetch, reqDest, withDeadline } from "../request";
+/* The transport fetch is controllable: the stale-cache tests gate the
+   upstream round trip and count calls (dedup coverage). */
+vi.mock("../transport", () => ({
+  currentEngine: () => "libcurl",
+  wispTransport: {
+    ready: async () => {},
+    fetch: async () => {
+      transportMock.calls++;
+      if (transportMock.gate) await transportMock.gate;
+      return new Response("mock", { headers: { "content-type": "text/html" } });
+    },
+  },
+}));
+
+import { classifyRtype, handleFetch, pageCacheMatch, reqDest, withDeadline } from "../request";
 
 describe("reqDest (#82 seam)", () => {
   it("falls back to sec-fetch-dest when destination is empty (Firefox, #40)", () => {
@@ -117,5 +131,92 @@ describe("withDeadline (#107)", () => {
   it("a non-positive deadline passes the promise through untouched", async () => {
     const p = Promise.resolve("ok");
     expect(withDeadline(p, 0, "x")).toBe(p);
+  });
+});
+
+describe("pageCacheMatch stale-while-revalidate dedup", () => {
+  /* A Map-backed cache bucket: pageCacheMatch only needs
+     open/match/put/delete/keys on the one bucket. */
+  const pagesStub = (urls: string[]) => {
+    const store = new Map(urls.map((u) => [u, staleEntry()] as const));
+    const cache = {
+      match: async (req: Request) => store.get(req.url),
+      put: async (req: Request, resp: Response) => void store.set(req.url, resp),
+      delete: async (req: Request) => store.delete(req.url),
+      keys: async () => [...store.keys()].map((u) => new Request(u)),
+    };
+    return { open: async () => cache };
+  };
+
+  /* No cache-control header: the default 10-minute TTL applies, so a
+     cached-at 20 minutes old is stale. */
+  const staleEntry = (): Response =>
+    new Response("<html></html>", {
+      headers: {
+        "content-type": "text/html",
+        "x-zl-cached-at": String(Date.now() - 20 * 60 * 1000),
+      },
+    });
+
+  const PAGES = [
+    "https://e.example/page",
+    "https://e.example/other",
+    "https://e.example/again",
+  ];
+
+  beforeEach(() => {
+    transportMock.calls = 0;
+    transportMock.gate = undefined;
+    vi.stubGlobal("caches", pagesStub(PAGES));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("serves the stale hit without waiting on the upstream refresh", async () => {
+    transportMock.gate = new Promise(() => {}); /* never settles */
+    const kept: Promise<unknown>[] = [];
+    const hit = await pageCacheMatch(new Request(PAGES[0]), (p) => {
+      kept.push(p);
+    });
+    expect(hit?.status).toBe(200);
+    /* the refresh rides waitUntil, it must not block the response */
+    expect(kept.length).toBe(1);
+    expect(transportMock.calls).toBe(1);
+  });
+
+  it("coalesces concurrent stale hits into one upstream fetch", async () => {
+    let release!: () => void;
+    transportMock.gate = new Promise<void>((res) => {
+      release = res;
+    });
+    const hits = await Promise.all([
+      pageCacheMatch(new Request(PAGES[1])),
+      pageCacheMatch(new Request(PAGES[1])),
+      pageCacheMatch(new Request(PAGES[1])),
+    ]);
+    expect(hits.every((h) => h?.status === 200)).toBe(true);
+    expect(transportMock.calls).toBe(1);
+    release();
+  });
+
+  it("starts a new refresh once the in-flight one has settled", async () => {
+    let release!: () => void;
+    transportMock.gate = new Promise<void>((res) => {
+      release = res;
+    });
+    const kept: Promise<unknown>[] = [];
+    await pageCacheMatch(new Request(PAGES[2]), (p) => {
+      kept.push(p);
+    });
+    expect(transportMock.calls).toBe(1);
+    release();
+    await Promise.all(kept);
+    transportMock.gate = undefined;
+    await pageCacheMatch(new Request(PAGES[2]), (p) => {
+      kept.push(p);
+    });
+    expect(transportMock.calls).toBe(2);
   });
 });

@@ -120,6 +120,9 @@ const ZL_PAGES = "zeolite-pages-v1";
 const ZL_CACHED_AT = "x-zl-cached-at";
 const ZL_DEFAULT_TTL = 10 * 60 * 1000;
 const ZL_PAGE_LIMIT = 60;
+/* One in-flight stale refresh per cache key: concurrent stale hits
+   coalesce into a single upstream fetch instead of one each. */
+const staleRefreshInFlight = new Map<string, Promise<void>>();
 
 export function cacheTtl(headers: Headers): number {
   const cc = (headers.get("cache-control") ?? "").toLowerCase();
@@ -153,30 +156,39 @@ export async function pageCacheMatch(
        keepAlive callback hands the promise to the fetch event's
        waitUntil, so the worker outlives the refresh instead of the
        refresh dying with the worker the moment the response is
-       served. */
-    const refresh = (async () => {
-      try {
-        /* #35: a background refresh fetches the RAW upstream body. For
-           serve-time-transformed JS (worker/script destinations) the
-           composed copy is built on the fetch path, which this refresh
-           bypasses - storing raw here would regress the entry. Drop the
-           stale entry instead: this hit serves from memory, the next
-           request re-fetches and re-transforms. */
-        /* #94: ONE copy of the JS-transform destination set (the refresh
-           skip must match the serve-time transform branches). */
-        const jsServe =
-          isWorkerDestination(req.destination) ||
-          (JS_TRANSFORM_DESTS.has(req.destination) && isJs(hit));
-        if (jsServe) {
-          await (await caches.open(ZL_PAGES)).delete(req);
-        } else {
-          const fresh = await wispFetchCacheBypass(req);
-          if (fresh.ok) await pageCacheStore(req, fresh);
+       served. Torture report (stale SWR): concurrent stale hits
+       for one entry used to each pay their own upstream fetch; one
+       in-flight refresh per cache key coalesces them into a single
+       round trip. */
+    let refresh = staleRefreshInFlight.get(req.url);
+    if (!refresh) {
+      refresh = (async () => {
+        try {
+          /* #35: a background refresh fetches the RAW upstream body. For
+             serve-time-transformed JS (worker/script destinations) the
+             composed copy is built on the fetch path, which this refresh
+             bypasses - storing raw here would regress the entry. Drop the
+             stale entry instead: this hit serves from memory, the next
+             request re-fetches and re-transforms. */
+          /* #94: ONE copy of the JS-transform destination set (the refresh
+             skip must match the serve-time transform branches). */
+          const jsServe =
+            isWorkerDestination(req.destination) ||
+            (JS_TRANSFORM_DESTS.has(req.destination) && isJs(hit));
+          if (jsServe) {
+            await (await caches.open(ZL_PAGES)).delete(req);
+          } else {
+            const fresh = await wispFetchCacheBypass(req);
+            if (fresh.ok) await pageCacheStore(req, fresh);
+          }
+        } catch {
+          /* offline: the stale copy stays served */
         }
-      } catch {
-        /* offline: the stale copy stays served */
-      }
-    })();
+      })();
+      staleRefreshInFlight.set(req.url, refresh);
+      /* the IIFE never rejects: its whole body is one try/catch. */
+      void refresh.then(() => staleRefreshInFlight.delete(req.url));
+    }
     keepAlive(refresh);
   }
   /* Issues #13 + #18: a Range request is answered from the stored full
