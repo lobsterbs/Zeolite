@@ -32,6 +32,7 @@ use axum::{
 };
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
+use kdl::{KdlDocument, KdlNode, KdlValue};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -405,6 +406,168 @@ impl Config {
         cfg.key_hex = key_hex;
         Ok(cfg)
     }
+}
+
+impl Config {
+    /// Read the configuration from a KDL document over the defaults
+    /// (layering: defaults < file < environment < flags). Fail
+    /// closed like `auth_config` and clamped like `env_num`: an
+    /// unknown node or a value below the safe minimum is a hard
+    /// error, so a config file can never silently disable a limit
+    /// or drop a setting.
+    pub fn from_kdl(text: &str) -> Result<Self, String> {
+        let doc = text
+            .parse::<KdlDocument>()
+            .map_err(|e| format!("invalid KDL: {e}"))?;
+        let mut cfg = Self::default();
+        let mut password = None;
+        let mut key_hex = None;
+        for node in doc.nodes() {
+            match node.name().value() {
+                "bind" => cfg.bind = kdl_string(node, "bind")?,
+                "port" => cfg.port = kdl_u16(node, "port", 1)?,
+                "static" => cfg.static_dir = kdl_string(node, "static")?,
+                "max_connections" => {
+                    cfg.max_connections = kdl_usize(node, "max_connections", 1)?
+                }
+                "max_connections_per_ip" => {
+                    cfg.max_connections_per_ip =
+                        kdl_usize(node, "max_connections_per_ip", 0)?
+                }
+                "max_streams_per_connection" => {
+                    cfg.max_streams_per_conn =
+                        kdl_usize(node, "max_streams_per_connection", 1)?
+                }
+                "connect_timeout" => {
+                    cfg.connect_timeout = kdl_secs(node, "connect_timeout")?
+                }
+                "stream_idle_timeout" => {
+                    cfg.stream_idle_timeout = kdl_secs(node, "stream_idle_timeout")?
+                }
+                "max_connection_duration" => {
+                    cfg.max_conn_duration = kdl_secs(node, "max_connection_duration")?
+                }
+                "max_udp_datagram_size" => {
+                    cfg.max_udp_datagram = kdl_usize(node, "max_udp_datagram_size", 64)?
+                }
+                "max_udp_bytes" => cfg.max_udp_bytes = kdl_u64(node, "max_udp_bytes", 1024)?,
+                "max_udp_packets" => cfg.max_udp_packets = kdl_u64(node, "max_udp_packets", 1)?,
+                "max_ws_message" => cfg.max_ws_message = kdl_usize(node, "max_ws_message", 2048)?,
+                "motd" => cfg.motd = kdl_opt_string(node, "motd")?,
+                "allowed_origins" => cfg.allowed_origins = kdl_strings(node, "allowed_origins")?,
+                "frame_ancestors" => {
+                    cfg.frame_ancestors = kdl_opt_string(node, "frame_ancestors")?
+                }
+                "auth" => {
+                    let user = kdl_auth_field(node, "user");
+                    let pass = kdl_auth_field(node, "password");
+                    let key = kdl_auth_field(node, "key_hex");
+                    let (pw, k) = auth_config(user, pass, key)?;
+                    password = pw;
+                    key_hex = k;
+                }
+                other => return Err(format!("unknown config node `{other}`")),
+            }
+        }
+        cfg.password = password;
+        cfg.key_hex = key_hex;
+        Ok(cfg)
+    }
+}
+
+/// Node arguments in order (entries without names).
+fn kdl_args(node: &KdlNode) -> Vec<&KdlValue> {
+    let mut out = Vec::new();
+    for entry in node.entries() {
+        if entry.name().is_none() {
+            out.push(entry.value());
+        }
+    }
+    out
+}
+
+/// A string argument, or an error naming the node.
+fn kdl_string(node: &KdlNode, name: &str) -> Result<String, String> {
+    kdl_opt_string(node, name)?.ok_or_else(|| format!("`{name}` expects a string"))
+}
+
+/// An optional string argument; a missing value is None, a present
+/// non-string (or an empty string) is an error.
+fn kdl_opt_string(node: &KdlNode, name: &str) -> Result<Option<String>, String> {
+    match kdl_args(node).first().copied() {
+        None => Ok(None),
+        Some(KdlValue::String(s)) if !s.is_empty() => Ok(Some(s.clone())),
+        Some(_) => Err(format!("`{name}` expects a non-empty string")),
+    }
+}
+
+/// String arguments (an empty list is valid, e.g. no origins).
+fn kdl_strings(node: &KdlNode, name: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for arg in kdl_args(node) {
+        match arg {
+            KdlValue::String(s) if !s.is_empty() => out.push(s.clone()),
+            _ => return Err(format!("`{name}` expects strings")),
+        }
+    }
+    Ok(out)
+}
+
+/// An integer argument with a hard minimum, mirroring `env_num`:
+/// config must never disable a limit entirely.
+fn kdl_int(node: &KdlNode, name: &str, min: i128) -> Result<i128, String> {
+    match kdl_args(node).first().copied() {
+        Some(KdlValue::Int(i)) if *i >= min => Ok(*i),
+        _ => Err(format!("`{name}` expects an integer >= {min}")),
+    }
+}
+
+fn kdl_usize(node: &KdlNode, name: &str, min: usize) -> Result<usize, String> {
+    usize::try_from(kdl_int(node, name, min as i128)?)
+        .map_err(|_| format!("`{name}` is out of range"))
+}
+
+fn kdl_u16(node: &KdlNode, name: &str, min: u16) -> Result<u16, String> {
+    u16::try_from(kdl_int(node, name, min as i128)?)
+        .map_err(|_| format!("`{name}` is out of range"))
+}
+
+fn kdl_u64(node: &KdlNode, name: &str, min: u64) -> Result<u64, String> {
+    u64::try_from(kdl_int(node, name, min as i128)?)
+        .map_err(|_| format!("`{name}` is out of range"))
+}
+
+/// A duration in seconds, minimum one like `env_secs`.
+fn kdl_secs(node: &KdlNode, name: &str) -> Result<Duration, String> {
+    Ok(Duration::from_secs(kdl_u64(node, name, 1)?))
+}
+
+/// One auth field: either a child node (`auth { user "ada" }`) or a
+/// prop (`auth user="ada"`). Empty values count as unset, like the
+/// environment overlay.
+fn kdl_auth_field(node: &KdlNode, key: &str) -> Option<String> {
+    if let Some(children) = node.children() {
+        for child in children.nodes() {
+            if child.name().value() == key {
+                if let Some(KdlValue::String(s)) = kdl_args(child).first().copied() {
+                    if !s.is_empty() {
+                        return Some(s.clone());
+                    }
+                }
+            }
+        }
+    }
+    for entry in node.entries() {
+        let Some(n) = entry.name() else { continue };
+        if n.value() == key {
+            if let KdlValue::String(s) = entry.value() {
+                if !s.is_empty() {
+                    return Some(s.clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Shared across connections: config, connection counters (global
@@ -2300,5 +2463,82 @@ mod tests {
         assert_eq!(key.unwrap().len(), 64);
         let (pw, key) = auth_config(None, None, None).unwrap();
         assert!(pw.is_none() && key.is_none());
+    }
+
+    #[test]
+    fn kdl_config_parses_every_field() {
+        let text = format!(
+            "bind \"10.0.0.1\"\n\
+             port 6003\n\
+             static \"/srv\"\n\
+             max_connections 5\n\
+             max_connections_per_ip 2\n\
+             max_streams_per_connection 3\n\
+             connect_timeout 7\n\
+             stream_idle_timeout 60\n\
+             max_connection_duration 120\n\
+             max_udp_datagram_size 128\n\
+             max_udp_bytes 4096\n\
+             max_udp_packets 9\n\
+             max_ws_message 2048\n\
+             motd \"hi\"\n\
+             allowed_origins \"https://a.example\" \"https://b.example\"\n\
+             frame_ancestors \"https://host.example\"\n\
+             auth user=\"ada\" password=\"pw\" key_hex=\"{key}\"\n\",
+            key = "00".repeat(32)
+        );
+        let cfg = Config::from_kdl(&text).unwrap();
+        assert_eq!(cfg.bind, "10.0.0.1");
+        assert_eq!(cfg.port, 6003);
+        assert_eq!(cfg.static_dir, "/srv");
+        assert_eq!(cfg.max_connections, 5);
+        assert_eq!(cfg.max_connections_per_ip, 2);
+        assert_eq!(cfg.max_streams_per_conn, 3);
+        assert_eq!(cfg.connect_timeout, Duration::from_secs(7));
+        assert_eq!(cfg.stream_idle_timeout, Duration::from_secs(60));
+        assert_eq!(cfg.max_conn_duration, Duration::from_secs(120));
+        assert_eq!(cfg.max_udp_datagram, 128);
+        assert_eq!(cfg.max_udp_bytes, 4096);
+        assert_eq!(cfg.max_udp_packets, 9);
+        assert_eq!(cfg.max_ws_message, 2048);
+        assert_eq!(cfg.motd.as_deref(), Some("hi"));
+        assert_eq!(
+            cfg.allowed_origins,
+            vec!["https://a.example", "https://b.example"]
+        );
+        assert_eq!(
+            cfg.frame_ancestors.as_deref(),
+            Some("https://host.example")
+        );
+        assert_eq!(cfg.password.unwrap().0, "ada");
+        assert_eq!(cfg.key_hex, Some("00".repeat(32)));
+    }
+
+    #[test]
+    fn kdl_config_rejects_unknown_nodes_and_bad_values() {
+        // Unknown nodes are hard errors: a typo must not silently
+        // leave a setting at its default.
+        assert!(Config::from_kdl("nonsense \"x\"").is_err());
+        // Below-minimum and malformed values fail like env_num.
+        assert!(Config::from_kdl("max_connections 0").is_err());
+        assert!(Config::from_kdl("port \"sixty\"").is_err());
+        assert!(Config::from_kdl("port 0").is_err());
+        assert!(Config::from_kdl("connect_timeout 0").is_err());
+        assert!(Config::from_kdl("bind 5").is_err());
+    }
+
+    #[test]
+    fn kdl_config_auth_fails_closed() {
+        // Half-set credentials in the file are a hard error,
+        // exactly like the environment overlay.
+        assert!(Config::from_kdl("auth user=\"ada\"").is_err());
+        assert!(Config::from_kdl("auth password=\"pw\"").is_err());
+        // A malformed key fails whatever its length.
+        assert!(Config::from_kdl(&format!("auth key_hex=\"{}\"", "z".repeat(64))).is_err());
+        // Both field shapes parse; good credentials land.
+        let cfg = Config::from_kdl("auth user=\"ada\" password=\"pw\"").unwrap();
+        assert_eq!(cfg.password.unwrap().0, "ada");
+        let cfg = Config::from_kdl("auth {\n  user \"ada\"\n  password \"pw\"\n}").unwrap();
+        assert_eq!(cfg.password.unwrap().0, "ada");
     }
 }

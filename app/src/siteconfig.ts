@@ -1,21 +1,21 @@
-/* SiteConfig (Phase 3): per-site rules loaded from /siteconfig.json at
+/* SiteConfig (Phase 3): per-site rules loaded from /siteconfig.kdl at
    engine origin. Every compat-suite failure becomes a rule here, never
    a hardcoded branch in the rewriter or SW.
 
-   Shape (all fields optional):
-   {
-     "rules": {
-       "youtube.com":  { "inject": ["/hooks/yt.js"],
-                         "block":  ["ad.doubleclick.net"],
-                         "plugins": ["strip-trackers"] }
+   Grammar (KDL v2 subset, parser in kdl.ts):
+     site "youtube.com" {
+       inject "/hooks/yt.js"
+       block "ad.doubleclick.net"
+       plugins "strip-trackers"
+       fingerprint "profile-data-or-node"
      }
-   }
 
    Matching: longest host-suffix wins (youtube.com matches
    www.youtube.com and music.youtube.com, but a more specific key
    like music.youtube.com wins over youtube.com). */
 
 import { engineBindingError, resolveProfile, type FingerprintProfile } from "./fingerprint";
+import { parseKdl, type KdlNode } from "./kdl";
 
 export interface SiteRule {
   /** Script paths (engine-origin) injected into <head> after the
@@ -42,10 +42,28 @@ export function siteRules(): Promise<SiteRules> {
   if (!cached) {
     cached = (async () => {
       try {
-        const resp = await fetch("/siteconfig.json", { cache: "no-cache" });
+        const resp = await fetch("/siteconfig.kdl", { cache: "no-cache" });
         if (!resp.ok) return {};
-        const data = (await resp.json()) as { rules?: SiteRules };
-        return data.rules ?? {};
+        const rules: SiteRules = {};
+        for (const node of parseKdl(await resp.text())) {
+          const host = node.args[0];
+          if (node.name !== "site" || typeof host !== "string" || host.length === 0) {
+            continue;
+          }
+          const rule: SiteRule = {};
+          for (const child of node.children) {
+            const strs = child.args.filter((a): a is string => typeof a === "string");
+            if (child.name === "inject") rule.inject = strs;
+            else if (child.name === "block") rule.block = strs;
+            else if (child.name === "plugins") rule.plugins = strs;
+            else if (child.name === "fingerprint") {
+              const v = kdlNodeValue(child);
+              if (v !== null) rule.fingerprint = v;
+            }
+          }
+          rules[host] = rule;
+        }
+        return rules;
       } catch {
         return {};
       }
@@ -89,4 +107,19 @@ export function ruleProfile(rule: SiteRule, engine: string): FingerprintProfile 
   } catch {
     return null;
   }
+}
+
+/** #80: a fingerprint child node as profile data: children and props
+    become an object, a single arg is the value, several args an
+    array, none is null (no data). resolveProfile validates the
+    result; bad site data must never break requests. */
+function kdlNodeValue(node: KdlNode): unknown {
+  const keys = Object.keys(node.props);
+  if (node.children.length > 0 || keys.length > 0) {
+    const obj: Record<string, unknown> = { ...node.props };
+    for (const child of node.children) obj[child.name] = kdlNodeValue(child);
+    return obj;
+  }
+  if (node.args.length === 1) return node.args[0] ?? null;
+  return node.args.length > 0 ? node.args : null;
 }

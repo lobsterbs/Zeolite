@@ -61,6 +61,11 @@ suite:
   ZL_WISP_PASSWORD pair or a malformed ZL_WISP_ED25519_HEX is a hard
   startup error (exit 2). Both used to filter to None, leaving an
   open server that looked configured.
+- The KDL config file (ZL_CONFIG / --config) fails closed like the
+  environment: unknown settings are rejected, limits clamp to the
+  same minimums as the environment overlay, and the auth block runs
+  through the same auth_config validation. A malformed or unreadable
+  file refuses to start.
 - Optional per-IP connection cap (MAX_CONNECTIONS_PER_IP, default
   off): a reverse proxy collapses all peers into one address, so the
   default cannot be a per-IP number.

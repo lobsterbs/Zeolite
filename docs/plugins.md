@@ -1,13 +1,12 @@
 # Zeolite plugin API (Phase 4)
 
 A plugin is an ES module served at `/plugins/<name>.js` on the engine
-origin. It is listed in a site's `plugins` array in `siteconfig.json`:
+origin. It is listed in a site's `plugins` child node in
+`siteconfig.kdl`:
 
-```json
-{
-  "rules": {
-    "youtube.com": { "plugins": ["strip-trackers"] }
-  }
+```kdl
+site "youtube.com" {
+  plugins "strip-trackers"
 }
 ```
 
@@ -53,7 +52,7 @@ scripts (use the `inject` rule for that).
 
 Drop the built module at `app/dist/plugins/<name>.js`. Nothing in the
 engine source needs to change: loading is fully data-driven from
-siteconfig.json, which is how a third party can ship a plugin without
+siteconfig.kdl, which is how a third party can ship a plugin without
 touching engine source (the Phase 4 done-when).
 
 Known gap: `app/src/plugins.ts` loads plugin modules with dynamic

@@ -42,15 +42,15 @@ honest no-listener errors. This pass adds runtime.alarms (in-memory timers in th
 - `app/src/transport.ts` — upstream transport seam: wisp/libcurl client lifecycle behind the Transport interface (issue #84).
 - `app/src/extensions/` — WebExtension compatibility runtime.
 - `app/src/diag.ts` — bounded diagnostics.
-- `app/src/rules.ts` - interception rules engine (block/allow/rewrite/modify, compiled from /rules.json).
+- `app/src/rules.ts` - interception rules engine (block/allow/rewrite/modify, compiled from /rules.kdl).
 - `app/src/intercept.ts` - public interception API (Phase 1).
 - `app/src/transit.ts` — NativeTransit transport-mode decision layer + fallback record.
 - `suite/` — compatibility probes.
 - `docs/` — architecture, roadmap, versioning and adapter docs.
 
 ## Interception API + rules engine (Phase 1, 1.1 Oxide)
-**Implemented** in `app/src/intercept.ts` (public `intercept(kind, handler)`: request/response plus navigation/worker/websocket/fetch filtered dispatch; block, URL rewrite, header merge; opt-in response body transforms behind the 512 KiB BODY_LIMIT gate, never for documents/stylesheets) and `app/src/rules.ts` (block/allow/rewrite/modify lists with resource-type filters, compiled once from `app/public/rules.json`, which ships the ad/tracker host lists migrated from the browser app's server-side engine plu
-s the captcha-host allowlist). The host toggles rules via the `zl:adblock` control message; the flag resets to enabled on SW restart. Contract: docs/interception.md. Honest limits: rules.json is global (per-site compatibility stays in siteconfig.json); the host's per-site adblock overrides apply only to the server-side engine; transformed responses are not page-cached.
+**Implemented** in `app/src/intercept.ts` (public `intercept(kind, handler)`: request/response plus navigation/worker/websocket/fetch filtered dispatch; block, URL rewrite, header merge; opt-in response body transforms behind the 512 KiB BODY_LIMIT gate, never for documents/stylesheets) and `app/src/rules.ts` (block/allow/rewrite/modify lists with resource-type filters, compiled once from `app/public/rules.kdl`, which ships the ad/tracker host lists migrated from the browser app's server-side engine plu
+s the captcha-host allowlist). The host toggles rules via the `zl:adblock` control message; the flag resets to enabled on SW restart. Contract: docs/interception.md. Honest limits: rules.kdl is global (per-site compatibility stays in siteconfig.kdl); the host's per-site adblock overrides apply only to the server-side engine; transformed responses are not page-cached.
 
 ## Hard invariants
 - Rewriting stays streaming; never buffer whole documents for convenience.

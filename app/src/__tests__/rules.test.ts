@@ -72,24 +72,24 @@ describe("compileRules", () => {
 });
 
 describe("loadRules", () => {
-  it("missing rules.json means no rules", async () => {
+  it("missing rules.kdl means no rules", async () => {
     const orig = globalThis.fetch;
     globalThis.fetch = (async () => new Response("nf", { status: 404 })) as typeof fetch;
     expect((await loadRules()).block).toEqual([]);
     globalThis.fetch = orig;
   });
 
-  it("malformed json means no rules", async () => {
+  it("malformed kdl means no rules", async () => {
     const orig = globalThis.fetch;
-    globalThis.fetch = (async () => new Response("{oops", { status: 200 })) as typeof fetch;
+    globalThis.fetch = (async () => new Response('block "oops', { status: 200 })) as typeof fetch;
     expect((await loadRules()).block).toEqual([]);
     globalThis.fetch = orig;
   });
 
-  it("loads and compiles rule data", async () => {
+  it("loads and compiles kdl rule data", async () => {
     const orig = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ block: [{ host: "BLOCK.example" }] }), {
+      new Response('block "BLOCK.example"', {
         status: 200,
       })) as typeof fetch;
     const r = await loadRules();

@@ -1,16 +1,15 @@
 /* Interception rules engine (Phase 1, 1.1 Oxide). Data-driven
    block / allow / rewrite / modify lists with optional resource-type
-   filters, compiled once per SW lifetime. The default /rules.json
+   filters, compiled once per SW lifetime. The default /rules.kdl
    ships the ad + tracker host lists migrated from the browser app's
    server-side engine, so client-side mode blocks the same hosts.
 
-   Shape (all fields optional):
-   {
-     "block":   [{ "host": "doubleclick.net", "types": ["script"] }],
-     "allow":   [{ "host": "challenges.cloudflare.com" }],
-     "rewrite": [{ "from": "http://", "to": "https://" }],
-     "modify":  [{ "host": "example.com", "headers": { "user-agent": "..." } }]
-   }
+   Grammar (KDL v2 subset, parser in kdl.ts):
+     block   "doubleclick.net"                  // every type
+     allow   "challenges.cloudflare.com"
+     block   "ads.example" { types "script" }   // filtered
+     rewrite "http://insecure.example/" "https://insecure.example/"
+     modify  "news.example" { types "fetch"; header "x-rule" "1" }
 
    Host matching follows the siteconfig grammar: exact hostname or
    any parent domain. allow beats block (captcha hosts must never be
@@ -18,6 +17,8 @@
    zl:adblock control message and pushes per-site overrides (host,
    adblock, user-agent) via zl:rules; disabled rules are a no-op, the
    data stays loaded. See docs/interception.md. */
+
+import { parseKdl, type KdlNode } from "./kdl";
 
 export type ResourceType =
   | "document"
@@ -173,17 +174,62 @@ export function applyRules(r: CompiledRules, url: string, rtype: ResourceType): 
   return dec;
 }
 
+/** Resource-type filter of an entry node: the `types` child node's
+    string args; undefined when absent. */
+function typesOf(node: KdlNode): ResourceType[] | undefined {
+  const t = node.children.find((c) => c.name === "types");
+  return t ? t.args.filter((a): a is ResourceType => typeof a === "string") : undefined;
+}
+
+/** Parse the rules.kdl grammar into compileRules input. Unknown node
+    names are skipped, like the old JSON parser ignored unknown
+    fields; a bad file still means "no rules". */
+function parseRulesKdl(doc: KdlNode[]): RulesData {
+  const data: RulesData = {};
+  for (const node of doc) {
+    const host = node.args[0];
+    if (node.name === "block" || node.name === "allow") {
+      if (typeof host !== "string" || host.length === 0) continue;
+      const entry: HostEntry = { host, types: typesOf(node) };
+      if (node.name === "block") {
+        if (!data.block) data.block = [];
+        data.block.push(entry);
+      } else {
+        if (!data.allow) data.allow = [];
+        data.allow.push(entry);
+      }
+    } else if (node.name === "rewrite") {
+      const to = node.args[1];
+      if (typeof host !== "string" || typeof to !== "string" || !host || !to) continue;
+      if (!data.rewrite) data.rewrite = [];
+      data.rewrite.push({ from: host, to, types: typesOf(node) });
+    } else if (node.name === "modify") {
+      if (typeof host !== "string" || host.length === 0) continue;
+      const headers: Record<string, string> = {};
+      for (const c of node.children) {
+        if (c.name !== "header") continue;
+        const n = c.args[0];
+        const v = c.args[1];
+        if (typeof n === "string" && typeof v === "string") headers[n] = v;
+      }
+      if (!data.modify) data.modify = [];
+      data.modify.push({ host, headers, types: typesOf(node) });
+    }
+  }
+  return data;
+}
+
 let cached: Promise<CompiledRules> | null = null;
 
-/** Fetch (and memoize for the SW lifetime) /rules.json. A missing or
+/** Fetch (and memoize for the SW lifetime) /rules.kdl. A missing or
     malformed file means "no rules": the engine must still work. */
 export function loadRules(): Promise<CompiledRules> {
   if (!cached) {
     cached = (async () => {
       try {
-        const resp = await fetch("/rules.json", { cache: "no-cache" });
+        const resp = await fetch("/rules.kdl", { cache: "no-cache" });
         if (!resp.ok) return compileRules(null);
-        return compileRules(await resp.json());
+        return compileRules(parseRulesKdl(parseKdl(await resp.text())));
       } catch {
         return compileRules(null);
       }
@@ -194,7 +240,7 @@ export function loadRules(): Promise<CompiledRules> {
 
 /* ---- Runtime per-site overrides (host app, zl:rules) --------------
    The host app pushes per-site decisions at runtime, beside the
-   static /rules.json data: a host-scoped adblock override and a
+   static /rules.kdl data: a host-scoped adblock override and a
    User-Agent string (plus a default UA for hosts without an
    override). Same host grammar as the static lists: exact hostname
    or any parent domain, longest suffix wins. Ephemeral like the

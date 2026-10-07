@@ -5,7 +5,7 @@ Neither depends on any host application.
 
 ## Rules engine (app/src/rules.ts)
 
-Data-driven lists loaded once per SW lifetime from /rules.json at the
+Data-driven lists loaded once per SW lifetime from /rules.kdl at the
 engine origin:
 
 | list | effect |
@@ -20,7 +20,15 @@ script, style, image, font, media, websocket, worker, manifest,
 eventsource, wasm, fetch, other). Host matching follows the
 siteconfig grammar: exact hostname or any parent domain.
 
-The shipped /rules.json contains the ad + tracker host lists migrated
+```kdl
+block   "doubleclick.net"                  // all types
+allow   "challenges.cloudflare.com"
+block   "ads.example" { types "script" "image" }
+rewrite "http://insecure.example/" "https://insecure.example/"
+modify  "news.example" { types "fetch"; header "x-rule" "1" }
+```
+
+The shipped /rules.kdl contains the ad + tracker host lists migrated
 from the browser app's server-side engine, plus the captcha-host
 allowlist, so client-side mode blocks the same hosts.
 
@@ -94,8 +102,8 @@ SW: no DOM, no page globals.
 
 ## Relation to the other seams
 
-- siteconfig.json stays the per-site compatibility seam (inject,
-  rewrite-time blocked hosts, plugins). rules.json is the global
+- siteconfig.kdl stays the per-site compatibility seam (inject,
+  rewrite-time blocked hosts, plugins). rules.kdl is the global
   policy seam; the runtime per-site overrides (zl:rules) are the
   host-app policy seam.
 - The WebExtension webRequest runtime stays the extension-compat
@@ -107,7 +115,7 @@ SW: no DOM, no page globals.
 ## Status
 
 Implemented (1.1 Oxide; zl:rules per-site overrides added on the
-deep-integration line). Honest limits: rules.json stays global
-(per-site compatibility stays in siteconfig.json; per-site adblock and
+deep-integration line). Honest limits: rules.kdl stays global
+(per-site compatibility stays in siteconfig.kdl; per-site adblock and
 UA arrive at runtime via zl:rules); transformed responses are not
 page-cached.

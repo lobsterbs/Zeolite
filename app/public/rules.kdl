@@ -1,0 +1,39 @@
+// Default interception rules (Phase 1). The ad + tracker host lists
+// are migrated from the browser app's server-side engine so
+// client-side mode blocks the same hosts. allow = captcha/anti-bot
+// widget hosts that must never be stripped (same policy as the
+// server engine). Grammar: docs/interception.md.
+
+block "doubleclick.net"
+block "googlesyndication.com"
+block "googleadservices.com"
+block "adservice.google.com"
+block "adnxs.com"
+block "adsrvr.org"
+block "criteo.com"
+block "taboola.com"
+block "outbrain.com"
+block "rubiconproject.com"
+block "pubmatic.com"
+block "openx.net"
+block "smartadserver.com"
+block "teads.tv"
+block "google-analytics.com"
+block "googletagmanager.com"
+block "analytics.google.com"
+block "scorecardresearch.com"
+block "quantserve.com"
+block "hotjar.com"
+block "mouseflow.com"
+block "fullstory.com"
+block "clarity.ms"
+block "segment.io"
+block "mixpanel.com"
+block "amplitude.com"
+
+allow "challenges.cloudflare.com"
+allow "cloudflare.com"
+allow "js.stripe.com"
+allow "hcaptcha.com"
+allow "www.google.com"
+allow "recaptcha.net"

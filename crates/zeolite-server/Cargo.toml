@@ -25,6 +25,7 @@ tower-http = { version = "0.5", features = ["fs"] }
 bytes = { workspace = true }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures = { version = "0.3" }
+kdl = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

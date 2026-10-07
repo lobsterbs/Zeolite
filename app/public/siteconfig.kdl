@@ -1,0 +1,2 @@
+// Per-site compatibility rules (grammar: app/src/siteconfig.ts).
+// No site rules ship by default.
