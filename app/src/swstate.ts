@@ -208,32 +208,48 @@ export async function siteProfileFor(target: string): Promise<SiteFp> {
    copy refreshed over the zl:docCookie port; a Set-Cookie admitted on
    a proxied fetch/XHR response used to stay invisible until the
    page's next read. The fetch path pushes the fresh jar view over
-   the same port right after admission. Keyed by client id; capped so
-   a page that keeps re-opening docCookie channels cannot grow the
-   map without bound (the oldest entry is dropped, its port simply
-   stops receiving pushes - reads still refresh on demand). */
-const docCookiePorts = new Map<string, { port: MessagePort; page: string }>();
+   the same port right after admission. Keyed by client id, one LIST
+   of ports per client (#108: a guarded same-origin child realm
+   shares its parent's client id; its registration must not evict the
+   parent's port, the push reaches every document of the client);
+   capped so a page that keeps re-opening docCookie channels cannot
+   grow the map without bound (the oldest client is dropped, its
+   ports simply stop receiving pushes - reads still refresh on
+   demand). */
+const docCookiePorts = new Map<string, Array<{ port: MessagePort; page: string }>>();
 const DOC_COOKIE_PORTS_CAP = 128;
 
 export function pushDocCookieView(clientId: string): void {
-  const entry = clientId ? docCookiePorts.get(clientId) : undefined;
-  if (!entry) return;
-  try {
-    entry.port.postMessage({ ok: true, cookie: documentCookieRead(entry.page) });
-  } catch {
-    /* port closed: the page is gone, stop tracking it */
-    docCookiePorts.delete(clientId);
+  const list = clientId ? docCookiePorts.get(clientId) : undefined;
+  if (!list) return;
+  for (let i = list.length - 1; i >= 0; i--) {
+    try {
+      list[i].port.postMessage({ ok: true, cookie: documentCookieRead(list[i].page) });
+    } catch {
+      /* port closed: that document is gone; drop its entry, the
+         client's other documents keep receiving pushes */
+      list.splice(i, 1);
+    }
   }
+  if (!list.length) docCookiePorts.delete(clientId);
 }
 
 /** zl:docCookie: keep the port so the fetch path can push jar updates
     (Set-Cookie on a proxied response) into this client's optimistic
-    document.cookie copy. Cap-aware: past the limit the oldest entry
-    is dropped first. */
+    document.cookie copy. Cap-aware: past the limit the oldest client
+    is dropped first. #108: a guarded child realm registers a second
+    port under the SAME client id; the registry appends, never
+    replaces. */
 export function registerDocCookiePort(clientId: string, port: MessagePort, page: string): void {
-  if (docCookiePorts.size >= DOC_COOKIE_PORTS_CAP && !docCookiePorts.has(clientId)) {
-    const oldest = docCookiePorts.keys().next();
-    if (!oldest.done && oldest.value !== undefined) docCookiePorts.delete(oldest.value);
+  let list = docCookiePorts.get(clientId);
+  if (!list) {
+    if (docCookiePorts.size >= DOC_COOKIE_PORTS_CAP) {
+      const oldest = docCookiePorts.keys().next();
+      if (!oldest.done && oldest.value !== undefined) docCookiePorts.delete(oldest.value);
+    }
+    list = [];
+    docCookiePorts.set(clientId, list);
   }
-  docCookiePorts.set(clientId, { port, page });
+  list.push({ port, page });
+});
 }

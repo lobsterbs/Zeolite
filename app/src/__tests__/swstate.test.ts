@@ -201,6 +201,33 @@ describe("docCookie port registry (#35)", () => {
     pushDocCookieView("newest");
     expect(newest.messages.length).toBe(1);
   });
+
+  it("a same-client second port (guarded child realm, #108) does not evict the first", () => {
+    const parent = fakePort();
+    const child = fakePort();
+    registerDocCookiePort("shared108", parent.port, "https://example.com/");
+    registerDocCookiePort("shared108", child.port, "https://example.com/");
+    pushDocCookieView("shared108");
+    expect(parent.messages.length).toBe(1);
+    expect(child.messages.length).toBe(1);
+  });
+
+  it("a dead port drops only itself; a live sibling of the same client keeps receiving", () => {
+    const live = fakePort();
+    const dead = {
+      port: {
+        postMessage: () => {
+          throw new Error("closed");
+        },
+        close: () => {},
+      } as unknown as MessagePort,
+    };
+    registerDocCookiePort("sibling108", live.port, "https://example.com/");
+    registerDocCookiePort("sibling108", dead.port, "https://example.com/");
+    pushDocCookieView("sibling108");
+    pushDocCookieView("sibling108");
+    expect(live.messages.length).toBe(2);
+  });
 });
 
 describe("shared instances", () => {
