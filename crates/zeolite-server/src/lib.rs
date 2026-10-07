@@ -431,12 +431,10 @@ impl Config {
                     cfg.max_connections = kdl_usize(node, "max_connections", 1)?
                 }
                 "max_connections_per_ip" => {
-                    cfg.max_connections_per_ip =
-                        kdl_usize(node, "max_connections_per_ip", 0)?
+                    cfg.max_connections_per_ip = kdl_usize(node, "max_connections_per_ip", 0)?
                 }
                 "max_streams_per_connection" => {
-                    cfg.max_streams_per_conn =
-                        kdl_usize(node, "max_streams_per_connection", 1)?
+                    cfg.max_streams_per_conn = kdl_usize(node, "max_streams_per_connection", 1)?
                 }
                 "connect_timeout" => {
                     cfg.connect_timeout = kdl_secs(node, "connect_timeout")?
@@ -517,24 +515,26 @@ fn kdl_strings(node: &KdlNode, name: &str) -> Result<Vec<String>, String> {
 /// config must never disable a limit entirely.
 fn kdl_int(node: &KdlNode, name: &str, min: i128) -> Result<i128, String> {
     match kdl_args(node).first().copied() {
-        Some(KdlValue::Int(i)) if *i >= min => Ok(*i),
+        Some(KdlValue::Integer(i)) if *i >= min => Ok(*i),
         _ => Err(format!("`{name}` expects an integer >= {min}")),
     }
 }
 
 fn kdl_usize(node: &KdlNode, name: &str, min: usize) -> Result<usize, String> {
-    usize::try_from(kdl_int(node, name, min as i128)?)
-        .map_err(|_| format!("`{name}` is out of range"))
+    usize::try_from(kdl_int(node, name, min as i128)?).map_err(|_| out_of_range(name))
 }
 
 fn kdl_u16(node: &KdlNode, name: &str, min: u16) -> Result<u16, String> {
-    u16::try_from(kdl_int(node, name, min as i128)?)
-        .map_err(|_| format!("`{name}` is out of range"))
+    u16::try_from(kdl_int(node, name, min as i128)?).map_err(|_| out_of_range(name))
+}
+
+/// The shared out-of-range message for the integer helpers.
+fn out_of_range(name: &str) -> String {
+    format!("`{name}` is out of range")
 }
 
 fn kdl_u64(node: &KdlNode, name: &str, min: u64) -> Result<u64, String> {
-    u64::try_from(kdl_int(node, name, min as i128)?)
-        .map_err(|_| format!("`{name}` is out of range"))
+    u64::try_from(kdl_int(node, name, min as i128)?).map_err(|_| out_of_range(name))
 }
 
 /// A duration in seconds, minimum one like `env_secs`.
@@ -2484,7 +2484,7 @@ mod tests {
              motd \"hi\"\n\
              allowed_origins \"https://a.example\" \"https://b.example\"\n\
              frame_ancestors \"https://host.example\"\n\
-             auth user=\"ada\" password=\"pw\" key_hex=\"{key}\"\n"",
+             auth user=\"ada\" password=\"pw\" key_hex=\"{key}\"\n",
             key = "00".repeat(32)
         );
         let cfg = Config::from_kdl(&text).unwrap();
