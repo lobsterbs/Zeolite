@@ -2007,7 +2007,7 @@ mod tests {
         let mut one = [0u8; 1];
         loop {
             match s.read_exact(&mut one).await {
-                Ok(()) => buf.push(one[0]),
+                Ok(_) => buf.push(one[0]),
                 Err(_) => break,
             }
             if buf.ends_with(b"\r\n\r\n") {
