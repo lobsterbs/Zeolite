@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyNavGuard, navEncode, NAV } from "../bootstrap/navguard";
+import { applyNavGuard, navEncode, NAV, NAVP } from "../bootstrap/navguard";
 import { b64uDecode } from "../codec";
 
 const LOC = "https://engine.host/j/abc";
@@ -130,14 +130,26 @@ describe("applyNavGuard", () => {
     expect(e.form.read(fo)).toBe(navEncode(REAL));
   });
 
-  it("passes relative, engine-origin and opaque URLs through unchanged", () => {
+  it("re-emits relative navigation writes, passes engine-origin and opaque through (#109)", () => {
     const e = makeEnv();
     const a = e.anchor.make();
-    for (const v of ["/local", "img.png", "https://engine.host/j/zzz", "data:text/html,x", "mailto:a@b.c"]) {
+    for (const v of ["/local", "img.png", "?q=1"]) {
+      a.href = v;
+      expect(e.anchor.read(a)).toBe("/j/abc" + NAVP + "/" + encodeURIComponent(v));
+      expect(a.href).toBe(v); /* reads stay page-truthful */
+    }
+    for (const v of ["https://engine.host/j/zzz", "data:text/html,x", "mailto:a@b.c", "#frag", ""]) {
       a.href = v;
       expect(e.anchor.read(a)).toBe(v);
       expect(a.href).toBe(v);
     }
+  });
+
+  it("leaves relative link href writes raw (#109: subresource, SW recovery owns it)", () => {
+    const e = makeEnv();
+    const l = e.link.make();
+    l.href = "/local.css";
+    expect(e.link.read(l)).toBe("/local.css");
   });
 
   it("rewrites protocol-relative URLs using the page location as base", () => {
@@ -153,7 +165,7 @@ describe("applyNavGuard", () => {
     a.setAttribute("href", REAL);
     expect(a.getAttribute("href")).toBe(navEncode(REAL)); /* swap: marker sync */
     a.setAttribute("href", "/local");
-    expect(a.getAttribute("href")).toBe("/local");
+    expect(a.getAttribute("href")).toBe("/j/abc" + NAVP + "/" + encodeURIComponent("/local"));
     a.setAttribute("title", REAL);
     expect(a.getAttribute("title")).toBe(REAL);
     const fo = e.form.make();
@@ -554,7 +566,7 @@ describe("setAttribute robustness (#59)", () => {
     a.setAttribute("HREF", REAL);
     expect(a.getAttribute("HREF")).toBe(navEncode(REAL));
     a.setAttribute("HREF", "/local");
-    expect(a.getAttribute("HREF")).toBe("/local");
+    expect(a.getAttribute("HREF")).toBe("/j/abc" + NAVP + "/" + encodeURIComponent("/local"));
     a.setAttribute("Title", REAL);
     expect(a.getAttribute("Title")).toBe(REAL);
   });
@@ -864,7 +876,8 @@ describe("navguard mint seams (#54 residual 3)", () => {
     a.setAttribute("href", "https://mint3.site/x");
     a.setAttribute("href", "/local");
     await settle();
-    expect(a.getAttribute("href")).toBe("/local"); /* upgrade dropped */
+    /* upgrade dropped: the newer relative write re-emitted (#109) */
+    expect(a.getAttribute("href")).toBe("/j/abc" + NAVP + "/" + encodeURIComponent("/local"));
   });
 
   it("the navigate re-drive rides the minted route", async () => {
@@ -989,40 +1002,38 @@ describe("popup activation guard (#106)", () => {
     };
   }
 
-  it("cancels a target=_blank click on a raw anchor and re-drives through window.open", async () => {
-    stubMint("/j/mp1");
+  it("cancels a target=_blank click and re-opens the marker synchronously (#109)", () => {
     const e = makeClickEnv();
     const ev = clickEv(rawAnchor(e.anchor, "https://pop1.site/x", "_blank"));
     fire(e, "click", ev);
     expect(ev.defaultPrevented).toBe(true);
-    expect(e.opened).toEqual([]); /* the mint is still in flight */
-    await settle();
-    expect(e.opened.length).toBe(1);
-    expect(e.opened[0][0]).toBe("/j/mp1"); /* engine route, not the raw dest */
+    expect(e.opened.length).toBe(1); /* same task: the activation is still live */
+    expect(e.opened[0][0]).toBe(navEncode("https://pop1.site/x")); /* marker, not the raw dest */
+    expect(e.opened[0][1]).toBe("_blank"); /* the anchor's target rides along */
+    expect(e.opened[0][2]).toBe("noopener"); /* target=_blank implies noopener, like the native activation */
   });
 
-  it("a middle-click auxclick is canceled and re-driven without target", async () => {
-    stubMint("/j/mp2");
+  it("a middle-click auxclick is canceled and re-opened with no target name", () => {
     const e = makeClickEnv();
     const ev = clickEv(rawAnchor(e.anchor, "https://pop2.site/x", ""), { button: 1 });
     fire(e, "auxclick", ev);
     expect(ev.defaultPrevented).toBe(true);
-    await settle();
-    expect(e.opened[0][0]).toBe("/j/mp2");
+    expect(e.opened.length).toBe(1);
+    expect(e.opened[0][0]).toBe(navEncode("https://pop2.site/x"));
+    expect(e.opened[0][1]).toBe(""); /* no target: an unnamed window */
+    expect(e.opened[0][2]).toBe(""); /* no rel, no noopener feature */
   });
 
-  it("a ctrl-click on a plain anchor re-drives through window.open", async () => {
-    stubMint("/j/mp3");
+  it("a ctrl-click on a plain anchor re-opens through window.open", () => {
     const e = makeClickEnv();
     const ev = clickEv(rawAnchor(e.anchor, "https://pop3.site/x", ""), { ctrlKey: true });
     fire(e, "click", ev);
     expect(ev.defaultPrevented).toBe(true);
-    await settle();
-    expect(e.opened[0][0]).toBe("/j/mp3");
+    expect(e.opened.length).toBe(1);
+    expect(e.opened[0][0]).toBe(navEncode("https://pop3.site/x"));
   });
 
-  it("a middle activation firing both click and auxclick drives once", async () => {
-    stubMint("/j/mp4");
+  it("a middle activation firing both click and auxclick opens once, then again after the task", async () => {
     const e = makeClickEnv();
     const a = rawAnchor(e.anchor, "https://pop4.site/x", "_blank");
     const ev1 = clickEv(a, { button: 1 });
@@ -1031,8 +1042,10 @@ describe("popup activation guard (#106)", () => {
     fire(e, "auxclick", ev2);
     expect(ev1.defaultPrevented).toBe(true);
     expect(ev2.defaultPrevented).toBe(true);
+    expect(e.opened.length).toBe(1); /* the driven mark dedups the pair */
     await settle();
-    expect(e.opened.length).toBe(1);
+    fire(e, "click", clickEv(a, { button: 1 }));
+    expect(e.opened.length).toBe(2); /* the mark cleared: a later press opens again */
   });
 
   it("engine-route, relative and same-window plain clicks stay native", () => {
@@ -1059,12 +1072,22 @@ describe("popup activation guard (#106)", () => {
     expect(e.opened).toEqual([]);
   });
 
-  it("a refused mint degrades to the marker, never a raw popup", async () => {
+  it("the popup path takes no mint: a controller-less realm opens the marker all the same", () => {
     vi.stubGlobal("navigator", { serviceWorker: {} }); /* controller absent */
     const e = makeClickEnv();
     fire(e, "click", clickEv(rawAnchor(e.anchor, "https://pop7.site/x", "_blank")));
-    await settle();
     expect(e.opened[0][0]).toBe(navEncode("https://pop7.site/x"));
+  });
+
+  it("a modifier popup ignores the named target; rel=noopener is honored (#109)", () => {
+    const e = makeClickEnv();
+    const a = rawAnchor(e.anchor, "https://pop8.site/x", "shim");
+    a.rel = "noopener noreferrer";
+    fire(e, "click", clickEv(a, { ctrlKey: true }));
+    expect(e.opened.length).toBe(1);
+    expect(e.opened[0][0]).toBe(navEncode("https://pop8.site/x"));
+    expect(e.opened[0][1]).toBe(""); /* a modifier activation ignores the target, like a native new tab */
+    expect(e.opened[0][2]).toBe("noopener");
   });
 });
 

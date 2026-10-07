@@ -180,7 +180,7 @@ jobs:
           test -f app/dist/libcurl/index.mjs
           test -f app/dist/epoxy/epoxy.js
           test -f app/dist/epoxy/epoxy.wasm
-      - name: Bootstrap size budget (must stay under 19 KiB minified)
+      - name: Bootstrap size budget (must stay under 20 KiB minified)
         # Raised from 5120 for the #28 navigation guard (window.open,
         # anchor/area/iframe/form/link URL property + setAttribute
         # rewrites, form submit paths, WebRTC removal) and the module
@@ -229,13 +229,24 @@ jobs:
         # child inherits the proxy origin, so its storage/cookie
         # surfaces get the guarding page's site scoping) - per-page
         # privacy correctness, same class as the rows above.
+        # Raised 19456 -> 20480 for #109: the popup sync-open (a
+        # popup-class activation must ride the original window.open
+        # while its transient user activation is live; the minted
+        # re-drive outlived the activation window on heavy pages,
+        # so the popup was blocked and the button only visibly
+        # pressed) and the relative navigation-bound re-emit
+        # (anchor/area href, iframe src, form action relative
+        # writes re-emit through the #101 parent-relative marker
+        # so the navigation stays in engine scope instead of
+        # landing on the proxy origin) - per-page correctness,
+        # same class as the rows above.
         # Raises are deliberate
         # decisions recorded here, never quiet accommodations; CI
         # prints the measured size.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 19456 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 19456)"; exit 1; fi
+          if [ "$SIZE" -ge 20480 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 20480)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

@@ -17,7 +17,7 @@
    loading would leave an unpatched window). The CI size gate covers
    the built artifact.
 
-   Budget: under 19 KiB minified (CI enforces). 5 KiB originally,
+   Budget: under 20 KiB minified (CI enforces). 5 KiB originally,
    6.5 for the #28 navigation guard, 8 when the artifact became the
    single classic file the browser run demanded (issue #35): what
    used to ride in shared chunks (the nav guard, the codec helpers)
@@ -43,7 +43,14 @@
    guarded window.open) and the child-realm page-surface isolation
    (a same-origin inline child inherits the proxy origin, so its
    storage/cookie surfaces get the guarding page's site scoping).
-   Deliberate raises, recorded in the workflow file, never creep.
+   20 for #109: the popup sync-open (popup-class activations ride
+   the original window.open while their user activation is live;
+   the minted re-drive outlived the activation window, so the
+   popup was blocked) and the relative navigation-bound re-emit
+   (anchor/area href, iframe src and form action relative writes
+   re-emit through the #101 parent-relative marker instead of
+   landing on the proxy origin). Deliberate raises, recorded in
+   the workflow file, never creep.
 
    Page-global contract (set by the rewriter at injection time,
    issue #32): window.__ZL = { site: "<opaque token>" } - a stable

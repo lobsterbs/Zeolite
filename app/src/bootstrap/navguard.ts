@@ -35,9 +35,13 @@
      src (and #58: srcdoc markup, whose child document likewise runs
      no bootstrap) is rewired to the marker before the browser's
      queued iframe load task starts.
-   - Engine-origin, relative and opaque URLs pass through untouched:
-     those requests stay inside the SW scope and it reroutes them
-     natively. <base href> is deliberately left alone (rewriting it
+   - Engine-origin and opaque URLs pass through untouched: those
+     requests stay inside the SW scope and it reroutes them
+     natively. Relative writes on navigation-bound attributes
+     (anchor/area href, iframe src, form action) re-emit through
+     the #101 parent-relative marker (#109): such a navigation
+     must never land on the proxy origin's SPA fallback.
+     <base href> is deliberately left alone (rewriting it
      would break relative resolution for the whole page).
    - RTCPeerConnection is removed, not shimmed: WebRTC connects
      directly, cannot be routed through the engine, and leaving a
@@ -127,6 +131,42 @@ export function applyNavGuard(
     const d = destAbs(v);
     return d === null ? String(v) : navEncode(d);
   };
+  /* #109: a relative write to a navigation-bound attribute
+     resolves against the page's own engine route, so destAbs
+     returns null and the raw value reached the browser - the
+     navigation then landed on the proxy origin. Re-emit through
+     the #101 parent-relative marker instead: the SW decodes the
+     own route and resolves the tail against its destination,
+     navigations included. Excluded: engine-route-shaped paths
+     (the own prefix), engine surfaces (the markers, bootstrap,
+     /zlsw, /libcurl, /zl-), scheme and protocol-relative inputs,
+     fragments and empty values; without a route-shaped own URL
+     (an about:blank child) nothing changes. */
+  let ownRoutePath: string | undefined;
+  try {
+    ownRoutePath = new URL(loc).pathname;
+  } catch {
+    /* a realm whose loc is not a URL anchors nothing */
+  }
+  const engPrefix = ownRoutePath?.match(/^\/[^/]+\//)?.[0];
+  const navRel = (v: string): string | null => {
+    if (
+      !ownRoutePath ||
+      !engPrefix ||
+      !v ||
+      v.startsWith(engPrefix) ||
+      v[0] === "#" ||
+      v.startsWith("//") ||
+      v.startsWith("/__zl_") ||
+      v === "/bootstrap.js" ||
+      v.startsWith("/zlsw") ||
+      v.startsWith("/libcurl") ||
+      v.startsWith("/zl-") ||
+      /^[a-z][a-z0-9+.-]*:$/i.test(v)
+    )
+      return null;
+    return ownRoutePath + NAVP + "/" + encodeURIComponent(v);
+  };
   /* Reads must return what the page wrote: frameworks compare href
      values, so the raw string is kept per element and attribute and
      the marker only reaches the browser. Keyed by name since #58:
@@ -161,6 +201,7 @@ export function applyNavGuard(
     proto: AnyRecord,
     prop: string,
     mode: Mode,
+    nav: boolean,
     xf?: (el: AnyRecord, v: string) => string,
   ): void => {
     const d = Object.getOwnPropertyDescriptor(proto, prop);
@@ -182,7 +223,7 @@ export function applyNavGuard(
         }
         const dest = destAbs(s);
         if (dest === null) {
-          d.set!.call(this, s);
+          d.set!.call(this, nav ? navRel(s) ?? s : s);
           return;
         }
         if (mode === "defer") d.set!.call(this, "");
@@ -195,6 +236,7 @@ export function applyNavGuard(
     proto: AnyRecord,
     attr: string,
     mode: Mode,
+    nav: boolean,
     xf?: (el: AnyRecord, v: string) => string,
   ): void => {
     const O = proto.setAttribute;
@@ -211,7 +253,7 @@ export function applyNavGuard(
       else raw.set(this, { [attr]: s });
       if (xf) return O.call(this, n, xf(this, s));
       const dest = destAbs(s);
-      if (dest === null) return O.call(this, n, s);
+      if (dest === null) return O.call(this, n, nav ? navRel(s) ?? s : s);
       if (mode === "defer") O.call(this, n, "");
       else O.call(this, n, navEncode(dest));
       mintUp(this, attr, s, dest, (r) => O.call(this, n, r));
@@ -239,19 +281,23 @@ export function applyNavGuard(
     : undefined;
   /* swap rows: hrefs are read by page code, never blanked.
      defer rows: writes that trigger loads are blanked first; the
-     minted route lands before the load task. */
-  const table: Array<[AnyRecord | undefined, string, "swap" | "defer"]> = [
-    [w.HTMLAnchorElement as AnyRecord, "href", "swap"],
-    [w.HTMLAreaElement as AnyRecord, "href", "swap"],
-    [w.HTMLIFrameElement as AnyRecord, "src", "defer"],
-    [w.HTMLFormElement as AnyRecord, "action", "defer"],
-    [w.HTMLLinkElement as AnyRecord, "href", "defer"],
+     minted route lands before the load task. nav rows (#109):
+     navigation-bound attributes whose relative writes would land
+     on the proxy origin re-emit through the #101 parent-relative
+     marker; link href stays raw (a subresource, the SW's own
+     relative-path recovery reroutes it). */
+  const table: Array<[AnyRecord | undefined, string, "swap" | "defer", boolean]> = [
+    [w.HTMLAnchorElement as AnyRecord, "href", "swap", true],
+    [w.HTMLAreaElement as AnyRecord, "href", "swap", true],
+    [w.HTMLIFrameElement as AnyRecord, "src", "defer", true],
+    [w.HTMLFormElement as AnyRecord, "action", "defer", true],
+    [w.HTMLLinkElement as AnyRecord, "href", "defer", false],
   ];
-  for (const [C, prop, mode] of table) {
+  for (const [C, prop, mode, nav] of table) {
     if (!C) continue;
     const proto = C.prototype;
-    safe(() => guardProp(proto, prop, mode));
-    safe(() => guardAttr(proto, prop, mode));
+    safe(() => guardProp(proto, prop, mode, nav));
+    safe(() => guardAttr(proto, prop, mode, nav));
   }
   /* #58: srcdoc gives the frame an inline child document that runs
      no bootstrap (about:srcdoc is not an engine destination), so
@@ -268,8 +314,8 @@ export function applyNavGuard(
     );
   const IFR = w.HTMLIFrameElement as AnyRecord | undefined;
   if (IFR) {
-    safe(() => guardProp(IFR.prototype, "srcdoc", "sync", (_el, v) => rewireSrcdoc(v)));
-    safe(() => guardAttr(IFR.prototype, "srcdoc", "sync", (_el, v) => rewireSrcdoc(v)));
+    safe(() => guardProp(IFR.prototype, "srcdoc", "sync", false, (_el, v) => rewireSrcdoc(v)));
+    safe(() => guardAttr(IFR.prototype, "srcdoc", "sync", false, (_el, v) => rewireSrcdoc(v)));
   }
   /* #39 residual: runtime-injected meta refresh is the one navigation
      seam left on engines without the Navigation API (Firefox has no
@@ -287,8 +333,8 @@ export function applyNavGuard(
             (_m: string, p: string, q: string, u: string) => p + q + rewire(u) + q,
           )
         : v;
-    safe(() => guardProp(META.prototype, "content", "sync", rewireMeta));
-    safe(() => guardAttr(META.prototype, "content", "sync", rewireMeta));
+    safe(() => guardProp(META.prototype, "content", "sync", false, rewireMeta));
+    safe(() => guardAttr(META.prototype, "content", "sync", false, rewireMeta));
   }
   /* Runtime-set SRI (#77 runtime half): the browser hashes the body
      the SW returns - the rewritten one - so a runtime integrity write
@@ -361,11 +407,16 @@ export function applyNavGuard(
      document.write markup: the property and setAttribute hooks
      never saw it) therefore opened unproxied, plaintext destination
      and all. A capture-phase click/auxclick listener sees the
-     activation before any page handler relies on it: cancel it and
-     re-drive through the minted route (marker fallback) - _blank
-     rides the guarded window.open above, _top/_parent are driven
-     through the ancestor window itself (engine frames are
-     same-origin, so the ancestor's own guard owns the follow-up).
+     activation before any page handler relies on it and cancels
+     it. #109: the popup class re-opens through the ORIGINAL
+     window.open synchronously, while the activation's transient
+     user activation is still live - the minted re-drive landed
+     past the activation window on heavy pages, so the popup was
+     blocked and the button only visibly pressed. The opaque NAV
+     marker route rides this path directly (no mint); _top/_parent
+     are driven through the ancestor window itself after the mint
+     (engine frames are same-origin, so the ancestor's own guard
+     owns the follow-up; a location write needs no activation).
      Engine-route anchors of every target already load through the
      SW scope and stay native; same-window plain clicks stay native
      too: the navigate seam owns them. */
@@ -375,7 +426,7 @@ export function applyNavGuard(
   if (typeof AE === "function") {
     /* click and auxclick both fire for a middle activation: the
        anchor is marked so the pair drives one popup, and unmarked
-       when the drive lands. */
+       after the task (popup path) or when the drive lands. */
     const driven = new WeakSet<object>();
     const drivePopup = (ev: Event): void => {
       const e = ev as MouseEvent;
@@ -401,15 +452,34 @@ export function applyNavGuard(
       ev.preventDefault();
       if (driven.has(n)) return;
       driven.add(n);
+      if (popup) {
+        /* #109: the re-open must ride the activation window, so it
+           goes through the captured original open with the marker
+           route (engine-local, SW-scoped), the target's popup name
+           (_blank only: a modifier activation ignores the anchor's
+           own target, like the native new-tab behavior) and the
+           rel-derived noopener feature. No mint on this path. The
+           driven mark clears on a timeout: click and auxclick of
+           one middle activation dispatch inside this task, so one
+           press opens one popup and a later press opens again. */
+        const rel = String(n.rel ?? "");
+        const keepOpener = /(^|\s)opener(\s|$)/i.test(rel);
+        const feats = keepOpener ? "" : /no(open|referr)er/i.test(rel) || tgt === "_blank" ? "noopener" : "";
+        const name = tgt === "_blank" ? "_blank" : "";
+        if (typeof OW === "function") {
+          try {
+            (OW as AnyRecord).call(w, navEncode(d), name, feats);
+          } catch {
+            /* a window that refuses the popup stays contained */
+          }
+        }
+        setTimeout(() => driven.delete(n));
+        return;
+      }
       mintRoute(d).then((route) => {
         const r = route ?? navEncode(d);
         try {
           driven.delete(n);
-          if (popup) {
-            const open = w.open as ((u?: string) => unknown) | undefined;
-            if (typeof open === "function") open.call(w, r);
-            return;
-          }
           const tw =
             tgt === "_top"
               ? (w.top as AnyRecord | undefined)
