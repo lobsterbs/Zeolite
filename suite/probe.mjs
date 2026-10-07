@@ -18,6 +18,8 @@
    Usage: node suite/probe.mjs --base http://localhost:6002 */
 
 import { writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { Buffer } from "node:buffer";
 import { connect as tcpConnect } from "node:net";
 import { wispSession, streamRequest, statusLine, reasonName } from "./wisp.mjs";
@@ -169,7 +171,11 @@ const scoreboard = {
     ratio: r.ttfbDirect && r.ttfbProxy ? +(r.ttfbProxy / r.ttfbDirect).toFixed(2) : null,
   })),
 };
-writeFileSync("suite/scoreboard.json", JSON.stringify(scoreboard, null, 2));
+/* #105: resolve the scoreboard writes against this script's location,
+   not process.cwd() - the natural invocation from inside suite/ must
+   not target suite/suite/ and lose the report after a full run. */
+const OUT = (name) => join(dirname(fileURLToPath(import.meta.url)), name);
+writeFileSync(OUT("scoreboard.json"), JSON.stringify(scoreboard, null, 2));
 
 const md = [
   "# Zeolite compat scoreboard",
@@ -195,7 +201,7 @@ const md = [
   "(flaky external targets must not break CI).",
   "",
 ].join("\n");
-writeFileSync("suite/scoreboard.md", md);
+writeFileSync(OUT("scoreboard.md"), md);
 
 /* 2.5 Iodide: real-site results never gate the run. Flaky external
    targets must not break CI; failures are recorded in the JSON and the

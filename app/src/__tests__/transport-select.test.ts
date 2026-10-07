@@ -77,6 +77,7 @@ describe("transport reset (#74)", () => {
     expect(isConnectClassError("Wisp WebSocket failed to connect: websocket did not open")).toBe(true);
     expect(isConnectClassError("Request failed with error code 55: Failed sending data to the peer")).toBe(true);
     expect(isConnectClassError("Request failed with error code 56: Failure when receiving data from the peer")).toBe(true);
+    expect(isConnectClassError("Request failed with error code 52: Server returned nothing (no headers, no data)")).toBe(true);
     expect(isConnectClassError(new TypeError("Request failed with error code 55: Failed sending data to the peer"))).toBe(true);
   });
 

@@ -731,9 +731,16 @@ async function getClient(cfg: { websocket: string }): Promise<LibcurlClientLike>
    or never-opened wisp websocket is transport state, not a destination
    failure. The SW resets the singleton here and retries once instead of
    serving terminal 502s from a poisoned client. Pure surface, unit-gated
-   in __tests__/transport-select.test.ts. */
+   in __tests__/transport-select.test.ts.
+   #104: libcurl error 52 (server returned nothing) joins the class.
+   An upstream that closed a pooled connection (plain HTTP often sends
+   Connection: close) answers the reused connection with an empty
+   reply; the reset drops the connection cache so the one retry rides
+   a new connection. A genuine empty HTTP response still carries
+   status and headers and is never error 52, so the retry cannot mask
+   a real answer. */
 const CONNECT_CLASS_RE =
-  /websocket did not open|failed sending data|failure when receiving data|error code (?:55|56)\b/i;
+  /websocket did not open|failed sending data|failure when receiving data|server returned nothing|error code (?:52|55|56)\b/i;
 
 export function isConnectClassError(err: unknown): boolean {
   return CONNECT_CLASS_RE.test(String(err));

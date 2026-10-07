@@ -65,8 +65,11 @@ async function ensureCurl(): Promise<void> {
 /* Issue #74: a dead or never-opened wisp websocket is transport state,
    not a per-destination failure. Connect-class errors (libcurl error 55
    send / 56 receive on the dead socket, "websocket did not open" from
-   either engine) reset the transport singleton and retry once before
-   the 502 page reaches the user. A request whose body stream was already
+   either engine; error 52 is the #104 stale-connection empty reply,
+   where an upstream that closed a pooled connection answers the
+   reuse with nothing - the reset drops the connection cache so the
+   one retry rides a fresh connection) reset the transport singleton
+   and retry once before the 502 page reaches the user. A request whose body stream was already
    consumed may fail the retry and surface as before: honest fallback,
    never a loop - each wispFetch call retries at most once. */
 async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
@@ -78,7 +81,7 @@ async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
     DIAG.emit({
       category: "TRANSPORT",
       severity: "error",
-      message: "wisp connection lost; transport reset, retrying once",
+      message: "transport failure; reset, retrying once on a fresh connection",
       technicalReason: String(err),
       url: ZL_WISP_URL,
     });
