@@ -1999,16 +1999,18 @@ mod tests {
         s.write_all(&upgrade_request(addr, origin, protocol))
             .await
             .unwrap();
+        // Read the head one byte at a time: the server's opening wisp
+        // packet follows the 101 immediately, and a chunked read
+        // swallows it into the head buffer (the auth tests then wait
+        // for a packet this helper ate).
         let mut buf = Vec::new();
-        let mut chunk = [0u8; 1024];
+        let mut one = [0u8; 1];
         loop {
-            let n = match s.read(&mut chunk).await {
-                Ok(0) => break,
-                Ok(n) => n,
+            match s.read_exact(&mut one).await {
+                Ok(()) => buf.push(one[0]),
                 Err(_) => break,
-            };
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            }
+            if buf.ends_with(b"\r\n\r\n") {
                 break;
             }
         }
