@@ -2005,11 +2005,8 @@ mod tests {
         // for a packet this helper ate).
         let mut buf = Vec::new();
         let mut one = [0u8; 1];
-        loop {
-            match s.read_exact(&mut one).await {
-                Ok(_) => buf.push(one[0]),
-                Err(_) => break,
-            }
+        while s.read_exact(&mut one).await.is_ok() {
+            buf.push(one[0]);
             if buf.ends_with(b"\r\n\r\n") {
                 break;
             }
