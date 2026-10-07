@@ -180,7 +180,7 @@ jobs:
           test -f app/dist/libcurl/index.mjs
           test -f app/dist/epoxy/epoxy.js
           test -f app/dist/epoxy/epoxy.wasm
-      - name: Bootstrap size budget (must stay under 18 KiB minified)
+      - name: Bootstrap size budget (must stay under 19 KiB minified)
         # Raised from 5120 for the #28 navigation guard (window.open,
         # anchor/area/iframe/form/link URL property + setAttribute
         # rewrites, form submit paths, WebRTC removal) and the module
@@ -220,13 +220,22 @@ jobs:
         # page's engine route instead of escaping to the proxy
         # origin) - per-page correctness, same class as the rows
         # above; the seams were deduplicated in the same pass.
+        # Raised 18944 -> 19456 for #106/#108: the popup activation
+        # guard (a target=_blank or modifier/middle activation on a
+        # raw-destination anchor fires no navigate event in the
+        # initiating document, so a capture-phase listener cancels
+        # and re-drives it through the guarded window.open) and the
+        # child-realm page-surface isolation (an about:blank/srcdoc
+        # child inherits the proxy origin, so its storage/cookie
+        # surfaces get the guarding page's site scoping) - per-page
+        # privacy correctness, same class as the rows above.
         # Raises are deliberate
         # decisions recorded here, never quiet accommodations; CI
         # prints the measured size.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 18944 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 18944)"; exit 1; fi
+          if [ "$SIZE" -ge 19456 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 19456)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

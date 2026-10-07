@@ -80,6 +80,34 @@ export function initEngine(ready: Promise<void>): void {
    surfaces 3xx; the loop follows). Past the cap the 3xx is surfaced to
    the page with a mapped Location instead of looping forever. */
 const MAX_REDIRECT_HOPS = 10;
+/* 2.3: a navigate-mode upstream fetch carries a first-byte deadline
+   (#107: the http-entry 301 strand could hang as a committed blank
+   frame - respondWith had answered, so the browser committed an
+   empty document and waited forever on an upstream that never sent
+   first bytes). The rejection lands in the same catch that turns
+   transport failures into the error page, so a hung upstream
+   surfaces honestly instead of a silent blank frame. Subresources
+   keep no deadline: the page owns their failure handling. The
+   transport fetch keeps running after a deadline rejection; its
+   answer is dropped, never served. */
+const NAV_TTFB_DEADLINE_MS = 30_000;
+
+export function withDeadline<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
+  if (!(ms > 0)) return p;
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(msg)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(t);
+        reject(err);
+      },
+    );
+  });
+}
 
 /* ---- Page cache (ported from the v3 worker) -------------------- */
 /* Cache-first for proxied GETs with stale-while-revalidate. Freshness
@@ -1256,7 +1284,11 @@ export function handleFetch(e: FetchEvent): void {
           let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
             ? undefined
             : e.request.body;
-          let resp = await wispTransport.fetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
+          let resp = await withDeadline(
+            wispTransport.fetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody }),
+            reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
+            "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
+          );
           for (let hops = 0; resp.status >= 300 && resp.status < 400 && hops < MAX_REDIRECT_HOPS; hops++) {
             /* Capture this hop's Set-Cookie against the URL it came from.
                #35: any admission also pushes the jar view to the
@@ -1295,7 +1327,11 @@ export function handleFetch(e: FetchEvent): void {
             else sendHeaders.delete("cookie");
             DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
             hopUrl = next;
-            resp = await wispTransport.fetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody });
+            resp = await withDeadline(
+              wispTransport.fetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody }),
+              reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
+              "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
+            );
           }
           curStage = "UPSTREAM_RESPONSE";
           DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
@@ -1496,7 +1532,7 @@ export function handleFetch(e: FetchEvent): void {
                  charset corrupts the page. */
               outHeaders.set("content-type", utf8ContentType(respCt));
               return new Response(
-                rewriteStream(resp.body, target, rule, csInject, respCt, rewriteDone),
+                rewriteStream(resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone),
                 {
                   status: resp.status,
                   headers: outHeaders,
@@ -1513,7 +1549,7 @@ export function handleFetch(e: FetchEvent): void {
             if (sniffHead && sniffsAsHtml(sniffHead)) {
               outHeaders.set("content-type", "text/html; charset=utf-8");
               return new Response(
-                rewriteStream(sniffReader, target, rule, csInject, "text/html", rewriteDone),
+                rewriteStream(sniffReader, finalDest ?? target, rule, csInject, "text/html", rewriteDone),
                 {
                   status: resp.status,
                   headers: outHeaders,
@@ -1536,7 +1572,7 @@ export function handleFetch(e: FetchEvent): void {
             traceDecision({ subsystem: "rewriter", rule: "css", original: target, result: "streaming", resource: rtype, traceId });
             outHeaders.set("content-type", utf8ContentType(respCt));
             return new Response(
-              cssRewriteStream(resp.body, target, respCt, () => {
+              cssRewriteStream(resp.body, finalDest ?? target, respCt, () => {
                 DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
                 WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
               }),

@@ -7,7 +7,7 @@
 
 import { swc } from "./siteid";
 
-export function applyCookie(site: string): void {
+export function applyCookie(site: string, doc: Document = document): void {
 /* ---- document.cookie (virtual, per-origin) ------------------------ */
 /* The getter must be synchronous, the authoritative jar lives in
  the service worker: the page keeps an optimistic local copy, every
@@ -31,7 +31,10 @@ export function applyCookie(site: string): void {
  ctl.postMessage({ type: "zl:docCookie" }, [ch.port2]);
  const sy = (set?: string) => ch.port1.postMessage({ set });
  try {
- Object.defineProperty(document, "cookie", {
+ /* #108: the document is a parameter so a guarded child realm
+   (about:blank/srcdoc) gets its own surface virtualized; the
+   channel still rides the guarding page's controller. */
+ Object.defineProperty(doc, "cookie", {
  configurable: true,
  get: () => {
  sy();

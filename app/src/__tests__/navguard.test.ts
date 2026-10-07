@@ -929,3 +929,206 @@ describe("runtime SRI neutralization (#77)", () => {
     expect(l.getAttribute("href")).not.toBe(REAL);
   });
 });
+
+describe("popup activation guard (#106)", () => {
+  function stubMint(route: string) {
+    vi.stubGlobal("navigator", {
+      serviceWorker: {
+        controller: {
+          postMessage(m: any, ports?: MessagePort[]) {
+            queueMicrotask(() => ports?.[0]?.postMessage({ ok: true, route }));
+          },
+        },
+      },
+    });
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+  /* Click env: listeners land in a map and window.open records its
+     calls; the anchor is a raw-destination parser-inserted element
+     (anchor.set bypasses the guard, like HTML-parsed markup). */
+  function makeClickEnv() {
+    const anchor = makeClass("href");
+    const listeners: Record<string, Array<(e: any) => void>> = {};
+    const opened: unknown[][] = [];
+    const topLoc = { href: "" };
+    const w: Record<string, any> = {
+      HTMLAnchorElement: { prototype: anchor.proto },
+      addEventListener(t: string, fn: (e: any) => void) {
+        (listeners[t] ?? (listeners[t] = [])).push(fn);
+      },
+      top: { location: topLoc },
+      open(...args: unknown[]) {
+        opened.push(args);
+        return { location: {} };
+      },
+    };
+    applyNavGuard(w, LOC, ENGINE);
+    return { anchor, listeners, opened, topLoc };
+  }
+  function rawAnchor(anchor: ReturnType<typeof makeClass>, href: string, target: string) {
+    const a = anchor.make();
+    anchor.set(a, href); /* HTML-parsed value: the hooks never saw it */
+    a.tagName = "A";
+    a.target = target;
+    return a;
+  }
+  function fire(e: { listeners: Record<string, Array<(e: any) => void>> }, type: string, ev: any) {
+    (e.listeners[type] ?? []).forEach((fn) => fn(ev));
+  }
+  function clickEv(a: any, extra: Record<string, any> = {}) {
+    return {
+      button: 0,
+      target: a,
+      defaultPrevented: false,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
+      ...extra,
+    };
+  }
+
+  it("cancels a target=_blank click on a raw anchor and re-drives through window.open", async () => {
+    stubMint("/j/mp1");
+    const e = makeClickEnv();
+    const ev = clickEv(rawAnchor(e.anchor, "https://pop1.site/x", "_blank"));
+    fire(e, "click", ev);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(e.opened).toEqual([]); /* the mint is still in flight */
+    await settle();
+    expect(e.opened.length).toBe(1);
+    expect(e.opened[0][0]).toBe("/j/mp1"); /* engine route, not the raw dest */
+  });
+
+  it("a middle-click auxclick is canceled and re-driven without target", async () => {
+    stubMint("/j/mp2");
+    const e = makeClickEnv();
+    const ev = clickEv(rawAnchor(e.anchor, "https://pop2.site/x", ""), { button: 1 });
+    fire(e, "auxclick", ev);
+    expect(ev.defaultPrevented).toBe(true);
+    await settle();
+    expect(e.opened[0][0]).toBe("/j/mp2");
+  });
+
+  it("a ctrl-click on a plain anchor re-drives through window.open", async () => {
+    stubMint("/j/mp3");
+    const e = makeClickEnv();
+    const ev = clickEv(rawAnchor(e.anchor, "https://pop3.site/x", ""), { ctrlKey: true });
+    fire(e, "click", ev);
+    expect(ev.defaultPrevented).toBe(true);
+    await settle();
+    expect(e.opened[0][0]).toBe("/j/mp3");
+  });
+
+  it("a middle activation firing both click and auxclick drives once", async () => {
+    stubMint("/j/mp4");
+    const e = makeClickEnv();
+    const a = rawAnchor(e.anchor, "https://pop4.site/x", "_blank");
+    const ev1 = clickEv(a, { button: 1 });
+    const ev2 = clickEv(a, { button: 1 });
+    fire(e, "click", ev1);
+    fire(e, "auxclick", ev2);
+    expect(ev1.defaultPrevented).toBe(true);
+    expect(ev2.defaultPrevented).toBe(true);
+    await settle();
+    expect(e.opened.length).toBe(1);
+  });
+
+  it("engine-route, relative and same-window plain clicks stay native", () => {
+    const e = makeClickEnv();
+    for (const href of ["/local", "https://engine.host/j/zzz"]) {
+      const ev = clickEv(rawAnchor(e.anchor, href, "_blank"));
+      fire(e, "click", ev);
+      expect(ev.defaultPrevented).toBe(false);
+    }
+    const plain = clickEv(rawAnchor(e.anchor, "https://pop5.site/x", "")); /* no popup class */
+    fire(e, "click", plain);
+    expect(plain.defaultPrevented).toBe(false); /* the navigate seam owns it */
+    expect(e.opened).toEqual([]);
+  });
+
+  it("a _top activation is driven through the ancestor window", async () => {
+    stubMint("/j/mp5");
+    const e = makeClickEnv();
+    const ev = clickEv(rawAnchor(e.anchor, "https://pop6.site/x", "_top"));
+    fire(e, "click", ev);
+    expect(ev.defaultPrevented).toBe(true);
+    await settle();
+    expect(e.topLoc.href).toBe("/j/mp5");
+    expect(e.opened).toEqual([]);
+  });
+
+  it("a refused mint degrades to the marker, never a raw popup", async () => {
+    vi.stubGlobal("navigator", { serviceWorker: {} }); /* controller absent */
+    const e = makeClickEnv();
+    fire(e, "click", clickEv(rawAnchor(e.anchor, "https://pop7.site/x", "_blank")));
+    await settle();
+    expect(e.opened[0][0]).toBe(navEncode("https://pop7.site/x"));
+  });
+});
+
+describe("child realm page-surface isolation (#108)", () => {
+  /* Parent env with a frame already in the DOM: the querySelectorAll
+     seam reaches guardChild without an observer round-trip. */
+  function makeSiteParent(frames: any[], site?: string) {
+    const w: Record<string, any> = {
+      MutationObserver: class {
+        observe(_t: any, _o: any) {}
+      },
+      document: {
+        documentElement: { tag: "html" },
+        querySelectorAll: () => frames,
+      },
+      open() {
+        return 1;
+      },
+    };
+    applyNavGuard(w, LOC, ENGINE, site);
+    return w;
+  }
+  function childRealm() {
+    const backing = new Map<string, string>();
+    const store: Record<string, any> = {
+      getItem: (k: string) => (backing.has(k) ? backing.get(k)! : null),
+      setItem: (k: string, v: string) => void backing.set(k, v),
+      removeItem: (k: string) => void backing.delete(k),
+    };
+    const doc: Record<string, any> = { baseURI: LOC };
+    const win: Record<string, any> = {
+      document: doc,
+      localStorage: store,
+      sessionStorage: store,
+      addEventListener() {},
+      removeEventListener() {},
+      open() {
+        return 1;
+      },
+    };
+    const el: Record<string, any> = {
+      nodeType: 1,
+      tagName: "IFRAME",
+      addEventListener() {},
+      getAttribute: () => null,
+      setAttribute() {},
+    };
+    Object.defineProperty(el, "contentWindow", { configurable: true, get: () => win });
+    Object.defineProperty(el, "contentDocument", { configurable: true, get: () => doc });
+    return { el, win, doc, backing };
+  }
+
+  it("scopes a same-origin child's storage to the guarding page's site", () => {
+    const child = childRealm();
+    makeSiteParent([child.el], "tok");
+    child.win.localStorage.setItem("k", "v");
+    expect(child.backing.get("zl:tok:k")).toBe("v"); /* site-scoped, not the raw proxy-origin surface */
+    expect(child.win.localStorage.getItem("k")).toBe("v");
+  });
+
+  it("keeps the child's surfaces native without a site token (unrewritten parent)", () => {
+    const child = childRealm();
+    makeSiteParent([child.el]);
+    child.win.localStorage.setItem("k", "v");
+    expect(child.backing.get("k")).toBe("v"); /* no prefix: native */
+  });
+});

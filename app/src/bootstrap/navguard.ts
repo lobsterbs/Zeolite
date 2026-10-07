@@ -55,6 +55,9 @@
      the documented degrade, never a hang. */
 
 import { applyReemit, mintRoute } from "./mint";
+import { applyCookie } from "./cookie";
+import { applyIsolation } from "./isolation";
+import { applyStorage } from "./storage";
 
 export const NAV = "/__zl_nav__";
 /* #101: parent-relative marker. A same-origin child realm (an
@@ -100,6 +103,10 @@ export function applyNavGuard(
   w: Record<string, unknown>,
   loc: string,
   engineOrigin: string,
+  /* #108: the guarding page's site token; when present, a
+     same-origin inline child realm gets its storage/cookie
+     surfaces scoped to the parent's site. */
+  site?: string,
 ): void {
   /* Absolute cross-origin http(s) destination, or null: relative,
      opaque, engine-local and already-routed values are no mint
@@ -346,6 +353,79 @@ export function applyNavGuard(
       };
     });
   }
+  /* #106: a popup-class activation - a target=_blank anchor, or any
+     click the browser upgrades to a new top-level context (middle
+     button, ctrl/meta/shift modifier) - fires no navigate event in
+     this document: the navigation belongs to the new context, which
+     has no guard yet. A raw-destination anchor (innerHTML or
+     document.write markup: the property and setAttribute hooks
+     never saw it) therefore opened unproxied, plaintext destination
+     and all. A capture-phase click/auxclick listener sees the
+     activation before any page handler relies on it: cancel it and
+     re-drive through the minted route (marker fallback) - _blank
+     rides the guarded window.open above, _top/_parent are driven
+     through the ancestor window itself (engine frames are
+     same-origin, so the ancestor's own guard owns the follow-up).
+     Engine-route anchors of every target already load through the
+     SW scope and stay native; same-window plain clicks stay native
+     too: the navigate seam owns them. */
+  const AE = w.addEventListener as
+    | ((t: string, fn: (e: Event) => void, c?: boolean) => void)
+    | undefined;
+  if (typeof AE === "function") {
+    /* click and auxclick both fire for a middle activation: the
+       anchor is marked so the pair drives one popup, and unmarked
+       when the drive lands. */
+    const driven = new WeakSet<object>();
+    const drivePopup = (ev: Event): void => {
+      const e = ev as MouseEvent;
+      if (e.defaultPrevented) return;
+      const btn = e.button ?? 0;
+      if (btn !== 0 && btn !== 1) return;
+      let n = e.target as AnyRecord | null;
+      while (n && String(n.tagName ?? "").toUpperCase() !== "A")
+        n = (n.parentNode as AnyRecord | null) ?? null;
+      if (!n) return;
+      const href = String(n.href ?? "");
+      if (!href) return;
+      const tgt = String(n.target ?? "").toLowerCase();
+      const popup =
+        tgt === "_blank" || btn === 1 || e.ctrlKey || e.metaKey || e.shiftKey;
+      if (!popup && tgt !== "_top" && tgt !== "_parent") return;
+      const d = destAbs(href);
+      if (d === null) return;
+      /* canceled in capture phase: nothing browser-direct is ever
+         requested; the mint delay is paid before the first byte of
+         the replacement navigation, the same contract as the
+         navigate re-drive. */
+      ev.preventDefault();
+      if (driven.has(n)) return;
+      driven.add(n);
+      mintRoute(d).then((route) => {
+        const r = route ?? navEncode(d);
+        try {
+          driven.delete(n);
+          if (popup) {
+            const open = w.open as ((u?: string) => unknown) | undefined;
+            if (typeof open === "function") open.call(w, r);
+            return;
+          }
+          const tw =
+            tgt === "_top"
+              ? (w.top as AnyRecord | undefined)
+              : tgt === "_parent"
+                ? (w.parent as AnyRecord | undefined)
+                : w;
+          const l = tw && (tw.location as { href: string } | undefined);
+          if (l) l.href = r;
+        } catch {
+          /* a closed or cross-origin window cannot be driven */
+        }
+      });
+    };
+    safe(() => AE.call(w, "click", drivePopup, true));
+    safe(() => AE.call(w, "auxclick", drivePopup, true));
+  }
   /* #58 follow-up: an inline child document (about:srcdoc,
      about:blank, a same-origin child that never fetched an engine
      document) runs no bootstrap of its own, so a runtime navigation
@@ -408,6 +488,21 @@ export function applyNavGuard(
         /* not a URL: no parent route to anchor to */
       }
       applyReemit(win, routePath);
+      /* #108: a same-origin inline child (about:blank, about:srcdoc)
+         inherits the proxy origin, so its native document.cookie,
+         cookieStore and localStorage are the real engine-origin
+         surfaces: left native, a child write lands in the real
+         proxy-origin jar. The guarding page's site token scopes the
+         child's surfaces exactly like its own (the cookie channel
+         rides the parent's controller, so child writes stay in the
+         parent's virtual jar). A guard without a site (an
+         unrewritten parent) keeps the native degrade. */
+      if (site) {
+        const CP = "zl:" + site + ":";
+        const cst = applyStorage(win, CP);
+        applyIsolation(win, CP, cst);
+        applyCookie(site, (doc as unknown) as Document);
+      }
     } catch {
       /* a realm that refuses hooks stays native */
     }

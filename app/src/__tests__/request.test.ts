@@ -14,7 +14,7 @@ vi.mock("../transport", () => ({
   wispTransport: { ready: async () => {}, fetch: async () => new Response("mock") },
 }));
 
-import { classifyRtype, handleFetch, reqDest } from "../request";
+import { classifyRtype, handleFetch, reqDest, withDeadline } from "../request";
 
 describe("reqDest (#82 seam)", () => {
   it("falls back to sec-fetch-dest when destination is empty (Firefox, #40)", () => {
@@ -96,5 +96,26 @@ describe("classifyRtype document destinations (#103)", () => {
     expect(classifyRtype("iframe", "text/html")).toBe("DOCUMENT");
     expect(classifyRtype("style", "text/html")).toBe("STYLE");
     expect(classifyRtype("empty", "")).toBe("FETCH");
+  });
+});
+
+describe("withDeadline (#107)", () => {
+  it("returns the settled value or rejection inside the deadline", async () => {
+    await expect(withDeadline(Promise.resolve(7), 5000, "x")).resolves.toBe(7);
+    await expect(
+      withDeadline(Promise.reject(new Error("upstream")), 5000, "x"),
+    ).rejects.toThrow("upstream");
+  });
+
+  it("rejects with the deadline message when the upstream never answers", async () => {
+    const never = new Promise<string>(() => {});
+    await expect(withDeadline(never, 25, "no first byte")).rejects.toThrow(
+      "no first byte",
+    );
+  });
+
+  it("a non-positive deadline passes the promise through untouched", async () => {
+    const p = Promise.resolve("ok");
+    expect(withDeadline(p, 0, "x")).toBe(p);
   });
 });
