@@ -511,20 +511,27 @@ pub fn build_app(shared: Arc<Shared>) -> Router {
         // so a restrictive default would break every host that
         // embeds it.
         .layer(middleware::from_fn(
-            move |req: Request, next: Next| async move {
-                let mut resp = next.run(req).await;
-                resp.headers_mut().insert(
-                    "x-content-type-options",
-                    axum::http::HeaderValue::from_static("nosniff"),
-                );
-                if let Some(fa) = &frame_ancestors {
-                    if let Ok(v) =
-                        axum::http::HeaderValue::from_str(&format!("frame-ancestors {fa}"))
-                    {
-                        resp.headers_mut().insert("content-security-policy", v);
+            move |req: Request, next: Next| {
+                // The async block moves its captures, so frame_ancestors is
+                // cloned per call: a moved capture would make this closure
+                // FnOnce, and the middleware must be FnMut (one call per
+                // request).
+                let frame_ancestors = frame_ancestors.clone();
+                async move {
+                    let mut resp = next.run(req).await;
+                    resp.headers_mut().insert(
+                        "x-content-type-options",
+                        axum::http::HeaderValue::from_static("nosniff"),
+                    );
+                    if let Some(fa) = &frame_ancestors {
+                        if let Ok(v) =
+                            axum::http::HeaderValue::from_str(&format!("frame-ancestors {fa}"))
+                        {
+                            resp.headers_mut().insert("content-security-policy", v);
+                        }
                     }
+                    resp
                 }
-                resp
             },
         ))
         .with_state(shared)
@@ -1956,12 +1963,9 @@ mod tests {
         let lst = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = lst.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(
-                lst,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .unwrap();
+            axum::serve(lst, app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .unwrap();
         });
         addr
     }
@@ -2012,7 +2016,10 @@ mod tests {
     /// Send one masked binary WebSocket frame (client frames MUST be
     /// masked per RFC 6455). Short payloads only.
     async fn ws_send(s: &mut tokio::net::TcpStream, payload: &[u8]) {
-        assert!(payload.len() <= 125, "test helper handles short frames only");
+        assert!(
+            payload.len() <= 125,
+            "test helper handles short frames only"
+        );
         let mask = [0x37u8, 0xfa, 0x21, 0x3d];
         let mut frame = vec![0x82u8, 0x80 | payload.len() as u8];
         frame.extend_from_slice(&mask);
@@ -2096,10 +2103,7 @@ mod tests {
         )
         .await;
         match recv_pkt(&mut sock).await {
-            Packet::Close {
-                stream_id,
-                reason,
-            } => {
+            Packet::Close { stream_id, reason } => {
                 assert_eq!(stream_id, 0);
                 assert_eq!(reason, CloseReason::AuthRequired);
             }
@@ -2126,10 +2130,7 @@ mod tests {
         )
         .await;
         match recv_pkt(&mut sock).await {
-            Packet::Close {
-                stream_id,
-                reason,
-            } => {
+            Packet::Close { stream_id, reason } => {
                 assert_eq!(stream_id, 0);
                 assert_eq!(reason, CloseReason::AuthRequired);
             }
@@ -2144,15 +2145,9 @@ mod tests {
         let addr = serve_app(auth_cfg()).await;
         let (head, mut sock) = http_upgrade(&addr, None, false).await;
         assert!(head.starts_with("HTTP/1.1 101"), "upgrade failed: {head}");
-        assert!(matches!(
-            recv_pkt(&mut sock).await,
-            Packet::Continue { .. }
-        ));
+        assert!(matches!(recv_pkt(&mut sock).await, Packet::Continue { .. }));
         match recv_pkt(&mut sock).await {
-            Packet::Close {
-                stream_id,
-                reason,
-            } => {
+            Packet::Close { stream_id, reason } => {
                 assert_eq!(stream_id, 0);
                 assert_eq!(reason, CloseReason::AuthRequired);
             }
@@ -2180,10 +2175,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(matches!(
-            recv_pkt(&mut sock).await,
-            Packet::Continue { .. }
-        ));
+        assert!(matches!(recv_pkt(&mut sock).await, Packet::Continue { .. }));
         ws_send(
             &mut sock,
             &encode_pkt(&Packet::Continue {
@@ -2203,10 +2195,7 @@ mod tests {
         )
         .await;
         match recv_pkt(&mut sock).await {
-            Packet::Close {
-                stream_id,
-                reason,
-            } => {
+            Packet::Close { stream_id, reason } => {
                 assert_eq!(stream_id, 1);
                 assert!(
                     matches!(
@@ -2225,14 +2214,23 @@ mod tests {
         let addr = serve_app(Config::default()).await;
         // A browser origin from another site: refused.
         let (head, _s) = http_upgrade(&addr, Some("https://evil.example"), true).await;
-        assert!(head.starts_with("HTTP/1.1 403"), "expected 403, got: {head}");
+        assert!(
+            head.starts_with("HTTP/1.1 403"),
+            "expected 403, got: {head}"
+        );
         // Same-origin: allowed.
         let origin = format!("http://{addr}");
         let (head, _s) = http_upgrade(&addr, Some(&origin), true).await;
-        assert!(head.starts_with("HTTP/1.1 101"), "same-origin refused: {head}");
+        assert!(
+            head.starts_with("HTTP/1.1 101"),
+            "same-origin refused: {head}"
+        );
         // No Origin header (non-browser client): allowed.
         let (head, _s) = http_upgrade(&addr, None, true).await;
-        assert!(head.starts_with("HTTP/1.1 101"), "origin-less refused: {head}");
+        assert!(
+            head.starts_with("HTTP/1.1 101"),
+            "origin-less refused: {head}"
+        );
         // Explicitly allowlisted cross-origin: allowed, others refused.
         let addr2 = serve_app(Config {
             allowed_origins: vec!["https://partner.example".into()],
@@ -2245,7 +2243,10 @@ mod tests {
             "allowlisted origin refused: {head}"
         );
         let (head, _s) = http_upgrade(&addr2, Some("https://evil.example"), true).await;
-        assert!(head.starts_with("HTTP/1.1 403"), "expected 403, got: {head}");
+        assert!(
+            head.starts_with("HTTP/1.1 403"),
+            "expected 403, got: {head}"
+        );
     }
 
     #[tokio::test]
@@ -2256,7 +2257,8 @@ mod tests {
         })
         .await;
         let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let req = format!("GET /no-such-file HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+        let req =
+            format!("GET /no-such-file HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
         s.write_all(req.as_bytes()).await.unwrap();
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
@@ -2298,5 +2300,4 @@ mod tests {
         let (pw, key) = auth_config(None, None, None).unwrap();
         assert!(pw.is_none() && key.is_none());
     }
-
 }
