@@ -2484,7 +2484,7 @@ mod tests {
              motd \"hi\"\n\
              allowed_origins \"https://a.example\" \"https://b.example\"\n\
              frame_ancestors \"https://host.example\"\n\
-             auth user=\"ada\" password=\"pw\" key_hex=\"{key}\"\n\",
+             auth user=\"ada\" password=\"pw\" key_hex=\"{key}\"\n"",
             key = "00".repeat(32)
         );
         let cfg = Config::from_kdl(&text).unwrap();
