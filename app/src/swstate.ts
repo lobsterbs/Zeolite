@@ -251,5 +251,4 @@ export function registerDocCookiePort(clientId: string, port: MessagePort, page:
     docCookiePorts.set(clientId, list);
   }
   list.push({ port, page });
-});
 }
