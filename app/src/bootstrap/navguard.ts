@@ -162,7 +162,7 @@ export function applyNavGuard(
       v.startsWith("/zlsw") ||
       v.startsWith("/libcurl") ||
       v.startsWith("/zl-") ||
-      /^[a-z][a-z0-9+.-]*:$/i.test(v)
+      /^[a-z][a-z0-9+.-]*:/i.test(v)
     )
       return null;
     return ownRoutePath + NAVP + "/" + encodeURIComponent(v);
