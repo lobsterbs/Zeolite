@@ -510,30 +510,28 @@ pub fn build_app(shared: Arc<Shared>) -> Router {
         // engine app is designed to be embedded by host applications,
         // so a restrictive default would break every host that
         // embeds it.
-        .layer(middleware::from_fn(
-            move |req: Request, next: Next| {
-                // The async block moves its captures, so frame_ancestors is
-                // cloned per call: a moved capture would make this closure
-                // FnOnce, and the middleware must be FnMut (one call per
-                // request).
-                let frame_ancestors = frame_ancestors.clone();
-                async move {
-                    let mut resp = next.run(req).await;
-                    resp.headers_mut().insert(
-                        "x-content-type-options",
-                        axum::http::HeaderValue::from_static("nosniff"),
-                    );
-                    if let Some(fa) = &frame_ancestors {
-                        if let Ok(v) =
-                            axum::http::HeaderValue::from_str(&format!("frame-ancestors {fa}"))
-                        {
-                            resp.headers_mut().insert("content-security-policy", v);
-                        }
+        .layer(middleware::from_fn(move |req: Request, next: Next| {
+            // The async block moves its captures, so frame_ancestors is
+            // cloned per call: a moved capture would make this closure
+            // FnOnce, and the middleware must be FnMut (one call per
+            // request).
+            let frame_ancestors = frame_ancestors.clone();
+            async move {
+                let mut resp = next.run(req).await;
+                resp.headers_mut().insert(
+                    "x-content-type-options",
+                    axum::http::HeaderValue::from_static("nosniff"),
+                );
+                if let Some(fa) = &frame_ancestors {
+                    if let Ok(v) =
+                        axum::http::HeaderValue::from_str(&format!("frame-ancestors {fa}"))
+                    {
+                        resp.headers_mut().insert("content-security-policy", v);
                     }
-                    resp
                 }
-            },
-        ))
+                resp
+            }
+        }))
         .with_state(shared)
 }
 
