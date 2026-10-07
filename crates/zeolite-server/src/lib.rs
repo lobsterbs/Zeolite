@@ -402,7 +402,6 @@ impl Config {
         Ok(cfg)
     }
 }
-}
 
 /// Shared across connections: config, connection counters (global
 /// and per-IP) and the (immutable) password store.
