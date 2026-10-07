@@ -29,6 +29,45 @@ Re-audited at 3.0: unchanged, still the only gate. The engine has
 exactly one dial path (the policy-gated wisp hop); nothing added
 since 2.0 dials a destination outside it.
 
+## Wisp endpoint auth, exposure and browser-origin guard
+
+Closed in the 2026-10-07 audit round, all socket-gated in the Rust test
+suite:
+
+- Wisp auth can no longer be bypassed by a CONTINUE-first handshake. A
+  v2 client that sends CONTINUE as its first packet used to complete
+  the handshake without any INFO exchange, so check_auth never ran,
+  and the CONNECT gate (auth_ok) passed the unverified session
+  whenever the confusingly named ZL_AUTH_REQUIRED_V1 flag was off -
+  the default. An unauthenticated client could open streams with
+  ZL_WISP_USER/ZL_WISP_PASSWORD or an Ed25519 key configured. Now the
+  Ok(None) handshake branch refuses unverified sessions at once, and
+  auth_ok rejects every unverified session when auth is configured
+  (v1 sessions can never authenticate and are always refused).
+  Socket-level tests drive the CONTINUE-first shape, the
+  INFO-without-extension shape, the v1 shape and a full authenticated
+  password session through the real axum app.
+- The server binds 127.0.0.1 by default (ZL_BIND / --bind to
+  override). It used to hard-bind 0.0.0.0, which made the README
+  quick start an open relay reachable from every network the host is
+  on.
+- The /wisp/ upgrade checks Origin: browsers always send it;
+  non-browser clients pass without one. With an allowlist configured
+  (ZL_ALLOWED_ORIGINS, comma-separated) the Origin must be listed;
+  otherwise it must match the request's own Host (same-origin). A
+  reverse proxy in front of the server must list its client origins,
+  or the browsers behind it lose wisp access - deliberate fail-closed.
+- Auth configuration fails closed: a half-set ZL_WISP_USER/
+  ZL_WISP_PASSWORD pair or a malformed ZL_WISP_ED25519_HEX is a hard
+  startup error (exit 2). Both used to filter to None, leaving an
+  open server that looked configured.
+- Optional per-IP connection cap (MAX_CONNECTIONS_PER_IP, default
+  off): a reverse proxy collapses all peers into one address, so the
+  default cannot be a per-IP number.
+- Static responses carry X-Content-Type-Options: nosniff, and an
+  opt-in frame-ancestors CSP (ZL_FRAME_ANCESTORS) exists because the
+  engine app is designed to be embedded by host applications.
+
 ## Header surgery
 
 Two header paths, both deliberate, invoked from app/src/sw.ts

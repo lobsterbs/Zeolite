@@ -14,12 +14,16 @@
 //! every resolved address, to beat DNS rebinding). Loopback, private,
 //! link-local, unique-local and cloud-metadata destinations are closed
 //! with reason 0x48 (Blocked).
+//!
+//! 2026-10-07 audit round: wisp auth is enforced on every handshake
+//! path, the default bind is loopback, the upgrade checks Origin, and
+//! auth configuration fails closed (see docs/security.md).
 
 pub mod policy;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::{
-    extract::{Request, State},
+    extract::{connect_info::ConnectInfo, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -212,13 +216,22 @@ pub async fn udp_dest_validated(
     Err(ConnectFailure::Blocked)
 }
 
-/// Environment-driven limits and configuration. Every value is clamped
-/// to a safe minimum so a typo cannot disable a limit entirely.
+/// Limits and configuration. Values from the environment are clamped
+/// to a safe minimum so a typo cannot disable a limit entirely; auth
+/// values fail closed (see `auth_config`).
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Bind address. Loopback by default: the server is an open relay
+    /// to the public internet, so binding every interface is an
+    /// explicit operator decision (ZL_BIND=0.0.0.0 or a config file).
+    pub bind: String,
     pub port: u16,
     pub static_dir: String,
     pub max_connections: usize,
+    /// Per-peer-IP connection cap; 0 = unlimited. Off by default
+    /// because a reverse proxy (Render) collapses every peer into one
+    /// address and the cap would then be a global one.
+    pub max_connections_per_ip: usize,
     pub max_streams_per_conn: usize,
     pub connect_timeout: Duration,
     pub stream_idle_timeout: Duration,
@@ -232,16 +245,26 @@ pub struct Config {
     pub password: Option<(String, String)>,
     /// Hex-encoded Ed25519 verifying key for wisp key auth (0x03).
     pub key_hex: Option<String>,
-    /// Also require auth for v1 connections (no extensions possible).
-    pub auth_required_v1: bool,
+    /// Origins allowed to open the wisp WebSocket (cross-site
+    /// hijacking guard). Empty = default policy: requests without an
+    /// Origin header (non-browser clients) pass, and a browser Origin
+    /// must match the request's own Host (same-origin). A proxy in
+    /// front of the server must list its clients' origins here.
+    pub allowed_origins: Vec<String>,
+    /// Content-Security-Policy frame-ancestors value applied to
+    /// static responses, e.g. "https://host.example". None = no
+    /// header (the engine app is designed to be embedded).
+    pub frame_ancestors: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            bind: "127.0.0.1".into(),
             port: 6002,
             static_dir: "app/dist".into(),
             max_connections: 64,
+            max_connections_per_ip: 0,
             max_streams_per_conn: 24,
             connect_timeout: Duration::from_secs(10),
             stream_idle_timeout: Duration::from_secs(300),
@@ -253,7 +276,8 @@ impl Default for Config {
             motd: None,
             password: None,
             key_hex: None,
-            auth_required_v1: false,
+            allowed_origins: Vec::new(),
+            frame_ancestors: None,
         }
     }
 }
@@ -273,48 +297,122 @@ fn env_secs(name: &str, default: u64) -> Duration {
     Duration::from_secs(env_num(name, default, 1))
 }
 
-impl Config {
-    pub fn from_env() -> Self {
-        let d = Self::default();
-        Self {
-            port: env_num("PORT", d.port, 1),
-            static_dir: std::env::var("ZL_STATIC").unwrap_or(d.static_dir),
-            max_connections: env_num("MAX_CONNECTIONS", d.max_connections, 1),
-            max_streams_per_conn: env_num("MAX_STREAMS_PER_CONNECTION", d.max_streams_per_conn, 1),
-            connect_timeout: env_secs("CONNECT_TIMEOUT", d.connect_timeout.as_secs()),
-            stream_idle_timeout: env_secs("STREAM_IDLE_TIMEOUT", d.stream_idle_timeout.as_secs()),
-            max_conn_duration: env_secs("MAX_CONNECTION_DURATION", d.max_conn_duration.as_secs()),
-            max_udp_datagram: env_num("MAX_UDP_DATAGRAM_SIZE", d.max_udp_datagram, 64),
-            max_udp_bytes: env_num("MAX_UDP_BYTES", d.max_udp_bytes, 1024),
-            max_udp_packets: env_num("MAX_UDP_PACKETS", d.max_udp_packets, 1),
-            max_ws_message: env_num("MAX_WS_MESSAGE", d.max_ws_message, 2048),
-            motd: std::env::var("ZL_MOTD").ok().filter(|s| !s.is_empty()),
-            password: match (
-                std::env::var("ZL_WISP_USER").ok().filter(|s| !s.is_empty()),
-                std::env::var("ZL_WISP_PASSWORD")
-                    .ok()
-                    .filter(|s| !s.is_empty()),
-            ) {
-                (Some(u), Some(p)) => Some((u, p)),
-                _ => None,
-            },
-            key_hex: std::env::var("ZL_WISP_ED25519_HEX")
-                .ok()
-                .filter(|s| s.len() == 64),
-            auth_required_v1: std::env::var("ZL_AUTH_REQUIRED_V1")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
+/// Auth config, fail closed (2026-10-07 audit: a half-set
+/// user/password pair or a malformed key used to filter to None,
+/// silently turning a server that LOOKED configured into an open
+/// one). The error must make the process refuse to start.
+fn auth_config(
+    user: Option<String>,
+    password: Option<String>,
+    key_hex: Option<String>,
+) -> Result<(Option<(String, String)>, Option<String>), String> {
+    let password = match (user, password) {
+        (None, None) => None,
+        (Some(u), Some(p)) => Some((u, p)),
+        (Some(_), None) => {
+            return Err("ZL_WISP_USER set without ZL_WISP_PASSWORD; refusing to start with auth silently disabled".into());
+        }
+        (None, Some(_)) => {
+            return Err("ZL_WISP_PASSWORD set without ZL_WISP_USER; refusing to start with auth silently disabled".into());
+        }
+    };
+    if let Some(k) = &key_hex {
+        if k.len() != 64 || hex_decode(k).is_none() {
+            return Err(format!(
+                "ZL_WISP_ED25519_HEX must be 64 hex characters (got {}); refusing to start",
+                k.len()
+            ));
         }
     }
+    Ok((password, key_hex))
 }
 
-/// Shared across connections: config, the global connection counter and
-/// the (immutable) password store.
+impl Config {
+    /// Read the environment over the defaults. Auth variables are
+    /// validated fail-closed; every other value clamps.
+    pub fn from_env() -> Result<Self, String> {
+        Self::overlay_env(Self::default())
+    }
+
+    /// Apply set environment variables over an existing config (file
+    /// values first, env on top; CLI flags apply last in main). Only
+    /// non-empty values override.
+    pub fn overlay_env(mut cfg: Self) -> Result<Self, String> {
+        if let Ok(v) = std::env::var("ZL_BIND") {
+            if !v.is_empty() {
+                cfg.bind = v;
+            }
+        }
+        cfg.port = env_num("PORT", cfg.port, 1);
+        if let Ok(v) = std::env::var("ZL_STATIC") {
+            if !v.is_empty() {
+                cfg.static_dir = v;
+            }
+        }
+        cfg.max_connections = env_num("MAX_CONNECTIONS", cfg.max_connections, 1);
+        cfg.max_connections_per_ip =
+            env_num("MAX_CONNECTIONS_PER_IP", cfg.max_connections_per_ip, 0);
+        cfg.max_streams_per_conn =
+            env_num("MAX_STREAMS_PER_CONNECTION", cfg.max_streams_per_conn, 1);
+        cfg.connect_timeout = env_secs("CONNECT_TIMEOUT", cfg.connect_timeout.as_secs());
+        cfg.stream_idle_timeout =
+            env_secs("STREAM_IDLE_TIMEOUT", cfg.stream_idle_timeout.as_secs());
+        cfg.max_conn_duration =
+            env_secs("MAX_CONNECTION_DURATION", cfg.max_conn_duration.as_secs());
+        cfg.max_udp_datagram = env_num("MAX_UDP_DATAGRAM_SIZE", cfg.max_udp_datagram, 64);
+        cfg.max_udp_bytes = env_num("MAX_UDP_BYTES", cfg.max_udp_bytes, 1024);
+        cfg.max_udp_packets = env_num("MAX_UDP_PACKETS", cfg.max_udp_packets, 1);
+        cfg.max_ws_message = env_num("MAX_WS_MESSAGE", cfg.max_ws_message, 2048);
+        if let Ok(v) = std::env::var("ZL_MOTD") {
+            if !v.is_empty() {
+                cfg.motd = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("ZL_ALLOWED_ORIGINS") {
+            let list = v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if !list.is_empty() {
+                cfg.allowed_origins = list;
+            }
+        }
+        if let Ok(v) = std::env::var("ZL_FRAME_ANCESTORS") {
+            if !v.is_empty() {
+                cfg.frame_ancestors = Some(v);
+            }
+        }
+        let user = std::env::var("ZL_WISP_USER")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| cfg.password.as_ref().map(|(u, _)| u.clone()));
+        let pass = std::env::var("ZL_WISP_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| cfg.password.as_ref().map(|(_, p)| p.clone()));
+        let key = std::env::var("ZL_WISP_ED25519_HEX")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| cfg.key_hex.clone());
+        let (password, key_hex) = auth_config(user, pass, key)?;
+        cfg.password = password;
+        cfg.key_hex = key_hex;
+        Ok(cfg)
+    }
+}
+}
+
+/// Shared across connections: config, connection counters (global
+/// and per-IP) and the (immutable) password store.
 pub struct Shared {
     pub cfg: Arc<Config>,
     pub dest: policy::DestinationPolicy,
     pub active: AtomicUsize,
     pub password: Option<PasswordAuth>,
+    /// Live connection count per peer IP (per-IP limit bookkeeping).
+    pub per_ip: Mutex<std::collections::HashMap<std::net::IpAddr, usize>>,
 }
 
 impl Shared {
@@ -328,6 +426,7 @@ impl Shared {
             dest: policy::DestinationPolicy::default(),
             active: AtomicUsize::new(0),
             password,
+            per_ip: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -336,16 +435,25 @@ impl Shared {
     }
 }
 
-/// Decrement the connection counter when the session ends, no matter
+/// Decrement the connection counters when the session ends, no matter
 /// how it ends (upgrade failure, panic-free error paths, disconnect).
-struct ConnGuard(Arc<Shared>);
+struct ConnGuard(Arc<Shared>, Option<std::net::IpAddr>);
 
 impl Drop for ConnGuard {
     fn drop(&mut self) {
         self.0.active.fetch_sub(1, Ordering::SeqCst);
+        if let Some(ip) = self.1 {
+            if let Ok(mut m) = self.0.per_ip.lock() {
+                if let Some(c) = m.get_mut(&ip) {
+                    *c -= 1;
+                    if *c == 0 {
+                        m.remove(&ip);
+                    }
+                }
+            }
+        }
     }
 }
-
 /// Percent-decode a URL path just enough to catch encoded dotfiles
 /// (%2E, %2e) and traversal (%2E%2E).
 fn percent_decode(path: &str) -> String {
@@ -390,20 +498,72 @@ async fn deny_sensitive(req: Request, next: Next) -> Response {
 
 pub fn build_app(shared: Arc<Shared>) -> Router {
     let static_dir = shared.cfg.static_dir.clone();
+    let frame_ancestors = shared.cfg.frame_ancestors.clone();
     Router::new()
         .route("/wisp/", get(wisp_handler))
         .fallback_service(
             tower_http::services::ServeDir::new(static_dir).append_index_html_on_directories(true),
         )
         .layer(middleware::from_fn(deny_sensitive))
+        // Static responses carry nosniff so a mis-served file can
+        // never be reinterpreted as a scriptable content type. The
+        // frame-ancestors CSP is opt-in (ZL_FRAME_ANCESTORS): the
+        // engine app is designed to be embedded by host applications,
+        // so a restrictive default would break every host that
+        // embeds it.
+        .layer(middleware::from_fn(
+            move |req: Request, next: Next| async move {
+                let mut resp = next.run(req).await;
+                resp.headers_mut().insert(
+                    "x-content-type-options",
+                    axum::http::HeaderValue::from_static("nosniff"),
+                );
+                if let Some(fa) = &frame_ancestors {
+                    if let Ok(v) =
+                        axum::http::HeaderValue::from_str(&format!("frame-ancestors {fa}"))
+                    {
+                        resp.headers_mut().insert("content-security-policy", v);
+                    }
+                }
+                resp
+            },
+        ))
         .with_state(shared)
 }
 
 pub async fn wisp_handler(
     State(sh): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     ws: WebSocketUpgrade,
     headers: HeaderMap,
 ) -> Response {
+    // Cross-site WebSocket hijacking guard (2026-10-07 audit: any
+    // website used to be able to open /wisp/ from a visitor's browser
+    // and use their machine as a relay). Browsers always send Origin
+    // on an upgrade; non-browser clients do not and pass. With an
+    // allowlist configured (ZL_ALLOWED_ORIGINS) the Origin must be
+    // listed; otherwise it must match the request's own Host header
+    // (same-origin). A proxy in front of the server must list its
+    // clients' origins.
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        let host = headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let origin_host = origin
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        let allowed = sh
+            .cfg
+            .allowed_origins
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(origin))
+            || (sh.cfg.allowed_origins.is_empty() && origin_host.eq_ignore_ascii_case(host));
+        if !allowed {
+            tracing::warn!(origin, "wisp upgrade refused: origin not allowed");
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
     // v2 clients request the "wisp" WebSocket subprotocol; absence means v1.
     // axum 0.7 has no accessor for the requested subprotocols, so the header
     // is read directly from the upgrade request.
@@ -411,11 +571,23 @@ pub async fn wisp_handler(
         .get("sec-websocket-protocol")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ps| ps.split(',').any(|p| p.trim().eq_ignore_ascii_case("wisp")));
-    // Soft limit check here; the exact count is taken when the upgrade
+    // Soft limit checks here; the exact count is taken when the upgrade
     // actually starts, so failed upgrades never leak a slot.
     if sh.active.load(Ordering::SeqCst) >= sh.cfg.max_connections {
         tracing::warn!("connection limit hit; refusing upgrade");
         return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    let ip = peer.ip();
+    if sh.cfg.max_connections_per_ip > 0 {
+        let n = sh
+            .per_ip
+            .lock()
+            .map(|m| *m.get(&ip).unwrap_or(&0))
+            .unwrap_or(0);
+        if n >= sh.cfg.max_connections_per_ip {
+            tracing::warn!(%ip, "per-IP connection limit hit; refusing upgrade");
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
     }
     tracing::info!(v2, "wisp connection opened");
     let max = sh.cfg.max_ws_message;
@@ -450,8 +622,11 @@ pub async fn wisp_handler(
     upgrade
         .max_message_size(max)
         .on_upgrade(move |socket| async move {
-            let _guard = ConnGuard(sh.clone());
+            let _guard = ConnGuard(sh.clone(), Some(ip));
             sh.active.fetch_add(1, Ordering::SeqCst);
+            if let Ok(mut m) = sh.per_ip.lock() {
+                *m.entry(ip).or_insert(0) += 1;
+            }
             wisp_session(socket, v2, sh).await;
             tracing::info!("wisp connection closed");
         })
@@ -525,13 +700,17 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// True when the session may open streams. v1 carries no extensions,
-/// so a v1 client can never authenticate.
-fn auth_ok(shared: &Shared, v2: bool, verified: bool) -> AuthState {
+/// Post-handshake verdict for opening streams. Any unverified session
+/// is rejected whenever auth is configured: v1 sessions can never
+/// authenticate (no extensions), and a v2 session that dodged the
+/// INFO exchange must not slip through (2026-10-07 audit: this gate
+/// used to pass unverified v2 sessions unless the confusingly named
+/// ZL_AUTH_REQUIRED_V1 flag was set, which was the bypass).
+fn auth_ok(shared: &Shared, verified: bool) -> AuthState {
     if !shared.auth_required() {
         return AuthState::NotRequired;
     }
-    if !v2 || (!verified && shared.cfg.auth_required_v1) {
+    if !verified {
         return AuthState::Reject(CloseReason::AuthRequired);
     }
     AuthState::Ok
@@ -656,7 +835,7 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
         // v1 has no INFO exchange; consider the handshake done and
         // honour the (default-off) v1 auth switch.
         handshake_done = true;
-        match auth_ok(&shared, false, false) {
+        match auth_ok(&shared, false) {
             AuthState::Reject(reason) => {
                 let _ = send_packet(&ws_tx, &wisp_core::handshake_reject(reason)).await;
                 tracing::warn!(?reason, "v1 connection rejected: auth required");
@@ -759,6 +938,21 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                     tracing::info!(version = ?handshake.version(), "handshake complete");
                 }
                 Ok(None) => {
+                    // A CONTINUE completes the handshake without any
+                    // INFO exchange. A v2 client that jumps straight
+                    // here skips check_auth entirely (2026-10-07
+                    // audit: the bypass), so an unverified session
+                    // must be refused at once instead of waiting for
+                    // the first CONNECT.
+                    if shared.auth_required() && !auth_verified {
+                        let _ = send_packet(
+                            &ws_tx,
+                            &wisp_core::handshake_reject(CloseReason::AuthRequired),
+                        )
+                        .await;
+                        tracing::warn!("handshake rejected: auth required, none offered");
+                        return;
+                    }
                     handshake_done = true;
                     tracing::info!(version = ?handshake.version(), "handshake complete");
                 }
@@ -797,7 +991,7 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                     tracing::warn!(stream_id, "protocol failure: invalid CONNECT");
                     continue;
                 }
-                if let AuthState::Reject(reason) = auth_ok(&shared, v2, auth_verified) {
+                if let AuthState::Reject(reason) = auth_ok(&shared, auth_verified) {
                     let _ = send_packet(&ws_tx, &Packet::Close { stream_id, reason }).await;
                     continue;
                 }
@@ -1752,4 +1946,358 @@ mod tests {
         relay.abort();
         echo_task.abort();
     }
+    // ---- Socket-level auth and exposure tests (2026-10-07 audit).
+    // The CONTINUE-first bypass could not be caught by check_auth
+    // unit tests: only a real socket drives the handshake loop. ----
+
+    /// Bind the real axum app on an ephemeral port, with ConnectInfo.
+    async fn serve_app(cfg: Config) -> SocketAddr {
+        let shared = Shared::new(cfg);
+        let app = build_app(shared);
+        let lst = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = lst.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                lst,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        addr
+    }
+
+    /// Raw HTTP request bytes for a /wisp/ WebSocket upgrade.
+    fn upgrade_request(addr: &SocketAddr, origin: Option<&str>, protocol: bool) -> Vec<u8> {
+        let mut req = format!(
+            "GET /wisp/ HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n",
+            addr
+        );
+        if protocol {
+            req.push_str("Sec-WebSocket-Protocol: wisp\r\n");
+        }
+        if let Some(o) = origin {
+            req.push_str("Origin: {o}\r\n");
+        }
+        req.push_str("\r\n");
+        req.into_bytes()
+    }
+
+    /// Open a TCP connection, send the upgrade request, return the
+    /// response head plus the live stream.
+    async fn http_upgrade(
+        addr: &SocketAddr,
+        origin: Option<&str>,
+        protocol: bool,
+    ) -> (String, tokio::net::TcpStream) {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(&upgrade_request(addr, origin, protocol))
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let n = match s.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        (String::from_utf8_lossy(&buf).into_owned(), s)
+    }
+
+    /// Send one masked binary WebSocket frame (client frames MUST be
+    /// masked per RFC 6455). Short payloads only.
+    async fn ws_send(s: &mut tokio::net::TcpStream, payload: &[u8]) {
+        assert!(payload.len() <= 125, "test helper handles short frames only");
+        let mask = [0x37u8, 0xfa, 0x21, 0x3d];
+        let mut frame = vec![0x82u8, 0x80 | payload.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+        s.write_all(&frame).await.unwrap();
+    }
+
+    /// Read one binary WebSocket frame's payload; None on a close
+    /// frame, an unexpected opcode, or EOF.
+    async fn ws_recv(s: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+        let mut hdr = [0u8; 2];
+        s.read_exact(&mut hdr).await.ok()?;
+        let opcode = hdr[0] & 0x0f;
+        let len = hdr[1] & 0x7f;
+        if opcode != 0x02 {
+            return None;
+        }
+        let plen = match len {
+            126 => {
+                let mut ext = [0u8; 2];
+                s.read_exact(&mut ext).await.ok()?;
+                u16::from_be_bytes(ext) as usize
+            }
+            127 => {
+                let mut ext = [0u8; 8];
+                s.read_exact(&mut ext).await.ok()?;
+                usize::try_from(u64::from_be_bytes(ext)).ok()?
+            }
+            n => n as usize,
+        };
+        let mut payload = vec![0u8; plen];
+        s.read_exact(&mut payload).await.ok()?;
+        Some(payload)
+    }
+
+    fn encode_pkt(pkt: &Packet) -> Vec<u8> {
+        let frame = encode_packet(pkt);
+        let mut buf = BytesMut::new();
+        frame.encode_into(&mut buf);
+        buf.to_vec()
+    }
+
+    fn decode_pkt(payload: &[u8]) -> Packet {
+        let mut buf = BytesMut::from(payload);
+        let frame = Frame::decode(&mut buf).unwrap().unwrap();
+        frame.parse_packet().unwrap()
+    }
+
+    /// Receive one wisp packet with a timeout, decoded.
+    async fn recv_pkt(s: &mut tokio::net::TcpStream) -> Packet {
+        let payload = tokio::time::timeout(Duration::from_secs(5), ws_recv(s))
+            .await
+            .expect("timeout waiting for a wisp packet")
+            .expect("socket closed waiting for a wisp packet");
+        decode_pkt(&payload)
+    }
+
+    fn auth_cfg() -> Config {
+        Config {
+            password: Some(("ada".into(), "hunter2".into())),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_continue_first_bypass_is_closed() {
+        // The reported bypass: a v2 client that sends CONTINUE as its
+        // first packet completes the handshake without any INFO
+        // exchange, so check_auth never ran and the CONNECT gate
+        // passed the unverified session.
+        let addr = serve_app(auth_cfg()).await;
+        let (head, mut sock) = http_upgrade(&addr, None, true).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "upgrade failed: {head}");
+        assert!(matches!(recv_pkt(&mut sock).await, Packet::Info { .. }));
+        ws_send(
+            &mut sock,
+            &encode_pkt(&Packet::Continue {
+                stream_id: 0,
+                buffer_remaining: 16,
+            }),
+        )
+        .await;
+        match recv_pkt(&mut sock).await {
+            Packet::Close {
+                stream_id,
+                reason,
+            } => {
+                assert_eq!(stream_id, 0);
+                assert_eq!(reason, CloseReason::AuthRequired);
+            }
+            other => panic!("expected CLOSE(0, AuthRequired), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_info_without_extension_rejected() {
+        // The legitimate-looking dodge: a v2 INFO exchange that never
+        // offers the configured auth extension.
+        let addr = serve_app(auth_cfg()).await;
+        let (head, mut sock) = http_upgrade(&addr, None, true).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "upgrade failed: {head}");
+        assert!(matches!(recv_pkt(&mut sock).await, Packet::Info { .. }));
+        ws_send(
+            &mut sock,
+            &encode_pkt(&Packet::Info {
+                stream_id: 0,
+                major: 2,
+                minor: 1,
+                extensions: vec![],
+            }),
+        )
+        .await;
+        match recv_pkt(&mut sock).await {
+            Packet::Close {
+                stream_id,
+                reason,
+            } => {
+                assert_eq!(stream_id, 0);
+                assert_eq!(reason, CloseReason::AuthRequired);
+            }
+            other => panic!("expected CLOSE(0, AuthRequired), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_v1_rejected_when_configured() {
+        // v1 carries no extensions, so a v1 client can never
+        // authenticate; the rejection follows the opening packet.
+        let addr = serve_app(auth_cfg()).await;
+        let (head, mut sock) = http_upgrade(&addr, None, false).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "upgrade failed: {head}");
+        assert!(matches!(
+            recv_pkt(&mut sock).await,
+            Packet::Continue { .. }
+        ));
+        match recv_pkt(&mut sock).await {
+            Packet::Close {
+                stream_id,
+                reason,
+            } => {
+                assert_eq!(stream_id, 0);
+                assert_eq!(reason, CloseReason::AuthRequired);
+            }
+            other => panic!("expected CLOSE(0, AuthRequired), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_valid_password_session_opens_streams() {
+        // The fix must not break the real flow: INFO with the password
+        // extension, then CONTINUE, then a CONNECT that the
+        // destination policy answers (loopback is blocked here).
+        let addr = serve_app(auth_cfg()).await;
+        let (head, mut sock) = http_upgrade(&addr, None, true).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "upgrade failed: {head}");
+        assert!(matches!(recv_pkt(&mut sock).await, Packet::Info { .. }));
+        let payload = wisp_core::extension::password_auth_client("ada", "hunter2").unwrap();
+        ws_send(
+            &mut sock,
+            &encode_pkt(&Packet::Info {
+                stream_id: 0,
+                major: 2,
+                minor: 1,
+                extensions: vec![(ExtensionId::PasswordAuth as u8, payload)],
+            }),
+        )
+        .await;
+        assert!(matches!(
+            recv_pkt(&mut sock).await,
+            Packet::Continue { .. }
+        ));
+        ws_send(
+            &mut sock,
+            &encode_pkt(&Packet::Continue {
+                stream_id: 0,
+                buffer_remaining: 16,
+            }),
+        )
+        .await;
+        ws_send(
+            &mut sock,
+            &encode_pkt(&Packet::Connect {
+                stream_id: 1,
+                kind: StreamKind::Tcp,
+                port: 61999,
+                hostname: "127.0.0.1".into(),
+            }),
+        )
+        .await;
+        match recv_pkt(&mut sock).await {
+            Packet::Close {
+                stream_id,
+                reason,
+            } => {
+                assert_eq!(stream_id, 1);
+                assert!(
+                    matches!(
+                        reason,
+                        CloseReason::Blocked | CloseReason::ConnectionRefused
+                    ),
+                    "unexpected close reason {reason:?}"
+                );
+            }
+            other => panic!("expected CLOSE(1, Blocked|Refused), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_site_wisp_origin_refused() {
+        let addr = serve_app(Config::default()).await;
+        // A browser origin from another site: refused.
+        let (head, _s) = http_upgrade(&addr, Some("https://evil.example"), true).await;
+        assert!(head.starts_with("HTTP/1.1 403"), "expected 403, got: {head}");
+        // Same-origin: allowed.
+        let origin = format!("http://{addr}");
+        let (head, _s) = http_upgrade(&addr, Some(&origin), true).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "same-origin refused: {head}");
+        // No Origin header (non-browser client): allowed.
+        let (head, _s) = http_upgrade(&addr, None, true).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "origin-less refused: {head}");
+        // Explicitly allowlisted cross-origin: allowed, others refused.
+        let addr2 = serve_app(Config {
+            allowed_origins: vec!["https://partner.example".into()],
+            ..Default::default()
+        })
+        .await;
+        let (head, _s) = http_upgrade(&addr2, Some("https://partner.example"), true).await;
+        assert!(
+            head.starts_with("HTTP/1.1 101"),
+            "allowlisted origin refused: {head}"
+        );
+        let (head, _s) = http_upgrade(&addr2, Some("https://evil.example"), true).await;
+        assert!(head.starts_with("HTTP/1.1 403"), "expected 403, got: {head}");
+    }
+
+    #[tokio::test]
+    async fn static_responses_carry_security_headers() {
+        let addr = serve_app(Config {
+            frame_ancestors: Some("https://host.example".into()),
+            ..Default::default()
+        })
+        .await;
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!("GET /no-such-file HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = match s.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let head = String::from_utf8_lossy(&buf).into_owned().to_lowercase();
+        assert!(
+            head.contains("x-content-type-options: nosniff"),
+            "nosniff missing: {head}"
+        );
+        assert!(
+            head.contains("content-security-policy: frame-ancestors https://host.example"),
+            "frame-ancestors missing: {head}"
+        );
+    }
+
+    #[test]
+    fn auth_config_fails_closed() {
+        // Half-set credentials are a hard error, never a silent None.
+        assert!(auth_config(Some("ada".into()), None, None).is_err());
+        assert!(auth_config(None, Some("hunter2".into()), None).is_err());
+        // A malformed key is a hard error, whatever its length.
+        assert!(auth_config(None, None, Some("zz".into())).is_err());
+        assert!(auth_config(None, None, Some("g".repeat(64))).is_err());
+        // Valid shapes.
+        let (pw, key) = auth_config(
+            Some("ada".into()),
+            Some("hunter2".into()),
+            Some("00".repeat(32)),
+        )
+        .unwrap();
+        assert_eq!(pw.unwrap().0, "ada");
+        assert_eq!(key.unwrap().len(), 64);
+        let (pw, key) = auth_config(None, None, None).unwrap();
+        assert!(pw.is_none() && key.is_none());
+    }
+
 }

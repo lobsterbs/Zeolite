@@ -146,6 +146,8 @@ From the repository root:
 cargo run -p zeolite-server -- --port 6002 --static app/dist
 ```
 
+The server binds loopback (127.0.0.1) by default: it is an open relay to the public internet, so exposing it to a network (`--bind 0.0.0.0` or `ZL_BIND`) is an explicit operator decision. Wisp auth is configured with `ZL_WISP_USER`/`ZL_WISP_PASSWORD` or `ZL_WISP_ED25519_HEX`; an invalid or half-set auth configuration refuses to start rather than silently running open. Browser origins are checked on the wisp upgrade (`ZL_ALLOWED_ORIGINS` to allowlist cross-origin embedders).
+
 Then run the compatibility probe suite:
 
 ```bash
