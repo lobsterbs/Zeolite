@@ -297,6 +297,10 @@ fn env_secs(name: &str, default: u64) -> Duration {
     Duration::from_secs(env_num(name, default, 1))
 }
 
+/// Parsed auth configuration: the wisp password pair and the
+/// Ed25519 key, each optional.
+type AuthConfig = (Option<(String, String)>, Option<String>);
+
 /// Auth config, fail closed (2026-10-07 audit: a half-set
 /// user/password pair or a malformed key used to filter to None,
 /// silently turning a server that LOOKED configured into an open
@@ -305,7 +309,7 @@ fn auth_config(
     user: Option<String>,
     password: Option<String>,
     key_hex: Option<String>,
-) -> Result<(Option<(String, String)>, Option<String>), String> {
+) -> Result<AuthConfig, String> {
     let password = match (user, password) {
         (None, None) => None,
         (Some(u), Some(p)) => Some((u, p)),
@@ -1978,7 +1982,7 @@ mod tests {
             req.push_str("Sec-WebSocket-Protocol: wisp\r\n");
         }
         if let Some(o) = origin {
-            req.push_str("Origin: {o}\r\n");
+            req.push_str(&format!("Origin: {o}\r\n"));
         }
         req.push_str("\r\n");
         req.into_bytes()
