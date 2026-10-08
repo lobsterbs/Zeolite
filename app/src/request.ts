@@ -1838,7 +1838,19 @@ function forwardedHeaders(req: Request, target: string, initiator?: string): Hea
     /* Mirror routes carry the page query in the route URL's search
        (b64u encodes it inside the tail); the Referer must match what
        direct browsing sends (issue #20). */
-    const ref = decodePath(refU.pathname);
+    let ref = decodePath(refU.pathname);
+    /* #112: a nav-handle document keeps the real destination inside
+       its keyed token, so decodePath fails on the navh route and
+       every subresource from that page lost the Referer upstream.
+       The reCAPTCHA anchor on google's /sorry validates the site key
+       against exactly that header and answers "Invalid domain for
+       site key" when it is missing. Decode the handle with the same
+       key that minted it. ponytail: the navh TTL still applies, so a
+       page on a navh route past its window degrades to an omitted
+       Referer again. */
+    if (!ref && refU.pathname.startsWith(NAVH + "/")) {
+      ref = decodeNavHandle(refU.pathname.slice(NAVH.length + 1));
+    }
     if (ref) out.set("referer", ref + refU.search);
     /* Scout report (2026-10-06): a referrer whose path is not a
        decodable engine route used to drop the Referer silently.
