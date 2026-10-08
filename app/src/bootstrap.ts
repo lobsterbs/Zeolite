@@ -1,63 +1,28 @@
-/* Zeolite runtime bootstrap. Injected into proxied HTML by the
-   rewriter right after opens.
+/* Zeolite runtime bootstrap, injected by the rewriter right after
+   <head> opens. Behavior patches only: storage scoping/virtualization,
+   cookies, the worker port relay, WebSocket routing, the serviceWorker
+   shim, the navigation guard (#28), the find loader (#29) and the
+   cross-site channel isolation (#37). URL-level fetch/XHR need no
+   patch: pages navigate engine-local paths the SW intercepts.
 
-   It only patches behavior: storage scoping, storage/cookie
-   virtualization, the shared-worker port relay, WebSocket routing,
-   the worker WebSocket relay, the navigator.serviceWorker shim and
-   the navigation guard (issue #28) and the on-demand find loader
-   (issue #29). #37 adds the cross-site channel isolation: storage
-   events, BroadcastChannel names, window.name scoping, and honest
-   cookieStore removal. URL-level fetch/XHR need no
-   patch: pages navigate within engine-local paths that the service
-   worker intercepts natively.
+   Source modules under ./bootstrap bundle into one synchronous
+   artifact (patches must exist before page scripts run); the CI size
+   gate covers the built artifact. Budget: under 20 KiB minified.
 
-   The source is split into modules under ./bootstrap; the bundler
-   merges them into this single synchronous artifact, because the
-   patches must exist before the page's own scripts run (lazy
-   loading would leave an unpatched window). The CI size gate covers
-   the built artifact.
+   Budget history (raises recorded in the workflow file): 5 KiB
+   original, 6.5 for the #28 nav guard, 8 for the single-file
+   artifact (#35), 10 for #37 channel isolation, 11 for the #28
+   parser-inserted iframe observer, 12 for the #58 srcdoc pass and
+   #59 setAttribute rows, 16 for #54 (page-realm mint client,
+   re-emission, navguard swap/defer seams), 18 for the #54
+   dedicated-Worker hook, 19 for #106/#108 (popup activation guard,
+   child-realm isolation), 20 for #109 (popup sync-open, relative
+   navigation-bound re-emit). Deliberate raises, never creep.
 
-   Budget: under 20 KiB minified (CI enforces). 5 KiB originally,
-   6.5 for the #28 navigation guard, 8 when the artifact became the
-   single classic file the browser run demanded (issue #35): what
-   used to ride in shared chunks (the nav guard, the codec helpers)
-   now bundles into the one file the page loads. 10 for #37: the
-   cross-site channel isolation (storage events, BroadcastChannel,
-   window.name, cookieStore removal) is per-page correctness, not
-   optional payload. 11 for the #28 parser-inserted iframe observer
-   (a frame injected by innerHTML or document.write has no bootstrap
-   of its own, so the document rewrites its src before the browser's
-   queued load task). 12 for the #58 srcdoc pass (a srcdoc child
-   document gets no bootstrap either, so the parent rewrites its
-   markup) and the #59 setAttribute robustness rows. 16 for #54: the
-   page-realm mint client and re-emission (fetch, sendBeacon, XHR and
-   EventSource inputs ride minted engine routes) plus the navguard
-   swap/defer seams (runtime DOM navigation values upgrade from the
-   decodable marker to keyed routes). 18 for the #54 dedicated-Worker
-   hook: the relay taps worker message channels (a Worker object, a
-   SharedWorker port) so mint/ws wrappers reach the engine without
-   leaking into the app's handlers, and the WS/EventSource shims
-   gain instanceof and close-state parity. 19 for #106/#108: the
-   popup activation guard (a capture-phase listener re-drives
-   popup-class activations on raw-destination anchors through the
-   guarded window.open) and the child-realm page-surface isolation
-   (a same-origin inline child inherits the proxy origin, so its
-   storage/cookie surfaces get the guarding page's site scoping).
-   20 for #109: the popup sync-open (popup-class activations ride
-   the original window.open while their user activation is live;
-   the minted re-drive outlived the activation window, so the
-   popup was blocked) and the relative navigation-bound re-emit
-   (anchor/area href, iframe src and form action relative writes
-   re-emit through the #101 parent-relative marker instead of
-   landing on the proxy origin). Deliberate raises, recorded in
-   the workflow file, never creep.
-
-   Page-global contract (set by the rewriter at injection time,
-   issue #32): window.__ZL = { site: "<opaque token>" } - a stable
-   per-site identity the engine computes from the real destination,
-   which itself never reaches the page. Absent (an unrewritten
-   document): the identity falls back to hashing document.baseURI,
-   so storage stays scoped and every shim stays native. */
+   Page-global contract (#32): window.__ZL = { site: "<opaque>" } -
+   a per-site identity computed from the real destination, which
+   never reaches the page. Absent, the identity falls back to
+   hashing document.baseURI. */
 
 import { fnv1a, pageOrigin } from "./bootstrap/siteid";
 import { applyStorage } from "./bootstrap/storage";

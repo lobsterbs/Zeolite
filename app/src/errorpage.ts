@@ -1,39 +1,26 @@
 /* Engine-owned navigation error page (issues #3, #31).
 
-   A navigation that fails inside the transport answers with an HTML
-   page the engine owns, styled after the host's Material 3 Expressive
-   surfaces (inline CSS only: the page loads no fonts, scripts or
-   components, so it renders identically on a cold cache). It carries
-   the one-line failure category, a details card with the joinable
-   diagnostics facts (category, reason, status, trace id, engine
-   version), one retry action, and a machine-readable zl-error meta
-   payload embedders and DevTools can read. Subresource failures keep
-   the honest 502 text/plain body - no UI.
+   A failed in-transport navigation answers with an HTML page the
+   engine owns, styled after the host's M3E surfaces (inline CSS
+   only: no fonts, scripts or components, renders on a cold cache):
+   the one-line failure category, a details card (category, reason,
+   status, trace id, engine version), one retry action, and a
+   machine-readable zl-error meta. Subresource failures keep the
+   honest 502 text/plain body - no UI.
 
-   Issue #32: the page never prints the destination URL. The address
-   bar already shows the opaque engine route of the failed navigation;
-   printing the plaintext destination on an engine-origin document
-   would expose it to any script (or iframe embedding) on that
-   origin, which is exactly the leak class #32 closes. For the same
-   reason the reason line is URL-redacted before it lands on the page
-   or in the meta: a transport error string may quote a hop URL. The
-   structured rings (DiagEvent / trace / netLog) keep the unredacted
-   truth; the trace id joins the page to them.
+   #32: the page never prints the destination URL (the address bar
+   already shows the opaque route; plaintext on an engine-origin
+   document would leak it to any script there). Reason lines are
+   URL-redacted for the same cause; the structured rings (diag /
+   trace / netLog) keep the unredacted truth, joined by trace id.
 
-   Issue #31: the page is also the answer for engine-side navigation
-   strands, not only transport failures. A malformed engine route
-   (decode failure, non-http(s) nav marker target), a disabled site
-   and a policy block are all navigation-capable outcomes; they land
-   here (category "route" / "blocked") with their own reason and
-   status, so no in-engine navigation outcome is a silent strand.
-
+   #31: engine-side navigation strands land here too - malformed
+   route, disabled site, policy block (category "route"/"blocked").
    The page is deterministic: same input, byte-identical HTML.
 
-   The no-control case (a browser hits an engine route with no
-   controlling worker) cannot be answered by the engine at all: with
-   no worker scoped to the route, nothing of the engine runs. The
-   embedder serves a documented snippet there; see
-   docs/error-pages.md. */
+   The no-control case (engine route with no controlling worker)
+   cannot be answered by the engine: the embedder serves a
+   documented snippet (docs/error-pages.md). */
 
 export type ErrorCategory =
   | "dns"

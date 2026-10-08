@@ -1,38 +1,25 @@
 /* libcurl-transport adapter (vendored seam).
- *
- * Zeolite cannot legally ship @mercuryworkshop/libcurl-transport's
- * dist in this repository: the package is AGPL-3.0-only and the dist
- * is a 2.1 MB bundle. Instead, the CI workflow vendors it:
- *
- *   npm i --prefix .vendor @mercuryworkshop/libcurl-transport@2.0.5
- *   cp -r .vendor/node_modules/@mercuryworkshop/libcurl-transport/dist app/public/libcurl
- *   cp -r .vendor/node_modules/libcurl.js/dist app/public/libcurl/libcurl.js
- *
- * so the built engine serves it at /libcurl/index.mjs. This module
- * stays committed, loads that bundle at runtime, and degrades to a
- * clear error when vendoring has not run (the compat suite then
- * records transport-missing instead of silently passing).
- *
- * Why libcurl: the service worker cannot terminate TLS, so proxied
- * HTTPS must come from a client-side engine. libcurl.js performs the
- * real TLS handshake with a real cipher/ALPN configuration, which is
- * also the seam where fingerprint impersonation (Phase 3) applies.
- * AGPL note: anyone serving a built engine with this bundle must
- * honor AGPL-3.0 for the transport (and, per AGPL, for the combined
- * work it links against).
- *
- * Verified API (dist/index.d.ts, v2.0.5):
- *   class LibcurlClient {
- *     constructor(options: { wisp: string; websocket?: string; proxy?: string; transport?: string });
- *     init(): Promise<void>;
- *     ready: boolean;
- *     request(remote: URL, method: string, body: BodyInit | null,
- *             headers: [string, string][], signal?: AbortSignal)
- *           : Promise<{ body: ReadableStream | ArrayBuffer | Blob | string;
- *                      headers: [string, string][]; status: number; statusText: string }>;
- *   }
- * Exported both as default and as the named `LibcurlClient`.
- */
+
+   The package is AGPL-3.0-only and its dist is 2.1 MB, so it is
+   never committed: the CI workflow vendors it (npm i
+   @mercuryworkshop/libcurl-transport@2.0.5, copies the dists into
+   app/public/libcurl) and the built engine serves it at
+   /libcurl/index.mjs. This module loads that bundle at runtime and
+   degrades to a clear error when vendoring has not run (the compat
+   suite records transport-missing instead of silently passing).
+
+   Why libcurl: a SW cannot terminate TLS, so proxied HTTPS needs a
+   client-side engine with a real TLS handshake - the seam where
+   fingerprint impersonation applies. AGPL note: anyone serving a
+   built engine must honor AGPL-3.0 for the transport and the
+   combined work.
+
+   Verified API (dist/index.d.ts, v2.0.5): class LibcurlClient
+   { constructor({ wisp, websocket?, proxy?, transport? });
+     init(): Promise<void>; ready: boolean;
+     request(remote, method, body, headers, signal?):
+       Promise<{ body, headers, status, statusText }> }
+   Exported as default and as named LibcurlClient. */
 
 type RawHeaders = Array<[string, string]>;
 type TransferrableResponse = {
@@ -79,48 +66,31 @@ function moduleUrl(): string {
 let client: LibcurlClientLike | null = null;
 let initPromise: Promise<void> | null = null;
 
-/* ---------------------------------------------------------------------------
- * Epoxy engine (issue #64): selectable second TLS/HTTP engine.
- *
- * The engine is chosen by deployment (Vite define ZL_TRANSPORT reading
- * globalThis.__ZL_TRANSPORT__, same pattern as ZL_WISP_URL), by a host
- * calling setEngine() before init(), or at runtime through the
- * zl:transport control message (DevTools toggle). Default stays
- * "libcurl".
- *
- * Corrections recorded up front (verified against npm metadata 2.1.18-1
- * and the upstream client/src/lib.rs): @mercuryworkshop/epoxy-tls is
- * AGPL-3.0-only, NOT MIT. There is no license win here; the win is
- * payload size and the rustls+hyper stack. Deployments serving either
- * bundle inherit the same AGPL obligations.
- *
- * The vendored variant is the FULL build: fetch + connect_websocket +
- * gzip/brotli decompression + HTTP/2 (the minimal build has fetch only
- * and no WS surface). The wasm is fetched lazily, only when the epoxy
- * engine is actually selected, so the default libcurl payload is
- * unchanged.
- *
- * Verified against upstream lib.rs (2.1.18-1, branch "multiplexed"):
- * - EpoxyClient.fetch(url, options) follows redirects by default; the
- *   engine surfaces 3xx itself, so the adapter passes redirect:
- *   "manual" for libcurl parity (the SW hop-follower owns redirect
- *   mapping).
- * - fetch() defines url/redirected/rawHeaders on the returned
- *   Response; rawHeaders is an object mapping header name -> value or
- *   array of values (set-cookie pairs survive there, past the
- *   forbidden-header filter). The adapter rebuilds the response with
- *   rawHeaders as pairs, the shape the Zeolite cookie jar reads.
- * - connect_websocket(handlers, url, protocols, headers) is async;
- *   EpoxyHandlers(onopen, onclose, onerror, onmessage) - note the
- *   order differs from libcurl's connect(). onopen/onclose carry no
- *   arguments: the peer close code is NOT surfaced, so a Close-frame
- *   close reports 1000 (a completed close handshake is by definition
- *   clean); an error-then-close reports 1006, matching the bridge's
- *   abnormal-close convention.
- * - AbortSignal is not part of the epoxy fetch options surface:
- *   aborted requests run to completion under epoxy. Honest limit,
- *   recorded, not faked.
- * ------------------------------------------------------------------------ */
+/* Epoxy engine (issue #64): selectable second TLS/HTTP engine.
+
+   Chosen by deployment (Vite define ZL_TRANSPORT reading
+   globalThis.__ZL_TRANSPORT__), by setEngine() before init(), or
+   at runtime via zl:transport. Default stays "libcurl".
+
+   Verified against upstream (epoxy-tls 2.1.18-1, lib.rs):
+   - @mercuryworkshop/epoxy-tls is AGPL-3.0-only, NOT MIT - no
+     license win, the win is payload size and rustls+hyper.
+   - The vendored variant is the FULL build (fetch, WS, gzip/
+     brotli, HTTP/2); its wasm is fetched lazily, only when epoxy
+     is selected, so the default payload is unchanged.
+   - EpoxyClient.fetch follows redirects by default; the engine
+     surfaces 3xx itself, so the adapter passes
+     redirect:"manual" for libcurl parity (the SW owns hops).
+   - fetch() defines url/redirected/rawHeaders on the Response;
+     rawHeaders maps name -> value | values (set-cookie survives
+     past the forbidden-header filter); the adapter rebuilds
+     responses with rawHeaders as pairs for the cookie jar.
+   - connect_websocket(handlers, url, protocols, headers):
+     EpoxyHandlers(onopen, onclose, onerror, onmessage) - order
+     differs from libcurl's connect(). No peer close code is
+     surfaced: clean close reports 1000, error-close 1006.
+   - No AbortSignal in the epoxy fetch options: aborted requests
+     run to completion. Honest limit, not faked. */
 
 export type TransportEngine = "libcurl" | "epoxy";
 
@@ -408,38 +378,31 @@ async function loadBundle(url: string): Promise<{ LibcurlClient?: unknown; defau
   return factory() as { LibcurlClient?: unknown; default?: unknown };
 }
 
-/* Issue #11: close-delimited empty-body responses (runtime transport
- * patch).
- *
- * libcurl.js 0.7.4 (vendored inside @mercuryworkshop/libcurl-transport
- * 2.0.5) resolves HTTPSession.fetch only when the body starts or cleanly
- * ends: CurlSession.stream_response fires the headers callback - which
- * constructs the Response and resolves the fetch promise - only from the
- * first body chunk (real_data_callback) or from real_end_callback at
- * error === 0. An empty-body response that is close-delimited (no
- * content-length, no chunked framing) never produces a body chunk, and
- * its end-of-body is the peer connection close, which the wasm curl maps
- * to error 56 (RECV_ERROR; the CI verbose trace shows mbedTLS ssl_read
- * returning 0 on the close, and the failure is identical on h2 and forced
- * HTTP/1.1). The full header set was already delivered, but the transport
- * rejects with no response object, so the SW redirect-hop follower never
- * engages and the engine error page answers (craigslist root, #11).
- *
- * Fix: replace stream_response on the CurlSession prototype at load time
- * (a patch on the vendored bundle own objects; the AGPL artifact itself
- * stays untouched and uncommitted) with this transcription of the 0.7.4
- * source plus one change: on error 56 with no body chunk surfaced, and
- * only when the received header set declares a close-delimited body (no
- * transfer-encoding, content-length absent or zero), fire the headers
- * callback first. http.js then resolves only when a real response exists
- * (create_response throws RangeError for status 0, i.e. no response was
- * ever received), so genuine pre-response failures keep their original
- * rejection through end_callback(error).
- *
- * Gates: __tests__/transport-patch.test.ts (callback ordering and
- * scoping) and the transport-gate workflow (suite/transport-diag.mjs:
- * the real craigslist 302 through a local wisp relay; dispatch-only
- * since 2026-10-05, run manually when the transport seam changes). */
+/* Issue #11: close-delimited empty-body responses.
+
+   libcurl.js 0.7.4 resolves HTTPSession.fetch only when the body
+   starts (first chunk) or cleanly ends (error === 0). An
+   empty-body response that is close-delimited (no content-length,
+   no chunked framing) never produces a body chunk, and the peer
+   close maps to curl error 56, so the transport rejects with no
+   response object (craigslist root, #11) and the SW redirect-hop
+   follower never engages.
+
+   Fix: replace CurlSession.prototype.stream_response at load time
+   (a patch on the vendored bundle's own objects; the AGPL artifact
+   stays untouched and uncommitted) with a transcription of the
+   0.7.4 source plus one change: on error 56 with no body chunk
+   surfaced, and only when the received header set declares a
+   close-delimited body (no transfer-encoding, content-length
+   absent or zero), fire the headers callback first. http.js
+   resolves only when a real response exists; genuine
+   pre-response failures keep their original rejection.
+
+   Gates: __tests__/transport-patch.test.ts (callback ordering,
+   scoping) and the transport-gate workflow (suite/
+   transport-diag.mjs, craigslist 302 through a local wisp relay;
+   dispatch-only since 2026-10-05, run manually when the
+   transport seam changes). */
 interface StreamResponseThis {
   /* Stashed by the request_async wrapper (see applyTransportEOF):
      the request method, captured once at the synchronous entry of

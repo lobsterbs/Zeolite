@@ -1,91 +1,31 @@
-/* Zeolite service worker: interception + header surgery + streaming
-   rewriter + wisp transport + SiteConfig rules + plugin hooks + the
-   network inspector's log.
+/* Zeolite service worker: fetch interception, header surgery,
+   streaming rewriter, wisp transport, SiteConfig rules, plugin
+   hooks, netLog. Engine-local routes under a rotatable prefix
+   (default /j/, zl:config since #17; scheme fixed "b64u" since
+   #32). Engine assets (sw.js, bootstrap.js, devtools, ...) and the
+   wisp endpoint pass through untouched; prefix/scheme decisions go
+   through ./codec (was hardcoded here).
 
-   URL shape: engine-local routes under a configurable prefix (default
-   /j/, rotatable at runtime via an zl:config message, persisted across
-   worker restarts since issue #17). Requests that
-   are engine assets (sw.js, bootstrap.js, devtools.html, ...) or the
-   wisp endpoint pass through untouched. All prefix/scheme decisions go
-   through ./codec helpers (bug-scout fix: "/j/" was previously hard
-   -coded here while decoding used the rotated prefix).
+   Control plane (postMessage, replies on the given port):
+     zl:config prefix | zl:mint dest | zl:navHandle dest
+     zl:rules ua rules | zl:jarProfile profile | zl:siteRoute
+     site enabled | zl:teardown | zl:getNetLog since cursor
+     zl:tracing enabled | zl:wsOpen url protocols
+     zl:docCookie set | zl:fingerprint profile
+     zl:recordStart recId | zl:recordStop
+     zl:find dest cmd pattern options | zl:ping (replies
+     { ok, version, degraded, prefix, scheme })
+     zl:sameSite policy | zl:importSession mode rule
+     zl:getJars | zl:clearJar profile origin
+     zl:downloadState id status | zl:listMenus extId
 
-   Phase 2 control plane (postMessage from the engine adapter):
-     { type: "zl:config", prefix }          rotate the route prefix
-                                             (scheme fixed "b64u" since
-                                             #32; other values rejected)
-     { type: "zl:mint", dest }              mint an opaque route for a
-                                             destination (#55: the SW
-                                             mints with its realm-held
-                                             key; the key never leaves
-                                             the worker)
-     { type: "zl:navHandle", dest }         mint an opaque one-window
-                                             initial-navigation handle
-                                             (#63, #54 design D; host-
-                                             only: a proxied page sender
-                                             is refused)
-     { type: "zl:rules", ua, rules }         host-app per-site overrides
-                                             (host, adblock, ua)
-     { type: "zl:jarProfile", profile }     switch the cookie jar to a
-                                             throwaway session profile
-                                             (incognito; in-memory only)
-     { type: "zl:siteRoute", site, enabled } per-site interception toggle
-     { type: "zl:teardown" }                 unregister + drop caches
-   Phase 4 control plane:
-     { type: "zl:getNetLog" }                snapshot of the request log
-     { type: "zl:tracing", enabled }          opt-in rewrite tracing ring (1.2)
-     { type: "zl:wsOpen", url, protocols }  page WS bridge (1.3; the
-                                            handshake identity is the
-                                            verified sender's own origin,
-                                            recovered from its client
-                                            route, item 4)
-     { type: "zl:docCookie", set }   per-origin document.cookie (1.5;
-                                            the jar origin is the verified
-                                            sender's, never a claim)
-     { type: "zl:fingerprint", profile }   document surface spoofing (1.8)
-     { type: "zl:recordStart", recId }     deterministic session recording (1.9)
-     { type: "zl:recordStop" }             build the zlRecord artifact
-     { type: "zl:find", dest, cmd, pattern, options }  in-page find in the
-                                            addressed page (#29; replies
-                                            { ok, matches, ordinal,
-                                            highlight })
-   2.1 Halogen control plane:
-     { type: "zl:ping" }                    version handshake (replies
-                                             { ok, version, degraded,
-                                               prefix, scheme } so
-                                             embedders can detect a
-                                             route-shape revert, #17)
-   2.2 Arsenide control plane:
-     { type: "zl:sameSite", policy }        opt-in jar SameSite policy
-                                             ("off" | "approx")
-     { type: "zl:importSession", ..., mode: "merge", rule }  merge-mode
-                                             session import (default replace)
+   Host-only gate (#41): proxied pages are SW clients too, so
+   control messages are host-only; a proxied document may send only
+   its own page-facing messages (zl:docCookie, zl:wsOpen, zl:ext,
+   zl:ping).
 
-    Issue #41 control plane:
-      { type: "zl:getJars" }                jar enumeration: every profile
-                                              with per-origin cookie state
-      { type: "zl:clearJar", profile, origin }  clear the active or named
-                                              jar profile, or one origin
-                                              inside it
-
-    Issue #44/#45 control plane:
-      { type: "zl:downloadState", id, status }  host reports a
-                                              zl:downloadOp handoff's
-                                              state back (registry +
-                                              downloads.onChanged)
-      { type: "zl:listMenus", extId? }      host lists registered
-                                              context-menu items
-
-    Bug-scout gate (#41): proxied pages are SW clients too, so control
-    messages are host-only now - a proxied document may still send its
-    own page-facing messages (zl:docCookie, zl:wsOpen, zl:ext, zl:ping),
-    nothing else.
-   Replies are posted back on the given MessageChannel port, so the
-   adapter (and the devtools page) get real acknowledgements.
-
-   The rewriter wasm (wasm-bindgen output of crates/rewriter) is emitted
-   by the build pipeline to src/rewriter_wasm/ (see workflow:
-   wasm-pack build --target web -> copy into app/src/rewriter_wasm). */
+   The rewriter wasm (wasm-bindgen output of crates/rewriter) is
+   emitted by the build pipeline to src/rewriter_wasm/. */
 
 /// <reference lib="webworker" />
 import { jarLoad } from "./cookies";

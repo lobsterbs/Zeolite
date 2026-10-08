@@ -1,62 +1,31 @@
 /* Runtime navigation guard + WebRTC gate (issues #28, #39).
 
-   The service worker only intercepts navigations inside its own
-   scope: a cross-origin navigation (window.open, an anchor href, a
-   form action) goes straight from the page to the real origin,
-   exposing the client IP and hostname. The rewriter covers URLs in
-   server-provided markup; this module covers the runtime DOM seams.
-   Rewritten absolute URLs become engine-local NAV marker routes,
-   which the SW decodes and proxies like any engine route
-   (cross-origin navigations would otherwise never reach the fetch
-   handler at all). Issue #32: the marker encodes the target
-   base64url, so no plaintext destination reaches the DOM value, the
-   address bar or history.
+   Cross-origin runtime DOM seams (window.open, anchor href, form
+   action) would go direct and expose the client IP. This module
+   rewrites those seams to engine-local NAV marker routes the SW
+   decodes and proxies (#32: base64url marker, no plaintext
+   destination in the DOM, address bar or history).
 
    Honest limits, by design:
-   - location is LegacyUnforgeable: location.href = "..." cannot be
-     hooked directly. #39 closes the escape class through the
-     Navigation API instead: the navigate event fires in this
-     document for every cross-document navigation it initiates and
-     is cancelable for push/replace/reload types, so the guard
-     cancels a real-origin navigation and re-drives it through the
-     marker. Browsers without window.navigation (Firefox today)
-     cannot cancel location-driven cross-document navigations;
-     there the meta-refresh hook below closes that one runtime
-     seam and the location.* limit stands, documented. Traverse
-     (back/forward) navigations cannot be canceled, but
-     history only ever holds engine routes (#32), so no real-origin
-     destination can sit in it.
-   - URLs inserted through the HTML parser (innerHTML, document.write)
-     bypass the property and setAttribute hooks, but the navigations
-     they eventually trigger still fire the navigate event, so
-     parser-inserted anchors, forms and meta refresh are covered by
-     the same seam. Parser-inserted iframe/frame src has its own
-     observer below: the child frame has no bootstrap yet, so the
-     src (and #58: srcdoc markup, whose child document likewise runs
-     no bootstrap) is rewired to the marker before the browser's
-     queued iframe load task starts.
-   - Engine-origin and opaque URLs pass through untouched: those
-     requests stay inside the SW scope and it reroutes them
-     natively. Relative writes on navigation-bound attributes
-     (anchor/area href, iframe src, form action) re-emit through
-     the #101 parent-relative marker (#109): such a navigation
-     must never land on the proxy origin's SPA fallback.
-     <base href> is deliberately left alone (rewriting it
-     would break relative resolution for the whole page).
-   - RTCPeerConnection is removed, not shimmed: WebRTC connects
-     directly, cannot be routed through the engine, and leaving a
-     constructible-looking API would be a fake feature.
-   - #54 residuals: the NAV marker is base64url - decodable by the
-     page-public legacy codec - so every runtime seam the guard
-     rewrites now upgrades to a minted keyed engine route (zl:mint)
-     whenever a microtask can be afforded. swap rows (anchor/area
-     href) write the marker synchronously and upgrade in place;
-     defer rows (iframe src, form action, link href, parser-inserted
-     src, window.open, the navigate re-drive) write a blank first
-     and the route after the mint - the load task starts after the
-     observer microtask, so nothing browser-direct is ever
-     requested. A refused or failed mint falls back to the marker:
-     the documented degrade, never a hang. */
+   - location is LegacyUnforgeable; #39 closes the escape class via
+     the Navigation API (cancel + re-drive through the marker). No
+     window.navigation (Firefox): the meta-refresh hook covers that
+     seam, the location.* limit stands. Traverse navigations cannot
+     be canceled, but history only holds engine routes.
+   - Parser-inserted anchors/forms fire the navigate event too;
+     parser-inserted iframe src (and #58 srcdoc markup) get their
+     own observer: the child has no bootstrap, so src is rewired
+     before the queued load task.
+   - Engine-origin and opaque URLs pass through; relative writes on
+     navigation-bound attributes re-emit through the #101
+     parent-relative marker (#109). <base href> stays alone.
+   - RTCPeerConnection is removed, not shimmed: WebRTC cannot be
+     routed through the engine; a fake API would be dishonest.
+   - #54: the marker is decodable by the page, so seams upgrade to
+     minted keyed routes (zl:mint) when a microtask can be spared:
+     swap rows upgrade in place, defer rows blank first then write
+     the route. A refused mint falls back to the marker -
+     documented degrade, never a hang. */
 
 import { applyReemit, mintRoute } from "./mint";
 import { applyCookie } from "./cookie";

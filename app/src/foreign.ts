@@ -1,36 +1,27 @@
 /* Cross-origin request policy (issue #34).
 
    A controlled page's subresource requests all reach the fetch
-   handler, whatever origin they name - only navigations are
-   scope-bound. Before #34 the handler declined foreign-origin http(s)
-   requests and the browser went direct, exposing the client IP and
-   the target hostname: every fetch/XHR, EventSource, sendBeacon,
-   image, stylesheet, script, media element or worker URL a page
-   built at runtime (or inserted through the HTML parser, CSS url(),
-   srcset - surfaces no page-side hook can cover) escaped the engine.
+   handler whatever origin they name - only navigations are
+   scope-bound. Before #34 the handler declined foreign-origin
+   http(s) requests, so runtime-built or parser/CSS-inserted URLs
+   (fetch/XHR, EventSource, sendBeacon, media, workers) escaped
+   the engine and exposed the client IP.
 
-   The policy classifies such a request before the SW answers it:
-
-   - passthrough: the requesting client is not a proxied document (no
-     client URL, or a client URL that does not decode to an engine
-     destination - the embedder app's own pages). Its cross-origin
-     traffic is its own business and keeps the direct browser path
-     with the #30 escape telemetry. Failing closed to passthrough for
-     an unknown client is the safe direction for the host app.
-   - preflight: a CORS preflight (OPTIONS + access-control-request-
-     method) from a proxied document. The engine is the proxy the
-     page is same-origin to, and the target's own CORS policy never
-     applied to engine-routed responses (applyEngineCors replaces
-     the target's CORS facts with the engine's), so the preflight is
-     answered by the engine for exactly the method and headers the
-     page asked for; the actual request then routes like any other.
+   Classification before the SW answers:
+   - passthrough: the client is not a proxied document (the
+     embedder's own pages) - its traffic keeps the direct path
+     with #30 escape telemetry. Failing closed to passthrough
+     for unknown clients is the safe direction.
+   - preflight: a CORS preflight from a proxied document. The
+     target's CORS policy never applied to engine-routed
+     responses, so the engine answers the preflight for exactly
+     what the page asked; the actual request routes normally.
    - route: a proxied document's request. The full URL is the
-     destination and the existing pipeline (SSRF policy, header
-     surgery, per-origin cookie jar, transport, rewriter, netLog)
-     serves it, so no browser-direct request ever leaves.
+     destination; the existing pipeline (SSRF, headers, jar,
+     transport, rewriter, netLog) serves it.
 
-   Pure code so the decision table is unit-tested; the SW owns the
-   async parts (client lookup) and stays thin. */
+   Pure code (unit-tested decision table); the SW owns the async
+   client lookup. */
 
 import { decodePath, isOpaqueUrl } from "./codec";
 

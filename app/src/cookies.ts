@@ -1,43 +1,26 @@
-/* Per-origin cookie jars + virtual-origin registry (Phase 4, 1.4 Boride).
+/* Per-origin cookie jars + virtual-origin registry (Phase 4, 1.4).
 
-   The engine owns one cookie store, partitioned by the virtual-origin
-   registry: every target origin gets a stable internal id (the same
-   FNV1a hash the bootstrap uses for storage scoping) and its
-   Zeolite-internal representation (the codec encoding of the origin).
-   Cookies are stored as records under that id; matching is the ONLY
-   way cookies cross records: a cookie attaches to a request when its
-   own Domain/Path/Secure attributes say so (RFC 6265 domain-match and
-   path-match). A cookie is never admitted outside its domain scope
-   and never attached outside it, so unrelated target origins are
-   isolated by construction. That is the hard gate.
-
-   Honesty notes (docs/cookies.md):
-   - 2.2 Arsenide: the SW now follows 3xx hops itself (the transport
-     surfaces them rather than following), calling applySetCookie on
-     every hop response, so hop cookies are captured. Hops the SW
-     cannot follow (307/308 with a one-shot stream body) are surfaced
-     to the page with a mapped Location; their Set-Cookie is captured
-     before that.
-   - SameSite is enforced only through the opt-in policy knob
-     (setSameSitePolicy, off by default): every proxied request is
-     engine-initiated, so the site-for-sites context is an
-     approximation built from the request referrer. SameSite=None
-     without Secure is rejected regardless of the knob (spec rule).
-   - document.cookie IS virtualized by the bootstrap (per-origin
-     view over the zl:docCookie channel; this jar stays authoritative
-     for engine-initiated requests).
-   - The transport (libcurl) may hold cookies internally; this jar is
-     the engine's authoritative Cookie source for requests it
-     initiates.
-
-   Persistence: IndexedDB (service workers have no localStorage),
-   reusing the extension subsystem's idb helper; the whole jar is one
-   record, rewritten (debounced) after mutations.
-
-   Jar profiles: the host app can switch the active jar to a throwaway
-   session profile (zl:jarProfile, incognito isolation). Session-
-   profile cookies are in-memory only and are dropped on switch-away
-   or SW restart; the host re-sends its profile on boot. */
+   One cookie store partitioned by the virtual-origin registry:
+   each target origin gets a stable internal id (the FNV1a hash
+   the bootstrap uses for storage scoping). Cookies attach to a
+   request only when their own Domain/Path/Secure attributes say
+   so (RFC 6265 matching): never admitted or attached outside
+   their domain scope, so unrelated origins are isolated by
+   construction. Honesty notes (docs/cookies.md):
+   - 2.2: the SW follows 3xx hops itself, applying Set-Cookie at
+     every hop; unfollowable hops (307/308 one-shot body) are
+     surfaced with a mapped Location, cookies captured first.
+   - SameSite enforced only via the opt-in knob (off by default):
+     every proxied request is engine-initiated, so the site
+     context is approximated from the referrer. SameSite=None
+     without Secure is always rejected.
+   - document.cookie is virtualized by the bootstrap
+     (zl:docCookie); this jar stays authoritative for
+     engine-initiated requests, even though the transport
+     (libcurl) may also hold cookies internally.
+   Persistence: IndexedDB (no localStorage in a SW), one record,
+   debounced rewrites. Jar profiles (zl:jarProfile) switch to a
+   throwaway in-memory session jar (incognito). */
 
 import { encodeDest } from "./codec";
 import { DIAG } from "./diag";
