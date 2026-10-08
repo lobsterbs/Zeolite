@@ -185,7 +185,7 @@ impl Rewriter {
             None => (abs, String::new()),
         };
         let mut out = if literal && matches!(self.cfg.codec, crate::encode::Codec::Keyed { .. }) {
-            match split_dir_dest(&bare) {
+            match Self::split_dir_dest(&bare) {
                 Some((parent, seg)) => {
                     let mut o = self.cfg.encode_url(parent);
                     o.push('/');
