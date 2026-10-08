@@ -1991,6 +1991,12 @@ function referrerOrigin(referrer: string): string | null {
     let ref = decodePath(refU.pathname);
     if (!ref && refU.pathname.startsWith(NAVH + "/"))
       ref = decodeNavHandle(refU.pathname.slice(NAVH.length + 1));
+    /* #113: legacy /zl/ routes from cold starts or pre-#113 dists
+       also fail decodePath when the prefix is not configured yet.
+       decodeLegacyRoute recovers them at the escape seam. */
+    if (!ref) {
+      ref = decodeLegacyRoute(refU.pathname);
+    }
     return ref ? new URL(ref).origin : null;
   } catch {
     return null;
@@ -2032,6 +2038,12 @@ function forwardedHeaders(req: Request, target: string, initiator?: string): Hea
        Referer again. */
     if (!ref && refU.pathname.startsWith(NAVH + "/")) {
       ref = decodeNavHandle(refU.pathname.slice(NAVH.length + 1));
+    }
+    /* #113: legacy /zl/ routes from cold starts or pre-#113 dists
+       also fail decodePath when the prefix is not configured yet.
+       decodeLegacyRoute recovers them at the escape seam. */
+    if (!ref) {
+      ref = decodeLegacyRoute(refU.pathname);
     }
     if (ref) out.set("referer", ref + refU.search);
     /* Scout report (2026-10-06): a referrer whose path is not a
