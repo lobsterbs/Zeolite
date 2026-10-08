@@ -486,6 +486,33 @@ export function recoverPath(path: string): string | null {
   return null;
 }
 
+/** #113: a legacy route minted under a prefix this worker has not
+    configured yet (a cold start, before the boot config lands) is
+    invisible to decodePath, which knows only the configured prefix,
+    so it reaches the escape seam instead of the route decode. The
+    tail still names a real page: accept a two-segment path whose
+    first segment is the configured prefix or the reserved legacy
+    "zl" segment (host routes like /r/ are never captured), refuse
+    keyed tails - fail closed, keyed decode is decodePath's job - and
+    bind the payload to http(s) like every other decode. */
+export function decodeLegacyRoute(path: string): string | null {
+  const m = /^/([^/]+)/([A-Za-z0-9_-]+)$/.exec(path);
+  if (!m) return null;
+  const seg = m[1];
+  const tail = m[2];
+  if (seg === undefined || tail === undefined) return null;
+  if (prefix !== "/" + seg + "/" && seg !== "zl") return null;
+  const bytes = b64uDecode(tail);
+  if (!bytes || (bytes.length >= 17 && bytes[0] === 1)) return null;
+  let dest: string;
+  try {
+    dest = DEC_STRICT.decode(bytes);
+  } catch {
+    return null;
+  }
+  return /^https?:///.test(dest) ? dest : null;
+}
+
 /** Schemes the engine never routes: the browser owns blob:, data: and
     about: natively (createObjectURL media, blob workers, generated
     downloads, data: documents). The SW fetch handler passes these

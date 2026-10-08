@@ -14,7 +14,7 @@
    this module keeps calling decideTransport/refineWithContent at the
    same seams the old handler did. */
 /// <reference lib="webworker" />
-import { b64uDecode, b64uEncode, decodeNavHandle, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { b64uDecode, b64uEncode, decodeLegacyRoute, decodeNavHandle, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
@@ -878,29 +878,51 @@ export function handleFetch(e: FetchEvent): void {
             ? referrerDest(e.request.referrer, url.pathname + url.search)
             : null;
           if (!refDest) {
-            /* #101: the silent passthrough. Neither the client's
-               virtual context nor the referrer names a home for this
-               same-origin path (an unrewritten embed page, a client
-               the context cap dropped, or a child realm the guard
-               never reached), so the browser serves it - on the
-               proxy origin that is a 404. Escape row, not a guess:
-               dest records what the browser will actually request. */
-            netLogPush({
-              method: e.request.method,
-              traceId: DIAG.trace(),
-              path: url.pathname + url.search,
-              dest: e.request.url,
-              status: 0,
-              rtype: classifyRtype(reqDest(e.request), ""),
-              ms: -1,
-              bytes: -1,
-              verdict: "escape: same-origin unknown home",
-              transport: "browser",
-              detail: { internalUrl: url.pathname + url.search, ttfb: -1 },
-            });
-            return fetch(e.request);
+            /* #113: a legacy route minted under a prefix this worker
+               has not configured yet (a cold start, the boot config
+               race) reaches this seam because decodePath knows only
+               the configured prefix, and passing it through is a
+               proxy-origin 404. Recover the tail here. */
+            const legacy = decodeLegacyRoute(url.pathname);
+            if (legacy) {
+              const ltid = DIAG.trace();
+              DIAG.emit({
+                traceId: ltid,
+                requestId: ltid,
+                category: "REWRITE",
+                severity: "info",
+                stage: "REQUEST_INTERCEPTED",
+                message: "legacy route recovered at the escape seam (route shape not configured yet)",
+                url: legacy,
+              });
+              dest0 = unwrapDest(legacy);
+              routeCarriesQuery = true;
+            } else {
+              /* #101: the silent passthrough. Neither the client's
+                 virtual context nor the referrer names a home for this
+                 same-origin path (an unrewritten embed page, a client
+                 the context cap dropped, or a child realm the guard
+                 never reached), so the browser serves it - on the
+                 proxy origin that is a 404. Escape row, not a guess:
+                 dest records what the browser will actually request. */
+              netLogPush({
+                method: e.request.method,
+                traceId: DIAG.trace(),
+                path: url.pathname + url.search,
+                dest: e.request.url,
+                status: 0,
+                rtype: classifyRtype(reqDest(e.request), ""),
+                ms: -1,
+                bytes: -1,
+                verdict: "escape: same-origin unknown home",
+                transport: "browser",
+                detail: { internalUrl: url.pathname + url.search, ttfb: -1 },
+              });
+              return fetch(e.request);
+            }
+          } else {
+            dest0 = refDest;
           }
-          dest0 = refDest;
         }
       }
       // Fragments are client-side only. The rewriter keeps them out of the
