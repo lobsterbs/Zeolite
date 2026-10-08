@@ -410,7 +410,8 @@ impl Rewriter {
                             // URL-literal pass (same order as the server
                             // engine's pipeline) so folded guards and
                             // navigation sinks apply to the final body.
-                            let rewritten = crate::js::rewrite_script(&raw, &|u| self.enc_literal(u));
+                            let rewritten =
+                                crate::js::rewrite_script(&raw, &|u| self.enc_literal(u));
                             out.push_str(&crate::js::antiframe(&rewritten));
                         } else {
                             out.push_str(&raw);
@@ -2017,7 +2018,10 @@ mod tests {
             out
         );
         assert!(
-            out.contains(&format!("'{}'", c.encode_url("https://www.google.com/x.js"))),
+            out.contains(&format!(
+                "'{}'",
+                c.encode_url("https://www.google.com/x.js")
+            )),
             "file literal unchanged: {}",
             out
         );
