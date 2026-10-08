@@ -496,7 +496,7 @@ export function recoverPath(path: string): string | null {
     keyed tails - fail closed, keyed decode is decodePath's job - and
     bind the payload to http(s) like every other decode. */
 export function decodeLegacyRoute(path: string): string | null {
-  const m = /^/([^/]+)/([A-Za-z0-9_-]+)$/.exec(path);
+  const m = /^\/([^/]+)\/([A-Za-z0-9_-]+)$/.exec(path);
   if (!m) return null;
   const seg = m[1];
   const tail = m[2];
@@ -510,7 +510,7 @@ export function decodeLegacyRoute(path: string): string | null {
   } catch {
     return null;
   }
-  return /^https?:///.test(dest) ? dest : null;
+  return /^https?:\/\//.test(dest) ? dest : null;
 }
 
 /** Schemes the engine never routes: the browser owns blob:, data: and
