@@ -72,23 +72,59 @@ async function ensureCurl(): Promise<void> {
    and retry once before the 502 page reaches the user. A request whose body stream was already
    consumed may fail the retry and surface as before: honest fallback,
    never a loop - each wispFetch call retries at most once. */
+
+/* Issue #99 class: the vendored request promise resolves when headers
+   arrive, so a request that stalls before the first byte (a silently
+   dropped wisp websocket, the class behind #99's mid-stream stalls
+   and hanging subresources) never settles and the page spinner runs
+   forever. Every fetch - navigation or subresource - now carries a
+   first-byte deadline (same 30s budget as request.ts navigations). A
+   stall is transport state exactly like a connect-class error: reset
+   the singleton, retry once on a fresh connection, then fail
+   honestly. Local copy of request.ts's withDeadline: transport.ts is
+   imported by request.ts, importing back would close a module cycle.
+   The abandoned fetch keeps running after the deadline fires; its
+   answer is dropped, never served. */
+const WISP_TTFB_DEADLINE_MS = 30_000;
+
+class WispStallError extends Error {}
+
+function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new WispStallError("wisp transport stall: no first byte within " + ms + "ms")), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(t);
+        reject(err);
+      },
+    );
+  });
+}
+
 async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
   await ensureCurl();
   try {
-    return await zlCurlFetch(dest, init);
+    return await withDeadline(zlCurlFetch(dest, init), WISP_TTFB_DEADLINE_MS);
   } catch (err) {
-    if (!isConnectClassError(err)) throw err;
+    if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw err;
     DIAG.emit({
       category: "TRANSPORT",
       severity: "error",
-      message: "transport failure; reset, retrying once on a fresh connection",
+      message:
+        err instanceof WispStallError
+          ? "transport stall: no first byte within " + WISP_TTFB_DEADLINE_MS + "ms; reset, retrying once"
+          : "transport failure; reset, retrying once on a fresh connection",
       technicalReason: String(err),
       url: ZL_WISP_URL,
     });
     zlCurlReset();
     curlReady = null; // force re-init inside the next ensureCurl()
     await ensureCurl();
-    return zlCurlFetch(dest, init);
+    return withDeadline(zlCurlFetch(dest, init), WISP_TTFB_DEADLINE_MS);
   }
 }
 
