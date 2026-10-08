@@ -95,6 +95,25 @@ impl Rewriter {
     }
 
     fn enc(&self, url: &str) -> String {
+        self.enc_route(url, false)
+    }
+
+    /// JS string-literal routing (#112): like enc(), but a keyed
+    /// route for a directory-shaped destination (path ending in "/")
+    /// keeps the last path segment visible after the token. Pages
+    /// branch on the tail of such base strings (reCAPTCHA's
+    /// enterprise loader appends "api2/" unless its api base ends
+    /// with "enterprise/"), and a fully opaque token breaks every
+    /// tail check. The split form still routes: recoverPath
+    /// (app/src/codec.ts) decodes token(parent) + "/seg/..." back
+    /// to parent + "/seg/...". Keyed codec only: recoverPath refuses
+    /// legacy tails, so a split legacy route would 404 instead of
+    /// decoding.
+    fn enc_literal(&self, url: &str) -> String {
+        self.enc_route(url, true)
+    }
+
+    fn enc_route(&self, url: &str, literal: bool) -> String {
         // Already engine-local (nested rewriting): keep as-is. An empty
         // origin matches every URL, so it must not take this branch.
         if !self.cfg.origin.is_empty() && url.starts_with(&self.cfg.origin) {
@@ -165,9 +184,37 @@ impl Rewriter {
             Some((b, f)) => (b.to_string(), format!("#{}", f)),
             None => (abs, String::new()),
         };
-        let mut out = self.cfg.encode_url(&bare);
+        let mut out = if literal && matches!(self.cfg.codec, crate::encode::Codec::Keyed { .. }) {
+            match split_dir_dest(&bare) {
+                Some((parent, seg)) => {
+                    let mut o = self.cfg.encode_url(parent);
+                    o.push('/');
+                    o.push_str(seg);
+                    o.push('/');
+                    o
+                }
+                None => self.cfg.encode_url(&bare),
+            }
+        } else {
+            self.cfg.encode_url(&bare)
+        };
         out.push_str(&frag);
         out
+    }
+
+    /// Split a directory-shaped destination (path ending in "/") into
+    /// (parent, last visible path segment): "https://e.com/a/b/" ->
+    /// ("https://e.com/a", "b"). None when there is no segment to
+    /// keep visible (root-only "/" or empty paths).
+    fn split_dir_dest(bare: &str) -> Option<(&str, &str)> {
+        let one = bare.strip_suffix('/')?;
+        let scheme_end = one.find("://")? + 3;
+        let path_start = one[scheme_end..].find('/').map(|i| i + scheme_end)?;
+        let seg_slash = one.rfind('/')?;
+        if seg_slash < path_start {
+            return None;
+        }
+        Some((&one[..seg_slash], &one[seg_slash + 1..]))
     }
 
     /// One-shot external-script body pass (#46): URL-literal rewriting
@@ -179,7 +226,7 @@ impl Rewriter {
         if !self.cfg.rewrite_js_literals {
             return js.to_string();
         }
-        let rewritten = crate::js::rewrite_script(js, &|u| self.enc(u));
+        let rewritten = crate::js::rewrite_script(js, &|u| self.enc_literal(u));
         crate::js::antiframe(&rewritten)
     }
 
@@ -363,7 +410,7 @@ impl Rewriter {
                             // URL-literal pass (same order as the server
                             // engine's pipeline) so folded guards and
                             // navigation sinks apply to the final body.
-                            let rewritten = crate::js::rewrite_script(&raw, &|u| self.enc(u));
+                            let rewritten = crate::js::rewrite_script(&raw, &|u| self.enc_literal(u));
                             out.push_str(&crate::js::antiframe(&rewritten));
                         } else {
                             out.push_str(&raw);
@@ -547,7 +594,7 @@ impl Rewriter {
                         Some(e)
                     } else if is_event_attr(&lower) && self.cfg.rewrite_js_literals {
                         Some(crate::js::antiframe(&crate::js::rewrite_inline(&v, &|u| {
-                            self.enc(u)
+                            self.enc_literal(u)
                         })))
                     } else {
                         None
@@ -1927,6 +1974,51 @@ mod tests {
         assert!(
             out.contains(r#""hello""#),
             "non-URL literal intact: {}",
+            out
+        );
+    }
+
+    /// #112: a JS literal whose destination path ends in "/" keeps
+    /// the last path segment visible after the keyed token, so
+    /// runtime tail checks (reCAPTCHA enterprise appends "api2/"
+    /// unless its api base ends with "enterprise/") still hold, and
+    /// the appended suffix lands on recoverPath, which decodes
+    /// token(parent) + "/seg/..." back to parent + "/seg/...".
+    #[test]
+    fn js_literal_directory_keeps_last_segment_visible() {
+        let mut c = cfg();
+        c.codec = Codec::Keyed {
+            prefix: "/j/".into(),
+            key: core::array::from_fn(|i| i as u8),
+        };
+        let base = "https://www.google.com/sorry/index";
+        let mut r = Rewriter::new(c.clone());
+        r.set_base(base);
+        let js = "var api='https://www.google.com/recaptcha/enterprise/';var page='https://www.google.com/';var file='https://www.google.com/x.js';";
+        let out = r.rewrite_js_body(js);
+        // Directory literal: token(parent) + "/enterprise/".
+        let parent = c.encode_url("https://www.google.com/recaptcha");
+        let dir_route = parent + "/enterprise/";
+        assert!(
+            out.contains(&format!("'{}'", dir_route)),
+            "directory literal split: {}",
+            out
+        );
+        // Not the single token for the whole directory.
+        assert!(
+            !out.contains(&c.encode_url("https://www.google.com/recaptcha/enterprise/")),
+            "whole-directory token absent: {}",
+            out
+        );
+        // Root-only and file literals keep the plain single-token form.
+        assert!(
+            out.contains(&format!("'{}'", c.encode_url("https://www.google.com/"))),
+            "root-only literal unchanged: {}",
+            out
+        );
+        assert!(
+            out.contains(&format!("'{}'", c.encode_url("https://www.google.com/x.js"))),
+            "file literal unchanged: {}",
             out
         );
     }
