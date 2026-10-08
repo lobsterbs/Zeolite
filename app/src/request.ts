@@ -947,6 +947,27 @@ export function handleFetch(e: FetchEvent): void {
         }
       }
 
+      /* #112: the Referer fix alone does not repair the reCAPTCHA
+         widget: its JS builds co= from window.location.origin
+         (LegacyUnforgeable), so upstream always receives the engine
+         origin and the site-key domain check fails. Virtualize a
+         co= that names this deployment at the seam the engine owns. */
+      const coFixed = virtualRecaptchaCo(target, e.request.referrer, self.location.origin);
+      if (coFixed !== target) {
+        const ctid = DIAG.trace();
+        DIAG.emit({
+          traceId: ctid,
+          requestId: ctid,
+          category: "CHALLENGE",
+          cause: "challenge",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "recaptcha co= virtualized to the page origin",
+          url: target,
+        });
+        target = coFixed;
+      }
+
       if (siteDisabled(target)) {
         /* #31: a disabled-site navigation lands on the error page
            ("blocked"), not a bare 403 strand. */
@@ -1823,6 +1844,76 @@ export function handleFetch(e: FetchEvent): void {
       })();
     })(),
   );
+}
+
+/** #112: reCAPTCHA's enterprise endpoints validate the site key against
+    the co= param (base64 of the embedding page's origin, '=' padded as
+    '.'). The page's JS computes it from window.location.origin, which
+    the engine can never virtualize (LegacyUnforgeable), so every
+    proxied embed sends the engine origin and the widget answers
+    "Invalid domain for site key". This seam rewrites a co= that names
+    this deployment to the virtual origin of the embedding page (the
+    decoded referrer's origin; the destination's own origin as the
+    no-referrer fallback). Rendering fidelity only: the challenge
+    itself is never solved or bypassed. */
+export function virtualRecaptchaCo(target: string, referrer: string, engineOrigin: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host !== "www.google.com" && u.host !== "www.recaptcha.net") return target;
+  if (!u.pathname.startsWith("/recaptcha/")) return target;
+  const m = /([?&])co=([^&]*)/.exec(u.search);
+  if (!m || !m[2]) return target;
+  let dec: string;
+  try {
+    dec = atob(percentDecode(m[2]).replace(/\./g, "="));
+  } catch {
+    return target;
+  }
+  /* Only a co= that names THIS deployment is ours to fix; any other
+     value is an origin the page genuinely chose. */
+  if (dec !== engineOrigin && dec !== engineOrigin + ":443" && dec !== engineOrigin + ":80")
+    return target;
+  const parent = referrerOrigin(referrer);
+  const home = parent ?? u.origin;
+  let vu: URL;
+  try {
+    vu = new URL(home);
+  } catch {
+    return target;
+  }
+  const port = vu.port ? "" : vu.protocol === "https:" ? ":443" : ":80";
+  const co = btoa(vu.origin + port).replace(/=+$/, (p) => ".".repeat(p.length));
+  return u.href.replace(m[0], m[1] + "co=" + co);
+}
+
+/** The virtual origin of the page that embedded a recaptcha frame:
+    decode its engine-route referrer (keyed route or nav handle). */
+function referrerOrigin(referrer: string): string | null {
+  if (!referrer) return null;
+  try {
+    const refU = new URL(referrer, "https://zl.invalid/");
+    let ref = decodePath(refU.pathname);
+    if (!ref && refU.pathname.startsWith(NAVH + "/"))
+      ref = decodeNavHandle(refU.pathname.slice(NAVH.length + 1));
+    return ref ? new URL(ref).origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Percent-decode a query value without form '+' semantics: the co=
+    payload is base64 and '+' inside it is data, not a space. */
+function percentDecode(s: string): string {
+  try {
+    return decodeURIComponent(s.replace(/%(?![0-9A-Fa-f]{2})/g, "%25"));
+  } catch {
+    return s;
+  }
 }
 
 /** Per-request header surgery: drop hop-by-hop + engine-origin leaks,
