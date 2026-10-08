@@ -947,6 +947,29 @@ export function handleFetch(e: FetchEvent): void {
         }
       }
 
+      /* #112 follow-up: a proxied page can never read its real path
+         (window.location.pathname IS the opaque engine route), so page
+         JS that builds an absolute URL as <real origin> +
+         location.pathname sends our route token upstream as the path
+         and the origin answers 404 ("/j/<token> was not found on this
+         server" is the live case). The engine holds the key that
+         minted that token: dereference an embedded self-route at the
+         fetch seam, before anything else shapes the destination. */
+      const deref = derefSelfRoute(target, self.location.origin);
+      if (deref !== target) {
+        const dtid = DIAG.trace();
+        DIAG.emit({
+          traceId: dtid,
+          requestId: dtid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "self-route token dereferenced (page JS built origin + location.pathname)",
+          url: target,
+        });
+        target = deref;
+      }
+
       /* #112: the Referer fix alone does not repair the reCAPTCHA
          widget: its JS builds co= from window.location.origin
          (LegacyUnforgeable), so upstream always receives the engine
@@ -1844,6 +1867,52 @@ export function handleFetch(e: FetchEvent): void {
       })();
     })(),
   );
+}
+
+/** #112 follow-up: dereference a route token embedded in an UPSTREAM
+    destination. A proxied page's JS reads location.pathname, which is
+    the opaque engine route, so an absolute URL built as <real origin> +
+    location.pathname carries the token as the target path and 404s
+    upstream. The engine can decode its own routes: when the embedded
+    path is a decodable route (keyed token, with recoverPath covering
+    token+plaintext concatenations, or a nav handle inside its TTL) and
+    the decoded origin equals the destination's own origin, the page
+    meant the decoded page - fetch the decoded path with the request's
+    own query, exactly like a normal engine route. Token decode is
+    MAC-verified, so a foreign path that merely looks like a route
+    fails closed and passes through untouched. */
+export function derefSelfRoute(target: string, engineOrigin: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.origin === engineOrigin) return target;
+  const p = currentPrefix();
+  if (
+    !u.pathname.startsWith(NAVH + "/") &&
+    !u.pathname.startsWith(p) &&
+    !u.pathname.startsWith("/zl/")
+  )
+    return target;
+  let decoded: string | null = null;
+  if (u.pathname.startsWith(NAVH + "/")) {
+    decoded = decodeNavHandle(u.pathname.slice(NAVH.length + 1).split(/[?#]/)[0]);
+  } else {
+    decoded = decodePath(u.pathname);
+    if (!decoded) decoded = recoverPath(u.pathname);
+  }
+  if (!decoded) return target;
+  let du: URL;
+  try {
+    du = new URL(decoded);
+  } catch {
+    return target;
+  }
+  if (du.origin !== u.origin) return target;
+  return du.origin + du.pathname + (u.search || du.search);
 }
 
 /** #112: reCAPTCHA's enterprise endpoints validate the site key against
