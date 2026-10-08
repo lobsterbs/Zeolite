@@ -145,7 +145,7 @@ impl Rewriter {
                     Some((b, f)) => (b.to_string(), format!("#{}", f)),
                     None => (innermost, String::new()),
                 };
-                let mut out = self.cfg.encode_url(&bare);
+                let mut out = self.enc_final(&bare, literal);
                 out.push_str(&frag);
                 return out;
             }
@@ -184,22 +184,25 @@ impl Rewriter {
             Some((b, f)) => (b.to_string(), format!("#{}", f)),
             None => (abs, String::new()),
         };
-        let mut out = if literal && matches!(self.cfg.codec, crate::encode::Codec::Keyed { .. }) {
-            match Self::split_dir_dest(&bare) {
-                Some((parent, seg)) => {
-                    let mut o = self.cfg.encode_url(parent);
-                    o.push('/');
-                    o.push_str(seg);
-                    o.push('/');
-                    o
-                }
-                None => self.cfg.encode_url(&bare),
-            }
-        } else {
-            self.cfg.encode_url(&bare)
-        };
+        let mut out = self.enc_final(&bare, literal);
         out.push_str(&frag);
         out
+    }
+
+    /// Final encode of a bare destination. JS literals under the
+    /// keyed codec keep the last path segment of a directory-shaped
+    /// destination visible (#112): see enc_literal.
+    fn enc_final(&self, bare: &str, literal: bool) -> String {
+        if literal && matches!(self.cfg.codec, crate::encode::Codec::Keyed { .. }) {
+            if let Some((parent, seg)) = Self::split_dir_dest(bare) {
+                let mut o = self.cfg.encode_url(parent);
+                o.push('/');
+                o.push_str(seg);
+                o.push('/');
+                return o;
+            }
+        }
+        self.cfg.encode_url(bare)
     }
 
     /// Split a directory-shaped destination (path ending in "/") into
