@@ -150,15 +150,13 @@ describe("child realm race (#116 residual 4)", () => {
         fetched.push(String(_u));
         return new Promise(() => {});
       },
-      XMLHttpRequest: {
-        prototype: {
-          open(this: any, _m: string, u: string) {
-            xhrOpened.push(String(u));
-          },
-          setRequestHeader() {},
-          send() {},
-          abort() {},
-        },
+      XMLHttpRequest: class {
+        open(_m: string, u: string) {
+          xhrOpened.push(String(u));
+        }
+        setRequestHeader() {}
+        send() {}
+        abort() {}
       },
       open() {
         return 1;
