@@ -21,6 +21,17 @@
    Matching targets, "*" and "/" keep the native path untouched, and
    a malformed targetOrigin keeps the native SyntaxError.
 
+   Two call shapes must both work: the standard
+   postMessage(msg, targetOrigin, transfer) and the legacy WebKit
+   order postMessage(msg, transfer, targetOrigin), whose targetOrigin
+   may be omitted entirely (defaults to "*"). The legacy overload is
+   live in the spec and in Chromium; reCAPTCHA's frame protocol uses
+   the bare two-argument form postMessage(msg, [port]). Delegation
+   must replay the ORIGINAL argument list: re-emitting that call as
+   (msg, [port], undefined) makes the binding pick the standard
+   overload and throw "Invalid target origin '[object MessagePort]'"
+   (seen live on the anchor frame once #129 routed it engine-side).
+
    Known gaps, deliberate: ev.source is null on the synthetic path
    (the real sender window is not observable from the recipient);
    the payload is only structured-cloned when the host exposes
@@ -37,10 +48,10 @@ function makeMessageEvent(
   ME: MsgEventCtor | undefined,
   data: unknown,
   origin: string,
-  transfer: unknown[] | undefined,
+  ports: unknown,
 ): unknown {
-  const ports = Array.isArray(transfer) ? transfer : [];
-  const init = { data, origin, source: null, ports, lastEventId: "" };
+  const list = Array.isArray(ports) ? ports : [];
+  const init = { data, origin, source: null, ports: list, lastEventId: "" };
   if (ME) {
     try {
       return new ME("message", init);
@@ -55,9 +66,7 @@ function makeMessageEvent(
 }
 
 export function applyPostMessage(w: Record<string, unknown>): void {
-  const native = w.postMessage as
-    | ((m: unknown, t?: unknown, tr?: unknown[]) => void)
-    | undefined;
+  const native = w.postMessage as ((...a: unknown[]) => void) | undefined;
   const dispatch = w.dispatchEvent as ((e: unknown) => boolean) | undefined;
   if (typeof native !== "function" || typeof dispatch !== "function") return;
   let real = "";
@@ -69,21 +78,20 @@ export function applyPostMessage(w: Record<string, unknown>): void {
   if (!real) return;
   const ME = w.MessageEvent as MsgEventCtor | undefined;
   const clone = w.structuredClone as
-    | ((m: unknown, o?: { transfer: unknown[] }) => unknown)
+    | ((m: unknown) => unknown)
     | undefined;
-  const wrapped = function (
-    msg: unknown,
-    targetOrigin?: unknown,
-    transfer?: unknown[],
-  ): void {
-    if (
-      typeof targetOrigin === "string" &&
-      targetOrigin !== "*" &&
-      targetOrigin !== "/"
-    ) {
+  const wrapped = function (...args: unknown[]): void {
+    const msg = args[0];
+    const a2 = args[1];
+    const a3 = args[2];
+    /* Standard order: (msg, targetOrigin, transfer). Legacy WebKit
+       order: (msg, transfer, targetOrigin). */
+    const origin = typeof a2 === "string" ? a2 : typeof a3 === "string" ? a3 : undefined;
+    const ports = typeof a2 === "string" ? a3 : a2;
+    if (typeof origin === "string" && origin !== "*" && origin !== "/") {
       let want = "";
       try {
-        want = new URL(targetOrigin).origin;
+        want = new URL(origin).origin;
       } catch {
         want = ""; // malformed: keep the native SyntaxError below
       }
@@ -91,23 +99,28 @@ export function applyPostMessage(w: Record<string, unknown>): void {
         let data = msg;
         if (typeof clone === "function") {
           try {
-            data = clone(
-              msg,
-              Array.isArray(transfer) ? { transfer } : undefined,
-            );
+            /* No transfer list: same-realm delivery keeps the ports
+               live for the recipient. structuredClone with a
+               transfer would neuter them into an unreachable clone
+               and kill the channel with the message. */
+            data = clone(msg);
           } catch {
             data = msg; // non-cloneable payload: deliver by reference
           }
         }
         try {
-          dispatch.call(w, makeMessageEvent(ME, data, want, transfer));
+          dispatch.call(w, makeMessageEvent(ME, data, want, ports));
         } catch {
           /* a listener threw during dispatch: not ours to surface */
         }
         return;
       }
     }
-    native.call(w, msg, targetOrigin, transfer);
+    /* Replay the caller's exact argument list so the native
+       overload resolution sees the same call shape it would
+       unproxied (a legacy two-arg call must not gain a third
+       undefined argument). */
+    native.apply(w, args);
   };
   try {
     Object.defineProperty(w, "postMessage", {

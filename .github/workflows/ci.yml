@@ -180,7 +180,7 @@ jobs:
           test -f app/dist/libcurl/index.mjs
           test -f app/dist/epoxy/epoxy.js
           test -f app/dist/epoxy/epoxy.wasm
-      - name: Bootstrap size budget (must stay under 20 KiB minified)
+      - name: Bootstrap size budget (must stay under 22 KiB minified)
         # Raised from 5120 for the #28 navigation guard (window.open,
         # anchor/area/iframe/form/link URL property + setAttribute
         # rewrites, form submit paths, WebRTC removal) and the module
@@ -249,8 +249,14 @@ jobs:
           # 21 KiB for #121 (the zl:engineUpdate reload listener:
           # a stale page keeps its old rewritten DOM until it
           # reloads). Raise decided with the feature, same class as
-          # every raise above.
-          if [ "$SIZE" -ge 21504 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 21504)"; exit 1; fi
+          # every raise above. Raised again 21504 -> 22528 for the
+          # #128 follow-up: the legacy WebKit postMessage(msg,
+          # transfer[, targetOrigin]) call shape (reCAPTCHA's frame
+          # protocol posts the bare two-argument port form) is
+          # per-page correctness - replaying it with a phantom
+          # third argument threw "Invalid target origin" and killed
+          # the widget protocol. Same class as every raise above.
+          if [ "$SIZE" -ge 22528 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 22528)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

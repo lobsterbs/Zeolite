@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { applyPostMessage } from "../bootstrap/postmsg";
 
 function fakeWindow(origin = "https://engine.example") {
-  const calls: { m: unknown; t?: unknown; tr?: unknown[] }[] = [];
+  const calls: { m: unknown; t?: unknown; tr?: unknown; n: number }[] = [];
   const events: unknown[] = [];
   const w: Record<string, unknown> = {
     location: { origin },
-    postMessage: (m: unknown, t?: unknown, tr?: unknown[]) => {
-      calls.push({ m, t, tr });
+    postMessage: (...a: unknown[]) => {
+      calls.push({ m: a[0], t: a[1], tr: a[2], n: a.length });
     },
     dispatchEvent: (e: unknown) => {
       events.push(e);
@@ -72,6 +72,71 @@ describe("applyPostMessage (issue #128)", () => {
     );
     const ev = events[0] as Record<string, unknown>;
     expect(ev.ports).toEqual([port]);
+  });
+
+  it("replays legacy two-arg calls with the exact argument list (#128 follow-up)", () => {
+    const { w, calls, events } = fakeWindow();
+    applyPostMessage(w);
+    const port = { postMessage: () => {} };
+    // reCAPTCHA's frame protocol: postMessage(msg, [port]) with no
+    // targetOrigin. Re-emitting this as (msg, [port], undefined)
+    // made the native binding throw "Invalid target origin
+    // '[object MessagePort]'".
+    (w.postMessage as unknown as (m: unknown, t?: unknown) => void)("m", [
+      port,
+    ]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].n).toBe(2); // arg count preserved, no phantom third arg
+    expect(calls[0].t).toEqual([port]);
+    expect(events).toHaveLength(0);
+  });
+
+  it("replays legacy three-arg calls for the real origin untouched", () => {
+    const { w, calls, events } = fakeWindow();
+    applyPostMessage(w);
+    const port = { postMessage: () => {} };
+    (w.postMessage as unknown as (m: unknown, t?: unknown, tr?: unknown) => void)(
+      "m",
+      [port],
+      "https://engine.example",
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].n).toBe(3);
+    expect(calls[0].t).toEqual([port]);
+    expect(calls[0].tr).toBe("https://engine.example");
+    expect(events).toHaveLength(0);
+  });
+
+  it("delivers legacy-order virtual-origin messages with live ports", () => {
+    const { w, calls, events } = fakeWindow();
+    w.structuredClone = structuredClone;
+    applyPostMessage(w);
+    const port = { postMessage: () => {} };
+    (w.postMessage as unknown as (m: unknown, t?: unknown, tr?: unknown) => void)(
+      "m",
+      [port],
+      "https://other.example",
+    );
+    expect(calls).toHaveLength(0);
+    const ev = events[0] as Record<string, unknown>;
+    expect(ev.origin).toBe("https://other.example");
+    const ports = ev.ports as unknown[];
+    expect(ports).toEqual([port]);
+    expect(ports[0]).toBe(port); // same-realm delivery keeps the port live
+  });
+
+  it("does not neuter transfer ports on the synthetic path", () => {
+    const { w, events } = fakeWindow();
+    w.structuredClone = structuredClone;
+    applyPostMessage(w);
+    const port = { postMessage: () => {} };
+    (w.postMessage as unknown as (m: unknown, t?: unknown, tr?: unknown[]) => void)(
+      "m",
+      "https://other.example",
+      [port],
+    );
+    const ev = events[0] as Record<string, unknown>;
+    expect((ev.ports as unknown[])[0]).toBe(port); // not transferred away
   });
 
   it("structured-clones the payload when the host exposes it", () => {

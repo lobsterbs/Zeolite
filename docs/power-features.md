@@ -133,7 +133,10 @@ that an origin-only Referrer-Policy page would otherwise drop.
 #128 repairs same-site frame messaging: a page addressing its
 own frame by the virtual origin no longer has the message
 dropped by the browser (the payload is delivered locally with
-the intended origin). #129 routes challenge-widget frames
+the intended origin; both call shapes are handled, including the
+legacy WebKit postMessage(msg, transfer[, targetOrigin]) order,
+whose exact argument list is replayed at the native boundary).
+#129 routes challenge-widget frames
 through the engine too: #120's provider-direct 302 was an IP
 leak (the #32 class) and left the anchor cross-origin, so the
 widget's postMessage to the embedder was dropped and the
