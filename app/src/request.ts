@@ -1129,6 +1129,56 @@ export function handleFetch(e: FetchEvent): void {
         target = coFixed;
       }
 
+      /* #120: a challenge-widget frame routed through the engine is
+         same-origin with the proxy, and BOTH origin checks fail: the
+         provider's in-frame scripts validate the widget's real
+         origin, and the embedding page's provider JS validates
+         postMessage event.origin against the provider domain - the
+         widget errors or spins forever instead of letting the human
+         solve it (live case: Google's /sorry/ reCAPTCHA anchor, whose
+         postMessage targets https://www.google.com but reaches an
+         engine-origin frame). The engine cannot un-route the DOM src
+         (the page's own JS builds it from its route origin), so
+         redirect the frame NAVIGATION to the provider: the browser
+         loads the widget directly, exactly like an unproxied page,
+         and the human's solve works; only the page around it stays
+         on the engine. The co= virtualization above rides along in
+         the redirect target, so the site-key domain check still
+         passes. Detection and human solving only - the challenge
+         itself is never solved or bypassed. */
+      if (
+        e.request.method === "GET" &&
+        e.request.mode === "navigate" &&
+        (e.request.destination === "iframe" || e.request.destination === "frame") &&
+        isChallengeFrameUrl(target)
+      ) {
+        const rtid = DIAG.trace();
+        DIAG.emit({
+          traceId: rtid,
+          requestId: rtid,
+          category: "CHALLENGE",
+          cause: "challenge",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "challenge widget frame left cross-origin (302 to the provider)",
+          url: target,
+        });
+        netLogPush({
+          method: e.request.method,
+          traceId: rtid,
+          path: url.pathname + url.search,
+          dest: target,
+          status: 302,
+          rtype: classifyRtype(e.request.destination, ""),
+          ms: -1,
+          bytes: -1,
+          verdict: "challenge frame: provider-direct",
+          transport: "browser",
+          detail: { internalUrl: url.pathname + url.search, ttfb: -1 },
+        });
+        return Response.redirect(target, 302);
+      }
+
       if (siteDisabled(target)) {
         /* #31: a disabled-site navigation lands on the error page
            ("blocked"), not a bare 403 strand. */
@@ -2096,6 +2146,30 @@ export function virtualRecaptchaCo(target: string, referrer: string, engineOrigi
   const port = vu.port ? "" : vu.protocol === "https:" ? ":443" : ":80";
   const co = btoa(vu.origin + port).replace(/=+$/, (p) => ".".repeat(p.length));
   return u.href.replace(m[0], m[1] + "co=" + co);
+}
+
+/** #120: challenge-widget frame URLs (reCAPTCHA, hCaptcha, Turnstile
+    - the shapes whose FRAMES are the challenge UI a human solves).
+    The google hosts are scoped to /recaptcha/ so ordinary
+    google.com embeds (maps, players) keep routing through the
+    engine; every path on challenges.cloudflare.com is a challenge
+    surface. Script and XHR requests to these hosts are not frame
+    navigations and route as before. */
+export function isChallengeFrameUrl(target: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+  const h = u.hostname;
+  if (h === "www.google.com" || h === "www.recaptcha.net" || h === "recaptcha.net") {
+    return u.pathname.startsWith("/recaptcha/");
+  }
+  return (
+    h === "challenges.cloudflare.com" || h === "hcaptcha.com" || h === "newassets.hcaptcha.com"
+  );
 }
 
 /** The virtual origin of the page that embedded a recaptcha frame:
