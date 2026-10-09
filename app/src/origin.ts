@@ -98,3 +98,21 @@ export function senderVirtualOrigin(
   if (du.protocol !== "https:" && du.protocol !== "http:") return null;
   return du.origin;
 }
+
+/** Upstream Referer for a request whose engine-side referrer did not
+    decode to a route (#127). A page with an origin-only referrer
+    policy sends the engine origin root; the virtual equivalent is
+    the controlling page's origin, in the origin-only form a real
+    browser sends (origin + "/"). Fail closed: null when the
+    initiator is unknown, unparseable, or not http(s). */
+export function virtualRefererFallback(initiator: string | null | undefined): string | null {
+  if (!initiator) return null;
+  let ii: URL;
+  try {
+    ii = new URL(initiator);
+  } catch {
+    return null;
+  }
+  if (ii.protocol !== "https:" && ii.protocol !== "http:") return null;
+  return ii.origin + "/";
+}

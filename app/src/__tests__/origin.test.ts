@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { senderVirtualOrigin, virtualOriginHeaders } from "../origin";
+import { senderVirtualOrigin, virtualOriginHeaders, virtualRefererFallback } from "../origin";
 import { encodeDest, setScheme } from "../codec";
 
 describe("virtualOriginHeaders (issue #23: upstream Origin / Sec-Fetch-Site)", () => {
@@ -97,5 +97,18 @@ describe("senderVirtualOrigin (bug-scout: control-message sender verification)",
     setScheme("/zl/");
     const route = "https://engine.host" + encodeDest("data:text/plain,hi");
     expect(senderVirtualOrigin(route, ENGINE)).toBeNull();
+  });
+});
+
+describe("virtualRefererFallback (#127: origin-only referrer policy)", () => {
+  it("restores the controlling page's origin in the form a real browser sends", () => {
+    expect(virtualRefererFallback("https://www.google.com/sorry/index?x=1")).toBe("https://www.google.com/");
+  });
+
+  it("fails closed for unknown, unparseable or non-http(s) initiators", () => {
+    expect(virtualRefererFallback(undefined)).toBeNull();
+    expect(virtualRefererFallback("not a url")).toBeNull();
+    expect(virtualRefererFallback("about:blank")).toBeNull();
+    expect(virtualRefererFallback("data:text/plain,hi")).toBeNull();
   });
 });

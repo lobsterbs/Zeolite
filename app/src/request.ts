@@ -48,7 +48,7 @@ import { wispTransport } from "./transport";
 
 
 
-import { virtualOriginHeaders } from "./origin";
+import { virtualOriginHeaders, virtualRefererFallback } from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { applySetCookie, cookieHeaderFor, isPassChallenge, jarHeaders, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
@@ -2236,18 +2236,29 @@ function forwardedHeaders(req: Request, target: string, initiator?: string): Hea
       ref = decodeLegacyRoute(refU.pathname);
     }
     if (ref) out.set("referer", ref + refU.search);
-    /* Scout report (2026-10-06): a referrer whose path is not a
-       decodable engine route used to drop the Referer silently.
-       Referrer-dependent CSRF and analytics then misbehave with no
-       trace why. Sending the raw engine route would leak the proxy
-       origin upstream, so the header stays omitted - but the event
-       is recorded instead of being swallowed. */
-    else DIAG.emit({
-      category: "TRANSPORT",
-      severity: "warning",
-      message: "engine-route referrer did not decode; Referer omitted",
-      url: req.referrer,
-    });
+    /* #127: a page with an origin-only referrer policy (google.com
+       serves one) sends the engine ORIGIN root as Referer, which no
+       route decode recovers, so every subresource from that page
+       lost the Referer upstream - and google's reCAPTCHA anchor on
+       /sorry validates the site key against exactly this header. The
+       browser already told us the policy stripped the referrer to
+       the origin; the virtual equivalent is the controlling page's
+       origin. Restore it. The Scout-report warning (2026-10-06)
+       stays for the case where even the initiator is unknown:
+       sending the raw engine route would leak the proxy origin
+       upstream, so the header stays omitted there - but the event is
+       recorded instead of being swallowed. */
+    else {
+      const refererFallback = virtualRefererFallback(initiator);
+      if (refererFallback) out.set("referer", refererFallback);
+      else
+        DIAG.emit({
+          category: "TRANSPORT",
+          severity: "warning",
+          message: "engine-route referrer did not decode; Referer omitted",
+          url: req.referrer,
+        });
+    }
   }
   /* Issue #23: the virtual origin. Every request the page makes is
      same-origin on the engine side, so the browser Origin and
