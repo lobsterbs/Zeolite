@@ -133,15 +133,17 @@ that an origin-only Referrer-Policy page would otherwise drop.
 #128 repairs same-site frame messaging: a page addressing its
 own frame by the virtual origin no longer has the message
 dropped by the browser (the payload is delivered locally with
-the intended origin); frames stay engine-routed, never passed
-provider-direct, because that would leak the user's IP. What
-remains unfixable: unforgeable location reads inside frames
-(#32 class), provider-direct anchor frames on third-party sites
-(no engine code runs there, so no synthetic delivery), a null
+the intended origin). #129 routes challenge-widget frames
+through the engine too: #120's provider-direct 302 was an IP
+leak (the #32 class) and left the anchor cross-origin, so the
+widget's postMessage to the embedder was dropped and the
+challenge spun; engine-routed, the #128 delivery carries the
+widget protocol end to end. What remains unfixable:
+unforgeable location reads inside frames (#32 class), a null
 ev.source on the synthetic path, and the datacenter IP failing
 Google's risk engine even on a direct headless load. The
-no-bypass rule stands. hCaptcha and Cloudflare Turnstile work
-provider-direct.
+no-bypass rule stands; hCaptcha and Cloudflare Turnstile frames
+take the same engine-routed path.
 ## Build order
 
 1. Network inspector ring + devtools streaming (it debugs the rest).

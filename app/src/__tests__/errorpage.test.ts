@@ -79,7 +79,14 @@ describe("errorPage", () => {
     expect(again).toBe(page);
     expect(page).toContain("color-scheme: light dark");
     expect(page).toContain("@media (prefers-color-scheme: dark)");
-    expect(page).toContain('href="/j/aHR0cHM6Ly90YXJnZXQuZGV2L3A"');
+    expect(page).toContain('action="/j/aHR0cHM6Ly90YXJnZXQuZGV2L3A"');
+  });
+
+  it("carries the Zeolite logo and a try-again button (#129)", () => {
+    expect(page).toContain("/__  /  ___  ____  / (_) /____");
+    expect(page).toContain("  / /  / _ \\/ __ \\/ / / __/ _ \\");
+    expect(page).toContain("<button");
+    expect(page).toContain("Try again");
   });
 
   it("one honest line per category, nothing else", () => {

@@ -13,10 +13,11 @@ service worker answers with a minimal HTML page it owns:
   route. The category comes from `classifyFailure` in
   `app/src/errorpage.ts`; an unrecognized failure is reported as a
   stream error, a cause is never invented;
-- a compact monospaced facts list: reason (URL-redacted), status,
-  trace id and engine version (the category line above already
-  states the category);
-- one retry action, linking back to the same engine route;
+- the Zeolite ASCII logo, centered above the facts;
+- a compact monospaced facts list: reason (URL-redacted), category,
+  status, trace id and engine version;
+- one try-again button: a real button in a GET form back to the same
+  engine route (no scripts, so it works on a cold cache);
 - a machine-readable `<meta name="zl-error">` payload (JSON:
   category, engine version, route, and when known: reason, traceId,
   status) for embedders and DevTools.

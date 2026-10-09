@@ -1129,25 +1129,20 @@ export function handleFetch(e: FetchEvent): void {
         target = coFixed;
       }
 
-      /* #120: a challenge-widget frame routed through the engine is
-         same-origin with the proxy, and BOTH origin checks fail: the
-         provider's in-frame scripts validate the widget's real
-         origin, and the embedding page's provider JS validates
-         postMessage event.origin against the provider domain - the
-         widget errors or spins forever instead of letting the human
-         solve it (live case: Google's /sorry/ reCAPTCHA anchor, whose
-         postMessage targets https://www.google.com but reaches an
-         engine-origin frame). The engine cannot un-route the DOM src
-         (the page's own JS builds it from its route origin), so
-         redirect the frame NAVIGATION to the provider: the browser
-         loads the widget directly, exactly like an unproxied page,
-         and the human's solve works; only the page around it stays
-         on the engine. The co= virtualization above rides along in
-         the redirect target, so the site-key domain check still
+      /* #129: challenge-widget frames stay engine-routed. The #120
+         policy redirected these navigations provider-direct, which
+         was an IP leak (the #32 class) AND left the widget
+         cross-origin with the embedder, so the widget's postMessage
+         back to the page was dropped by the browser and the
+         challenge spun forever. #128 now delivers same-site frame
+         messages with the intended virtual origin, so the frame
+         stays on the engine: the user's IP never reaches the
+         challenge host, and the co= virtualization above rides the
+         engine-routed request so the site-key domain check still
          passes. Detection and human solving only - the challenge
-         itself is never solved or bypassed. */
+         itself is never solved or bypassed; the diag row below is
+         observability, not policy. */
       if (
-        e.request.method === "GET" &&
         e.request.mode === "navigate" &&
         (e.request.destination === "iframe" || e.request.destination === "frame") &&
         isChallengeFrameUrl(target)
@@ -1160,23 +1155,9 @@ export function handleFetch(e: FetchEvent): void {
           cause: "challenge",
           severity: "info",
           stage: "REQUEST_INTERCEPTED",
-          message: "challenge widget frame left cross-origin (302 to the provider)",
+          message: "challenge widget frame engine-routed (#129)",
           url: target,
         });
-        netLogPush({
-          method: e.request.method,
-          traceId: rtid,
-          path: url.pathname + url.search,
-          dest: target,
-          status: 302,
-          rtype: classifyRtype(e.request.destination, ""),
-          ms: -1,
-          bytes: -1,
-          verdict: "challenge frame: provider-direct",
-          transport: "browser",
-          detail: { internalUrl: url.pathname + url.search, ttfb: -1 },
-        });
-        return Response.redirect(target, 302);
       }
 
       if (siteDisabled(target)) {

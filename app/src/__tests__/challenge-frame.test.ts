@@ -1,11 +1,14 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-/* #120: challenge-widget frames must stay genuinely cross-origin.
-   The request engine (transport mock mirroring request.test.ts)
-   redirects frame NAVIGATIONS to challenge URLs to the provider
-   instead of serving them through the tunnel; every other request
-   shape (scripts, XHR, non-challenge frames) routes as before. */
+/* #129: challenge-widget frames stay engine-routed. The request
+   engine (transport mock mirroring request.test.ts) serves frame
+   NAVIGATIONS to challenge URLs through the tunnel like any other
+   document; #120's provider-direct 302 was an IP leak (the #32
+   class) and left the widget cross-origin, so its postMessage to
+   the embedder was dropped and the challenge spun. Every other
+   request shape (scripts, XHR, non-challenge frames) routes as
+   before. */
 
 const transportMock = vi.hoisted(() => ({
   calls: 0,
@@ -33,7 +36,7 @@ import { encodeDestLegacy } from "../codec";
 const ORIGIN = "https://w.example.org";
 const b64 = (s: string) => btoa(s).replace(/=+$/, (p) => ".".repeat(p.length));
 
-describe("isChallengeFrameUrl (#120)", () => {
+describe("isChallengeFrameUrl (#120 shapes)", () => {
   it("accepts recaptcha frame URLs on the google hosts only under /recaptcha/", () => {
     expect(isChallengeFrameUrl("https://www.google.com/recaptcha/enterprise/anchor?ar=1")).toBe(true);
     expect(isChallengeFrameUrl("https://www.recaptcha.net/recaptcha/api2/bframe?x=1")).toBe(true);
@@ -56,7 +59,7 @@ describe("isChallengeFrameUrl (#120)", () => {
   });
 });
 
-describe("challenge frame navigation redirect (#120)", () => {
+describe("challenge frame navigation routing (#129)", () => {
   /* Plain-object requests/events (mode "navigate" is constructor-
      illegal on a node Request), mirroring the #110 harness. */
   const mkEvent = (routeUrl: string, mode: string, destination: string, referrer: string) => {
@@ -100,7 +103,7 @@ describe("challenge frame navigation redirect (#120)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("redirects a recaptcha anchor frame navigation to the provider with the co= fix", async () => {
+  it("routes a recaptcha anchor frame navigation through the engine with the co= fix", async () => {
     const anchor =
       "https://www.google.com/recaptcha/enterprise/anchor?ar=1&k=KEY&co=" + b64(ORIGIN + ":443") + "&v=V";
     const referrer = ORIGIN + encodeDestLegacy("https://www.google.com/sorry/ipblur");
@@ -113,16 +116,16 @@ describe("challenge frame navigation redirect (#120)", () => {
     handleFetch(ev);
     expect(armed.length).toBe(1);
     const served = await armed[0]!;
-    expect(served.status).toBe(302);
-    const loc = served.headers.get("location")!;
-    expect(loc.startsWith("https://www.google.com/recaptcha/enterprise/anchor?")).toBe(true);
+    expect(served.status).toBe(200);
+    /* the fetch rides the transport: the frame never goes provider-direct */
+    expect(transportMock.calls).toBe(1);
+    expect(served.headers.get("location")).toBeNull();
     /* the site-key domain check rides along: co= names the embedding
        page's virtual origin, not the engine origin */
-    expect(loc).toContain("co=" + b64("https://www.google.com:443"));
-    expect(transportMock.calls).toBe(0);
+    expect(transportMock.urls[0]).toContain("co=" + b64("https://www.google.com:443"));
   });
 
-  it("redirects a Turnstile frame navigation provider-direct", async () => {
+  it("routes a Turnstile frame navigation through the engine", async () => {
     const { ev, armed } = mkEvent(
       ORIGIN + encodeDestLegacy("https://challenges.cloudflare.com/cf-turnstile-challenge"),
       "navigate",
@@ -131,9 +134,9 @@ describe("challenge frame navigation redirect (#120)", () => {
     );
     handleFetch(ev);
     const served = await armed[0]!;
-    expect(served.status).toBe(302);
-    expect(served.headers.get("location")).toBe("https://challenges.cloudflare.com/cf-turnstile-challenge");
-    expect(transportMock.calls).toBe(0);
+    expect(served.status).toBe(200);
+    expect(transportMock.calls).toBe(1);
+    expect(served.headers.get("location")).toBeNull();
   });
 
   it("still routes a script load of the same anchor URL through the engine", async () => {
