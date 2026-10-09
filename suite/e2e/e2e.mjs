@@ -410,7 +410,7 @@ async function main() {
       href: location.href,
       meta: document.querySelector('meta[name="zl-error"]')?.getAttribute("content") ?? null,
       h1: document.querySelector("h1")?.textContent ?? "",
-      retry: document.querySelector("a")?.getAttribute("href") ?? "",
+      retry: document.querySelector("form")?.getAttribute("action") ?? "",
     }));
     assert(o.meta, "no zl-error meta - the failed navigation was a bare strand: " + JSON.stringify(o));
     const meta = JSON.parse(o.meta);
@@ -419,7 +419,7 @@ async function main() {
       "unexpected failure category: " + o.meta,
     );
     eq(o.h1, "Could not load this page", "engine error page heading");
-    eq(o.retry, "/j/" + tail, "retry link points at the same engine route");
+    eq(o.retry, "/j/" + tail, "retry action points at the same engine route");
     eq(resp.status(), 502, "transport failure status");
     assert(o.href.startsWith(ENGINE + "/j/"), "navigation left the engine origin: " + o.href);
     return "category " + meta.category;
