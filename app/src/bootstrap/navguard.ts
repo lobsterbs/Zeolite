@@ -298,9 +298,9 @@ export function applyNavGuard(
        is browser-direct and uncatchable. Every path into the child
        realm reads contentWindow or contentDocument first, so both
        getters install the child guard synchronously at access
-       time; the re-entrancy set keeps guardChild's own reads from
-       recursing through the getter. */
-    const guarding = new WeakSet<object>();
+       time; the shared flag keeps guardChild's own reads from
+       recursing through the getters. */
+    let ing = false;
     for (const prop of ["contentWindow", "contentDocument"]) {
       safe(() => {
         const d = Object.getOwnPropertyDescriptor(IFR.prototype, prop);
@@ -309,12 +309,12 @@ export function applyNavGuard(
           configurable: true,
           enumerable: true,
           get(this: AnyRecord) {
-            if (!guarding.has(this)) {
-              guarding.add(this);
+            if (!ing) {
+              ing = true;
               try {
                 guardChild(this);
               } finally {
-                guarding.delete(this);
+                ing = false;
               }
             }
             return d.get!.call(this);
@@ -687,8 +687,9 @@ export function applyNavGuard(
      microtask, the load is a task, so the child never receives the
      plaintext address. Added subtrees are scanned whole (innerHTML
      adds one root, not one record per frame). #116 residual 2:
-     shadow roots are covered by the attachShadow hook below, so no
-     frame realm is out of observer reach. */
+     shadow roots created after this guard join through the
+     attachShadow hook below; roots older than the guard keep
+     their native frame loads (documented at the hook). */
   const MO = w.MutationObserver as
     | (new (cb: (muts: Array<{ type: string; addedNodes: ArrayLike<AnyRecord> }>) => void) => {
         observe(t: AnyRecord, o: AnyRecord): void;
@@ -753,20 +754,16 @@ export function applyNavGuard(
        document-wide observer, so parser-inserted shadow frames
        loaded browser-direct. Hook attachShadow: every created root
        is observed with the same contract (rewire + child guard)
-       and lands in the registry for the present-frames pass
-       below. The __zlShadow flag keeps a twice-guarded realm from
-       stacking a second hook over the first. */
-    const shadowRoots: AnyRecord[] = [];
+       by this guard's own observer. The __zlShadow flag keeps a
+       twice-guarded realm from stacking a second hook over the
+       first. */
     const ES = w.Element as AnyRecord | undefined;
     const OAS = ES && ES.prototype && ES.prototype.attachShadow;
     if (typeof OAS === "function" && !(OAS as AnyRecord).__zlShadow) {
       safe(() => {
         (ES as AnyRecord).prototype.attachShadow = function (this: AnyRecord, init: AnyRecord) {
           const root = OAS.call(this, init);
-          if (root) {
-            shadowRoots.push(root);
-            obs?.observe(root, { childList: true, subtree: true });
-          }
+          if (root) obs?.observe(root, { childList: true, subtree: true });
           return root;
         };
         ((ES as AnyRecord).prototype.attachShadow as AnyRecord).__zlShadow = true;
@@ -774,17 +771,13 @@ export function applyNavGuard(
     }
     /* Frames already in the DOM when this realm is guarded (a child
        realm guarded on load): the observer only sees later
-       additions, so give the present ones their realm guard -
-       including frames inside shadow roots this guard did not
-       see created. */
+       additions, so give the present ones their realm guard.
+       Frames inside shadow roots created before this guard ran
+       keep their native loads: the hook above only covers roots
+       created after it (a documented residual). */
     if (typeof D.querySelectorAll === "function") {
       const frames = D.querySelectorAll("iframe,frame") as ArrayLike<AnyRecord>;
       for (let i = 0; i < frames.length; i++) guardChild(frames[i]);
-      for (const root of shadowRoots) {
-        if (typeof root.querySelectorAll !== "function") continue;
-        const sframes = root.querySelectorAll("iframe,frame") as ArrayLike<AnyRecord>;
-        for (let i = 0; i < sframes.length; i++) guardChild(sframes[i]);
-      }
     }
   }
   /* WebRTC connects directly; presence would be a fake feature. */
