@@ -4,11 +4,25 @@
 //! through the pinned public resolver, not the deployment host's
 //! system resolver and never Google DNS. ZL_DNS selects the mode:
 //!
-//! - "quad9" (default): Quad9 anycast 9.9.9.9 + 149.112.112.112
-//! - "cloudflare":      Cloudflare 1.1.1.1 + 1.0.0.1
+//! - "quad9" (default): Quad9 anycast 9.9.9.9 + 149.112.112.112 over
+//!   DNS-over-HTTPS (https://dns.quad9.net/dns-query), TLS name
+//!   pinned, certificate validated against the Mozilla root store
+//!   (webpki-roots): no OS trust store, no system resolver, no
+//!   plaintext port 53 anywhere
+//! - "cloudflare":      Cloudflare 1.1.1.1 + 1.0.0.1 over DoH
+//!   (https://cloudflare-dns.com/dns-query), same pinning
 //! - "system":         the host resolver via tokio::net::lookup_host
 //!   (explicit operator opt-out for restricted-egress hosts; the
 //!   startup log names whatever is active)
+//!
+//! DoH by default (#125): pinning the resolver IPs still left every
+//! lookup on the wire in plaintext UDP/TCP 53, visible to the
+//! deployment network and anyone on path. The same pinned IPs now
+//! answer over HTTPS/443 with the resolver's certificate validated
+//! against its DNS name, so the query is encrypted end to end. There
+//! is deliberately no plaintext fallback: a host that blocks the DoH
+//! handshake fails closed (the startup log names the mode), it never
+//! silently falls back to the system resolver.
 //!
 //! An unrecognized ZL_DNS value logs a warning and stays on quad9;
 //! it never silently falls back to the system resolver.
@@ -62,38 +76,61 @@ pub fn nameservers(m: &Mode) -> Vec<IpAddr> {
     }
 }
 
+/// The TLS server name the resolver's certificate must be valid for
+/// (empty for System). Pinning the name, not the IP SAN, is what makes
+/// DoH to a bare anycast IP verifiable.
+fn tls_dns_name(m: &Mode) -> &'static str {
+    match m {
+        Mode::Quad9 => "dns.quad9.net",
+        Mode::Cloudflare => "cloudflare-dns.com",
+        Mode::System => "",
+    }
+}
+
 /// Human-readable description for the startup log.
 pub fn mode_description() -> String {
     match mode() {
-        Mode::Quad9 => "quad9 (9.9.9.9, 149.112.112.112) pinned; system resolver unused".into(),
-        Mode::Cloudflare => "cloudflare (1.1.1.1, 1.0.0.1) pinned; system resolver unused".into(),
-        Mode::System => "system resolver (ZL_DNS=system; not pinned)".into(),
+        Mode::Quad9 => {
+            "quad9 DoH (https://dns.quad9.net/dns-query via 9.9.9.9, 149.112.112.112:443) pinned; plaintext DNS and the system resolver unused".into()
+        }
+        Mode::Cloudflare => {
+            "cloudflare DoH (https://cloudflare-dns.com/dns-query via 1.1.1.1, 1.0.0.1:443) pinned; plaintext DNS and the system resolver unused".into()
+        }
+        Mode::System => "system resolver (ZL_DNS=system; not pinned, not encrypted)".into(),
     }
 }
 
 static PINNED: OnceLock<hickory_resolver::TokioResolver> = OnceLock::new();
 
+/// The DoH resolver config for a mode: one HTTPS nameserver per
+/// pinned IP, TLS name set, default /dns-query endpoint. Extracted so
+/// the config itself is unit-testable without the process-wide
+/// OnceLock.
+fn pinned_config(m: &Mode) -> hickory_resolver::config::ResolverConfig {
+    use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig};
+    let group = NameServerConfigGroup::from_ips_https(
+        &nameservers(m),
+        443,
+        tls_dns_name(m).to_string(),
+        true,
+    );
+    ResolverConfig::from_parts(None, vec![], group)
+}
+
 fn pinned() -> &'static hickory_resolver::TokioResolver {
     PINNED.get_or_init(|| {
-        use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig};
-        let ips = nameservers(mode());
-        // from_ips_clear registers each IP over UDP and TCP (53), and
-        // try_tcp_on_error retries over TCP when UDP fails, so a
-        // truncated or blocked UDP answer does not end the lookup.
-        let group = NameServerConfigGroup::from_ips_clear(&ips, 53, true);
-        let config = ResolverConfig::from_parts(None, vec![], group);
-        let mut builder = hickory_resolver::TokioResolver::builder_with_config(
+        let config = pinned_config(mode());
+        let builder = hickory_resolver::TokioResolver::builder_with_config(
             config,
             hickory_resolver::name_server::TokioConnectionProvider::default(),
         );
-        builder.options_mut().try_tcp_on_error = true;
         builder.build()
     })
 }
 
 /// Resolve a hostname to candidate SocketAddrs through the pinned
-/// resolver. The port is attached locally; the resolver is only asked
-/// for the name. System mode delegates to tokio::net::lookup_host.
+/// DoH resolver. The port is attached locally; the resolver is only
+/// asked for the name. System mode delegates to tokio::net::lookup_host.
 pub async fn lookup(hostname: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
     if matches!(mode(), Mode::System) {
         return tokio::net::lookup_host((hostname, port))
@@ -103,13 +140,14 @@ pub async fn lookup(hostname: &str, port: u16) -> std::io::Result<Vec<SocketAddr
     let answer = pinned()
         .lookup_ip(hostname)
         .await
-        .map_err(|e| std::io::Error::other(format!("pinned dns: {e}")))?;
+        .map_err(|e| std::io::Error::other(format!("pinned doh: {e}")))?;
     Ok(answer.iter().map(|ip| SocketAddr::new(ip, port)).collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hickory_resolver::proto::xfer::Protocol;
 
     #[test]
     fn parses_known_modes_and_rejects_everything_else() {
@@ -138,21 +176,47 @@ mod tests {
     }
 
     #[test]
+    fn tls_names_pin_the_resolver_not_the_ip() {
+        assert_eq!(tls_dns_name(&Mode::Quad9), "dns.quad9.net");
+        assert_eq!(tls_dns_name(&Mode::Cloudflare), "cloudflare-dns.com");
+        assert_eq!(tls_dns_name(&Mode::System), "");
+    }
+
+    #[test]
+    fn doh_config_is_https_443_with_pinned_tls_names_no_port53() {
+        for m in [Mode::Quad9, Mode::Cloudflare] {
+            let cfg = pinned_config(&m);
+            let servers = cfg.name_servers();
+            assert_eq!(servers.len(), 2);
+            for ns in servers {
+                assert_eq!(ns.protocol, Protocol::Https);
+                assert_eq!(ns.socket_addr.port(), 443);
+                assert_eq!(
+                    ns.tls_dns_name.as_deref(),
+                    Some(tls_dns_name(&m)),
+                    "every pinned nameserver must carry the TLS name"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn description_names_the_active_mode() {
         let d = mode_description();
         assert!(!d.is_empty());
         if matches!(mode(), Mode::Quad9) {
-            assert!(d.contains("quad9") && d.contains("system resolver unused"));
+            assert!(d.contains("quad9") && d.contains("DoH"));
+            assert!(d.contains("system resolver unused"));
         }
     }
 
     // Real-network check: run manually with
     // `cargo test -p zeolite-server dns -- --ignored`. Not in CI: it
-    // needs egress UDP/53 to the pinned resolver and would be flaky.
+    // needs egress HTTPS/443 to the pinned resolver and would be flaky.
     #[tokio::test]
     #[ignore]
-    async fn resolves_real_names_through_the_pinned_resolver() {
-        let addrs = lookup("example.com", 443).await.expect("pinned lookup");
+    async fn resolves_real_names_through_the_pinned_doh_resolver() {
+        let addrs = lookup("example.com", 443).await.expect("pinned doh lookup");
         assert!(!addrs.is_empty());
         assert!(addrs.iter().all(|a| a.port() == 443));
     }

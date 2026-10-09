@@ -29,7 +29,7 @@ kdl = "6"
 tracing = "0.1"
 # Pinned upstream DNS (privacy: Quad9 by default, Cloudflare optional,
 # never the host resolver or Google; see src/dns.rs).
-hickory-resolver = "0.25"
+hickory-resolver = { version = "0.25", features = ["https-ring", "webpki-roots"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
