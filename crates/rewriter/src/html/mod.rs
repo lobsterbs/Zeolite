@@ -575,27 +575,39 @@ impl Rewriter {
                     } else if lower == "style" && self.cfg.rewrite_css {
                         Some(css::rewrite_stylesheet(&v, &|u| self.enc(u)))
                     } else if url_attrs::is_url_attr(&name, &lower) {
-                        let e = self.enc(&v);
-                        // <base href> switches the folding base for
-                        // every later relative URL (issue #36). Per
-                        // HTML only the first base with a non-empty
-                        // href counts, and the base's own href is
-                        // resolved against the page base BEFORE it
-                        // takes effect. An already-encoded route
-                        // folds against its innermost destination,
-                        // never the host the route text is bound to.
-                        if name == "base" && lower == "href" && !self.base_seen {
-                            let folded = resolve(&v, &self.base);
-                            let folded = match self.cfg.decode_engine_route(&folded) {
-                                Some(inner) => inner,
-                                None => folded,
-                            };
-                            if folded.starts_with("http://") || folded.starts_with("https://") {
-                                self.base = folded;
-                                self.base_seen = true;
+                        // Challenge-provider script srcs stay
+                        // provider-direct (#123): Turnstile's api.js
+                        // locates its own <script> tag by the original
+                        // src, silently no-ops on a routed src, and the
+                        // widget never injects (infinite spinner).
+                        if name == "script"
+                            && matches!(lower.as_str(), "src" | "href")
+                            && url_attrs::is_challenge_script_src(&resolve(&v, &self.base))
+                        {
+                            None
+                        } else {
+                            let e = self.enc(&v);
+                            // <base href> switches the folding base for
+                            // every later relative URL (issue #36). Per
+                            // HTML only the first base with a non-empty
+                            // href counts, and the base's own href is
+                            // resolved against the page base BEFORE it
+                            // takes effect. An already-encoded route
+                            // folds against its innermost destination,
+                            // never the host the route text is bound to.
+                            if name == "base" && lower == "href" && !self.base_seen {
+                                let folded = resolve(&v, &self.base);
+                                let folded = match self.cfg.decode_engine_route(&folded) {
+                                    Some(inner) => inner,
+                                    None => folded,
+                                };
+                                if folded.starts_with("http://") || folded.starts_with("https://") {
+                                    self.base = folded;
+                                    self.base_seen = true;
+                                }
                             }
+                            Some(e)
                         }
-                        Some(e)
                     } else if is_event_attr(&lower) && self.cfg.rewrite_js_literals {
                         Some(crate::js::antiframe(&crate::js::rewrite_inline(&v, &|u| {
                             self.enc_literal(u)
@@ -1124,6 +1136,49 @@ mod tests {
             inject_bootstrap: false,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn turnstile_script_src_stays_provider_direct() {
+        // #123: Turnstile api.js locates its own <script> tag by
+        // the original src; a routed src breaks self-location and
+        // the widget never injects (infinite spinner where the
+        // captcha should be).
+        let base = "https://demo.example/login.html";
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let html = r#"<html><head><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script><script src="https://www.google.com/recaptcha/api.js"></script><iframe src="https://challenges.cloudflare.com/x"></iframe></head></html>"#;
+        let out = r.process(html);
+        let enc = |u: &str| {
+            let abs = resolve(u, base);
+            cfg().encode_url(&abs)
+        };
+        // The Turnstile src is untouched, provider-direct.
+        assert!(
+            out.contains(r#"src="https://challenges.cloudflare.com/turnstile/v0/api.js""#),
+            "got: {}",
+            out
+        );
+        // recaptcha script srcs stay routed: that path is verified
+        // working (#112 co= virtualization, #120 frame redirect).
+        assert!(
+            out.contains(&format!(
+                r#"src="{}""#,
+                enc("https://www.google.com/recaptcha/api.js")
+            )),
+            "got: {}",
+            out
+        );
+        // Non-script tags on the challenge host still route; #120
+        // handles widget frame navigations at the fetch seam.
+        assert!(
+            out.contains(&format!(
+                r#"src="{}""#,
+                enc("https://challenges.cloudflare.com/x")
+            )),
+            "got: {}",
+            out
+        );
     }
 
     #[test]

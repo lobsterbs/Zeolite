@@ -66,6 +66,25 @@ pub fn is_svg_paint_attr(_tag: &str, attr: &str) -> bool {
     )
 }
 
+/// Challenge-provider script URLs whose <script src> must stay
+/// provider-direct. Cloudflare Turnstile's api.js locates its own
+/// <script> tag by the original src; a routed src breaks
+/// self-location and the widget never injects (an infinite spinner
+/// where the captcha should be). Mirrors the fetch-seam challenge
+/// list in app/src/request.ts (isChallengeFrameUrl); only hosts with
+/// a verified self-location requirement belong here - recaptcha and
+/// hCaptcha load fine through the engine route today.
+pub fn is_challenge_script_src(url: &str) -> bool {
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    host.eq_ignore_ascii_case("challenges.cloudflare.com")
+}
+
 /// Rewrite one `url(...)` SVG paint value through `enc`. Values that
 /// are not a bare `url(...)` token pass through unchanged: plain
 /// colors, `none`, fragment-only references (`url(#local)`, never a
@@ -191,6 +210,24 @@ mod tests {
         assert!(!is_url_attr("body", "manifest"));
         assert!(is_svg_paint_attr("path", "fill"));
         assert!(!is_svg_paint_attr("input", "pattern"));
+    }
+
+    #[test]
+    fn challenge_script_srcs() {
+        // Turnstile's api.js must keep its provider src (self-location).
+        assert!(is_challenge_script_src(
+            "https://challenges.cloudflare.com/turnstile/v0/api.js"
+        ));
+        // Other challenge providers stay routed today; lookalike
+        // hosts and relative URLs do not match.
+        assert!(!is_challenge_script_src("https://hcaptcha.com/1/api.js"));
+        assert!(!is_challenge_script_src(
+            "https://www.google.com/recaptcha/api.js"
+        ));
+        assert!(!is_challenge_script_src(
+            "https://example.com/challenges.cloudflare.com.evil"
+        ));
+        assert!(!is_challenge_script_src("relative/path.js"));
     }
 
     #[test]
