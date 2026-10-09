@@ -2037,6 +2037,56 @@ mod tests {
         );
     }
 
+    /// #126: inline module scripts resolve import specifiers against
+    /// the document's engine route, which the SW cannot recover at
+    /// fetch time. The rewriter routes non-bare specifiers itself.
+    #[test]
+    fn js_body_module_specifiers_route() {
+        let base = "https://cdn.example.com/lib/app.js";
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let out = r.rewrite_js_body(
+            "import './mod.js'; import('https://cdn.example.com/other.js'); import 'lodash';",
+        );
+        let enc = |u: &str| {
+            let abs = resolve(u, base);
+            cfg().encode_url(&abs)
+        };
+        assert!(
+            out.contains(&format!("'{}'", enc("./mod.js"))),
+            "relative specifier routed: {}",
+            out
+        );
+        assert!(
+            out.contains(&format!("'{}'", enc("https://cdn.example.com/other.js"))),
+            "dynamic specifier routed: {}",
+            out
+        );
+        assert!(out.contains("'lodash'"), "bare specifier intact: {}", out);
+    }
+
+    /// #126: a specifier that is already an engine route must not
+    /// gain a second wrap when a rewritten body is rewritten again
+    /// (the double-wrap hazard, issue #1 finding 4).
+    #[test]
+    fn js_body_routed_specifier_stays_single() {
+        let base = "https://cdn.example.com/lib/app.js";
+        let c = cfg();
+        let mut r0 = Rewriter::new(c.clone());
+        r0.set_base(base);
+        let once = r0.rewrite_js_body("import './mod.js';");
+        let route = once.trim_start_matches("import '").trim_end_matches("';");
+        assert!(
+            !route.contains("import"),
+            "route extraction failed: {}",
+            once
+        );
+        let mut r = Rewriter::new(c.clone());
+        r.set_base(base);
+        let twice = r.rewrite_js_body(&format!("import '{}';", route));
+        assert_eq!(twice, once, "second pass must re-emit one route, not wrap");
+    }
+
     /// #112: a JS literal whose destination path ends in "/" keeps
     /// the last path segment visible after the keyed token, so
     /// runtime tail checks (reCAPTCHA enterprise appends "api2/"
@@ -2088,19 +2138,27 @@ mod tests {
     #[test]
     fn external_script_body_routes_pass_through() {
         // #46: the specifier pass runs first at the seam, so the body
-        // can already contain root-relative engine routes; those are
-        // not URL-like literals and must survive untouched, and an
-        // engine-origin absolute route stays engine-local.
+        // can already contain root-relative engine routes. A decodable
+        // route unwraps and re-emits as exactly one route (never
+        // double-wrapped); a token that does not decode to an
+        // http(s) destination is an honest page-relative path and
+        // routes like any other. An engine-origin absolute route
+        // stays engine-local.
         let base = "https://cdn.example.com/lib/app.js";
         let origin = "https://engine.example.org";
         let mut c = cfg();
         c.origin = origin.to_string();
+        let token = c.encode_url("https://keep.example/ok");
         let mut r = Rewriter::new(c);
         r.set_base(base);
-        let out = r.rewrite_js_body(
-            r#"import("/j/aGVsbG8"); fetch("https://engine.example.org/j/d29ybGQ");"#,
+        let out = r.rewrite_js_body(&format!(
+            "import({token:?}); fetch(\"https://engine.example.org/j/d29ybGQ\");"
+        ));
+        assert!(
+            out.contains(&format!("{token:?}")),
+            "decodable route stays single: {}",
+            out
         );
-        assert!(out.contains("/j/aGVsbG8"), "route intact: {}", out);
         assert!(
             out.contains(r#"fetch("https://engine.example.org/j/d29ybGQ")"#),
             "engine-origin URL stays local: {}",

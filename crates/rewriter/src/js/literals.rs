@@ -109,6 +109,29 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
             }
             out.push_str(&js[start..i]);
             let run = &js[start..i];
+            // Module specifiers (#126): 'from "..."' and 'import
+            // "..."' / 'import("...")' inside an inline script resolve
+            // against the document's engine route at fetch time, and
+            // the SW cannot recover the destination from the resolved
+            // engine-origin path. Route non-bare specifiers here with
+            // the same bare rule as the TS pass (routeModuleSpecifier
+            // in app/src/worker-imports.ts): package names pass
+            // through; scheme, root- and dot-relative specifiers
+            // route. The '.' guard excludes property access
+            // (x.from("..."), cfg.import("...")).
+            if (run == "from" || run == "import") && last_sig != b'.' {
+                if let Some((open_end, spec, q, end)) = peek_specifier(js, i, run == "import") {
+                    if !spec.contains('\\') && !is_bare_specifier(&spec) {
+                        out.push_str(&js[i..open_end]);
+                        out.push_str(&enc(&spec));
+                        out.push(q);
+                        i = end;
+                        last_sig = b'x'; // a string literal is a value
+                        wlen = 0;
+                        continue;
+                    }
+                }
+            }
             if run.len() <= MAX_KEYWORD {
                 word[..run.len()].copy_from_slice(run.as_bytes());
                 wlen = run.len();
@@ -130,6 +153,53 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
         }
     }
     out
+}
+
+/// Peek past an identifier run ('from'/'import') for a module
+/// specifier string: skip whitespace and, for dynamic import, one
+/// opening paren plus whitespace. Returns the offset just past the
+/// opening quote, the specifier text, the quote char, and the offset
+/// just past the closing quote.
+fn peek_specifier(
+    js: &str,
+    from: usize,
+    allow_paren: bool,
+) -> Option<(usize, String, char, usize)> {
+    let b = js.as_bytes();
+    let mut p = from;
+    while p < b.len() && matches!(b[p], b' ' | b'\t' | b'\n' | b'\r') {
+        p += 1;
+    }
+    if allow_paren && p < b.len() && b[p] == b'(' {
+        p += 1;
+        while p < b.len() && matches!(b[p], b' ' | b'\t' | b'\n' | b'\r') {
+            p += 1;
+        }
+    }
+    if p >= b.len() || (b[p] != b'"' && b[p] != b'\'') {
+        return None;
+    }
+    let q = b[p] as char;
+    let close = find_literal_end(&js[p + 1..], q)?;
+    let spec = js[p + 1..p + 1 + close].to_string();
+    Some((p + 1, spec, q, p + 1 + close + 1))
+}
+
+/// Bare module specifier (node-style package name): no scheme, not
+/// root- or dot-relative. Mirrors routeModuleSpecifier in
+/// app/src/worker-imports.ts: bare specifiers belong to the runtime
+/// import map and pass through untouched.
+fn is_bare_specifier(spec: &str) -> bool {
+    let s = spec.trim();
+    if s.starts_with('/') || s.starts_with('.') {
+        return false;
+    }
+    if let Some(ci) = s.find(':') {
+        if crate::encode::is_scheme(&s[..ci]) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Can a '/' at this position start a regex literal? False positives
@@ -382,5 +452,47 @@ mod tests {
         let js = r#"const u = new URL("https://dyn.example/p?x=1");"#;
         let out = rewrite_script(js, &|u| format!("[{}]", u));
         assert!(out.contains(r#""[https://dyn.example/p?x=1]""#), "{}", out);
+    }
+
+    #[test]
+    fn module_specifiers_route() {
+        // #126: static, dynamic and export-from specifiers route when
+        // they are not bare package names; the closing quote is
+        // consumed so the literal pass never double-processes them.
+        let js = r#"import './a.js'; import b from "../b.js"; import("/root.js"); export {x} from 'https://cdn.example.com/m.js';"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r"'[./a.js]'"), "{}", out);
+        assert!(out.contains(r#""[../b.js]""#), "{}", out);
+        assert!(out.contains(r#""[/root.js]""#), "{}", out);
+        assert!(out.contains(r"'[https://cdn.example.com/m.js]'"), "{}", out);
+    }
+
+    #[test]
+    fn bare_specifiers_stay_bare() {
+        // Bare package names belong to the runtime import map; the
+        // rewriter must not touch them (routeModuleSpecifier parity).
+        let js = r#"import 'lodash'; import x from "react-dom/client"; import('some-pkg/x');"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn import_meta_and_property_access_untouched() {
+        // import.meta: no string follows the token. x.from(...) and
+        // cfg.import(...): the '.' guard excludes property access.
+        let js = "import.meta.url; const u = x.from('./keep.js'); cfg.import('./keep2.js');";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn twitch_concat_shape_stays_verbatim() {
+        // #124 regression shape: the tokens around a string-concat
+        // chain must not be bridged by the specifier pass either.
+        let js = r#"x="No matches from ".concat(w," payloads"); import 'https://x.example/a.js';"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("No matches from "), "{}", out);
+        assert!(out.contains(".concat(w,"), "{}", out);
+        assert!(out.contains(r"'[https://x.example/a.js]'"), "{}", out);
     }
 }
