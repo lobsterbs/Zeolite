@@ -20,7 +20,8 @@ function makeClass(prop: string) {
       return (this._attrs ?? {})[n] ?? null;
     },
     addEventListener(this: any, t: string, fn: () => void) {
-      (this._listeners ?? (this._listeners = {}))[t] ?? (this._listeners[t] = []).push(fn);
+      if (!this._listeners) this._listeners = {};
+      (this._listeners[t] ?? (this._listeners[t] = [])).push(fn);
     },
   };
   Object.defineProperty(proto, prop, {
