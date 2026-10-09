@@ -10,6 +10,7 @@ const W = "https://api.site/worker.js";
 const E = "https://engine.host";
 
 beforeEach(() => setScheme(P));
+const BT = String.fromCharCode(96);
 
 describe("routeModuleSpecifier", () => {
   it("routes absolute http(s) specifiers through the engine codec", () => {
@@ -60,6 +61,43 @@ describe("rewriteModuleWorkerImports", () => {
   it("is a pure text pass: same input, same output", () => {
     const src = 'import { a } from "./a.js";\nexport * from "https://cdn.other/x.js";';
     expect(rewriteModuleWorkerImports(P, W, E, src)).toBe(rewriteModuleWorkerImports(P, W, E, src));
+  });
+
+
+  it("#124 does not bridge string literals: the Twitch stats-sdk patterns stay untouched", () => {
+    const a = 'if(c){var w=f.length;this.emitTrace(t,"No matches from ".concat(w," payloads"))}';
+    expect(rewriteModuleWorkerImports(P, W, E, a)).toBe(a);
+    const b = 'this.emitTrace(e,"No matching criteria from ".concat(o.length," experiment payloads"))';
+    expect(rewriteModuleWorkerImports(P, W, E, b)).toBe(b);
+  });
+
+  it("#124 leaves from/import heads inside strings, templates, comments and regexes untouched", () => {
+    const t = "const t=" + BT + "docs from " + String.fromCharCode(34) + "site" + String.fromCharCode(34) + " end" + BT + ";";
+    const cases = [
+      'const s="see from " + x + " now";',
+      t,
+      '/* import "https://cdn.other/x.js" */',
+      'const r=/from "https:\/\/x\/y"/;',
+    ];
+    for (const c of cases) {
+      expect(rewriteModuleWorkerImports(P, W, E, c)).toBe(c);
+    }
+  });
+
+  it("#124 property names from/import are not import heads", () => {
+    const c = 'x.from = "https://a.example/y.js"; obj.import("u");';
+    expect(rewriteModuleWorkerImports(P, W, E, c)).toBe(c);
+  });
+
+  it("#124 rewrites pretty multi-line imports and minified ones", () => {
+    const pretty = "import {\n  a\n}\nfrom\n  \"./a.js\";";
+    const out1 = rewriteModuleWorkerImports(P, W, E, pretty);
+    expect(decodePath(out1.match(/from\n\s*"([^"]+)"/)![1])).toBe("https://api.site/a.js");
+    const mini = 'import{a}from"./a.js";import"./b.js";const m=import("./c.js");';
+    const out2 = rewriteModuleWorkerImports(P, W, E, mini);
+    expect(decodePath(out2.match(/from"([^"]+)"/)![1])).toBe("https://api.site/a.js");
+    expect(decodePath(out2.match(/import"([^"]+)"/)![1])).toBe("https://api.site/b.js");
+    expect(decodePath(out2.match(/import\("([^"]+)"\)/)![1])).toBe("https://api.site/c.js");
   });
 
   it("follows the rotated prefix", () => {
