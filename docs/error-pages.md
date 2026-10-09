@@ -13,8 +13,9 @@ service worker answers with a minimal HTML page it owns:
   route. The category comes from `classifyFailure` in
   `app/src/errorpage.ts`; an unrecognized failure is reported as a
   stream error, a cause is never invented;
-- a details card with the joinable diagnostics facts: category,
-  reason (URL-redacted), status, trace id and engine version;
+- a compact monospaced facts list: reason (URL-redacted), status,
+  trace id and engine version (the category line above already
+  states the category);
 - one retry action, linking back to the same engine route;
 - a machine-readable `<meta name="zl-error">` payload (JSON:
   category, engine version, route, and when known: reason, traceId,

@@ -1,12 +1,14 @@
 /* Engine-owned navigation error page (issues #3, #31).
 
    A failed in-transport navigation answers with an HTML page the
-   engine owns, styled after the host's M3E surfaces (inline CSS
-   only: no fonts, scripts or components, renders on a cold cache):
-   the one-line failure category, a details card (category, reason,
-   status, trace id, engine version), one retry action, and a
-   machine-readable zl-error meta. Subresource failures keep the
-   honest 502 text/plain body - no UI.
+   engine owns. The design is deliberately minimal (2026-10-09
+   redesign, operator request): plain system type, no cards, no
+   chrome, no accent color - a heading, one honest category line, a
+   compact monospaced facts list (reason, status, trace id, engine
+   version), one plain retry link, and a machine-readable zl-error
+   meta. Inline CSS only: no fonts, scripts or components, renders
+   on a cold cache. Subresource failures keep the honest 502
+   text/plain body - no UI.
 
    #32: the page never prints the destination URL (the address bar
    already shows the opaque route; plaintext on an engine-origin
@@ -106,12 +108,13 @@ export function errorPage(input: ErrorPageInput): string {
     ...(input.traceId ? { traceId: input.traceId } : {}),
     ...(typeof input.status === "number" ? { status: input.status } : {}),
   });
-  const row = (k: string, v: string, cls?: string): string =>
-    `<div class="row"><dt>${esc(k)}</dt><dd${cls ? ` class="${cls}"` : ""}>${esc(v)}</dd></div>`;
-  let rows = row("Category", input.category);
+  const row = (k: string, v: string): string =>
+    `
+<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`;
+  let rows = "";
   if (reason) rows += row("Reason", reason);
   if (typeof input.status === "number") rows += row("Status", String(input.status));
-  if (input.traceId) rows += row("Trace ID", input.traceId, "mono");
+  if (input.traceId) rows += row("Trace ID", input.traceId);
   rows += row("Engine", "zeolite " + input.engineVersion);
   return `<!doctype html>
 <html>
@@ -122,49 +125,31 @@ export function errorPage(input: ErrorPageInput): string {
 <title>Could not load this page</title>
 <style>
 :root { color-scheme: light dark; }
-* { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-  font: 16px/1.5 "Google Sans Flex", "Google Sans Text", system-ui, sans-serif;
-  background: #f7f5ff; color: #141218; }
-main { width: min(92vw, 36em); margin: 1em; padding: clamp(24px, 5vw, 48px);
-  background: #ffffff; border: 1px solid rgba(127,127,140,.25);
-  border-radius: 28px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-h1 { font-size: 1.4rem; font-weight: 500; margin: 0 0 .35em; }
-p.cat { margin: 0; }
-h2 { font-size: .875rem; font-weight: 500; margin: 1.75em 0 .25em;
-  text-transform: uppercase; letter-spacing: .08em; color: #4a4458; }
-dl { margin: 0; }
-.row { display: flex; gap: 16px; padding: 8px 0;
-  border-bottom: 1px solid rgba(127,127,140,.12); }
-.row:last-child { border-bottom: none; }
-dt { flex: 0 0 96px; margin: 0; font-size: .875rem; color: #4a4458; }
-dd { margin: 0; font-size: .875rem; overflow-wrap: anywhere; }
-dd.mono { font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: .8125rem; }
-p.hint { margin: 1.25em 0 0; font-size: .8125rem; color: #4a4458; }
-a.retry { display: inline-block; margin-top: 2em; padding: .7em 1.75em;
-  border-radius: 999px; background: #6750a4; color: #fff;
-  font-size: .875rem; font-weight: 500; text-decoration: none; }
-a.retry:focus-visible { outline: 2px solid #6750a4; outline-offset: 2px; }
+  font: 15px/1.6 system-ui, sans-serif; background: #fff; color: #1c1c1e; }
+main { max-width: 32em; padding: 1.5em; }
+h1 { font-size: 1.0625rem; font-weight: 600; margin: 0; }
+p { margin: .4em 0 1.5em; color: #6b6b70; }
+dl { font: .8125rem/1.8 ui-monospace, Menlo, Consolas, monospace;
+  color: #6b6b70; margin: 0 0 1.75em; }
+dl > div { display: flex; gap: 1.25em; }
+dt { margin: 0; flex: none; }
+dd { margin: 0; overflow-wrap: anywhere; }
+a { color: inherit; }
+a:focus-visible { outline: 1px solid currentColor; }
 @media (prefers-color-scheme: dark) {
-  body { background: #141218; color: #f5eff7; }
-  main { background: #1d1b20; box-shadow: none; }
-  h2, dt, p.hint { color: #cac4d0; }
-  a.retry { background: #cfbcff; color: #381e72; }
-  a.retry:focus-visible { outline-color: #cfbcff; }
+  body { background: #0f0f10; color: #e8e8ea; }
+  p, dl { color: #9b9ba0; }
 }
 </style>
 </head>
 <body>
 <main>
 <h1>Could not load this page</h1>
-<p class="cat">${esc(CATEGORY_TEXT[input.category])}</p>
-<h2>Details</h2>
-<dl>
-${rows}
+<p>${esc(CATEGORY_TEXT[input.category])}</p>
+<dl>${rows}
 </dl>
-<p class="hint">Full request logs live in the engine diagnostics rings (the embedder's DevTools network and diagnostics panels); the trace ID joins them.</p>
-<a class="retry" href="${esc(input.route)}">Retry</a>
+<a href="${esc(input.route)}">Retry</a>
 </main>
 </body>
 </html>
