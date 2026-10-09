@@ -94,5 +94,5 @@ Reusable integrations must have stable boundaries, documented inputs/outputs, ex
 Use **Implemented**, **Partial**, **Experimental**, or **Planned**. Never describe NativeTransit as implemented until code and tests prove it.
 
 ## Versioning
-Current release: **2.4 Bromide** (`2.4.0`). See `docs/versioning.md` before changing version identifiers.
+Current release: **3.0 Diamond** (`3.0.0`). See `docs/versioning.md` before changing version identifiers.
 
