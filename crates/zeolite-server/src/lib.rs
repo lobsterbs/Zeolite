@@ -19,6 +19,7 @@
 //! path, the default bind is loopback, the upgrade checks Origin, and
 //! auth configuration fails closed (see docs/security.md).
 
+pub mod dns;
 pub mod policy;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -156,16 +157,12 @@ async fn connect_validated_steps(
     if dest.check_hostname(hostname) == policy::Verdict::Block {
         return Err(ConnectFailure::Blocked);
     }
-    let addrs = match tokio::time::timeout(
-        connect_timeout,
-        tokio::net::lookup_host((hostname, port)),
-    )
-    .await
-    {
-        Ok(Ok(list)) => list,
-        Ok(Err(_)) => return Err(ConnectFailure::Dns),
-        Err(_) => return Err(ConnectFailure::Timeout),
-    };
+    let addrs =
+        match tokio::time::timeout(connect_timeout, crate::dns::lookup(hostname, port)).await {
+            Ok(Ok(list)) => list,
+            Ok(Err(_)) => return Err(ConnectFailure::Dns),
+            Err(_) => return Err(ConnectFailure::Timeout),
+        };
     let mut last = ConnectFailure::Dns;
     for addr in addrs {
         if dest.check_ip(&addr.ip()) == policy::Verdict::Block {
@@ -198,16 +195,12 @@ pub async fn udp_dest_validated(
     if dest.check_hostname(hostname) == policy::Verdict::Block {
         return Err(ConnectFailure::Blocked);
     }
-    let addrs = match tokio::time::timeout(
-        connect_timeout,
-        tokio::net::lookup_host((hostname, port)),
-    )
-    .await
-    {
-        Ok(Ok(list)) => list,
-        Ok(Err(_)) => return Err(ConnectFailure::Dns),
-        Err(_) => return Err(ConnectFailure::Timeout),
-    };
+    let addrs =
+        match tokio::time::timeout(connect_timeout, crate::dns::lookup(hostname, port)).await {
+            Ok(Ok(list)) => list,
+            Ok(Err(_)) => return Err(ConnectFailure::Dns),
+            Err(_) => return Err(ConnectFailure::Timeout),
+        };
     for addr in addrs {
         if dest.check_ip(&addr.ip()) == policy::Verdict::Block {
             continue;
@@ -657,6 +650,9 @@ async fn deny_sensitive(req: Request, next: Next) -> Response {
 }
 
 pub fn build_app(shared: Arc<Shared>) -> Router {
+    // Name the active resolver at startup: the pinned-DNS choice
+    // (src/dns.rs) must be visible in every embedder's logs.
+    tracing::info!("wisp upstream DNS: {}", crate::dns::mode_description());
     let static_dir = shared.cfg.static_dir.clone();
     let frame_ancestors = shared.cfg.frame_ancestors.clone();
     Router::new()

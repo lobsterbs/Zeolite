@@ -27,6 +27,9 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures = { version = "0.3" }
 kdl = "6"
 tracing = "0.1"
+# Pinned upstream DNS (privacy: Quad9 by default, Cloudflare optional,
+# never the host resolver or Google; see src/dns.rs).
+hickory-resolver = "0.25"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
