@@ -45,6 +45,38 @@ const PT_BODY = Buffer.from(
 );
 const PT_ETAG = '"zl-pt-1"';
 
+/* #99: large-document fixture. ~2.2 MB of tag-dense HTML built once
+   per fixture process and sliced at fixed byte offsets so multi-byte
+   UTF-8 sequences land split across chunk boundaries (the
+   incremental rewriter decoder has to flush them). Served with no
+   content-length (chunked framing) and cache-control: no-store so
+   the engine page cache never answers it: the load always rides
+   the wisp transport and the streaming rewriter. */
+const BIGDOC_ITEMS = 20000;
+let bigdocChunks = null;
+function buildBigdoc() {
+  const parts = [];
+  parts.push("<!doctype html><html><head><title>zl bigdoc</title>");
+  parts.push("<style>.bd{color:#123}</style>");
+  parts.push("<script>var bdLit=\"/dir/img.png\";var bdN=1;</script>");
+  parts.push("</head><body>");
+  parts.push("<p id=\"bigdoc-first\">bigdoc-first</p>");
+  for (let i = 0; i < BIGDOC_ITEMS; i++) {
+    parts.push("<div class=\"bd\" id=\"item-" + i + "\"><a href=\"landing.html\">l</a><span>unicode \u2713 " + i + " \u00fcn\u00efc\u00f6d\u00e9</span></div>");
+  }
+  parts.push("<img src=\"img.png\" alt=\"b\">");
+  parts.push("<img srcset=\"img.png 1x, img.png 2x\" alt=\"s\">");
+  parts.push("<p id=\"bigdoc-end\" data-count=\"" + BIGDOC_ITEMS + "\">bigdoc-end</p></body></html>");
+  const whole = Buffer.from(parts.join("\n"), "utf8");
+  const target = Math.ceil(whole.length / 16);
+  const chunks = [];
+  for (let off = 0; off < whole.length; off += target) {
+    chunks.push(whole.subarray(off, Math.min(whole.length, off + target)));
+  }
+  bigdocChunks = chunks;
+  return chunks;
+}
+
 function pageHtml(origin) {
   const other = origin === ORIGIN_A ? ORIGIN_B : ORIGIN_A;
   return `<!doctype html><html><head><title>zl fixture</title>
@@ -274,6 +306,23 @@ export function startFixture(port) {
           }
           res.write(block);
           setTimeout(tick, 40);
+        };
+        tick();
+      } else if (path === "/dir/bigdoc.html") {
+        /* #99: first chunk goes out immediately (TTFB), then 150 ms
+           gaps make the progressive parse observable; chunked
+           framing, no-store. */
+        const chunks = bigdocChunks ?? buildBigdoc();
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        let i = 0;
+        const tick = () => {
+          res.write(chunks[i]);
+          i++;
+          if (i >= chunks.length) {
+            res.end();
+            return;
+          }
+          setTimeout(tick, 150);
         };
         tick();
       } else if (path === "/api/slow") {

@@ -327,6 +327,81 @@ async function main() {
     return direct.len + " bytes matched (direct " + direct.chunks + " chunks, proxied " + proxied.chunks + ")";
   });
 
+  await check("rewriting", "large document: a ~2 MB streamed HTML doc parses to completion, renders progressively, and the SW stays alive (#99)", async () => {
+    /* The #99 live failure froze a large SERP mid-parse (~714 KB
+       parsed) and left the SW control plane dead. This is the CI
+       analog: a tag-dense ~2 MB document streamed in time-separated
+       chunks must (a) show its first marker strictly before its end
+       marker (streaming, not whole-body buffering), (b) parse every
+       element, (c) settle to readyState complete, and (d) leave
+       the control plane and a small fetch working afterwards. No
+       retries: a wedged engine must fail loudly, not retry green. */
+    const directPage = await context.newPage();
+    await directPage.goto(ORIGIN_A + "/dir/bigdoc.html");
+    const dEnd = await directPage.locator("#bigdoc-end").textContent({ timeout: 30000 });
+    const dCount = await directPage.locator(".bd").count();
+    await directPage.close();
+    eq(dEnd, "bigdoc-end", "direct oracle never parsed the end marker (fixture regression)");
+    assert(dCount > 10000, "direct oracle parsed only " + dCount + " items (fixture regression)");
+    const pg = await context.newPage();
+    await pg.goto(ENGINE + "/?url=" + encodeURIComponent(ORIGIN_A + "/dir/bigdoc.html"));
+    const t0 = Date.now();
+    let firstSeen = 0;
+    let endSeen = 0;
+    while (Date.now() - t0 < 60000 && !endSeen) {
+      if (!firstSeen && (await frameWith(pg, "#bigdoc-first"))) {
+        firstSeen = Date.now() - t0;
+        /* End marker already there in the same poll means the whole
+           doc landed at once: buffering, not streaming. */
+        if (await frameWith(pg, "#bigdoc-end")) endSeen = firstSeen;
+      } else if (firstSeen && (await frameWith(pg, "#bigdoc-end"))) {
+        endSeen = Date.now() - t0;
+      }
+      if (!endSeen) await sleep(50);
+    }
+    if (!firstSeen) {
+      const status = await pg.evaluate(() => document.getElementById("zl-status")?.textContent ?? "(no status node)").catch(() => "(evaluate failed)");
+      throw new Error("the first marker never rendered in 60s; embedder status: " + status);
+    }
+    assert(endSeen > 0, "the document never completed in 60s: mid-stream freeze, the exact #99 signature");
+    assert(endSeen > firstSeen, "the end marker was already rendered when the first appeared (whole-document buffering, not streaming)");
+    const frame = await frameWith(pg, "#bigdoc-end");
+    const state = JSON.parse(await evalIn(frame, "bigdoc state", `async () => {
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline && document.readyState !== "complete") await new Promise((r) => setTimeout(r, 100));
+      const end = document.getElementById("bigdoc-end");
+      return JSON.stringify({
+        rs: document.readyState,
+        items: document.querySelectorAll(".bd").length,
+        want: end ? end.getAttribute("data-count") : null,
+        html: document.documentElement.outerHTML.length,
+        title: document.title,
+      });
+    }`, 20000));
+    eq(state.rs, "complete", "readyState never settled to complete (mid-stream freeze)");
+    eq(String(state.items), String(state.want), "parsed element count differs from data-count (bytes lost mid-stream)");
+    eq(state.title, "zl bigdoc", "the document title was lost");
+    assert(state.html > 1000000, "the rendered document lost most of its content: outerHTML " + state.html);
+    /* Control-plane liveness after the heavy load: the second #99
+       symptom is the SW no longer answering. Same mint the #35
+       suite proves on a fresh page. */
+    const handle = await pg.evaluate((d) => new Promise((res) => {
+      const ch = new MessageChannel();
+      const ctl = navigator.serviceWorker.controller;
+      if (!ctl) return res({ ok: false, error: "no controller" });
+      ctl.postMessage({ type: "zl:navHandle", dest: d }, [ch.port2]);
+      ch.port1.onmessage = (e) => res(e.data);
+      setTimeout(() => res({ ok: false, error: "timeout" }), 5000);
+    }), ORIGIN_B + "/dir/landing.html");
+    assert(handle.ok, "control plane dead after the large-document load (zl:navHandle: " + JSON.stringify(handle) + ")");
+    const zl = await evalIn(frame, "post-load fetch", `async () => {
+      const r = await fetch("/api/data");
+      return (await r.json()).zl;
+    }`, 15000);
+    eq(zl, "api", "a small fetch after the large load did not route through the engine");
+    return "first " + firstSeen + "ms, end " + endSeen + "ms, " + state.items + " items, control plane alive";
+  });
+
   await check("transport", "slow response: a 700ms TTFB completes with identical bytes", async () => {
     const probe = `async () => {
       const r = await fetch("/api/slow");

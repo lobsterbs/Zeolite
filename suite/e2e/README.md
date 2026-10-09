@@ -114,7 +114,10 @@ so a red run names the broken layer. The classes and what they mean:
   (CRLF inside a tag, unquoted and padded attributes, a unicode src,
   srcset, iframe, relative anchor), CSS @import + multiline url() +
   @font-face, the JS string-literal URL pass, and the
-  runtime-concatenated URL it closes.
+  runtime-concatenated URL it closes. The large-document load (#99):
+  a ~2 MB tag-dense document served in time-separated chunks must render
+  its first content strictly before its end, parse every element,
+  settle to complete, and leave the SW control plane answering.
 - `isolation` - virtual-origin behavior: cookie set/delete lifecycle,
   the pinned Secure-cookie divergence (see below), cross-origin
   preflight vs same-virtual-origin.
