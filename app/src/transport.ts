@@ -8,6 +8,7 @@
    WebSocket opening and the live engine name are re-exported through
    the same seam; WS bridging stays in sw.ts (#88). */
 import { DIAG } from "./diag";
+import { transportState, waitForTransportState } from "./transport-lifecycle";
 import { ZL_WISP_URL } from "./config";
 import {
   fetch as zlCurlFetch,
@@ -87,6 +88,12 @@ async function ensureCurl(): Promise<void> {
    answer is dropped, never served. */
 const WISP_TTFB_DEADLINE_MS = 30_000;
 
+/* #119: how long a request that arrives while the transport is
+   known-dead waits for the reconnect before proceeding on the
+   normal path. Bounded: a timeout is not an error, ensureCurl()
+   below still runs and fails honestly if the transport is gone. */
+const WAIT_FOR_RECONNECT_MS = 10_000;
+
 class WispStallError extends Error {}
 
 function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -106,6 +113,13 @@ function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
+  /* #119: the lifecycle machine (not the dead-but-present client)
+     owns the answer to whether the transport is alive. A request
+     landing in the dead window waits for the reconnect instead of
+     racing it. */
+  if (transportState() === "dead") {
+    await waitForTransportState("connected", WAIT_FOR_RECONNECT_MS);
+  }
   await ensureCurl();
   try {
     return await withDeadline(zlCurlFetch(dest, init), WISP_TTFB_DEADLINE_MS);

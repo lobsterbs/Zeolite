@@ -2,8 +2,9 @@
    (issue #64). The seam keeps the libcurl path byte-identical; these
    cover the new pure surface only. */
 
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { setEngine, currentEngine, stripEsmExports, inlineDataImports, reset, isConnectClassError, reconnectDelay, installWispWatcher } from "../libcurl-transport-vendored";
+import { setTransportState, onTransportState, transportState, waitForTransportState } from "../transport-lifecycle";
 
 describe("transport engine selection", () => {
   it("defaults to libcurl", () => {
@@ -123,5 +124,49 @@ describe("wisp socket watcher (#74 follow-up)", () => {
        must close without exploding or scheduling anything. */
     const ws = new g.WebSocket("wss://other.example/ws");
     ws.fire("close");
+  });
+});
+
+/* Issue #119: explicit transport lifecycle machine. The vendored layer
+   drives it (init/reset/watcher glue, live-verified); these gate the
+   pure surface: transitions, event emission, and the bounded
+   wait-for-reconnect path. */
+describe("transport lifecycle (#119)", () => {
+  afterEach(() => setTransportState("idle", "test cleanup"));
+
+  it("emits on every real transition, not on same-state calls", () => {
+    const seen: string[] = [];
+    const off = onTransportState((s) => seen.push(s));
+    setTransportState("connecting", "t");
+    setTransportState("connecting", "t2"); /* same-state no-op */
+    setTransportState("connected", "t3");
+    off();
+    setTransportState("dead", "t4"); /* unsubscribed: no emit */
+    expect(seen).toEqual(["connecting", "connected"]);
+    expect(transportState()).toBe("dead");
+  });
+
+  it("reset() transitions a live transport to dead", () => {
+    setTransportState("connected", "t");
+    reset();
+    expect(transportState()).toBe("dead");
+  });
+
+  it("reset() of a never-initialized transport stays idle (idle is not dead)", () => {
+    setTransportState("idle", "t");
+    reset();
+    expect(transportState()).toBe("idle");
+  });
+
+  it("waitForTransportState resolves true when the state arrives in time", async () => {
+    setTransportState("dead", "t");
+    const p = waitForTransportState("connected", 5_000);
+    setTimeout(() => setTransportState("connected", "t"), 10);
+    expect(await p).toBe(true);
+  });
+
+  it("waitForTransportState is bounded: false on timeout, never a hang", async () => {
+    setTransportState("dead", "t");
+    expect(await waitForTransportState("connected", 5)).toBe(false);
   });
 });

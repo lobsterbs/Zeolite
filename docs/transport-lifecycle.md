@@ -8,9 +8,17 @@ transport singletons and re-inits with backoff (`reconnectDelay`, 1s doubling,
 retry in the service worker (connect-class errors) remains the backstop for
 mid-stream failures.
 
-Known gap, kept honest: the watcher is observational only. A request
-that lands in the sub-second window between socket death and the first
-reconnect attempt fails honestly; it does not wait.
+#119 closed the observational-only gap: an explicit lifecycle machine
+(app/src/transport-lifecycle.ts, states idle / connecting / connected /
+dead) is driven by the seams that observe the transport - vendored
+init(), the watcher socket open/close events, and reset() - and every
+transition reaches DIAG. The request path consults the machine: a
+fetch that arrives while the transport is known-dead waits (bounded,
+10s) for the reconnect instead of racing it; a timeout is not an
+error, the normal path and its honest failure still run. The watcher
+stays as a fallback for transports that cannot report, and the
+connect-class reset+retry remains the backstop for mid-stream
+failures.
 
 Frame-buster neutralization (`crates/rewriter/src/js/antiframe.rs`) is
 wired into the streaming rewriter for both script bodies and inline

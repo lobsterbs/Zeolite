@@ -702,6 +702,8 @@ async function getClient(cfg: { websocket: string }): Promise<LibcurlClientLike>
    a new connection. A genuine empty HTTP response still carries
    status and headers and is never error 52, so the retry cannot mask
    a real answer. */
+import { setTransportState, transportState } from "./transport-lifecycle";
+
 const CONNECT_CLASS_RE =
   /websocket did not open|failed sending data|failure when receiving data|server returned nothing|error code (?:52|55|56)\b/i;
 
@@ -712,6 +714,9 @@ export function isConnectClassError(err: unknown): boolean {
 /** Drop the libcurl/epoxy singletons so the next init() brings up a
     fresh transport with a new wisp websocket. Never throws. */
 export function reset(): void {
+  if (transportState() === "connecting" || transportState() === "connected") {
+    setTransportState("dead", "singleton reset");
+  }
   client = null;
   initPromise = null;
   epoxyClient = null;
@@ -777,10 +782,14 @@ export function installWispWatcher(g: WatcherGlobal = globalThis as WatcherGloba
         liveWisp.add(this);
         this.addEventListener("open", () => {
           reconnectAttempt = 0; // healthy again: backoff restarts from 1s
+          setTransportState("connected", "wisp socket open");
         });
         this.addEventListener("close", () => {
           liveWisp.delete(this);
-          if (liveWisp.size === 0 && lastCfg) scheduleReconnect();
+          if (liveWisp.size === 0) {
+            setTransportState("dead", "last wisp socket closed");
+            if (lastCfg) scheduleReconnect();
+          }
         });
       } catch {
         /* not a parseable URL: none of our business */
@@ -795,11 +804,18 @@ installWispWatcher();
 
 export async function init(cfg: { websocket: string }): Promise<void> {
   lastCfg = cfg;
-  if (engine === "epoxy") {
-    await getEpoxy(cfg);
-    return;
+  setTransportState("connecting", "init " + engine);
+  try {
+    if (engine === "epoxy") {
+      await getEpoxy(cfg);
+    } else {
+      await getClient(cfg);
+    }
+  } catch (err) {
+    setTransportState("dead", "init failed");
+    throw err;
   }
-  await getClient(cfg);
+  setTransportState("connected", "init ok " + engine);
 }
 
 export async function fetch(url: string, init?: RequestInit): Promise<Response> {
