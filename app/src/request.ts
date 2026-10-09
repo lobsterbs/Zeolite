@@ -126,13 +126,31 @@ const staleRefreshInFlight = new Map<string, Promise<void>>();
 
 export function cacheTtl(headers: Headers): number {
   const cc = (headers.get("cache-control") ?? "").toLowerCase();
-  /* no-cache must revalidate before every use; this cache serves
-     stored copies without revalidation, so the honest reading is to
-     skip the entry entirely: never stored, never served. */
+  /* #115: no-cache is stored but always stale (zero TTL, revalidated
+     before every use); no-store is never stored at all. Both read as a
+     zero TTL; storability is decided by cacheStorable below. */
   if (/\bno-store\b|\bno-cache\b/.test(cc)) return 0;
   const m = /(?:^|[,\s])max-age=(\d+)/.exec(cc);
   if (m) return Math.min(Number(m[1]) * 1000, 24 * 60 * 60 * 1000);
   return ZL_DEFAULT_TTL;
+}
+
+/** #115: only no-store is uncacheable. A no-cache response is stored
+    (zero TTL) and revalidated before every use; an entry without
+    validators revalidates as an unconditional probe. */
+export function cacheStorable(headers: Headers): boolean {
+  return !/\bno-store\b/.test((headers.get("cache-control") ?? "").toLowerCase());
+}
+
+/* #94 + #35: ONE copy of the JS-transform destination set - the
+   refresh and no-cache revalidation skips must both match the
+   serve-time transform branches: a raw upstream body must never
+   overwrite the composed copy such an entry stores. */
+function cacheRefreshSkipsEntry(req: Request, hit: Response): boolean {
+  return (
+    isWorkerDestination(req.destination) ||
+    (JS_TRANSFORM_DESTS.has(req.destination) && isJs(hit))
+  );
 }
 
 export async function pageCacheMatch(
@@ -148,6 +166,28 @@ export async function pageCacheMatch(
   if (!hit) return null;
   const at = Number(hit.headers.get(ZL_CACHED_AT) ?? 0);
   const ttl = cacheTtl(hit.headers);
+  /* #115: a stored no-store view can only be a legacy entry; it stays
+     unserved. */
+  const cc = (hit.headers.get("cache-control") ?? "").toLowerCase();
+  if (/\bno-store\b/.test(cc)) return null;
+  const rangeHeader = req.headers.get("range");
+  /* #115: no-cache revalidates BEFORE use (RFC 9111): the conditional
+     fetch blocks this response, and only a wire 304 hands the page the
+     stored body. A failed revalidation never falls back to the stale
+     copy - the request bypasses to the live path and surfaces the
+     honest transport result. A Range request bypasses too: the origin
+     owns range semantics, the pre-#115 behavior. */
+  if (/\bno-cache\b/.test(cc)) {
+    if (rangeHeader) return null;
+    /* #35/#94 parity: a transformed-JS entry is dropped, never
+       revalidated - the raw upstream 200 must not overwrite the
+       composed copy the next hit would serve. */
+    if (cacheRefreshSkipsEntry(req, hit)) {
+      try { await (await caches.open(ZL_PAGES)).delete(req); } catch { /* no storage */ }
+      return null;
+    }
+    return await revalidateBeforeUse(req, hit);
+  }
   if (!ttl) return null;
   if (Date.now() - at >= ttl) {
     /* Stale: serve it now, refresh without blocking the response.
@@ -172,14 +212,23 @@ export async function pageCacheMatch(
              request re-fetches and re-transforms. */
           /* #94: ONE copy of the JS-transform destination set (the refresh
              skip must match the serve-time transform branches). */
-          const jsServe =
-            isWorkerDestination(req.destination) ||
-            (JS_TRANSFORM_DESTS.has(req.destination) && isJs(hit));
+          const jsServe = cacheRefreshSkipsEntry(req, hit);
           if (jsServe) {
             await (await caches.open(ZL_PAGES)).delete(req);
           } else {
-            const fresh = await wispFetchCacheBypass(req);
-            if (fresh.ok) await pageCacheStore(req, fresh);
+            /* #115: the refresh carries the stored validators so the
+               origin can answer 304; a 304 keeps the stored body and
+               bumps the stored-at time instead of transferring a new
+               copy. */
+            const fresh = await wispFetchCacheBypass(req, {
+              etag: hit.headers.get("etag"),
+              lastModified: hit.headers.get("last-modified"),
+            });
+            if (fresh.status === 304) {
+              await bumpStoredEntry(req, fresh);
+            } else if (fresh.ok) {
+              await pageCacheStore(req, fresh);
+            }
           }
         } catch {
           /* offline: the stale copy stays served */
@@ -196,7 +245,6 @@ export async function pageCacheMatch(
      serve (plain body under the size cap). Everything else bypasses the
      cache so the origin owns range semantics; forwardedHeaders passes
      the header to the wisp path. */
-  const rangeHeader = req.headers.get("range");
   if (rangeHeader) return await rangeFromEntry(hit, rangeHeader);
   return hit;
 }
@@ -229,9 +277,18 @@ async function rangeFromEntry(hit: Response, rangeHeader: string): Promise<Respo
 let pageCacheTrimWarned = false;
 let pageCacheStoreWarned = false;
 
-async function pageCacheStore(req: Request, resp: Response): Promise<void> {
-  const ttl = cacheTtl(resp.headers);
-  if (!ttl || resp.status !== 200) return;
+/** Store a 200 in the page cache. With keepView the caller also serves
+    the returned surgered view to the page (the cache consumes a clone,
+    both forks stream concurrently); without it the view's body is
+    consumed by the cache and the return value must not be served. */
+async function pageCacheStore(
+  req: Request,
+  resp: Response,
+  keepView = false,
+): Promise<Response | null> {
+  /* #115: no-cache entries are stored too - cacheTtl gives them a zero
+     TTL, so every use revalidates - and only no-store is never stored. */
+  if (!cacheStorable(resp.headers) || resp.status !== 200) return null;
   try {
     const cache = await caches.open(ZL_PAGES);
     /* Issue #2 + hostile-header hygiene: the cache must never store the
@@ -250,7 +307,7 @@ async function pageCacheStore(req: Request, resp: Response): Promise<void> {
     mapRefreshHeader(storedHeaders, croute ? croute + cu.search : cu.href);
     const stored = new Response(resp.body, { status: 200, headers: storedHeaders });
     stored.headers.set(ZL_CACHED_AT, String(Date.now()));
-    await cache.put(req, stored);
+    await cache.put(req, keepView ? stored.clone() : stored);
     let keys = await cache.keys();
     while (keys.length > ZL_PAGE_LIMIT) {
       const gone = await cache.delete(keys[0]);
@@ -268,6 +325,7 @@ async function pageCacheStore(req: Request, resp: Response): Promise<void> {
       }
       keys = keys.slice(1);
     }
+    return stored;
   } catch {
     if (!pageCacheStoreWarned) {
       pageCacheStoreWarned = true;
@@ -278,6 +336,7 @@ async function pageCacheStore(req: Request, resp: Response): Promise<void> {
       });
     }
     /* storage full or unavailable: skip caching */
+    return null;
   }
 }
 
@@ -299,8 +358,13 @@ export function surfaceNotModified(h: Headers): Response {
 
 /** Re-fetch a cached request straight through the wisp transport. The
     transport adapter ignores the fetch redirect option (3xx responses
-    surface to the caller), so no redirect hint is passed. */
-async function wispFetchCacheBypass(req: Request): Promise<Response> {
+    surface to the caller), so no redirect hint is passed. #115: when
+    the stored entry carries validators, the fetch is conditional
+    (If-None-Match / If-Modified-Since) so the origin can answer 304. */
+async function wispFetchCacheBypass(
+  req: Request,
+  validators?: { etag?: string | null; lastModified?: string | null },
+): Promise<Response> {
   /* Issue #38: engine routes keep the query outside the encoded
      destination; a foreign (#34) cached entry is keyed by the full
      target URL, and its pathname is not a decodable route. Compose
@@ -313,7 +377,59 @@ async function wispFetchCacheBypass(req: Request): Promise<Response> {
   const headers = new Headers();
   const jarCookie = cookieHeaderFor(dest);
   if (jarCookie) headers.set("cookie", jarCookie);
+  /* #115: send the stored validators so the origin can answer 304. */
+  if (validators?.etag) headers.set("if-none-match", validators.etag);
+  if (validators?.lastModified) headers.set("if-modified-since", validators.lastModified);
   return wispTransport.fetch(dest, { method: "GET", headers });
+}
+
+/** #115: a wire 304 answering a conditional fetch keeps the stored
+    body. Re-match the entry (a fresh stream of the same stored body),
+    carry over any updated validators from the 304, bump the
+    stored-at time, and put the same body back. No bytes are
+    re-transferred and nothing is buffered: the body streams from the
+    stored entry into the cache. */
+async function bumpStoredEntry(req: Request, notModified: Response): Promise<void> {
+  try {
+    const cache = await caches.open(ZL_PAGES);
+    const cur = await cache.match(req);
+    if (!cur) return;
+    const h = new Headers(cur.headers);
+    const etag = notModified.headers.get("etag");
+    const lm = notModified.headers.get("last-modified");
+    if (etag) h.set("etag", etag);
+    if (lm) h.set("last-modified", lm);
+    h.set(ZL_CACHED_AT, String(Date.now()));
+    await cache.put(req, new Response(cur.body, { status: 200, headers: h }));
+  } catch {
+    /* offline or storage failure: the copy already served is unaffected */
+  }
+}
+
+/** #115: the no-cache revalidate-before-use path. The conditional
+    fetch is awaited: a 304 serves the stored view, a 200 stores and
+    serves the surgered fresh view (the jar is not fed on this branch,
+    same as the SWR refresh - capture happens on the live path), and
+    anything else (transport failure included) returns null so the
+    request bypasses to the live path and gets an honest result.
+    ponytail: no coalescing here - concurrent no-cache hits each pay
+    their own conditional fetch; a shared in-flight probe keyed by URL
+    is the upgrade path if a hot no-cache resource measurably hurts. */
+async function revalidateBeforeUse(req: Request, hit: Response): Promise<Response | null> {
+  try {
+    const probe = await wispFetchCacheBypass(req, {
+      etag: hit.headers.get("etag"),
+      lastModified: hit.headers.get("last-modified"),
+    });
+    if (probe.status === 304) {
+      await bumpStoredEntry(req, probe);
+      return hit;
+    }
+    if (probe.ok) return (await pageCacheStore(req, probe, true)) ?? null;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /* ---- Fetch interception -------------------------------------------- */
