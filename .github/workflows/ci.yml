@@ -246,7 +246,11 @@ jobs:
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 20480 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 20480)"; exit 1; fi
+          # 21 KiB for #121 (the zl:engineUpdate reload listener:
+          # a stale page keeps its old rewritten DOM until it
+          # reloads). Raise decided with the feature, same class as
+          # every raise above.
+          if [ "$SIZE" -ge 21504 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 21504)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

@@ -57,6 +57,10 @@ import { handleControlEvent } from "./control";
    root: it boots the runtime and wires browser events to the engine
    and the control plane. */
 import { handleFetch, initEngine, persistRoute, routeReady } from "./request";
+/* #121: engine-update alerting (update poll + activation broadcast)
+   lives in ./updates; this entrypoint owns the worker lifecycle
+   seams that call it. */
+import { broadcastEngineUpdate, startUpdateChecks } from "./updates";
 
 declare const self: ServiceWorkerGlobalScope;
 
@@ -212,6 +216,16 @@ self.addEventListener("activate", (e) => {
   e.waitUntil(
     (async () => {
       await self.clients.claim();
+      /* #121: the freshly-activated worker announces itself to every
+         window client (proxied pages reload once per engine sha; the
+         embedding host's own window can surface the alert). After
+         claim, so matchAll sees the claimed clients. */
+      try {
+        await broadcastEngineUpdate();
+      } catch {
+        /* best-effort: the reload guard is idempotent, a dropped
+           broadcast costs one update cycle */
+      }
       /* Warm the transport so the first proxied request skips libcurl
          init. A missing vendored build just logs, as before. */
       try {
@@ -222,6 +236,10 @@ self.addEventListener("activate", (e) => {
     })(),
   );
 });
+/* #121: long-lived tabs never run the browser's navigation-time
+   update check, so the active worker polls registration.update()
+   itself (the browser's own byte-compare oracle). */
+startUpdateChecks();
 
 /* #82: pure wiring - the request lifecycle is the engine's. */
 self.addEventListener("fetch", handleFetch);

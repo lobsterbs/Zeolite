@@ -17,7 +17,8 @@
    re-emission, navguard swap/defer seams), 18 for the #54
    dedicated-Worker hook, 19 for #106/#108 (popup activation guard,
    child-realm isolation), 20 for #109 (popup sync-open, relative
-   navigation-bound re-emit). Deliberate raises, never creep.
+   navigation-bound re-emit), 21 for #121 (the zl:engineUpdate
+   reload listener). Deliberate raises, never creep.
 
    Page-global contract (#32): window.__ZL = { site: "<opaque>" } -
    a per-site identity computed from the real destination, which
@@ -33,6 +34,7 @@ import { applyWs } from "./bootstrap/ws";
 import { applyReemit } from "./bootstrap/mint";
 import { applyNavGuard } from "./bootstrap/navguard";
 import { applyFindLoad } from "./bootstrap/findload";
+import { applyUpdateReload } from "./bootstrap/update";
 
 const w = window as unknown as Record<string, unknown>;
 const loc = w.location as Location;
@@ -52,3 +54,6 @@ applyReemit(w);
 applyIsolation(w, P, st);
 applyNavGuard(w, loc.href, loc.origin, site);
 applyFindLoad(w);
+/* #121: reload once per engine sha when the worker broadcasts
+   zl:engineUpdate (a stale page keeps its old rewritten DOM). */
+applyUpdateReload(w);
