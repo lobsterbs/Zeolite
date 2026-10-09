@@ -129,14 +129,19 @@ bypass, no Google login flows. What we ship instead:
 Honest gap (2026-10-09, verified live): Google reCAPTCHA widgets
 boot through the engine - api.js and the anchor load, the
 checkbox is clickable, and #127 restored the upstream Referer
-that an origin-only Referrer-Policy page would otherwise drop -
-but Google binds the site key to the parent frame's origin,
-which here is the engine origin: the anchor never spawns its
-bframe and the widget times out. A datacenter IP additionally
-fails Google's risk engine even on a direct headless load. Same
-unforgeable-origin class as #32: no fix without faking origins,
-and the no-bypass rule stands. hCaptcha and Cloudflare Turnstile
-work provider-direct.
+that an origin-only Referrer-Policy page would otherwise drop.
+#128 repairs same-site frame messaging: a page addressing its
+own frame by the virtual origin no longer has the message
+dropped by the browser (the payload is delivered locally with
+the intended origin); frames stay engine-routed, never passed
+provider-direct, because that would leak the user's IP. What
+remains unfixable: unforgeable location reads inside frames
+(#32 class), provider-direct anchor frames on third-party sites
+(no engine code runs there, so no synthetic delivery), a null
+ev.source on the synthetic path, and the datacenter IP failing
+Google's risk engine even on a direct headless load. The
+no-bypass rule stands. hCaptcha and Cloudflare Turnstile work
+provider-direct.
 ## Build order
 
 1. Network inspector ring + devtools streaming (it debugs the rest).

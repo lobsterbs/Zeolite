@@ -1,8 +1,8 @@
 /* Zeolite runtime bootstrap, injected by the rewriter right after
    <head> opens. Behavior patches only: storage scoping/virtualization,
    cookies, the worker port relay, WebSocket routing, the serviceWorker
-   shim, the navigation guard (#28), the find loader (#29) and the
-   cross-site channel isolation (#37). URL-level fetch/XHR need no
+   shim, the navigation guard (#28), the find loader (#29), the postMessage
+   targetOrigin repair (#128) and the cross-site channel isolation (#37). URL-level fetch/XHR need no
    patch: pages navigate engine-local paths the SW intercepts.
 
    Source modules under ./bootstrap bundle into one synchronous
@@ -35,6 +35,7 @@ import { applyReemit } from "./bootstrap/mint";
 import { applyNavGuard } from "./bootstrap/navguard";
 import { applyFindLoad } from "./bootstrap/findload";
 import { applyUpdateReload } from "./bootstrap/update";
+import { applyPostMessage } from "./bootstrap/postmsg";
 
 const w = window as unknown as Record<string, unknown>;
 const loc = w.location as Location;
@@ -57,3 +58,5 @@ applyFindLoad(w);
 /* #121: reload once per engine sha when the worker broadcasts
    zl:engineUpdate (a stale page keeps its old rewritten DOM). */
 applyUpdateReload(w);
+/* #128: same-site frame messaging repair (virtual targetOrigin). */
+applyPostMessage(w);
