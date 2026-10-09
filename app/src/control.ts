@@ -68,6 +68,9 @@ export interface ControlMessage {
     | "zl:docCookie"
     | "zl:downloads"
     | "zl:cancelDownload"
+    | "zl:pauseDownload"
+    | "zl:resumeDownload"
+    | "zl:saveDownload"
     | "zl:downloadState"
     | "zl:exportSession"
     | "zl:importSession"
@@ -628,6 +631,52 @@ case "zl:tracing":
       reply({ ok: DL.cancel(id) });
       break;
     }
+    case "zl:pauseDownload": {
+      const id = msg.id;
+      if (typeof id !== "string") {
+        reply({ ok: false, error: "missing id" });
+        break;
+      }
+      /* #118: pause severs like cancel but keeps the entry resumable. */
+      reply({ ok: DL.pause(id) });
+      break;
+    }
+    case "zl:resumeDownload": {
+      const id = msg.id;
+      if (typeof id !== "string") {
+        reply({ ok: false, error: "missing id" });
+        break;
+      }
+      /* #118: async - the Range request goes through the wisp tunnel. */
+      e.waitUntil(
+        DL.resume(id).then(
+          (r) => reply({ ok: r.ok, error: r.error }),
+          (err) => reply({ ok: false, error: String(err) }),
+        ),
+      );
+      break;
+    }
+    case "zl:saveDownload": {
+      const id = msg.id;
+      if (typeof id !== "string") {
+        reply({ ok: false, error: "missing id" });
+        break;
+      }
+      /* #118: the UI host owns the save; the blob crosses the
+         MessageChannel by structured clone. */
+      e.waitUntil(
+        DL.assemble(id).then(
+          (a) =>
+            reply(
+              a
+                ? { ok: true, blob: a.blob, filename: a.filename, mime: a.mime }
+                : { ok: false, error: "no buffered artifact for this entry" },
+            ),
+          (err) => reply({ ok: false, error: String(err) }),
+        ),
+      );
+      break;
+    }
     case "zl:exportSession": {
       /* 1.7 Sulfide: encrypted session export (cookies + tabs +
          caller extras). The passphrase only ever lives in this
@@ -779,6 +828,6 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag",
+  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag",
 ]);
 

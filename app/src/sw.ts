@@ -121,12 +121,17 @@ const initReady = (async () => {
   }
   /* 2.2 Arsenide: restore the persisted download registry. Entries
      that were active across the restart are honestly marked
-     interrupted by the load itself; resume stays unbuilt. */
+     interrupted by the load itself; #118: paused entries restore
+     with their stored partial bytes and stay resumable. */
   try {
     await DL.load();
   } catch {
     /* in-memory registry only */
   }
+  /* #118: the download resume path issues its Range request through
+     the engine transport; the wisp tunnel relays the header
+     end-to-end (the seam test pins that it is sent). */
+  DL.setResumeFetch((url, init) => wispTransport.fetch(url, { method: "GET", headers: init.headers }));
   /* Extensions: load the installed set, then boot enabled
      background scripts. Any failure lands in that extension's
      record; the engine itself never fails because of one. */

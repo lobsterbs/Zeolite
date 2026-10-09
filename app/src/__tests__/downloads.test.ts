@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
-import { beforeEach, describe, expect, it } from "vitest";
-import { DL, DownloadTracker, adoptResponse, downloadFilename } from "../downloads";
-import { openDb, idbClear, idbGetAllKeys, idbPut, STORE_DOWNLOADS } from "../extensions/idb";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DL, DownloadTracker, adoptResponse, downloadFilename, ZL_DL_RESUME_MAX } from "../downloads";
+import { openDb, idbClear, idbGetAllKeys, idbPut, idbDelete, STORE_DOWNLOADS, STORE_PARTIALS } from "../extensions/idb";
 
 function headers(h: Record<string, string>): Headers {
   return new Headers(h);
@@ -340,5 +340,174 @@ describe("adoptResponse seam (#90)", () => {
     expect(severed).toBe(true);
     expect(DL.snapshot()[0].status).toBe("cancelled");
     DL.reset();
+  });
+});
+
+/* Issue #118: download resume via Range through the engine fetch
+   seam. The seam test also pins that the Range header is sent;
+   the wisp relay is an opaque byte tunnel end-to-end. */
+describe("download resume (#118)", () => {
+  let t: DownloadTracker;
+
+  beforeEach(async () => {
+    try {
+      const db = await openDb();
+      await idbClear(db, STORE_DOWNLOADS);
+      await idbClear(db, STORE_PARTIALS);
+    } catch {
+      /* storage unavailable: the resume tests then fail honestly */
+    }
+    t = new DownloadTracker();
+  });
+
+  afterEach(() => {
+    t.reset();
+  });
+
+  function endlessBody(): ReadableStream<Uint8Array> {
+    return new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        ctrl.enqueue(new Uint8Array(4).fill(7));
+      },
+    });
+  }
+
+  function fetcher(status: number, body: Uint8Array, hs: Record<string, string>) {
+    const calls: Array<{ url: string; range?: string }> = [];
+    const fn = async (url: string, init?: { headers: Record<string, string> }) => {
+      calls.push({ url, range: init?.headers?.range });
+      return new Response(body as unknown as BodyInit, { status, headers: hs });
+    };
+    return { fn, calls };
+  }
+
+  it("pause severs mid-flight and keeps the entry resumable", async () => {
+    const id = t.begin("https://x.test/big.bin", headers({ "content-disposition": 'attachment; filename="big.bin"' }), "application/octet-stream", 10);
+    const reader = t.wrap(id, endlessBody()).getReader();
+    await reader.read(); /* 4 of 10 bytes */
+    expect(t.pause(id)).toBe(true);
+    const snap = t.snapshot();
+    expect(snap[0].status).toBe("paused");
+    expect(snap[0].received).toBe(4);
+    expect(snap[0].resumable).toBe(true);
+    let severed = false;
+    for (let i = 0; i < 4 && !severed; i++) {
+      try {
+        if ((await reader.read()).done) break;
+      } catch {
+        severed = true;
+      }
+    }
+    expect(severed).toBe(true);
+  });
+
+  it("resume sends the Range header through the seam and completes the artifact", async () => {
+    const id = t.begin("https://x.test/big.bin", headers({ "content-disposition": 'attachment; filename="big.bin"' }), "application/octet-stream", 10);
+    const reader = t.wrap(id, endlessBody()).getReader();
+    await reader.read();
+    t.pause(id);
+    const rest = new Uint8Array(6).fill(9);
+    const { fn, calls } = fetcher(206, rest, { "content-range": "bytes 4-9/10" });
+    t.setResumeFetch(fn);
+    const r = await t.resume(id);
+    expect(r.ok).toBe(true);
+    expect(calls).toEqual([{ url: "https://x.test/big.bin", range: "bytes=4-" }]);
+    const snap = t.snapshot();
+    expect(snap[0].status).toBe("done");
+    expect(snap[0].received).toBe(10);
+    const art = await t.assemble(id);
+    expect(art).not.toBeNull();
+    const bytes = new Uint8Array(await art!.blob.arrayBuffer());
+    expect(bytes).toHaveLength(10);
+    expect(bytes.slice(0, 4).every((b) => b === 7)).toBe(true);
+    expect(bytes.slice(4).every((b) => b === 9)).toBe(true);
+  });
+
+  it("a server that ignores Range restarts from zero and discards the partial", async () => {
+    const id = t.begin("https://x.test/r.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", 10);
+    const reader = t.wrap(id, endlessBody()).getReader();
+    await reader.read();
+    t.pause(id);
+    const { fn } = fetcher(200, new Uint8Array(10).fill(3), {});
+    t.setResumeFetch(fn);
+    const r = await t.resume(id);
+    expect(r.ok).toBe(true);
+    const snap = t.snapshot();
+    expect(snap[0].status).toBe("done");
+    expect(snap[0].received).toBe(10);
+    const art = await t.assemble(id);
+    expect(art).not.toBeNull();
+    expect(new Uint8Array(await art!.blob.arrayBuffer()).every((b) => b === 3)).toBe(true);
+  });
+
+  it("a 416 answer kills the entry honestly", async () => {
+    const id = t.begin("https://x.test/g.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", 10);
+    const reader = t.wrap(id, endlessBody()).getReader();
+    await reader.read();
+    t.pause(id);
+    const { fn } = fetcher(416, new Uint8Array(0), {});
+    t.setResumeFetch(fn);
+    const r = await t.resume(id);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("416");
+    expect(t.snapshot()[0].status).toBe("error");
+    expect(await t.assemble(id)).toBeNull();
+  });
+
+  it("above the cap there is honestly nothing to resume", async () => {
+    const id = t.begin("https://x.test/huge.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", ZL_DL_RESUME_MAX + 1);
+    const reader = t.wrap(id, endlessBody()).getReader();
+    await reader.read();
+    expect(t.snapshot()[0].resumable).toBe(false);
+    t.pause(id);
+    expect(t.snapshot()[0].status).toBe("paused");
+    const r = await t.resume(id);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("no resumable bytes");
+    t.cancel(id);
+  });
+
+  it("the registry shows the resumed state across a tracker restart", async () => {
+    const a = new DownloadTracker();
+    const id = a.begin("https://x.test/p.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", 8);
+    const reader = a.wrap(id, endlessBody()).getReader();
+    await reader.read();
+    a.pause(id);
+    await a.persistPartial(id);
+    await a.persist();
+    const b = new DownloadTracker();
+    await b.load();
+    const snap = b.snapshot();
+    expect(snap[0].status).toBe("paused");
+    expect(snap[0].received).toBe(4);
+    expect(snap[0].resumable).toBe(true);
+    b.setResumeFetch(fetcher(206, new Uint8Array(4).fill(1), { "content-range": "bytes 4-7/8" }).fn);
+    expect((await b.resume(id)).ok).toBe(true);
+    expect(b.snapshot()[0].status).toBe("done");
+    expect(b.snapshot()[0].received).toBe(8);
+    const art = await b.assemble(id);
+    expect(art).not.toBeNull();
+    expect(new Uint8Array(await art!.blob.arrayBuffer())).toHaveLength(8);
+    a.reset();
+    b.reset();
+  });
+
+  it("an orphaned stored partial is pruned on load", async () => {
+    const db = await openDb();
+    await idbPut(db, STORE_PARTIALS, "dl999", { chunks: [new Uint8Array(2)], n: 2 });
+    const a = new DownloadTracker();
+    await a.load();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(await idbGetAllKeys(db, STORE_PARTIALS)).toEqual([]);
+    a.reset();
+  });
+
+  it("resume without a wired transport is honest", async () => {
+    const id = t.begin("https://x.test/n.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", 8);
+    await t.wrap(id, endlessBody()).getReader().read();
+    t.pause(id);
+    const r = await t.resume(id);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("no resume transport");
   });
 });

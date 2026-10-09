@@ -6,12 +6,14 @@
    version bump with a recreate. */
 
 const DB_NAME = "zl-extensions";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 export const STORE_META = "meta";
 export const STORE_FILES = "files";
 export const STORE_STORAGE = "storage";
 export const STORE_COOKIES = "cookies";
 export const STORE_DOWNLOADS = "downloads";
+/* #118: partial download bytes per registry entry id. */
+export const STORE_PARTIALS = "download-partials";
 
 let dbp: Promise<IDBDatabase> | null = null;
 
@@ -26,6 +28,7 @@ export function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_STORAGE)) db.createObjectStore(STORE_STORAGE);
       if (!db.objectStoreNames.contains(STORE_COOKIES)) db.createObjectStore(STORE_COOKIES);
       if (!db.objectStoreNames.contains(STORE_DOWNLOADS)) db.createObjectStore(STORE_DOWNLOADS);
+      if (!db.objectStoreNames.contains(STORE_PARTIALS)) db.createObjectStore(STORE_PARTIALS);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error ?? new Error("zeolite: indexeddb open failed"));

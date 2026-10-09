@@ -110,8 +110,8 @@ Closes the honest limits recorded in 1.4/1.5/1.7.
 - Session import currently replaces cookie jars wholesale; add a merge
   mode with per-jar conflict rules.
 - Download registry: persist the ring to site-scoped IndexedDB so entries
-  survive a SW restart; keep no-resume honest until resume is actually
-  built.
+  survive a SW restart; resume shipped with #118 (Range requests
+  through the wisp tunnel, capped partial buffering).
 - Wrap IDBFactory.cmp in the storage partition.
 
 ## Phase 13 - 2.3 Selenide: worker virtualization completion (shipped)
