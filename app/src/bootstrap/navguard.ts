@@ -15,7 +15,9 @@
    - Parser-inserted anchors/forms fire the navigate event too;
      parser-inserted iframe src (and #58 srcdoc markup) get their
      own observer: the child has no bootstrap, so src is rewired
-     before the queued load task.
+     before the queued load task. #116: shadow roots join through
+     an attachShadow hook, and contentWindow/contentDocument reads
+     install the child guard synchronously (the write-race door).
    - Engine-origin and opaque URLs pass through; relative writes on
      navigation-bound attributes re-emit through the #101
      parent-relative marker (#109). <base href> stays alone.
@@ -273,18 +275,53 @@ export function applyNavGuard(
      absolute URLs inside its markup would load browser-direct from
      the child. Rewire the navigable attributes inside the markup:
      the child's initial navigations then ride the marker route,
-     which the parent's SW proxies like any engine route. Unquoted
-     attribute values stay as written (HTML ends them at the first
-     whitespace anyway); quoted values keep their quotes. */
+     which the parent's SW proxies like any engine route. #116
+     residual 3: unquoted values end at the first whitespace, so the
+     URL inside them carries no spaces and rewrites safely; quoted
+     values keep their quotes. */
   const rewireSrcdoc = (v: string): string =>
     v.replace(
-      /(\s(?:href|src|action|formaction|poster|background|cite|data)\s*=\s*)(["'])(.*?)\2/gi,
-      (_m: string, p: string, q: string, u: string) => p + q + rewire(u) + q,
+      /(\s(?:href|src|action|formaction|poster|background|cite|data)\s*=\s*)("[^"]*"|'[^']*'|[^\s"'>]+)/gi,
+      (_m: string, p: string, val: string) => {
+        if (val.length > 1 && (val[0] === '"' || val[0] === "'"))
+          return p + val[0] + rewire(val.slice(1, -1)) + val[0];
+        return p + rewire(val);
+      },
     );
   const IFR = w.HTMLIFrameElement as AnyRecord | undefined;
   if (IFR) {
     safe(() => guardProp(IFR.prototype, "srcdoc", "sync", false, (_el, v) => rewireSrcdoc(v)));
     safe(() => guardAttr(IFR.prototype, "srcdoc", "sync", false, (_el, v) => rewireSrcdoc(v)));
+    /* #116 residual 4: a child script can run in the same task that
+       created it (contentDocument.write), before the observer
+       microtask lands the child guard - the navigation it commits
+       is browser-direct and uncatchable. Every path into the child
+       realm reads contentWindow or contentDocument first, so both
+       getters install the child guard synchronously at access
+       time; the re-entrancy set keeps guardChild's own reads from
+       recursing through the getter. */
+    const guarding = new WeakSet<object>();
+    for (const prop of ["contentWindow", "contentDocument"]) {
+      safe(() => {
+        const d = Object.getOwnPropertyDescriptor(IFR.prototype, prop);
+        if (!d || !d.get) return;
+        Object.defineProperty(IFR.prototype, prop, {
+          configurable: true,
+          enumerable: true,
+          get(this: AnyRecord) {
+            if (!guarding.has(this)) {
+              guarding.add(this);
+              try {
+                guardChild(this);
+              } finally {
+                guarding.delete(this);
+              }
+            }
+            return d.get!.call(this);
+          },
+        });
+      });
+    }
   }
   /* #39 residual: runtime-injected meta refresh is the one navigation
      seam left on engines without the Navigation API (Firefox has no
@@ -649,10 +686,9 @@ export function applyNavGuard(
      queued iframe load task starts: an observer callback is a
      microtask, the load is a task, so the child never receives the
      plaintext address. Added subtrees are scanned whole (innerHTML
-     adds one root, not one record per frame).
-     ponytail: frames inside a shadow root escape a document observer;
-     hooking attachShadow would cover them - add when a real page
-     needs it. */
+     adds one root, not one record per frame). #116 residual 2:
+     shadow roots are covered by the attachShadow hook below, so no
+     frame realm is out of observer reach. */
   const MO = w.MutationObserver as
     | (new (cb: (muts: Array<{ type: string; addedNodes: ArrayLike<AnyRecord> }>) => void) => {
         observe(t: AnyRecord, o: AnyRecord): void;
@@ -703,20 +739,52 @@ export function applyNavGuard(
         for (let i = 0; i < frames.length; i++) rewired(frames[i]);
       }
     };
+    let obs: { observe(t: AnyRecord, o: AnyRecord): void } | null = null;
     safe(() => {
-      new MO((muts) => {
+      obs = new MO((muts) => {
         for (const m of muts) {
           if (m.type !== "childList") continue;
           for (let i = 0; i < m.addedNodes.length; i++) scan(m.addedNodes[i]);
         }
-      }).observe(D.documentElement as unknown as AnyRecord, { childList: true, subtree: true });
+      });
+      obs.observe(D.documentElement as unknown as AnyRecord, { childList: true, subtree: true });
     });
+    /* #116 residual 2: frames inside a shadow root escape a
+       document-wide observer, so parser-inserted shadow frames
+       loaded browser-direct. Hook attachShadow: every created root
+       is observed with the same contract (rewire + child guard)
+       and lands in the registry for the present-frames pass
+       below. The __zlShadow flag keeps a twice-guarded realm from
+       stacking a second hook over the first. */
+    const shadowRoots: AnyRecord[] = [];
+    const ES = w.Element as AnyRecord | undefined;
+    const OAS = ES && ES.prototype && ES.prototype.attachShadow;
+    if (typeof OAS === "function" && !(OAS as AnyRecord).__zlShadow) {
+      safe(() => {
+        (ES as AnyRecord).prototype.attachShadow = function (this: AnyRecord, init: AnyRecord) {
+          const root = OAS.call(this, init);
+          if (root) {
+            shadowRoots.push(root);
+            obs?.observe(root, { childList: true, subtree: true });
+          }
+          return root;
+        };
+        ((ES as AnyRecord).prototype.attachShadow as AnyRecord).__zlShadow = true;
+      });
+    }
     /* Frames already in the DOM when this realm is guarded (a child
        realm guarded on load): the observer only sees later
-       additions, so give the present ones their realm guard. */
+       additions, so give the present ones their realm guard -
+       including frames inside shadow roots this guard did not
+       see created. */
     if (typeof D.querySelectorAll === "function") {
       const frames = D.querySelectorAll("iframe,frame") as ArrayLike<AnyRecord>;
       for (let i = 0; i < frames.length; i++) guardChild(frames[i]);
+      for (const root of shadowRoots) {
+        if (typeof root.querySelectorAll !== "function") continue;
+        const sframes = root.querySelectorAll("iframe,frame") as ArrayLike<AnyRecord>;
+        for (let i = 0; i < sframes.length; i++) guardChild(sframes[i]);
+      }
     }
   }
   /* WebRTC connects directly; presence would be a fake feature. */
