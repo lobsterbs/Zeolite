@@ -27,6 +27,7 @@ import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
+import { loadPolicy, policyMatch } from "./policy";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
 import { httpsUpgraded } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
@@ -1227,7 +1228,7 @@ export function handleFetch(e: FetchEvent): void {
            destination scheme + request destination; refined with the
            actual content type once the response arrives. */
         const dest = reqDest(e.request);
-        const decision = decideTransport(target, dest);
+        let decision = decideTransport(target, dest);
         /* webNavigation.onBeforeNavigate: navigation-mode requests
            report the interception itself, before any cache or upstream
            work. */
@@ -1280,6 +1281,27 @@ export function handleFetch(e: FetchEvent): void {
            wins, before cache and transport. See docs/interception.md. */
         const engineRules = await loadRules();
         const rtype = classifyRtype(dest, "").toLowerCase() as ResourceType;
+        /* #135/#136: compatibility policy. A matching rule upgrades
+           the default native decision onto the rewrite path; native
+           is already the default and required rewrites cannot be
+           demoted, so the upgrade is the only effect. */
+        const policy = await loadPolicy();
+        const policyRule = policyMatch(policy, target, rtype);
+        if (policyRule && decision.mode === "NativeTransit") {
+          decision = {
+            mode: "RewriteFallback",
+            reason: "POLICY_REWRITE",
+            ruleId: policyRule.id,
+          };
+          traceDecision({
+            subsystem: "policy",
+            rule: policyRule.id,
+            original: target,
+            result: "rewrite",
+            resource: rtype,
+            traceId,
+          });
+        }
         const ruleDec = applyRules(engineRules, target, rtype);
         const kinds: Exclude<InterceptKind, "response">[] = ["request"];
         if (e.request.mode === "navigate") kinds.push("navigation");
@@ -1356,7 +1378,7 @@ export function handleFetch(e: FetchEvent): void {
                fallback ring + netLog row stay the per-request record;
                native is the default and stays row-only). */
             if (dec.mode === "RewriteFallback")
-              DIAG.stage(traceId, "TRANSPORT_FALLBACK", { url: target, message: dec.reason });
+              DIAG.stage(traceId, "TRANSPORT_FALLBACK", { url: target, message: dec.reason + (dec.ruleId ? " (policy " + dec.ruleId + ")" : "") });
             /* Bug-scout fix: cache-hit navigations used to skip the
                webNavigation lifecycle entirely. */
             if (
@@ -1755,7 +1777,7 @@ export function handleFetch(e: FetchEvent): void {
              lands here, so the reason is in the diag stream, not just
              the opt-in tracing ring). */
           if (dec.mode === "RewriteFallback")
-            DIAG.stage(traceId, "TRANSPORT_FALLBACK", { url: target, message: dec.reason });
+            DIAG.stage(traceId, "TRANSPORT_FALLBACK", { url: target, message: dec.reason + (dec.ruleId ? " (policy " + dec.ruleId + ")" : "") });
           traceDecision({ subsystem: "transport", rule: dec.mode, original: target, result: reasonOf(dec) ?? dec.mode, resource: rtype, traceId });
           if (finalDest)
             traceDecision({ subsystem: "transport", rule: "redirect", original: target, result: finalDest, resource: rtype, traceId });

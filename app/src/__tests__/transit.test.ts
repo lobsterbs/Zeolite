@@ -284,3 +284,24 @@ describe("transitRecord", () => {
     expect(transitStats().epoch).toBe(s.epoch);
   });
 });
+
+
+/* #135/#136: the policy upgrade is a first-class transit decision. */
+describe("policy upgrade decisions", () => {
+  it("POLICY_REWRITE is a stable fallback reason that refinement keeps", () => {
+    const dec: TransitDecision = { mode: "RewriteFallback", reason: "POLICY_REWRITE", ruleId: "site-x" };
+    expect(reasonOf(dec)).toBe("POLICY_REWRITE");
+    expect(refineWithContent(dec, "text/html", "document")).toBe(dec);
+  });
+
+  it("records the rule id on the fallback ring", () => {
+    transitRecord("t-pol", "https://example.com/x", {
+      mode: "RewriteFallback",
+      reason: "POLICY_REWRITE",
+      ruleId: "site-x",
+    });
+    const st = transitStats();
+    expect(st.fallback).toBe(1);
+    expect(st.fallbacks[0]).toMatchObject({ reason: "POLICY_REWRITE", ruleId: "site-x" });
+  });
+});

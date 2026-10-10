@@ -31,7 +31,8 @@ export type FallbackReason =
   | "CSS_URL_REWRITE_REQUIRED"
   | "JS_LITERAL_REWRITE_REQUIRED"
   | "XML_DOCUMENT_REWRITE_REQUIRED"
-  | "UNSUPPORTED_PROTOCOL";
+  | "UNSUPPORTED_PROTOCOL"
+  | "POLICY_REWRITE";
 
 /* #94: the reason taxonomy. A native decision explains itself too
    (the unremarkable default), and a blocked request carries the gate
@@ -66,7 +67,7 @@ export function originOf(url: string): OriginContext | null {
    a native transport the default's own reason. */
 export type TransitDecision =
   | { mode: "NativeTransit"; reason: NativeReason }
-  | { mode: "RewriteFallback"; reason: FallbackReason }
+  | { mode: "RewriteFallback"; reason: FallbackReason; ruleId?: string }
   | { mode: "Blocked"; reason: BlockReason };
 
 /** The telemetry view of a decision's reason: fallbacks and blocks
@@ -199,6 +200,7 @@ export interface FallbackEvent {
   ts: number;
   url: string;
   reason: FallbackReason;
+  ruleId?: string;
   traceId?: string;
 }
 
@@ -236,7 +238,7 @@ export function transitRecord(traceId: string, url: string, dec: TransitDecision
      exits. */
   if (dec.mode === "Blocked") return;
   fallbackCount++;
-  fallbacks.push({ ts: Date.now(), url, reason: dec.reason, traceId });
+  fallbacks.push({ ts: Date.now(), url, reason: dec.reason, traceId, ruleId: dec.ruleId });
   if (fallbacks.length > FALLBACK_LIMIT) fallbacks.shift();
 }
 
