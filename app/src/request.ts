@@ -1069,7 +1069,7 @@ export function handleFetch(e: FetchEvent): void {
          ordinary pipeline. The CHALLENGE event is the log line hosts
          see when this fires. */
       if (isPassChallenge(target)) {
-        const fixed = passChallengeRedirFixed(target);
+        const fixed = passChallengeRedirFixed(target, self.location.origin);
         if (fixed && fixed !== target) {
           const ctid = DIAG.trace();
           DIAG.emit({

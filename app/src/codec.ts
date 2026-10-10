@@ -619,26 +619,47 @@ export function referrerDest(referrer: string, path: string): string | null {
     rejects a redirect target outside its allowlist
     (redirect_domain_not_allowed), so verification fails after the
     challenge completes. When redir is a decodable engine route
-    (keyed or legacy), rebuild the query with the plaintext upstream
+    (keyed or legacy, as a bare route path or as an absolute engine-origin URL the way anubis >= 1.26 emits it from window.location.href), rebuild the query with the plaintext upstream
     page URL so the challenge can finish; the response redirect chain
     maps the hop back to an engine route through the ordinary
     pipeline. Returns the fixed absolute URL, or null when redir is
     absent or not a decodable engine route. */
-export function passChallengeRedirFixed(dest: string): string | null {
+export function passChallengeRedirFixed(dest: string, engineOrigin: string): string | null {
   let u: URL;
   try {
     u = new URL(dest);
   } catch {
     return null;
   }
-  const redir = u.searchParams.get("redir");
-  if (!redir) return null;
-  const q = redir.indexOf("?");
-  const path = q < 0 ? redir : redir.slice(0, q);
+  const raw = u.searchParams.get("redir");
+  if (!raw) return null;
+  let path: string;
+  let tailQuery = "";
+  /* anubis >= 1.26 builds redir from window.location.href, so the
+     challenge page hands the browser an ABSOLUTE engine URL, not the
+     bare route path older deployments emitted. Both shapes name the
+     same engine route: accept the absolute form only on the engine
+     origin (a foreign origin's route is not ours to decode). */
+  if (raw.startsWith("http://") || raw.startsWith("https://")) {
+    let r: URL;
+    try {
+      r = new URL(raw);
+    } catch {
+      return null;
+    }
+    if (r.origin !== engineOrigin) return null;
+    path = r.pathname;
+    tailQuery = r.search.startsWith("?") ? r.search.slice(1) : "";
+  } else {
+    const q = raw.indexOf("?");
+    path = q < 0 ? raw : raw.slice(0, q);
+    tailQuery = q < 0 ? "" : raw.slice(q + 1);
+  }
   if (!isEnginePath(path)) return null;
   const decoded = decodePath(path);
-  if (!decoded || !/^https?:\/\//.test(decoded)) return null;
+  if (!decoded || !(decoded.startsWith("http://") || decoded.startsWith("https://"))) return null;
   const out = new URL(dest);
-  out.searchParams.set("redir", decoded + (q < 0 ? "" : redir.slice(q)));
+  out.searchParams.set("redir", tailQuery ? decoded + "?" + tailQuery : decoded);
   return out.href;
 }
+

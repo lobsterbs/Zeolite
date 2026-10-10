@@ -32,20 +32,21 @@ describe("isPassChallenge (#52)", () => {
    after the challenge completes. passChallengeRedirFixed decodes the
    route and carries the plaintext upstream URL instead. */
 describe("passChallengeRedirFixed (#52 handoff)", () => {
+  const ORIGIN = "https://proxy.example";
   const pc = (redir: string) =>
     "https://startpage.com/.within.website/x/cmd/anubis/api/pass-challenge?redir=" +
     encodeURIComponent(redir);
 
   it("rewrites a legacy engine route redir to the upstream URL", () => {
     const route = encodeDestLegacy("https://startpage.com/sp/search");
-    const fixed = passChallengeRedirFixed(pc(route));
+    const fixed = passChallengeRedirFixed(pc(route), ORIGIN);
     expect(fixed).not.toBeNull();
     expect(new URL(fixed!).searchParams.get("redir")).toBe("https://startpage.com/sp/search");
   });
 
   it("keeps the route-carried query on the upstream URL", () => {
     const route = encodeDestLegacy("https://startpage.com/sp/search") + "?query=test";
-    const fixed = passChallengeRedirFixed(pc(route));
+    const fixed = passChallengeRedirFixed(pc(route), ORIGIN);
     expect(new URL(fixed!).searchParams.get("redir")).toBe(
       "https://startpage.com/sp/search?query=test",
     );
@@ -54,16 +55,52 @@ describe("passChallengeRedirFixed (#52 handoff)", () => {
   it("decodes a keyed route redir with the active key", () => {
     setRouteKey(b64uEncode(crypto.getRandomValues(new Uint8Array(16))));
     const route = encodeDest("https://startpage.com/sp/search");
-    const fixed = passChallengeRedirFixed(pc(route));
+    const fixed = passChallengeRedirFixed(pc(route), ORIGIN);
     expect(new URL(fixed!).searchParams.get("redir")).toBe("https://startpage.com/sp/search");
     setRouteKey(null);
   });
 
   it("returns null for non-engine redirs and non-URLs", () => {
-    expect(passChallengeRedirFixed(pc("/sp/search"))).toBeNull();
+    expect(passChallengeRedirFixed(pc("/sp/search"), ORIGIN)).toBeNull();
     expect(
-      passChallengeRedirFixed("https://startpage.com/.within.website/x/cmd/anubis/api/pass-challenge"),
+      passChallengeRedirFixed("https://startpage.com/.within.website/x/cmd/anubis/api/pass-challenge", ORIGIN),
     ).toBeNull();
-    expect(passChallengeRedirFixed("not a url")).toBeNull();
+    expect(passChallengeRedirFixed("not a url", ORIGIN)).toBeNull();
+  });
+});
+
+/* anubis >= 1.26 emits redir as window.location.href: an ABSOLUTE
+   URL on the engine origin carrying the rewritten route. The live
+   startpage case: redir must decode through the same pipeline and
+   hand anubis its own-origin page URL. */
+describe("passChallengeRedirFixed (absolute engine URL, anubis 1.26+)", () => {
+  const ORIGIN = "https://proxy.example";
+  const pcAbs = (route: string) =>
+    "https://startpage.com/.within.website/x/cmd/anubis/api/pass-challenge?redir=" +
+    encodeURIComponent(ORIGIN + route);
+
+  it("rewrites an absolute engine-origin URL redir to the upstream URL", () => {
+    const route = encodeDestLegacy("https://www.startpage.com/sp/search?query=eiffel+tower");
+    const fixed = passChallengeRedirFixed(pcAbs(route), ORIGIN);
+    expect(fixed).not.toBeNull();
+    expect(new URL(fixed!).searchParams.get("redir")).toBe(
+      "https://www.startpage.com/sp/search?query=eiffel+tower",
+    );
+  });
+
+  it("keeps a query carried on the absolute route", () => {
+    const route = encodeDestLegacy("https://startpage.com/sp/search") + "?query=test";
+    const fixed = passChallengeRedirFixed(pcAbs(route), ORIGIN);
+    expect(new URL(fixed!).searchParams.get("redir")).toBe(
+      "https://startpage.com/sp/search?query=test",
+    );
+  });
+
+  it("refuses an absolute redir on a foreign origin", () => {
+    const route = encodeDestLegacy("https://startpage.com/sp/search");
+    const foreign =
+      "https://startpage.com/.within.website/x/cmd/anubis/api/pass-challenge?redir=" +
+      encodeURIComponent("https://evil.example" + route);
+    expect(passChallengeRedirFixed(foreign, ORIGIN)).toBeNull();
   });
 });
