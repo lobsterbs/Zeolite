@@ -22,11 +22,13 @@
      so the browser stamps the genuine caller as ev.source.
    - child half (#132): contentWindow on the iframe/frame
      prototypes returns a cached Proxy whose postMessage executes
-     the CHILD's stashed native from THIS realm, so parent->child
+     the CHILD stashed native from THIS realm, so parent->child
      calls land with ev.source = the parent, not the child itself.
-     The cache is module scope and readable through childProxyOf so
-     vorigin's relabel presents the SAME identity to a strict
-     listener (gstatic checks ev.source === contentWindow).
+     The cache is module scope, mintable on demand
+     (mintChildProxy) and scanned per frame element
+     (childProxyByFrame), so vorigin relabel presents the SAME
+     identity to a strict listener even when the event beats the
+     realm first post-bootstrap contentWindow read.
    - parity drop (#132): a parseable targetOrigin the recipient's
      __zlVO does not match is DROPPED, exactly what the unproxied
      browser does (self-echo phantoms die here). Marker pending or
@@ -41,8 +43,8 @@ type AnyRecord = Record<string, any>;
 
 /* #132: the child-proxy cache. One map per realm (each realm loads
    its own bootstrap instance). Populated by the contentWindow
-   getter, read by vorigin's relabel, so both surfaces hand out the
-   identical proxy object and identity comparisons hold. */
+   getter or minted on demand by vorigin relabel, so every surface
+   hands out the identical proxy object. */
 const childProxies = new WeakMap<object, AnyRecord>();
 
 /* The cached child proxy for a child window this realm has already
@@ -53,6 +55,62 @@ export function childProxyOf(child: unknown): AnyRecord | undefined {
   const c = child as AnyRecord | null;
   if (!c || typeof c !== "object") return undefined;
   return childProxies.get(c);
+}
+
+/* Mint (or fetch) the shared child proxy for a same-origin child
+   carrying the stashed native. A cross-origin child throws on the
+   property read and stays raw; a child without the stash (native
+   or pre-bootstrap) stays raw too. Exported for vorigin relabel:
+   an event can arrive before this realm ever read that sender
+   through contentWindow, while the strict listener does a LIVE
+   contentWindow read inside its own handler - both surfaces must
+   converge on one proxy, so the first need mints it and every
+   later read (getter or relabel) finds the same cache entry
+   (#132 race). */
+export function mintChildProxy(real: string, child: unknown): AnyRecord | undefined {
+  const c = child as AnyRecord | null;
+  if (!c || typeof c !== "object") return undefined;
+  let px = childProxies.get(c);
+  if (px) return px;
+  let np: ((...a: unknown[]) => void) | undefined;
+  try {
+    np = c.__zlNativePM;
+  } catch {
+    return undefined; /* cross-origin child: raw identity */
+  }
+  if (typeof np !== "function") return undefined;
+  px = proxyOf(c, senderPm(c, np, real));
+  childProxies.set(c, px);
+  return px;
+}
+
+/* The shared proxy for a delivered event sender, only when the
+   sender is one of THIS document frame children. Scoping keeps a
+   parent or top-level sender raw (window.parent/top are not
+   contentWindow reads). Reading el.contentWindow runs the
+   shimmed getter, which populates the cache; the unwrapped
+   compare then catches a stashed child, and a raw return means
+   the child has no bootstrap yet and keeps its raw identity. */
+export function childProxyByFrame(w: AnyRecord, real: string, src: unknown): AnyRecord | undefined {
+  const hit = childProxyOf(src);
+  if (hit) return hit;
+  try {
+    const els = (w.document as Document | undefined)?.querySelectorAll("iframe,frame");
+    if (!els) return undefined;
+    for (const el of els) {
+      try {
+        /* A pre-bootstrap child reads raw here, and mint then
+           returns undefined (no stash), so raw stays raw. */
+        const cw = (el as AnyRecord).contentWindow as AnyRecord | undefined;
+        if (cw && (cw.window as unknown) === src) return mintChildProxy(real, src);
+      } catch {
+        /* cross-origin frame element: skip */
+      }
+    }
+  } catch {
+    /* no document: raw stays raw */
+  }
+  return undefined;
 }
 
 /* The sender-side delivery function shared by the parent half and
@@ -122,14 +180,7 @@ function applyChildWindowShim(w: AnyRecord, real: string): void {
   const wrap = (child: unknown): unknown => {
     const c = child as AnyRecord | null;
     if (!c || typeof c !== "object") return child;
-    const np = c.__zlNativePM as ((...a: unknown[]) => void) | undefined;
-    if (typeof np !== "function") return child;
-    let px = childProxies.get(c);
-    if (!px) {
-      px = proxyOf(c, senderPm(c, np, real));
-      childProxies.set(c, px);
-    }
-    return px;
+    return mintChildProxy(real, c) ?? child;
   };
   const shadow = (ctorName: string): void => {
     const proto = (w[ctorName] as AnyRecord | undefined)?.prototype as AnyRecord | undefined;
@@ -181,14 +232,12 @@ export function applySenderShim(w: AnyRecord): void {
   if (!pw || (pw as unknown) === (w as unknown)) return; /* top-level realm */
   if (typeof np !== "function") return; /* unpatched parent: native stays */
   const target = pw;
-  const native = np;
-  let px: AnyRecord | undefined;
   try {
     Object.defineProperty(w, "parent", {
-      get: () => {
-        if (!px) px = proxyOf(target, senderPm(target, native, real));
-        return px;
-      },
+      /* mintChildProxy shares the child-proxies cache, so a
+         listener comparing ev.source === window.parent sees the
+         same object the relabel presents for a parent sender. */
+      get: () => mintChildProxy(real, target) ?? target,
       configurable: true,
       enumerable: true,
     });

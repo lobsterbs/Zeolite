@@ -231,5 +231,38 @@ describe("applyVirtualOrigin (#132 source identity)", () => {
     for (const l of listeners.get("message") ?? []) l(ev);
     expect(seen[0]).toBe(w);
   });
+
+  it("converges identity for a stashed frame child never read through contentWindow (#132 race)", () => {
+    const { w, listeners } = fakeWindow();
+    stubController();
+    const child: Record<string, unknown> = { window: null };
+    child.window = child;
+    Object.defineProperty(child, "__zlNativePM", { value: () => {}, configurable: true });
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, "contentWindow", {
+      get: () => child,
+      configurable: true,
+    });
+    w.HTMLIFrameElement = { prototype: proto };
+    const frameEl = Object.create(proto) as Record<string, unknown>;
+    w.document = {
+      querySelectorAll: (sel: string) => (sel === "iframe,frame" ? [frameEl] : []),
+    };
+    w.postMessage = () => {};
+    applyPostMessage(w); /* contentWindow shim + stash */
+    applyVirtualOrigin(w);
+    const seen: unknown[] = [];
+    (w.addEventListener as unknown as (t: unknown, l: (ev: unknown) => void) => void)(
+      "message",
+      (ev) => {
+        seen.push((ev as { source: unknown }).source);
+      },
+    );
+    const ev = { origin: "https://engine.example", source: child, data: "x" };
+    for (const l of listeners.get("message") ?? []) l(ev);
+    expect(seen[0]).not.toBe(child); /* minted, not raw */
+    const liveRead = frameEl.contentWindow;
+    expect(seen[0]).toBe(liveRead); /* the strict listener next read matches */
+  });
 });
 });

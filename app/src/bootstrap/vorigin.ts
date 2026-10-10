@@ -31,7 +31,7 @@
    nothing and listeners keep the native engine-origin view. */
 
 import { swc } from "./siteid";
-import { childProxyOf } from "./postmsg";
+import { childProxyByFrame } from "./postmsg";
 
 export function applyVirtualOrigin(w: Record<string, unknown>): void {
   const ctl = swc();
@@ -66,16 +66,17 @@ export function applyVirtualOrigin(w: Record<string, unknown>): void {
     const e = ev as { origin?: unknown; source?: unknown };
     if (!e || e.origin !== real) return ev;
     /* #132 identity: the strict channel establisher compares
-       ev.source with the iframe's contentWindow. The shimmed getter
-       returns a cached proxy, so the delivered event must present
-       that SAME proxy or the comparison fails and the setup port is
-       never taken (the reCAPTCHA widget then times out). Cache hits
-       only: a sender this realm never read through contentWindow
-       keeps its raw identity, so a raw reference still compares
-       equal. */
+       ev.source with a LIVE iframe.contentWindow read. The shimmed
+       getter and this relabel share one per-child proxy cache, and
+       a miss is allowed to MINT the entry when the sender is one
+       of this document frame children, so the first delivered
+       event and every later read converge on the same proxy
+       instead of racing raw-vs-proxy while the anchor is rebuilt
+       (the widget timed out on exactly that loop). Strangers stay
+       raw. */
     const src = e.source;
     if (src && typeof src === "object" && (src as object) !== (w as object)) {
-      const px = childProxyOf(src);
+      const px = childProxyByFrame(w, real, src);
       if (px) {
         try {
           Object.defineProperty(e, "source", { get: () => px, configurable: true });

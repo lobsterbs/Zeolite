@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyPostMessage, childProxyOf } from "../bootstrap/postmsg";
+import { applyPostMessage, childProxyOf, mintChildProxy } from "../bootstrap/postmsg";
 
 function fakeWindow(origin = "https://engine.example") {
   const calls: { m: unknown; t?: unknown; tr?: unknown; n: number }[] = [];
@@ -444,5 +444,21 @@ describe("applyPostMessage (#132 contentWindow sender half)", () => {
       tr: [port],
       n: 3,
     });
+  });
+});
+
+describe("mintChildProxy (#132 identity race)", () => {
+  it("mints a stable proxy for a stashed child and caches it", () => {
+    const child: Record<string, unknown> = {};
+    Object.defineProperty(child, "__zlNativePM", { value: () => {}, configurable: true });
+    const a = mintChildProxy("https://engine.example", child);
+    const b = mintChildProxy("https://engine.example", child);
+    expect(a).toBe(b);
+    expect(a).not.toBe(child);
+    expect(childProxyOf(child)).toBe(a);
+  });
+
+  it("keeps a stash-less child raw", () => {
+    expect(mintChildProxy("https://engine.example", {})).toBeUndefined();
   });
 });

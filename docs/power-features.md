@@ -168,7 +168,16 @@ references compare equal), while a sender never read via
 contentWindow keeps raw identity. The wrapper own-slot legacy
 re-emit is gone too: it replays the exact native call, matching
 the measured direct run (self delivery drops ports, cross-frame
-delivery preserves them).
+delivery preserves them). A further same-day follow-up closes
+the identity race the live probe still showed: the strict
+listener re-reads contentWindow inside its handler, and an
+event can beat the realm first post-bootstrap read, so
+ev.source stayed raw while w() returned the proxy and every
+anchor rebuild repeated the mismatch; the relabel now mints
+the shared per-child proxy on demand for senders that are this
+document own frame elements (mintChildProxy /
+childProxyByFrame), so the first delivered event and every
+later read converge on one identity.
 Residual: window.top and window.frames[i] are
 LegacyUnforgeable and keep receiver-side delivery. Deliberate #32 relaxation
 (user-authorized): page-realm scripts can read their own site's

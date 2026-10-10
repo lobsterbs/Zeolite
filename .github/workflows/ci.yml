@@ -269,8 +269,14 @@ jobs:
           # (a targetOrigin the recipient's marker does not match is
           # dropped, the unproxied behavior) - per-page correctness
           # for every frame protocol, reCAPTCHA first. Same class as
-          # every raise above.
-          if [ "$SIZE" -ge 24576 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 24576)"; exit 1; fi
+          # every raise above. Raised again 24576 -> 25088 for the
+          # #132 identity-race follow-up (mintChildProxy /
+          # childProxyByFrame: the relabel and the contentWindow
+          # getter converge on one proxy identity even when the
+          # event beats the first post-bootstrap read - without
+          # it the strict channel check failed on every anchor
+          # rebuild and the widget timed out). Same class again.
+          if [ "$SIZE" -ge 25088 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 25088)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
