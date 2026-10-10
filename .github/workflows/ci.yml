@@ -32,8 +32,12 @@ jobs:
         run: |
           cargo clippy --workspace --all-targets -- -D warnings > clippy.out 2>&1 || true
           tail -c 16000 clippy.out || true
-          grep -E "^(error|warning)(\[|:)" clippy.out | head -9 | while IFS= read -r l; do echo "::error::CLIPPY $l"; done
-          if grep -qE "^(error|warning)(\[|:)" clippy.out; then exit 1; fi
+          # Cargo own "spurious network error" retry warnings (a crates.io
+          # flake) start with "warning:" and are not lints: filter them or
+          # a network retry fails a clean run (run 38074371590).
+          grep -E "^(error|warning)(\[|:)" clippy.out | grep -v "spurious network error" > clippyfail.out || true
+          head -9 clippyfail.out | while IFS= read -r l; do echo "::error::CLIPPY $l"; done
+          if [ -s clippyfail.out ]; then exit 1; fi
       - name: test
         env:
           CARGO_TERM_COLOR: never
