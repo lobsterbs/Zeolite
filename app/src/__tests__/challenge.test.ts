@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isPassChallenge } from "../cookies";
-import { b64uEncode, encodeDest, encodeDestLegacy, passChallengeRedirFixed, setRouteKey } from "../codec";
+import { b64uEncode, encodeDest, encodeDestLegacy, encodeNavHandle, NAVH, passChallengeRedirFixed, setRouteKey } from "../codec";
 
 /* Issue #52: detect-only recognition of the Anubis pass-challenge
    endpoint. The engine never solves challenges; this is the seam that
@@ -102,5 +102,27 @@ describe("passChallengeRedirFixed (absolute engine URL, anubis 1.26+)", () => {
       "https://startpage.com/.within.website/x/cmd/anubis/api/pass-challenge?redir=" +
       encodeURIComponent("https://evil.example" + route);
     expect(passChallengeRedirFixed(foreign, ORIGIN)).toBeNull();
+  });
+
+  /* The live startpage case: anubis 1.26 echoes the frame's real
+     location, and initial navigations ride navh handles, so redir
+     is the ABSOLUTE handle URL. The handle must decode through
+     its own decoder (keyed tag + TTL), not decodePath. */
+  it("rewrites an absolute navh handle redir to the upstream URL", () => {
+    setRouteKey(b64uEncode(crypto.getRandomValues(new Uint8Array(16))));
+    const token = encodeNavHandle("https://www.startpage.com/");
+    expect(token).not.toBeNull();
+    const fixed = passChallengeRedirFixed(pcAbs(NAVH + "/" + token!), ORIGIN);
+    expect(fixed).not.toBeNull();
+    expect(new URL(fixed!).searchParams.get("redir")).toBe("https://www.startpage.com/");
+    setRouteKey(null);
+  });
+
+  it("refuses an expired navh handle redir", () => {
+    setRouteKey(b64uEncode(crypto.getRandomValues(new Uint8Array(16))));
+    const token = encodeNavHandle("https://www.startpage.com/", -1);
+    expect(token).not.toBeNull();
+    expect(passChallengeRedirFixed(pcAbs(NAVH + "/" + token!), ORIGIN)).toBeNull();
+    setRouteKey(null);
   });
 });

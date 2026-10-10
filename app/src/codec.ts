@@ -655,8 +655,19 @@ export function passChallengeRedirFixed(dest: string, engineOrigin: string): str
     path = q < 0 ? raw : raw.slice(0, q);
     tailQuery = q < 0 ? "" : raw.slice(q + 1);
   }
-  if (!isEnginePath(path)) return null;
-  const decoded = decodePath(path);
+  /* The live startpage case (anubis 1.26.4, 2026-10-10): the
+     embedder's initial navigations ride navh handles, so the
+     frame's real location - the URL anubis echoes into redir - is
+     the handle URL, not a /zl/ route. decodePath does not decode
+     handles (their keyed tag and TTL are their own); decode the
+     handle with its own decoder. */
+  let decoded: string | null;
+  if (path.startsWith(NAVH + "/")) {
+    decoded = decodeNavHandle(path.slice(NAVH.length + 1).split(/[?#]/)[0]);
+  } else {
+    if (!isEnginePath(path)) return null;
+    decoded = decodePath(path);
+  }
   if (!decoded || !(decoded.startsWith("http://") || decoded.startsWith("https://"))) return null;
   const out = new URL(dest);
   out.searchParams.set("redir", tailQuery ? decoded + "?" + tailQuery : decoded);
