@@ -1,69 +1,143 @@
-/* Same-site frame messaging repair (issues #128, #130, #131).
+/* Same-site frame messaging repair (#128, #130, #131, #132).
 
-   Every engine-routed document is served from one real origin, so a
-   page that messages its own same-site frame addresses it by the
-   frame's VIRTUAL origin: win.postMessage(msg, "https://site.example")
-   names a window whose real origin is the engine. The browser would
-   drop the message with a console warning and the frame protocol
-   times out (reCAPTCHA: the postMessage origin-mismatch warning,
-   then a spin/timeout).
+   Every engine-routed document is served from one real origin, so
+   cross-frame calls name their target by VIRTUAL origin: the
+   reCAPTCHA anchor calls parent.postMessage(msg, pageVO), the page
+   answers through anchor.contentWindow.postMessage(msg, vo).
+   Unproxied those origins match; proxied the browser drops every
+   one of them. Provider-direct frames would restore the match but
+   leak the user's IP to the upstream site (#32 class, ruled out),
+   so frames stay engine-routed and the repair is sender-side:
 
-   The frame stays engine-routed on purpose: provider-direct would
-   connect the user's browser straight to the upstream site and leak
-   the user's IP (the #32 class - ruled out).
+   - own slot: a foreign targetOrigin is rewritten to the real
+     engine origin and delivered natively, in the standard order
+     for every call shape; native paths replay the exact argument
+     list so overload resolution and SyntaxErrors stay honest.
+   - parent half (#131): a child whose parent carries the stashed
+     native (__zlNativePM) shadows window.parent with a Proxy whose
+     postMessage executes the parent's native from the CHILD realm,
+     so the browser stamps the genuine caller as ev.source.
+   - child half (#132): contentWindow on the iframe/frame
+     prototypes returns a cached Proxy whose postMessage executes
+     the CHILD's stashed native from THIS realm, so parent->child
+     calls land with ev.source = the parent, not the child itself.
+   - parity drop (#132): a parseable targetOrigin the recipient's
+     __zlVO does not match is DROPPED, exactly what the unproxied
+     browser does (self-echo phantoms die here). Marker pending or
+     absent: deliver, never break messaging on the race.
 
-   The repair (#130): a targetOrigin that parses to a foreign origin
-   is rewritten to the REAL engine origin and the call is delivered
-   natively - the browser then provides a real ev.source and truly
-   transferred ports. The recipient's filter (vorigin.ts) re-labels
-   the message event with the sender's virtual origin, so listeners
-   see exactly what an unproxied same-site delivery would show.
-
-   Two call shapes must both work: the standard
-   postMessage(msg, targetOrigin, transfer) and the legacy WebKit
-   order postMessage(msg, transfer, targetOrigin). Virtual-target
-   calls of both shapes re-emit in the standard order; native-path
-   calls replay the caller's EXACT argument list so overload
-   resolution sees the same call shape it would unproxied (a
-   legacy two-arg call must not gain a phantom third argument, and a
-   malformed targetOrigin keeps the native SyntaxError). One shape
-   is exempt: the bare two-argument legacy port call
-   postMessage(msg, [ports]) is re-emitted in the standard order
-   against the real origin, because Chromium's legacy overload
-   drops the transferred ports on same-origin delivery - the exact
-   replay reaches the recipient but portless (#130 residual).
-
-   The identity repair (#131): the wrapper above re-emits from the
-   realm it was CREATED in, so a cross-realm call - the reCAPTCHA
-   anchor calling parent.postMessage - lands on the page's wrapper
-   and the re-emission executes in the PAGE realm: the browser
-   stamps ev.source with the page window and the recipient cannot
-   tell the message from the page's own (measured: the anchor's
-   setup events arrive from=self and the page's grecaptcha drops
-   them; the widget spins and times out). A receiver-side wrapper
-   cannot know its caller, so the repair is sender-side: the child
-   shadows its own window.parent getter (parent is a configurable
-   accessor - measured; top is LegacyUnforgeable and stays native)
-   with a Proxy whose postMessage executes the parent's stashed
-   native (__zlNativePM) from the CHILD realm. The browser then
-   stamps the genuine caller's window as ev.source, transfers the
-   ports through the normalized standard shape, and the targetOrigin
-   is rewritten exactly like the wrapper does. The parent's own
-   wrapper keeps serving self-calls and receive-path normalization;
-   patched children simply stop routing through it. Honest limits:
-   window.top and window.frames[i] callers keep the receiver-side
-   behavior (documented residual), and a cross-origin parent (the
-   real-world shape) throws on the realm probe and keeps everything
-   native, which is correct: cross-origin callers reach built-ins
-   and never see the wrapper at all. */
+   Recipient-side, vorigin.ts re-labels ev.origin with ev.source's
+   virtual origin. Residuals: window.top and window.frames[i] are
+   LegacyUnforgeable and keep receiver-side behavior (a top-path
+   cross-realm call still delivers with the top realm's source). */
 
 type AnyRecord = Record<string, any>;
 
-/* #131: the child-side half. Runs in every engine realm (from
-   applyPostMessage) and every guarded inline child realm (from
-   navguard's guardChild): a child whose parent is a patched engine
-   realm shadows window.parent so the parent's postMessage reads
-   route through the child realm. */
+/* The sender-side delivery function shared by the parent half and
+   the child half: normalize every call shape (standard order,
+   legacy WebKit order, the bare legacy port call) into the
+   standard order, apply the #132 parity drop, then run the
+   recipient's stashed native so the incumbent realm is the
+   CALLER's (ev.source = the genuine caller window). */
+function senderPm(
+  target: AnyRecord,
+  native: (...a: unknown[]) => void,
+  real: string,
+): (msg: unknown, a2: unknown, a3: unknown) => void {
+  return function (msg, a2, a3) {
+    const origin = typeof a2 === "string" ? a2 : typeof a3 === "string" ? a3 : undefined;
+    let to = origin;
+    /* #130 residual: the bare legacy port call carries no
+       targetOrigin anywhere, so deliver against the real origin or
+       Chromium's legacy overload drops the ports. */
+    if (typeof origin !== "string" && Array.isArray(a2)) to = real;
+    if (typeof origin === "string" && origin !== "*" && origin !== "/" && origin !== real) {
+      let want = "";
+      try {
+        want = new URL(origin).origin;
+      } catch {
+        want = ""; /* malformed: the native keeps its SyntaxError */
+      }
+      if (want && want !== real) {
+        const vo = target.__zlVO;
+        if (typeof vo === "string" && vo && want !== vo) return; /* #132 parity: the real web drops this */
+        to = real;
+      }
+    }
+    const ports = typeof a2 === "string" ? a3 : a2;
+    if (Array.isArray(ports)) native.call(target, msg, to, ports);
+    else native.call(target, msg, to);
+  };
+}
+
+/* Transparent proxy for a target window: postMessage routes through
+   the sender shim; other reads pass through, binding configurable
+   functions (a non-configurable property must keep its exact
+   identity through the proxy, and unforgeable members reject a
+   proxy receiver anyway). */
+function proxyOf(
+  target: AnyRecord,
+  pm: (msg: unknown, a2: unknown, a3: unknown) => void,
+): AnyRecord {
+  return new Proxy(target, {
+    get(t: AnyRecord, p: string | symbol): unknown {
+      if (p === "postMessage") return pm;
+      const d = Reflect.getOwnPropertyDescriptor(t, p);
+      const v = Reflect.get(t, p, t);
+      return !d || !d.configurable || typeof v !== "function"
+        ? v
+        : (v as (...a: unknown[]) => unknown).bind(t);
+    },
+  });
+}
+
+/* #132 child half: shadow contentWindow on the iframe/frame
+   prototypes so a parent messaging its child delivers from the
+   PARENT realm (the unproxied shape). Cached per child window so
+   identity holds across reads. A child without the stash (native,
+   pre-bootstrap, cross-origin) keeps its raw window. */
+function applyChildWindowShim(w: AnyRecord, real: string): void {
+  const cache = new WeakMap<object, AnyRecord>();
+  const wrap = (child: unknown): unknown => {
+    const c = child as AnyRecord | null;
+    if (!c || typeof c !== "object") return child;
+    const np = c.__zlNativePM as ((...a: unknown[]) => void) | undefined;
+    if (typeof np !== "function") return child;
+    let px = cache.get(c);
+    if (!px) {
+      px = proxyOf(c, senderPm(c, np, real));
+      cache.set(c, px);
+    }
+    return px;
+  };
+  const shadow = (ctorName: string): void => {
+    const proto = (w[ctorName] as AnyRecord | undefined)?.prototype as AnyRecord | undefined;
+    if (!proto) return; /* no frames in this context (tests, workers) */
+    const d = Object.getOwnPropertyDescriptor(proto, "contentWindow");
+    if (!d || !d.configurable || typeof d.get !== "function") return;
+    if ((d.get as AnyRecord).__zlCW) return; /* already ours */
+    const orig = d.get as (this: AnyRecord) => unknown;
+    const get = function (this: AnyRecord): unknown {
+      try {
+        return wrap(orig.call(this));
+      } catch {
+        return orig.call(this);
+      }
+    };
+    (get as AnyRecord).__zlCW = 1;
+    try {
+      Object.defineProperty(proto, "contentWindow", { get, configurable: true });
+    } catch {
+      /* locked: the native getter stays */
+    }
+  };
+  shadow("HTMLIFrameElement");
+  shadow("HTMLFrameElement");
+}
+
+/* #131/#132: the sender-side halves. Runs in every engine realm
+   (from applyPostMessage) and every guarded inline child realm
+   (from navguard's guardChild). */
 export function applySenderShim(w: AnyRecord): void {
   let real = "";
   try {
@@ -72,6 +146,9 @@ export function applySenderShim(w: AnyRecord): void {
     return;
   }
   if (!real) return;
+  /* The child half applies in every realm: any engine realm can be
+     the parent of an iframe. */
+  applyChildWindowShim(w, real);
   let pw: AnyRecord | undefined;
   let np: ((...a: unknown[]) => void) | undefined;
   try {
@@ -84,47 +161,13 @@ export function applySenderShim(w: AnyRecord): void {
   if (typeof np !== "function") return; /* unpatched parent: native stays */
   const target = pw;
   const native = np;
-  const shim = function (msg: unknown, a2: unknown, a3: unknown): void {
-    /* Standard order (msg, targetOrigin, transfer), legacy WebKit
-       order (msg, transfer, targetOrigin) and the bare legacy port
-       call (msg, [ports]) all deliver in the standard order, the
-       same normalization the page-side wrapper applies. */
-    const origin = typeof a2 === "string" ? a2 : typeof a3 === "string" ? a3 : undefined;
-    let to = origin;
-    /* #130 residual on the parent path too: the bare legacy port
-       call carries no targetOrigin anywhere, so deliver against the
-       real origin or Chromium's legacy overload drops the ports. */
-    if (typeof origin !== "string" && Array.isArray(a2)) to = real;
-    if (typeof origin === "string" && origin !== "*" && origin !== "/") {
-      let want = "";
-      try {
-        want = new URL(origin).origin;
-      } catch {
-        want = ""; /* malformed: the native keeps its SyntaxError */
-      }
-      if (want && want !== real) to = real;
-    }
-    const ports = typeof a2 === "string" ? a3 : a2;
-    if (Array.isArray(ports)) native.call(target, msg, to, ports);
-    else native.call(target, msg, to);
-  };
-  const px = new Proxy(target, {
-    get(t: AnyRecord, p: string | symbol): unknown {
-      if (p === "postMessage") return shim;
-      const d = Reflect.getOwnPropertyDescriptor(t, p);
-      const v = Reflect.get(t, p, t);
-      /* Bind only configurable functions: a non-configurable target
-         property must keep its exact identity through the proxy
-         (invariant), and unforgeable members reject a proxy
-         receiver anyway. */
-      return !d || !d.configurable || typeof v !== "function"
-        ? v
-        : (v as (...a: unknown[]) => unknown).bind(t);
-    },
-  });
+  let px: AnyRecord | undefined;
   try {
     Object.defineProperty(w, "parent", {
-      get: () => px,
+      get: () => {
+        if (!px) px = proxyOf(target, senderPm(target, native, real));
+        return px;
+      },
       configurable: true,
       enumerable: true,
     });
@@ -160,7 +203,7 @@ export function applyPostMessage(w: AnyRecord): void {
     /* Standard order: (msg, targetOrigin, transfer). Legacy WebKit
        order: (msg, transfer, targetOrigin). */
     const origin = typeof a2 === "string" ? a2 : typeof a3 === "string" ? a3 : undefined;
-    if (typeof origin === "string" && origin !== "*" && origin !== "/") {
+    if (typeof origin === "string" && origin !== "*" && origin !== "/" && origin !== real) {
       let want = "";
       try {
         want = new URL(origin).origin;
@@ -168,6 +211,12 @@ export function applyPostMessage(w: AnyRecord): void {
         want = ""; // malformed: keep the native SyntaxError below
       }
       if (want && want !== real) {
+        /* #132 parity: the unproxied browser drops a call whose
+           targetOrigin does not match the recipient's origin; the
+           marker still pending -> deliver (never break on the
+           race). */
+        const vo = w.__zlVO;
+        if (typeof vo === "string" && vo && want !== vo) return;
         /* Foreign target: deliver on the real origin so the browser
            provides ev.source and transfers the ports; the recipient's
            filter re-labels the event with the sender's virtual
@@ -181,13 +230,10 @@ export function applyPostMessage(w: AnyRecord): void {
     /* Legacy bare two-argument port call: postMessage(msg, [ports])
        with no targetOrigin anywhere. Chromium's legacy overload
        delivers the message but DROPS the ports on the event
-       (measured: ev.ports.length 0 on a same-origin delivery), which
-       kills every port-channel frame protocol - reCAPTCHA hands its
-       anchor the private setup port in exactly this shape and the
-       widget times out waiting on a port that never arrived
-       (#130 residual). The wrapped window always lives on the real
-       engine origin, so re-emitting in the standard order against
-       it is the same delivery with the ports actually transferred.
+       (measured), which kills every port-channel frame protocol -
+       reCAPTCHA hands its anchor the private setup port in exactly
+       this shape (#130 residual). Re-emit in the standard order
+       against the real origin: same delivery, ports transferred.
        Unproxied this shape targets a cross-origin frame, where the
        legacy overload preserves ports; no engine frame is ever
        cross-origin, so the rewrite is behavior-preserving here. */
@@ -207,7 +253,7 @@ export function applyPostMessage(w: AnyRecord): void {
   } catch {
     /* read-only: native messaging stays (documented gap) */
   }
-  /* #131: this realm's own calls to its parent get the child-side
-     half (a no-op for a top-level realm). */
+  /* #131/#132: this realm's own calls get the sender-side halves
+     (a no-op parent half for a top-level realm). */
   applySenderShim(w);
 }

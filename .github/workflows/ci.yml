@@ -262,7 +262,15 @@ jobs:
           # delivery with native delivery (real ev.source, live
           # ports) - per-page correctness for every frame protocol,
           # reCAPTCHA first. Same class as every raise above.
-          if [ "$SIZE" -ge 23552 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 23552)"; exit 1; fi
+          # Raised again 23552 -> 24576 for #132: the contentWindow
+          # sender half (parent->child frame calls deliver with the
+          # genuine sender window, the direction the #131 receiver
+          # wrapper cannot restore) + the virtual-origin parity drop
+          # (a targetOrigin the recipient's marker does not match is
+          # dropped, the unproxied behavior) - per-page correctness
+          # for every frame protocol, reCAPTCHA first. Same class as
+          # every raise above.
+          if [ "$SIZE" -ge 24576 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 24576)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

@@ -266,3 +266,162 @@ describe("applyPostMessage (#131 sender-side identity repair)", () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+
+describe("applyPostMessage (#132 own-slot parity drop)", () => {
+  it("drops a foreign targetOrigin that does not match the recipient marker", () => {
+    const { w, calls } = fakeWindow();
+    w.__zlVO = "https://site.example";
+    applyPostMessage(w);
+    (w.postMessage as unknown as (m: unknown, t?: unknown) => void)(
+      1,
+      "https://other.example",
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it("delivers when the targetOrigin matches the recipient marker", () => {
+    const { w, calls } = fakeWindow();
+    w.__zlVO = "https://www.google.com";
+    applyPostMessage(w);
+    (w.postMessage as unknown as (m: unknown, t?: unknown) => void)(
+      2,
+      "https://www.google.com",
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.t).toBe("https://engine.example");
+  });
+
+  it("drops a parent-path call whose targetOrigin misses the parent marker", () => {
+    const stash: unknown[][] = [];
+    const parent: Record<string, unknown> = {
+      location: { origin: "https://engine.example" },
+      __zlVO: "https://page.example",
+      __zlNativePM: (...a: unknown[]) => {
+        stash.push(a);
+      },
+      postMessage: () => {},
+    };
+    const w: Record<string, unknown> = {
+      location: { origin: "https://engine.example" },
+      parent,
+      postMessage: () => {},
+    };
+    applyPostMessage(w);
+    (
+      (w.parent as Record<string, unknown>).postMessage as unknown as (
+        m: unknown,
+        t?: unknown,
+      ) => void
+    )(3, "https://wrong.example");
+    expect(stash).toHaveLength(0);
+  });
+});
+
+describe("applyPostMessage (#132 contentWindow sender half)", () => {
+  function frameFixture(vo?: string) {
+    const childCalls: { m: unknown; t?: unknown; tr?: unknown; n: number }[] = [];
+    const child: Record<string, unknown> = {
+      location: { origin: "https://engine.example" },
+      __zlNativePM: (...a: unknown[]) => {
+        childCalls.push({ m: a[0], t: a[1], tr: a[2], n: a.length });
+      },
+      /* the child's own wrapped postMessage must be BYPASSED by the
+         contentWindow shim: routing through it is the corruption. */
+      postMessage: () => {
+        throw new Error("child wrapper must be bypassed");
+      },
+    };
+    if (vo !== undefined) child.__zlVO = vo;
+    const el: Record<string, unknown> = {};
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, "contentWindow", {
+      get: () => child,
+      configurable: true,
+    });
+    const w: Record<string, unknown> = {
+      location: { origin: "https://engine.example" },
+      postMessage: () => {},
+      HTMLIFrameElement: { prototype: proto },
+    };
+    w.parent = w; /* top realm: the parent half stays out of the way */
+    return { w, el, proto, child, childCalls };
+  }
+  const getCw = (f: {
+    proto: Record<string, unknown>;
+    el: Record<string, unknown>;
+  }): unknown =>
+    (
+      Object.getOwnPropertyDescriptor(f.proto, "contentWindow")!.get as unknown as (
+        this: unknown,
+      ) => unknown
+    ).call(f.el);
+
+  it("routes element.contentWindow.postMessage through the child stash", () => {
+    const f = frameFixture("https://www.google.com");
+    applyPostMessage(f.w);
+    const px = getCw(f) as Record<string, unknown>;
+    expect(px).not.toBe(f.child);
+    const port = { postMessage: () => {} };
+    (
+      px.postMessage as unknown as (m: unknown, t?: unknown, tr?: unknown[]) => void
+    )("m", "https://www.google.com", [port]);
+    expect(f.childCalls).toHaveLength(1);
+    expect(f.childCalls[0]).toEqual({
+      m: "m",
+      t: "https://engine.example",
+      tr: [port],
+      n: 3,
+    });
+  });
+
+  it("caches the proxy: identity holds across reads", () => {
+    const f = frameFixture("https://www.google.com");
+    applyPostMessage(f.w);
+    expect(getCw(f)).toBe(getCw(f));
+  });
+
+  it("drops a targetOrigin that does not match the child marker", () => {
+    const f = frameFixture("https://www.google.com");
+    applyPostMessage(f.w);
+    const px = getCw(f) as Record<string, unknown>;
+    (px.postMessage as unknown as (m: unknown, t?: unknown) => void)(
+      1,
+      "https://wrong.example",
+    );
+    expect(f.childCalls).toHaveLength(0);
+  });
+
+  it("delivers while the child marker is pending (no drop race)", () => {
+    const f = frameFixture(undefined);
+    applyPostMessage(f.w);
+    const px = getCw(f) as Record<string, unknown>;
+    (px.postMessage as unknown as (m: unknown, t?: unknown) => void)(
+      2,
+      "https://www.google.com",
+    );
+    expect(f.childCalls).toHaveLength(1);
+    expect(f.childCalls[0]!.t).toBe("https://engine.example");
+  });
+
+  it("keeps the raw window for a child without a stash", () => {
+    const f = frameFixture("https://www.google.com");
+    delete f.child.__zlNativePM;
+    applyPostMessage(f.w);
+    expect(getCw(f)).toBe(f.child);
+  });
+
+  it("normalizes the bare legacy port call on the child path", () => {
+    const f = frameFixture("https://www.google.com");
+    applyPostMessage(f.w);
+    const px = getCw(f) as Record<string, unknown>;
+    const port = { postMessage: () => {} };
+    (px.postMessage as unknown as (m: unknown, p?: unknown[]) => void)("m", [port]);
+    expect(f.childCalls[0]).toEqual({
+      m: "m",
+      t: "https://engine.example",
+      tr: [port],
+      n: 3,
+    });
+  });
+});

@@ -1,27 +1,24 @@
 /* Zeolite runtime bootstrap, injected by the rewriter right after
    <head> opens. Behavior patches only: storage scoping/virtualization,
    cookies, the worker port relay, WebSocket routing, the serviceWorker
-   shim, the navigation guard (#28), the find loader (#29), the postMessage
-   targetOrigin repair (#128), the virtual-origin marker + message-event
-   origin filter (#130) and the cross-site channel isolation (#37). URL-level fetch/XHR need no
-   patch: pages navigate engine-local paths the SW intercepts.
+   shim, the navigation guard (#28), the find loader (#29), the
+   postMessage sender repair (#128/#130/#131/#132), the virtual-origin
+   marker + message-event filter (#130), the cross-site channel
+   isolation (#37). URL-level fetch/XHR need no patch: pages navigate
+   engine-local paths the SW intercepts.
 
    Source modules under ./bootstrap bundle into one synchronous
    artifact (patches must exist before page scripts run); the CI size
-   gate covers the built artifact. Budget: under 23 KiB minified.
+   gate covers the built artifact. Budget: under 24 KiB minified.
 
-   Budget history (raises recorded in the workflow file): 5 KiB
-   original, 6.5 for the #28 nav guard, 8 for the single-file
-   artifact (#35), 10 for #37 channel isolation, 11 for the #28
-   parser-inserted iframe observer, 12 for the #58 srcdoc pass and
-   #59 setAttribute rows, 16 for #54 (page-realm mint client,
-   re-emission, navguard swap/defer seams), 18 for the #54
-   dedicated-Worker hook, 19 for #106/#108 (popup activation guard,
-   child-realm isolation), 20 for #109 (popup sync-open, relative
-   navigation-bound re-emit), 21 for #121 (the zl:engineUpdate
-   reload listener), 22.5 for #128/#129 (the postMessage repair),
-   23 for #130 (virtual-origin marker + message-event origin
-   filter). Deliberate raises, never creep.
+   Budget raises (each decided with the feature, never creep): 5 KiB
+   original; 6.5 #28 nav guard; 8 #35 single file; 10 #37 isolation;
+   11 #28 iframe observer; 12 #58/#59 srcdoc + setAttribute; 16 #54
+   page-realm mint client; 18 #54 worker hook; 19 #106/#108 child
+   isolation + popup guard; 20 #109 popup sync-open; 21 #121
+   engineUpdate reload; 22.5 #128/#129 postMessage repair; 23 #130
+   vorigin marker + filter; 24 #132 contentWindow sender half +
+   virtual-origin parity drop.
 
    Page-global contract (#32): window.__ZL = { site: "<opaque>" } -
    a per-site identity computed from the real destination, which

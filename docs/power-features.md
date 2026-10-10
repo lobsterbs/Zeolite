@@ -148,7 +148,17 @@ anchor's parent.postMessage arrived stamped with the page's window as ev.source 
 dropped it; each child now shadows its configurable window.parent
 getter (measured; top is LegacyUnforgeable) with a Proxy that
 executes the parent's stashed native from the CHILD realm, so
-the browser stamps the genuine caller. Deliberate #32 relaxation
+the browser stamps the genuine caller. #132 closes the remaining
+duplex seams: the reply direction had the same corruption (the
+page's calls into anchor.contentWindow re-emitted in the CHILD
+realm, so the anchor heard its own setup echo) and the wrapper
+delivered self-echo phantoms the unproxied browser drops; every
+realm now shadows contentWindow on the iframe/frame prototypes
+with a cached Proxy that runs the child's stashed native from
+the CALLER's realm, and a parseable targetOrigin the recipient's
+virtual-origin marker does not match is dropped (the unproxied
+behavior). Residual: window.top and window.frames[i] are
+LegacyUnforgeable and keep receiver-side delivery. Deliberate #32 relaxation
 (user-authorized): page-realm scripts can read their own site's
 origin at runtime; a spoofed marker grants nothing new, every
 engine frame is already same-origin scriptable. What remains
