@@ -91,6 +91,51 @@ Known gaps include:
 
 See the full support matrix for exact behavior and per-feature status.
 
+## Working sites
+
+Live-deployment probe results (interactive Chromium runs against a hosted
+LobsterBrowse/Zeolite deployment, 2026-10). Sites are listed honestly:
+what works is verified by driving the page, and failures are classified
+as engine bugs, environmental walls, or documented design limits.
+
+### Verified working
+
+- **Wikipedia** - search suggestions, search results, full article navigation.
+- **YouTube** - watch pages boot, the video element reaches a ready state.
+- **slither.io** - canvas renders, nickname entry and server join work.
+- **Brave Search** - full SERP with favicons and Ask AI (site passed all
+  subresource MIME checks standalone; one transient engine error page was
+  observed in a batch run and did not reproduce).
+- **Hacker News, example.com, plain content sites** - full load.
+
+### Captcha and challenge coverage
+
+- **Anubis proof-of-work challenges** - solved in-engine (verified on
+  Startpage).
+- **Google reCAPTCHA** - the widget renders and communicates through the
+  engine (Referer, `co=` domain virtualization, anchor/bframe message
+  ports). Interaction inside the challenge frame works; the engine does
+  not auto-solve challenges.
+- **Cloudflare interstitials** - never bypassed; detection only, by design.
+
+### Environmental failures (not engine bugs)
+
+- **Google Search** - the shared datacenter exit IP is risk-flagged and
+  serves the sorry/captcha wall.
+- **duck.ai** - upstream TLS refuses the host's IP range.
+- **chatgpt.com** - anonymous chat is login-walled upstream.
+- **krunker.io** - datacenter-IP bot wall.
+
+### Documented design limits
+
+- **SPA routers that branch on `location.pathname`** (play2048.co, some
+  Google AI Mode surfaces) render their own client-side 404 view because
+  the page identity is opaque by design. Reintroducing a plaintext
+  destination would fix the class at a privacy cost and is a recorded
+  design decision, not a bug.
+- **Runtime-constructed asset names** - single-segment script/style names
+  built by page code at runtime (github.com module CSS) are recovered by
+  the global observed asset-base heuristic (#134).
 ## Repository layout
 
 | Path | Purpose |
