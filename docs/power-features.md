@@ -157,7 +157,19 @@ realm now shadows contentWindow on the iframe/frame prototypes
 with a cached Proxy that runs the child's stashed native from
 the CALLER's realm, and a parseable targetOrigin the recipient's
 virtual-origin marker does not match is dropped (the unproxied
-behavior). Residual: window.top and window.frames[i] are
+behavior). A same-day #132 follow-up closes the strict channel
+handshake: the page gstatic receiver accepts the setup port
+only when ev.source is the anchor contentWindow it stored, and
+the engine was delivering the raw anchor window, so the port
+was never taken and the widget timed out; delivered events now
+also relabel ev.source to the sender cached contentWindow
+proxy (one shared childProxyOf cache across the shims, so
+references compare equal), while a sender never read via
+contentWindow keeps raw identity. The wrapper own-slot legacy
+re-emit is gone too: it replays the exact native call, matching
+the measured direct run (self delivery drops ports, cross-frame
+delivery preserves them).
+Residual: window.top and window.frames[i] are
 LegacyUnforgeable and keep receiver-side delivery. Deliberate #32 relaxation
 (user-authorized): page-realm scripts can read their own site's
 origin at runtime; a spoofed marker grants nothing new, every

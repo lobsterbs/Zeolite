@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyPostMessage } from "../bootstrap/postmsg";
+import { applyPostMessage, childProxyOf } from "../bootstrap/postmsg";
 
 function fakeWindow(origin = "https://engine.example") {
   const calls: { m: unknown; t?: unknown; tr?: unknown; n: number }[] = [];
@@ -89,22 +89,43 @@ describe("applyPostMessage (#128 -> #130 native delivery)", () => {
     expect(calls.map((c) => c.t)).toEqual(["https://", "not an origin"]);
   });
 
-  it("re-emits legacy two-arg port calls in standard order (#130 residual: ports must survive)", () => {
+  it("replays the bare legacy two-arg port call exactly (#132: native semantics)", () => {
     const { w, calls } = fakeWindow();
     applyPostMessage(w);
     const port = { postMessage: () => {} };
-    // reCAPTCHA's frame protocol: postMessage(msg, [port]) with no
-    // targetOrigin. The exact replay reaches the recipient but
-    // Chromium's legacy overload drops the ports on the event
-    // (measured: ev.ports.length 0), so the anchor never receives
-    // the private setup port and the widget times out. Re-emit in
-    // the standard order against the real origin: same delivery,
-    // ports transferred.
+    // reCAPTCHA's own-realm bootstrap: postMessage(msg, [port]).
+    // Direct-run measurement 2026-10-10: the native legacy overload
+    // drops the ports on self-delivery and preserves them
+    // cross-frame. Re-emitting in standard order delivered phantom
+    // self-ports that a first-match setup listener stole, so the
+    // engine replays the exact shape and lets the native keep its
+    // own semantics.
     (w.postMessage as unknown as (m: unknown, t?: unknown) => void)("m", [port]);
     expect(calls).toHaveLength(1);
-    expect(calls[0].n).toBe(3);
-    expect(calls[0].t).toBe("https://engine.example");
-    expect(calls[0].tr).toEqual([port]);
+    expect(calls[0].n).toBe(2);
+    expect(calls[0].t).toEqual([port]);
+    expect(calls[0].tr).toBeUndefined();
+  });
+
+  it("shares the contentWindow proxy with childProxyOf (#132 identity)", () => {
+    const { w } = fakeWindow();
+    const child: Record<string, unknown> = {};
+    Object.defineProperty(child, "__zlNativePM", {
+      value: () => {},
+      configurable: true,
+    });
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, "contentWindow", {
+      get: () => child,
+      configurable: true,
+    });
+    w.HTMLIFrameElement = { prototype: proto };
+    applyPostMessage(w);
+    const got = (proto as Record<string, unknown>).contentWindow as Record<string, unknown>;
+    expect(got).not.toBe(child);
+    expect(typeof got.postMessage).toBe("function");
+    expect(childProxyOf(child)).toBe(got);
+    expect(childProxyOf({})).toBeUndefined();
   });
 
   it("replays legacy three-arg calls for the real origin untouched", () => {

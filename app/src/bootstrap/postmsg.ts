@@ -11,8 +11,11 @@
 
    - own slot: a foreign targetOrigin is rewritten to the real
      engine origin and delivered natively, in the standard order
-     for every call shape; native paths replay the exact argument
-     list so overload resolution and SyntaxErrors stay honest.
+     for every call shape; every other shape replays the exact
+     argument list so native overload resolution keeps its own
+     semantics (a bare legacy port call drops its ports on
+     self-delivery and preserves them cross-frame, exactly what
+     the unproxied browser does - measured 2026-10-10).
    - parent half (#131): a child whose parent carries the stashed
      native (__zlNativePM) shadows window.parent with a Proxy whose
      postMessage executes the parent's native from the CHILD realm,
@@ -21,17 +24,36 @@
      prototypes returns a cached Proxy whose postMessage executes
      the CHILD's stashed native from THIS realm, so parent->child
      calls land with ev.source = the parent, not the child itself.
+     The cache is module scope and readable through childProxyOf so
+     vorigin's relabel presents the SAME identity to a strict
+     listener (gstatic checks ev.source === contentWindow).
    - parity drop (#132): a parseable targetOrigin the recipient's
      __zlVO does not match is DROPPED, exactly what the unproxied
      browser does (self-echo phantoms die here). Marker pending or
      absent: deliver, never break messaging on the race.
 
    Recipient-side, vorigin.ts re-labels ev.origin with ev.source's
-   virtual origin. Residuals: window.top and window.frames[i] are
-   LegacyUnforgeable and keep receiver-side behavior (a top-path
-   cross-realm call still delivers with the top realm's source). */
-
+   virtual origin and ev.source with the shared child proxy.
+   Residuals: window.top and window.frames[i] are LegacyUnforgeable
+   and keep receiver-side behavior (a top-path cross-realm call
+   still delivers with the top realm's source). */
 type AnyRecord = Record<string, any>;
+
+/* #132: the child-proxy cache. One map per realm (each realm loads
+   its own bootstrap instance). Populated by the contentWindow
+   getter, read by vorigin's relabel, so both surfaces hand out the
+   identical proxy object and identity comparisons hold. */
+const childProxies = new WeakMap<object, AnyRecord>();
+
+/* The cached child proxy for a child window this realm has already
+   read through contentWindow, or undefined. A child never read that
+   way keeps its raw window identity: a raw reference held by page
+   code then still compares equal to the delivered ev.source. */
+export function childProxyOf(child: unknown): AnyRecord | undefined {
+  const c = child as AnyRecord | null;
+  if (!c || typeof c !== "object") return undefined;
+  return childProxies.get(c);
+}
 
 /* The sender-side delivery function shared by the parent half and
    the child half: normalize every call shape (standard order,
@@ -97,16 +119,15 @@ function proxyOf(
    identity holds across reads. A child without the stash (native,
    pre-bootstrap, cross-origin) keeps its raw window. */
 function applyChildWindowShim(w: AnyRecord, real: string): void {
-  const cache = new WeakMap<object, AnyRecord>();
   const wrap = (child: unknown): unknown => {
     const c = child as AnyRecord | null;
     if (!c || typeof c !== "object") return child;
     const np = c.__zlNativePM as ((...a: unknown[]) => void) | undefined;
     if (typeof np !== "function") return child;
-    let px = cache.get(c);
+    let px = childProxies.get(c);
     if (!px) {
       px = proxyOf(c, senderPm(c, np, real));
-      cache.set(c, px);
+      childProxies.set(c, px);
     }
     return px;
   };
@@ -227,22 +248,15 @@ export function applyPostMessage(w: AnyRecord): void {
         return;
       }
     }
-    /* Legacy bare two-argument port call: postMessage(msg, [ports])
-       with no targetOrigin anywhere. Chromium's legacy overload
-       delivers the message but DROPS the ports on the event
-       (measured), which kills every port-channel frame protocol -
-       reCAPTCHA hands its anchor the private setup port in exactly
-       this shape (#130 residual). Re-emit in the standard order
-       against the real origin: same delivery, ports transferred.
-       Unproxied this shape targets a cross-origin frame, where the
-       legacy overload preserves ports; no engine frame is ever
-       cross-origin, so the rewrite is behavior-preserving here. */
-    if (args.length === 2 && Array.isArray(a2)) {
-      native.call(w, args[0], real, a2);
-      return;
-    }
-    /* Replay the caller's exact argument list so the native overload
-       resolution sees the same call shape it would unproxied. */
+    /* Replay the caller's exact argument list so the native
+       overload resolution sees the same call shape it would
+       unproxied. The bare legacy port call postMessage(msg, [ports])
+       keeps native semantics that way: the ports die on
+       self-delivery and survive cross-frame (measured 2026-10-10
+       against the unproxied widget), which is exactly the shape
+       page code expects - re-emitting it in standard order would
+       deliver phantom self-ports a first-match setup listener
+       steals. */
     native.apply(w, args);
   };
   try {

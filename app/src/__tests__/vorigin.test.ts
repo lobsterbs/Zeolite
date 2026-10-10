@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyVirtualOrigin } from "../bootstrap/vorigin";
+import { applyPostMessage } from "../bootstrap/postmsg";
 import { PAGE_MESSAGES } from "../cpgate";
 
 type Listener = (ev: unknown) => unknown;
@@ -161,4 +162,74 @@ describe("applyVirtualOrigin (#130)", () => {
     expect(PAGE_MESSAGES.has("zl:getVirtualOrigin")).toBe(true);
     expect(PAGE_MESSAGES.has("zl:navHandle")).toBe(false);
   });
+
+describe("applyVirtualOrigin (#132 source identity)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("re-labels ev.source to the shared contentWindow proxy for a cached child", () => {
+    const { w, listeners } = fakeWindow();
+    stubController();
+    const child: Record<string, unknown> = {};
+    Object.defineProperty(child, "__zlNativePM", {
+      value: () => {},
+      configurable: true,
+    });
+    const proto: Record<string, unknown> = {};
+    Object.defineProperty(proto, "contentWindow", {
+      get: () => child,
+      configurable: true,
+    });
+    w.HTMLIFrameElement = { prototype: proto };
+    w.postMessage = () => {};
+    applyPostMessage(w);
+    const proxy = (proto as Record<string, unknown>).contentWindow;
+    expect(proxy).not.toBe(child);
+    applyVirtualOrigin(w);
+    const seen: unknown[] = [];
+    (w.addEventListener as unknown as (t: unknown, l: (ev: unknown) => void) => void)(
+      "message",
+      (ev) => {
+        seen.push((ev as { source: unknown }).source);
+      },
+    );
+    const ev = { origin: "https://engine.example", source: child, data: "x" };
+    for (const l of listeners.get("message") ?? []) l(ev);
+    expect(seen[0]).toBe(proxy);
+  });
+
+  it("keeps the raw source for a sender the realm never read through contentWindow", () => {
+    const { w, listeners } = fakeWindow();
+    stubController();
+    applyVirtualOrigin(w);
+    const seen: unknown[] = [];
+    (w.addEventListener as unknown as (t: unknown, l: (ev: unknown) => void) => void)(
+      "message",
+      (ev) => {
+        seen.push((ev as { source: unknown }).source);
+      },
+    );
+    const stranger = {};
+    const ev = { origin: "https://engine.example", source: stranger, data: "x" };
+    for (const l of listeners.get("message") ?? []) l(ev);
+    expect(seen[0]).toBe(stranger);
+  });
+
+  it("keeps the raw source for self-originated events", () => {
+    const { w, listeners } = fakeWindow();
+    stubController();
+    applyVirtualOrigin(w);
+    const seen: unknown[] = [];
+    (w.addEventListener as unknown as (t: unknown, l: (ev: unknown) => void) => void)(
+      "message",
+      (ev) => {
+        seen.push((ev as { source: unknown }).source);
+      },
+    );
+    const ev = { origin: "https://engine.example", source: w, data: "x" };
+    for (const l of listeners.get("message") ?? []) l(ev);
+    expect(seen[0]).toBe(w);
+  });
+});
 });

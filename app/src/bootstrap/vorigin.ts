@@ -12,20 +12,26 @@
      window.__zlVO.
    - the filter: page-registered "message" listeners (addEventListener
      and window.onmessage) receive events whose origin is re-labelled
-     with ev.source.__zlVO when the sender carries the marker; events
-     from the engine itself (worker pushes, unmarked frames, native
-     child realms) keep their native origin.
+     with ev.source.__zlVO when the sender carries the marker, and
+     whose source is re-labelled with the shared contentWindow proxy
+     when the sender is a child this realm has already read through
+     contentWindow (#132 identity: gstatic's channel establisher
+     checks ev.source === iframe.contentWindow, and the shimmed
+     getter hands out the proxy). Events from the engine itself
+     (worker pushes, unmarked frames, native child realms) keep
+     their native origin and source.
 
    Honest tradeoffs, deliberate (#32 relaxation, user-authorized):
    page-realm scripts can read their own site's origin from __zlVO at
    runtime (the destination still never enters the injected init
    script), and a spoofed __zlVO can relabel a message with another
    virtual site's origin - but every engine frame is already
-   same-origin scriptable, so no new capability is granted. Without a
-   controller, or when the reply never lands, the module installs
+   same-origin scriptable, so no new capability is granted. Without
+   a controller, or when the reply never lands, the module installs
    nothing and listeners keep the native engine-origin view. */
 
 import { swc } from "./siteid";
+import { childProxyOf } from "./postmsg";
 
 export function applyVirtualOrigin(w: Record<string, unknown>): void {
   const ctl = swc();
@@ -59,8 +65,26 @@ export function applyVirtualOrigin(w: Record<string, unknown>): void {
   const relabel = (ev: unknown): unknown => {
     const e = ev as { origin?: unknown; source?: unknown };
     if (!e || e.origin !== real) return ev;
-    const src = e.source as Record<string, unknown> | null | undefined;
-    const vo = src && typeof src === "object" ? src.__zlVO : undefined;
+    /* #132 identity: the strict channel establisher compares
+       ev.source with the iframe's contentWindow. The shimmed getter
+       returns a cached proxy, so the delivered event must present
+       that SAME proxy or the comparison fails and the setup port is
+       never taken (the reCAPTCHA widget then times out). Cache hits
+       only: a sender this realm never read through contentWindow
+       keeps its raw identity, so a raw reference still compares
+       equal. */
+    const src = e.source;
+    if (src && typeof src === "object" && (src as object) !== (w as object)) {
+      const px = childProxyOf(src);
+      if (px) {
+        try {
+          Object.defineProperty(e, "source", { get: () => px, configurable: true });
+        } catch {
+          /* not redefinable: the listener sees the raw window */
+        }
+      }
+    }
+    const vo = (src as Record<string, unknown> | null | undefined)?.__zlVO;
     if (typeof vo !== "string" || !vo) return ev;
     try {
       Object.defineProperty(e, "origin", { get: () => vo, configurable: true });
