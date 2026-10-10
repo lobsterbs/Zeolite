@@ -117,15 +117,68 @@ describe("asset base registry (#134)", () => {
     expect(seenRef.h?.get("user-agent")).toBe("test-agent");
   });
 
-  it("only handles script and style destinations", async () => {
+  it("refuses document and worker destinations", async () => {
     recordAssetBase("https://p.example/", "https://cdn.example/assets/x.js");
     const rec = await recoverFlatAsset(
       "https://p.example/",
-      "https://p.example/flat.png",
+      "https://p.example/flat.css",
+      "document",
+      new Headers(),
+      async () => mkResp(200, "text/html"),
+    );
+    expect(rec).toBeNull();
+  });
+
+  it("recovers a runtime-built binary fetch (dest empty, glb)", async () => {
+    recordAssetBase("https://github.com/", "https://github.githubassets.com/assets/app.js");
+    const rec = await recoverFlatAsset(
+      "https://github.com/",
+      "https://github.com/shield-99c76cd962f04df2.glb",
+      "empty",
+      new Headers(),
+      async () => mkResp(200, "application/octet-stream"),
+    );
+    expect(rec?.url).toBe("https://github.githubassets.com/assets/shield-99c76cd962f04df2.glb");
+  });
+
+  it("refuses extension-less fetch misses (beacon shape), no retries", async () => {
+    recordAssetBase("https://p.example/", "https://cdn.example/assets/x.js");
+    let calls = 0;
+    const rec = await recoverFlatAsset(
+      "https://p.example/",
+      "https://p.example/collect",
+      "empty",
+      new Headers(),
+      async () => {
+        calls++;
+        return mkResp(200, "application/json");
+      },
+    );
+    expect(rec).toBeNull();
+    expect(calls).toBe(0);
+  });
+
+  it("refuses an HTML candidate for a fetch recovery", async () => {
+    recordAssetBase("https://p.example/", "https://cdn.example/assets/x.js");
+    const rec = await recoverFlatAsset(
+      "https://p.example/",
+      "https://p.example/blob.frag",
+      "empty",
+      new Headers(),
+      async () => mkResp(200, "text/html"),
+    );
+    expect(rec).toBeNull();
+  });
+
+  it("recovers an image destination flat miss", async () => {
+    recordAssetBase("https://p.example/", "https://cdn.example/assets/x.js");
+    const rec = await recoverFlatAsset(
+      "https://p.example/",
+      "https://p.example/hero-99c76cd962f04df2.png",
       "image",
       new Headers(),
       async () => mkResp(200, "image/png"),
     );
-    expect(rec).toBeNull();
+    expect(rec?.url).toBe("https://cdn.example/assets/hero-99c76cd962f04df2.png");
   });
 });

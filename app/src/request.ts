@@ -50,7 +50,7 @@ import { wispTransport } from "./transport";
 
 import { virtualOriginHeaders, virtualRefererFallback } from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
-import { recordAssetBase, recoverFlatAsset } from "./assetbases";
+import { isRecoverableAssetDest, recordAssetBase, recoverFlatAsset } from "./assetbases";
 import { applySetCookie, cookieHeaderFor, isPassChallenge, jarHeaders, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
@@ -1608,10 +1608,10 @@ export function handleFetch(e: FetchEvent): void {
              origin and 404 there; the real assets sit on CDN bases
              the page itself already loaded script/style from. Record
              those bases on successful cross-origin script/style loads,
-             then retry a failed flat-named script/style against them. */
+             then retry a failed flat-named asset (script, style, or a runtime-built binary) against them. */
           if (resp.status === 200 && (dest === "script" || dest === "style") && initiator)
             recordAssetBase(initiator, target);
-          if (resp.status >= 400 && (dest === "script" || dest === "style")) {
+          if (resp.status >= 400 && isRecoverableAssetDest(dest)) {
             const rec = await recoverFlatAsset(initiator ?? "", target, dest, e.request.headers, (u2, init2) =>
               wispTransport.fetch(u2, init2));
             if (rec) {

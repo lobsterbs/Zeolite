@@ -3,7 +3,7 @@
    they resolve against the page origin and 404 there, while the
    real assets live on CDN directories the page itself loaded
    script/style from. This registry records those directories per
-   virtual page origin and retries failed flat-named script/style
+   virtual page origin and retries failed flat-named asset (script, style, runtime-built binaries)
    requests against them. Global by construction: everything comes
    from observed loads, never a per-site table. */
 
@@ -12,6 +12,17 @@ export type FlatFetch = (url: string, init: { method: string; headers: Headers }
 const ASSET_BASES_PER_ORIGIN = 4;
 const ASSET_BASES_TOTAL = 128;
 const assetBases = new Map<string, string[]>();
+
+/* #134 residual: the registry is not script/style-only. Runtime-built
+   binary names (a glb or fragment minted at runtime, a hashed image)
+   404 at the page origin exactly like module css; recover them too.
+   Documents and workers stay out: a flat-named navigation miss must
+   surface honestly, and worker code has its own pipeline. */
+const RECOVERABLE_DESTS = new Set(["script", "style", "image", "video", "audio", "font", "empty"]);
+
+export function isRecoverableAssetDest(dest: string): boolean {
+  return RECOVERABLE_DESTS.has(dest);
+}
 
 export function originOf(u: string): string {
   try {
@@ -51,15 +62,30 @@ export function isFlatPath(pathname: string): boolean {
 function mimeOkFor(dest: string, ct: string): boolean {
   const c = (ct || "").split(";")[0].trim().toLowerCase();
   if (dest === "style") return c === "text/css";
-  return (
-    c === "text/javascript" ||
-    c === "application/javascript" ||
-    c === "application/ecmascript" ||
-    c.endsWith("+javascript")
-  );
+  if (dest === "script") {
+    return (
+      c === "text/javascript" ||
+      c === "application/javascript" ||
+      c === "application/ecmascript" ||
+      c.endsWith("+javascript")
+    );
+  }
+  /* Binary asset dests: octet-stream passes everywhere (CDNs serve
+     glb, mp4 and font binaries that way) and each element dest also
+     accepts its own MIME family. A bare fetch (dest "empty") has no
+     family to check, so its gate is negative: never an HTML soft-404,
+     never a plain-text miss. */
+  const octet = c === "application/octet-stream" || c === "binary/octet-stream";
+  if (dest === "image") return c.startsWith("image/") || octet;
+  if (dest === "video") return c.startsWith("video/") || octet;
+  if (dest === "audio") return c.startsWith("audio/") || octet;
+  if (dest === "font")
+    return octet || c.includes("font") || c.includes("woff") || c.includes("ttf") || c.includes("otf");
+  return octet || (c !== "" && c !== "text/html" && c !== "text/plain");
 }
 
-/** Retry a failed flat-named script/style against the page's recorded
+/** Retry a failed flat-named asset (script, style, or a runtime-built
+    binary) against the page's recorded
     asset bases. Cookie/origin/referer never ride along: the candidate
     is a different origin and must not see this page's jar. */
 export async function recoverFlatAsset(
@@ -70,7 +96,7 @@ export async function recoverFlatAsset(
   fetchUpstream: FlatFetch,
   maxTries = 3,
 ): Promise<{ url: string; resp: Response } | null> {
-  if (dest !== "script" && dest !== "style") return null;
+  if (!isRecoverableAssetDest(dest)) return null;
   if (!initiator) return null;
   const bases = assetBases.get(originOf(initiator)) ?? [];
   if (bases.length === 0) return null;
@@ -87,6 +113,14 @@ export async function recoverFlatAsset(
     if (v) safe.set(h, v);
   }
   const flat = u.pathname.slice(1);
+  /* A bare fetch() has no destination signal, so gate on an
+     extension: runtime-built binary assets (a glb, a fragment)
+     carry one; beacon-shaped single-segment misses do not and
+     must not mint CDN retries. */
+  if (dest === "empty") {
+    const dot = flat.lastIndexOf(".");
+    if (dot < 1 || flat.length - dot > 9) return null;
+  }
   for (const base of bases.slice(0, maxTries)) {
     let cand: URL;
     try {
