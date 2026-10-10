@@ -76,6 +76,13 @@ impl JsRewriter {
     pub fn set_blocked_hosts(&mut self, hosts: Vec<String>) {
         self.inner.set_blocked_hosts(hosts);
     }
+
+    /// Opt-in lazy images (host toggle): inject loading=\"lazy\" on
+    /// <img> tags that lack one. See RewriteConfig::lazy_images.
+    #[wasm_bindgen(js_name = "set_lazy_images")]
+    pub fn set_lazy_images(&mut self) {
+        self.inner.set_lazy_images();
+    }
 }
 
 /// The CSS url() encoder shared by the one-shot pass and the streaming

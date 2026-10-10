@@ -89,6 +89,11 @@ impl Rewriter {
         self.cfg.block_hosts = hosts;
     }
 
+    /// Opt-in lazy images (host toggle): see RewriteConfig::lazy_images.
+    pub fn set_lazy_images(&mut self) {
+        self.cfg.lazy_images = true;
+    }
+
     /// Add a script path to inject after <head> opens (Phase 3 hooks).
     pub fn add_injection(&mut self, path: &str) {
         self.cfg.injections.push(path.to_string());
@@ -523,6 +528,7 @@ impl Rewriter {
             return String::new();
         }
         let mut first_url: Option<String> = None;
+        let mut has_loading = false;
         while let Some(attr) = next_attr(rest) {
             let Attr {
                 consumed,
@@ -532,6 +538,9 @@ impl Rewriter {
                 quote,
             } = attr;
             let lower = attr_name.to_ascii_lowercase();
+            if lower == "loading" {
+                has_loading = true;
+            }
             // SRI hashes are computed over the upstream bytes; the
             // rewritten subresource always differs (URLs folded
             // into engine routes), so the browser silently refuses
@@ -640,6 +649,12 @@ impl Rewriter {
                     return String::new();
                 }
             }
+        }
+        // Lazy images (host toggle): an <img> with no loading attribute
+        // gets loading=\"lazy\", so off-screen images defer until
+        // they approach the viewport. An explicit author choice is kept.
+        if self.cfg.lazy_images && name == "img" && !has_loading {
+            out.push_str(" loading=\"lazy\"");
         }
         out.push_str(rest);
         out
@@ -1405,6 +1420,68 @@ mod tests {
         assert!(out.contains("<a "), "anchor kept: {}", out);
     }
 
+    /// Lazy images: opt-in injection of loading=\"lazy\" on <img>.
+    #[test]
+    fn lazy_images_opt_in() {
+        // Off by default: nothing is invented.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!("{}{}", r.process("<img src=\"x.png\">"), r.finish());
+        assert!(!out.contains("loading"), "off by default: {}", out);
+        // On: a missing loading attribute is injected exactly once; an
+        // explicit author choice is kept; non-img tags untouched.
+        let mut r = Rewriter::new(cfg());
+        r.set_lazy_images();
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}",
+            r.process("<img src=\"x.png\"><img src=\"y.png\" loading=\"eager\"><div class=\"loading\">d</div>"),
+            r.finish()
+        );
+        assert!(out.contains(" loading=\"lazy\""), "injected: {}", out);
+        assert_eq!(
+            out.matches("loading=\"").count(),
+            2,
+            "one added, one kept: {}",
+            out
+        );
+        assert!(
+            out.contains("loading=\"eager\""),
+            "author choice kept: {}",
+            out
+        );
+        assert!(
+            out.contains("class=\"loading\""),
+            "non-img untouched: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn lazy_images_chunked_and_bare_forms() {
+        // A bare loading attribute (no value) counts as present.
+        let bare = {
+            let mut r = Rewriter::new(cfg());
+            r.set_lazy_images();
+            r.set_base("https://example.com/");
+            format!("{}{}", r.process("<img loading src=\"x.png\">"), r.finish())
+        };
+        assert!(!bare.contains("lazy"), "bare loading counts: {}", bare);
+        // The tag split mid-attribute across chunks still injects once.
+        let chunked = {
+            let mut r = Rewriter::new(cfg());
+            r.set_lazy_images();
+            r.set_base("https://example.com/");
+            let a = r.process("<img src=\"x");
+            let b = r.process(".png\">");
+            format!("{}{}{}", a, b, r.finish())
+        };
+        assert!(
+            chunked.contains(" loading=\"lazy\""),
+            "chunked injection: {}",
+            chunked
+        );
+    }
     #[test]
     fn blocked_subdomain_matches() {
         let c = RewriteConfig {

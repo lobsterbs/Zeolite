@@ -47,7 +47,7 @@ import { decodePath } from "./codec";
 /* #87: the shared service-worker runtime state (degraded flag, route
    key, fingerprint scripts, per-site profile cache) lives in
    ./swstate; this entrypoint and the request engine are call sites. */
-import { getFpScript, getRouteKey, setEngineDegraded, siteProfileFor, ZEOLITE_VERSION } from "./swstate";
+import { getFpScript, getRouteKey, isImageLazy, setEngineDegraded, siteProfileFor, ZEOLITE_VERSION } from "./swstate";
 import { ALARMS, MGMT, TABS, SCRIPTING, DOWNLOADS, NOTIFY, PERMS, bootEnabled, extensions, wakeExtension } from "./extensions";
 
 import { handleControlEvent } from "./control";
@@ -89,6 +89,7 @@ initTransform({
   fpScript: () => getFpScript(),
   siteScript: async (base) => (await siteProfileFor(base))?.script ?? null,
   setDegraded: setEngineDegraded,
+  lazyImages: isImageLazy,
 });
 
 

@@ -19,6 +19,7 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
     }
     add_injection(_p: string) {}
     set_blocked_hosts(_h: string[]) {}
+    set_lazy_images() {}
   }
   class JsCssRewriter {
     process(s: string) {
@@ -80,6 +81,7 @@ function deps(): TransformDeps {
     fpScript: () => null,
     siteScript,
     setDegraded,
+    lazyImages: () => false,
   };
 }
 
@@ -139,6 +141,7 @@ describe("rewriteStream (#86)", () => {
       fpScript: () => "/*fp*/",
       siteScript,
       setDegraded,
+      lazyImages: () => false,
     });
     const out = await readAll(rewriteStream(streamOf([DOC]), BASE, {}, [], "text/html"));
     expect(out).toContain("/*fp*/");

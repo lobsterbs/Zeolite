@@ -188,3 +188,33 @@ describe("zl:getVirtualOrigin (#130)", () => {
     expect(posted).toEqual([{ ok: true, vo: null }]);
   });
 });
+
+describe("zl:config imageLazy toggle (lazy images host push)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org" } });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sets and echoes the live value", async () => {
+    const on = mkEvent("https://w.example.org/", { type: "zl:config", prefix: "/j/", imageLazy: true });
+    await handleControlEvent(on.ev, deps);
+    const rOn = on.posted[0] as { ok: boolean; imageLazy?: boolean };
+    expect(rOn.ok).toBe(true);
+    expect(rOn.imageLazy).toBe(true);
+    const off = mkEvent("https://w.example.org/", { type: "zl:config", prefix: "/j/", imageLazy: false });
+    await handleControlEvent(off.ev, deps);
+    const rOff = off.posted[0] as { ok: boolean; imageLazy?: boolean };
+    expect(rOff.imageLazy).toBe(false);
+  });
+
+  it("keeps the live choice when the field is absent", async () => {
+    const set = mkEvent("https://w.example.org/", { type: "zl:config", prefix: "/j/", imageLazy: true });
+    await handleControlEvent(set.ev, deps);
+    const probe = mkEvent("https://w.example.org/", { type: "zl:config", prefix: "/j/" });
+    await handleControlEvent(probe.ev, deps);
+    const r = probe.posted[0] as { ok: boolean; imageLazy?: boolean };
+    expect(r.imageLazy).toBe(true);
+  });
+});

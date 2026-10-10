@@ -99,6 +99,20 @@ export function setNavHandles(on: boolean): void {
   navHandles = on;
 }
 
+/* Lazy images (LB host toggle): the rewriter injects loading="lazy" on
+   <img> tags that lack one, so below-the-fold images defer until they
+   approach the viewport. Ephemeral like adblock: resets on SW
+   restart, the host re-sends it. */
+let imageLazy = false;
+
+export function isImageLazy(): boolean {
+  return imageLazy;
+}
+
+export function setImageLazy(on: boolean): void {
+  imageLazy = on;
+}
+
 /* ---- Per-site route table ------------------------------------------ */
 
 /** Sites the user disabled for this engine. Keyed by registrable-ish

@@ -26,6 +26,10 @@ pub struct RewriteConfig {
     /// Strip ad/tracker subresources at the rewrite layer: hosts whose
     /// requests should never leave the browser (Phase 3).
     pub block_hosts: Vec<String>,
+    /// Opt-in lazy images: inject loading=\"lazy\" on <img> tags that
+    /// lack one, so below-the-fold images defer until they approach
+    /// the viewport. Off by default; a host toggle.
+    pub lazy_images: bool,
 }
 
 impl Default for RewriteConfig {
@@ -41,6 +45,7 @@ impl Default for RewriteConfig {
             bootstrap_path: "/bootstrap.js".into(),
             injections: Vec::new(),
             block_hosts: Vec::new(),
+            lazy_images: false,
         }
     }
 }

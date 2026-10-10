@@ -20,7 +20,7 @@ import type { RecordingState } from "./recording";
 import { beginRecording, finishRecording } from "./recording";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
-import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, navHandlesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setNavHandles, setSiteEnabled } from "./swstate";
+import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setSiteEnabled } from "./swstate";
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
 import { currentEngine, wispTransport } from "./transport";
@@ -92,6 +92,8 @@ export interface ControlMessage {
   /** zl:config: opt-in engine-side HTTPS upgrade (#53). Absent keeps
       the persisted choice; the ack echoes the live value. */
   httpsUpgrade?: boolean;
+  /** zl:config: opt-in lazy images; absent keeps the live choice. */
+  imageLazy?: boolean;
   /** zl:config: opt-in refusal of the plaintext ?url= initial
       navigation (#63). Absent keeps the persisted choice (legacy
       ?url= accepted, the migration window); the ack echoes the live
@@ -259,12 +261,14 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       }
       /* #53: absent leaves the persisted choice (old embedders). */
       if (typeof msg.httpsUpgrade === "boolean") setHttpsUpgrade(msg.httpsUpgrade);
+      /* Lazy images: same rule - absent keeps the live choice. */
+      if (typeof msg.imageLazy === "boolean") setImageLazy(msg.imageLazy);
       /* #63: same migration-window rule for the ?url= refusal. */
       if (typeof msg.navHandles === "boolean") setNavHandles(msg.navHandles);
       setScheme(msg.prefix ?? "/j/");
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
-      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), navHandles: navHandlesEnabled() });
+      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), navHandles: navHandlesEnabled() });
       break;
     }
     case "zl:mint": {

@@ -27,6 +27,8 @@ export interface TransformDeps {
   siteScript: (base: string) => Promise<string | null>;
   /** Records a transport-level degradation reason (engineDegraded). */
   setDegraded: (reason: string) => void;
+  /** Lazy-images host toggle: inject loading=lazy on <img> tags. */
+  lazyImages: () => boolean;
 }
 
 let deps: TransformDeps | null = null;
@@ -43,6 +45,7 @@ interface JsRewriter {
   finish(): string;
   add_injection(path: string): void;
   set_blocked_hosts(hosts: string[]): void;
+  set_lazy_images(): void;
 }
 interface JsCssRewriter {
   process(chunk: string): string;
@@ -195,6 +198,7 @@ export function rewriteStream(
         const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
         for (const path of rule.inject ?? []) rw.add_injection(path);
         if (rule.block?.length) rw.set_blocked_hosts(rule.block);
+        if (deps!.lazyImages()) rw.set_lazy_images();
         for (const u of csInject) rw.add_injection(u);
         /* Stream-head hold (quirks splice + charset): raw bytes
            accumulate until the charset resolves (header label, else
