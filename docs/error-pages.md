@@ -73,3 +73,24 @@ not an upstream destination failure. The page should say what happened
 (the worker is not installed, not controlling, or outdated) and give
 one action: load the engine root so the browser installs/activates
 the worker, then retry.
+
+## The embedder implementation (LobsterBrowse, 2026-10-10)
+
+The LobsterBrowse embedder follows this contract and phases its own
+error UI out entirely: a failed navigation through a live engine
+renders the engine page above inside the frame as-is, and the
+embedder only stops its loading spinner and mirrors the
+meta[zl-error] payload into its log and DevTools console. The two
+embedder-only answers are minimal notices in the same style:
+
+- an engine route with no controlling worker answers 503
+  (Engine offline) with one scriptless GET retry form back to the
+  same route and one instruction: open the app root once so the
+  worker installs, then retry;
+- the embedder-only legacy /r/ and /lj/ prefixes keep a 502
+  gone-notice (the engine never owned them).
+
+Both notices carry meta[zl-error] (JSON: category, reason) with the
+embedder categories offline and route, so the DevTools mirror treats
+them like any engine failure. Neither prints the destination URL
+(#32); both are deterministic and scriptless.
