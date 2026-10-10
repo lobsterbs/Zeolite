@@ -1428,6 +1428,49 @@ export function handleFetch(e: FetchEvent): void {
                 headers: hitHeaders,
               });
             }
+            /* #134: a cached JS body must serve through the same
+               specifier + literal passes a fresh response takes. Entries
+               stored by older dists (before the JS transform covered
+               script destinations) hold raw upstream bodies: a
+               module-relative import() in such a copy resolved against
+               the engine route, and the escaped-path recovery answered
+               the wrong destination (play2048's lazy chunk, github.com's
+               CSS chunk). Both passes are idempotent on composed copies
+               - engine routes pass through untouched - so an
+               already-transformed entry only pays the scan. The repaired
+               copy is written back only when a pass changed the body: a
+               stale raw entry heals once instead of rescanning on every
+               hit. Worker destinations keep the raw serve: their cached
+               copies are composed (prelude + folded specifiers) by the
+               fresh path, and re-running a text pass over prepended
+               engine code is not idempotent by construction. */
+            if (
+              isJs(hit) &&
+              (e.request.destination === "script" || e.request.destination === "") &&
+              hit.body
+            ) {
+              const jsCt = hit.headers.get("content-type") ?? "";
+              const raw0 = decodeBody(await hit.arrayBuffer(), jsCt);
+              let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, raw0);
+              try {
+                src = await rewriteJsBody(src, target);
+              } catch (err) {
+                /* A wasm load failure must not break the hit: the
+                   specifier output still serves (the fresh path's
+                   rule). */
+                DIAG.emit({
+                  category: "REWRITE",
+                  severity: "error",
+                  message: "cache-hit script body pass failed",
+                  technicalReason: String(err),
+                  url: target,
+                });
+              }
+              hitHeaders.set("content-type", utf8ContentType(jsCt));
+              const out = new Response(src, { status: hit.status, headers: hitHeaders });
+              if (src !== raw0) void pageCacheStore(e.request, out.clone());
+              return out;
+            }
             return new Response(hit.body, { status: hit.status, headers: hitHeaders });
           }
         }
