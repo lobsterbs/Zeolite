@@ -194,6 +194,16 @@ unfixable: unforgeable location reads inside frames (#32 class)
 and the datacenter IP failing Google's risk engine even on a
 direct headless load. The no-bypass rule stands; hCaptcha and
 Cloudflare Turnstile frames take the same engine-routed path.
+## 5. Lazy images (opt-in rewrite pass)
+
+A zl:config imageLazy true push (boolean, absent keeps the live
+choice; resets to off on SW restart) turns on a streaming rewriter
+pass that appends loading="lazy" to img tags that do not already
+carry a loading attribute. Additive only: no attribute is removed,
+scripts/styles/documents are untouched, and a page that sets its
+own loading value per image keeps it. Off by default; hosts that
+want it re-push it per boot.
+
 ## Build order
 
 1. Network inspector ring + devtools streaming (it debugs the rest).
