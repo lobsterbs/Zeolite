@@ -33,6 +33,7 @@ import { applyReemit, mintRoute } from "./mint";
 import { applyCookie } from "./cookie";
 import { applyIsolation } from "./isolation";
 import { applyStorage } from "./storage";
+import { applySenderShim } from "./postmsg";
 
 export const NAV = "/__zl_nav__";
 /* #101: parent-relative marker. A same-origin child realm (an
@@ -564,6 +565,10 @@ export function applyNavGuard(
         /* not a URL: no parent route to anchor to */
       }
       applyReemit(win, routePath);
+      /* #131: the guarded child realm also gets the sender-side
+         identity repair, so its parent.postMessage calls deliver
+         with its own window as ev.source. */
+      applySenderShim(win);
       /* #108: a same-origin inline child (about:blank, about:srcdoc)
          inherits the proxy origin, so its native document.cookie,
          cookieStore and localStorage are the real engine-origin

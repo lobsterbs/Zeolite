@@ -142,7 +142,13 @@ each realm asks the engine for its own virtual origin
 route, never a page-supplied claim) and marks its window with
 it, and page message listeners see events re-labelled with the
 sender's virtual origin - the unproxied view end to end, both
-postMessage call shapes covered. Deliberate #32 relaxation
+postMessage call shapes covered. #131 repairs the last
+measured seam: that wrapper re-emits from its OWN realm, so the
+anchor's parent.postMessage arrived stamped with the page's window as ev.source (from=self) and the page's grecaptcha
+dropped it; each child now shadows its configurable window.parent
+getter (measured; top is LegacyUnforgeable) with a Proxy that
+executes the parent's stashed native from the CHILD realm, so
+the browser stamps the genuine caller. Deliberate #32 relaxation
 (user-authorized): page-realm scripts can read their own site's
 origin at runtime; a spoofed marker grants nothing new, every
 engine frame is already same-origin scriptable. What remains
