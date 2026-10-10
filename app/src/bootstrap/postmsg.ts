@@ -24,9 +24,14 @@
    order postMessage(msg, transfer, targetOrigin). Virtual-target
    calls of both shapes re-emit in the standard order; native-path
    calls replay the caller's EXACT argument list so overload
-   resolution sees the same call shape it would unproxied (a legacy
-   two-arg call must not gain a phantom third argument, and a
-   malformed targetOrigin keeps the native SyntaxError). */
+   resolution sees the same call shape it would unproxied (a
+   legacy two-arg call must not gain a phantom third argument, and a
+   malformed targetOrigin keeps the native SyntaxError). One shape
+   is exempt: the bare two-argument legacy port call
+   postMessage(msg, [ports]) is re-emitted in the standard order
+   against the real origin, because Chromium's legacy overload
+   drops the transferred ports on same-origin delivery - the exact
+   replay reaches the recipient but portless (#130 residual). */
 
 export function applyPostMessage(w: Record<string, unknown>): void {
   const native = w.postMessage as ((...a: unknown[]) => void) | undefined;
@@ -61,6 +66,23 @@ export function applyPostMessage(w: Record<string, unknown>): void {
         else native.call(w, args[0], real);
         return;
       }
+    }
+    /* Legacy bare two-argument port call: postMessage(msg, [ports])
+       with no targetOrigin anywhere. Chromium's legacy overload
+       delivers the message but DROPS the ports on the event
+       (measured: ev.ports.length 0 on a same-origin delivery), which
+       kills every port-channel frame protocol - reCAPTCHA hands its
+       anchor the private setup port in exactly this shape and the
+       widget times out waiting on a port that never arrived
+       (#130 residual). The wrapped window always lives on the real
+       engine origin, so re-emitting in the standard order against
+       it is the same delivery with the ports actually transferred.
+       Unproxied this shape targets a cross-origin frame, where the
+       legacy overload preserves ports; no engine frame is ever
+       cross-origin, so the rewrite is behavior-preserving here. */
+    if (args.length === 2 && Array.isArray(a2)) {
+      native.call(w, args[0], real, a2);
+      return;
     }
     /* Replay the caller's exact argument list so the native overload
        resolution sees the same call shape it would unproxied. */

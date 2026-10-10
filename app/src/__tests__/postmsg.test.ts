@@ -89,18 +89,22 @@ describe("applyPostMessage (#128 -> #130 native delivery)", () => {
     expect(calls.map((c) => c.t)).toEqual(["https://", "not an origin"]);
   });
 
-  it("replays legacy two-arg calls with the exact argument list (#128 follow-up)", () => {
+  it("re-emits legacy two-arg port calls in standard order (#130 residual: ports must survive)", () => {
     const { w, calls } = fakeWindow();
     applyPostMessage(w);
     const port = { postMessage: () => {} };
     // reCAPTCHA's frame protocol: postMessage(msg, [port]) with no
-    // targetOrigin. Re-emitting this as (msg, [port], undefined)
-    // made the native binding throw "Invalid target origin
-    // '[object MessagePort]'".
+    // targetOrigin. The exact replay reaches the recipient but
+    // Chromium's legacy overload drops the ports on the event
+    // (measured: ev.ports.length 0), so the anchor never receives
+    // the private setup port and the widget times out. Re-emit in
+    // the standard order against the real origin: same delivery,
+    // ports transferred.
     (w.postMessage as unknown as (m: unknown, t?: unknown) => void)("m", [port]);
     expect(calls).toHaveLength(1);
-    expect(calls[0].n).toBe(2); // arg count preserved, no phantom third arg
-    expect(calls[0].t).toEqual([port]);
+    expect(calls[0].n).toBe(3);
+    expect(calls[0].t).toBe("https://engine.example");
+    expect(calls[0].tr).toEqual([port]);
   });
 
   it("replays legacy three-arg calls for the real origin untouched", () => {
