@@ -1,0 +1,19 @@
+// Compatibility policy (issues #135, #136). This file is
+// intentionally EMPTY: no rule means every request keeps the
+// default transit decision (native transport; rewriting only
+// where the engine requires it). Grammar: docs/policy.md.
+//
+//   rule "short-id" priority=10 {
+//     match host="cdn.example.com" path="/assets/"  // both optional
+//     types "script" "fetch"                        // optional
+//     route "rewrite"                               // the only route
+//     reason "why this site needs the rewrite path"
+//   }
+//
+// A rule upgrades matching requests from native transport onto
+// the rewrite path. It cannot do the opposite: documents,
+// stylesheets and transformed scripts REQUIRE rewriting, and
+// native is already the default for everything else. Highest
+// priority wins; on equal priority the later rule wins. A
+// rejected file keeps the defaults active (diagnostics carry the
+// error).
