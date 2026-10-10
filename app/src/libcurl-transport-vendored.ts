@@ -66,6 +66,32 @@ function moduleUrl(): string {
 let client: LibcurlClientLike | null = null;
 let initPromise: Promise<void> | null = null;
 
+/* #133: the vendored bundle keeps a module-level wisp connection
+   cache (_wisp_connections) keyed by the wisp URL, so a reset()+
+   reinit with the SAME URL silently reuses the wedged WispTransport
+   and its half-dead WebSocket out of that cache - the socket never
+   fires close, so the #74 watcher cannot see the death either.
+   Busting the cache key with a generation query forces a fresh
+   transport; the server ignores the query. Generation 0 rides the
+   pristine URL (the first init is unchanged), every reset() bumps
+   the generation so the next init pays a fresh key. The client
+   requires the URL to end in "/", so the generation rides before
+   a final slash; the pathname is unchanged, so the watcher's
+   origin+pathname match still holds. Rig-verified
+   (MAX_STREAMS_PER_CONNECTION=3, 8x25MB burst): a client wedged to
+   instant error 7 healed on reinit with a busted URL (fresh
+   WebSocket, 200s afterwards). */
+let wispGeneration = 0;
+
+/** Wisp connection-cache key bust for generation g (0 = pristine
+    URL). Pure, unit-gated in __tests__/transport-select.test.ts. */
+export function bustWispUrl(url: string, generation: number): string {
+  if (generation <= 0) return url;
+  const base = url.endsWith("/") ? url : url + "/";
+  const sep = base.includes("?") ? "&" : "?";
+  return base + sep + "zlG=" + generation + "/";
+}
+
 /* Epoxy engine (issue #64): selectable second TLS/HTTP engine.
 
    Chosen by deployment (Vite define ZL_TRANSPORT reading
@@ -669,8 +695,12 @@ async function getClient(cfg: { websocket: string }): Promise<LibcurlClientLike>
         throw new Error("zeolite: vendored libcurl bundle exports no LibcurlClient");
       }
       /* Both option spellings are accepted by the client; passing the
-         wisp URL through both is harmless and covers API drift. */
-      const c = new Ctor({ wisp: cfg.websocket, websocket: cfg.websocket });
+         wisp URL through both is harmless and covers API drift.
+         #133: the generation-busted URL busts the bundle's
+         module-level connection cache, so a post-reset reinit gets
+         a fresh WispTransport instead of the wedged one. */
+      const wispUrl = bustWispUrl(cfg.websocket, wispGeneration);
+      const c = new Ctor({ wisp: wispUrl, websocket: wispUrl });
       await c.init();
       /* Issue #11 patch: a missing seam is a hard init failure (the
          transport-gate workflow catches layout drift in CI before any
@@ -704,8 +734,20 @@ async function getClient(cfg: { websocket: string }): Promise<LibcurlClientLike>
    a real answer. */
 import { setTransportState, transportState } from "./transport-lifecycle";
 
+/* #133: zeolite-server answers a stream beyond max_streams_per_conn
+   with wisp Close(Throttled); the wasm transport surfaces that as
+   libcurl error 35 (SSL connect error), and the socket stays half
+   dead afterwards - every later request fails instantly with error
+   7 and the WebSocket 'close' event never fires, so the #74 watcher
+   cannot see it (reproduced against a local zeolite-server with
+   MAX_STREAMS_PER_CONNECTION=3: 3 live streams succeed, the 4th+
+   pay error 35, then everything pays error 7 with no close event).
+   Both signatures join the connect class: the request-time
+   reset+retry rides a fresh wisp connection with an empty stream
+   table. A genuine TLS/connect failure pays one reset and retry,
+   then surfaces honestly. */
 const CONNECT_CLASS_RE =
-  /websocket did not open|failed sending data|failure when receiving data|server returned nothing|error code (?:52|55|56)\b/i;
+  /websocket did not open|failed sending data|failure when receiving data|server returned nothing|error code (?:7|35|52|55|56)\b/i;
 
 export function isConnectClassError(err: unknown): boolean {
   return CONNECT_CLASS_RE.test(String(err));
@@ -717,6 +759,15 @@ export function reset(): void {
   if (transportState() === "connecting" || transportState() === "connected") {
     setTransportState("dead", "singleton reset");
   }
+  /* #133: bump so the next init() busts the wisp connection-cache
+     key (bustWispUrl); a same-URL reinit would silently reuse the
+     wedged transport out of the bundle's module-level cache. */
+  wispGeneration++;
+  /* #133: the wedged socket never fires close, so it would sit in
+     the watcher's live set forever and disarm future reconnects.
+     The singletons are being dropped here; their sockets are
+     abandoned transport state, not live transport state. */
+  liveWisp.clear();
   client = null;
   initPromise = null;
   epoxyClient = null;

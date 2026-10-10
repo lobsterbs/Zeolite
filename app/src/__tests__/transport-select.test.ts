@@ -3,7 +3,7 @@
    cover the new pure surface only. */
 
 import { afterEach, describe, it, expect } from "vitest";
-import { setEngine, currentEngine, stripEsmExports, inlineDataImports, reset, isConnectClassError, reconnectDelay, installWispWatcher } from "../libcurl-transport-vendored";
+import { setEngine, currentEngine, stripEsmExports, inlineDataImports, reset, isConnectClassError, reconnectDelay, installWispWatcher, bustWispUrl } from "../libcurl-transport-vendored";
 import { setTransportState, onTransportState, transportState, waitForTransportState } from "../transport-lifecycle";
 
 describe("transport engine selection", () => {
@@ -80,6 +80,13 @@ describe("transport reset (#74)", () => {
     expect(isConnectClassError("Request failed with error code 56: Failure when receiving data from the peer")).toBe(true);
     expect(isConnectClassError("Request failed with error code 52: Server returned nothing (no headers, no data)")).toBe(true);
     expect(isConnectClassError(new TypeError("Request failed with error code 55: Failed sending data to the peer"))).toBe(true);
+    // #133: throttled wisp streams surface as error 35, the wedged
+    // socket afterwards as error 7 (local MAX_STREAMS_PER_CONNECTION=3 rig).
+    expect(isConnectClassError("Request failed with error code 35: SSL connect error")).toBe(true);
+    expect(isConnectClassError("Request failed with error code 7: Could not connect to server")).toBe(true);
+    expect(isConnectClassError("Request failed with error code 75: unassigned")).toBe(false);
+    expect(isConnectClassError("Request failed with error code 6: Could not resolve host")).toBe(false);
+    expect(isConnectClassError("Request failed with error code 3: URL using bad format")).toBe(false);
   });
 
   it("leaves ordinary failures alone", () => {
@@ -92,6 +99,29 @@ describe("transport reset (#74)", () => {
     setEngine("libcurl");
     expect(() => reset()).not.toThrow();
     expect(currentEngine()).toBe("libcurl");
+  });
+});
+
+/* #133: wisp connection-cache key bust (wedged-transport heal). */
+describe("wisp url bust (#133)", () => {
+  it("generation 0 rides the pristine URL (first init unchanged)", () => {
+    expect(bustWispUrl("wss://e.example/wisp/", 0)).toBe("wss://e.example/wisp/");
+    expect(bustWispUrl("wss://e.example/wisp/", -1)).toBe("wss://e.example/wisp/");
+  });
+
+  it("busts the cache key per generation without moving the pathname", () => {
+    const base = "wss://e.example/wisp/";
+    const g1 = bustWispUrl(base, 1);
+    const g2 = bustWispUrl(base, 2);
+    expect(g1).toBe("wss://e.example/wisp/?zlG=1/");
+    expect(g1).not.toBe(g2);
+    /* the watcher matches origin+pathname: the bust must not break it */
+    expect(new URL(g1).pathname).toBe(new URL(base).pathname);
+  });
+
+  it("normalizes a missing trailing slash and joins an existing query", () => {
+    expect(bustWispUrl("wss://e.example/wisp", 3)).toBe("wss://e.example/wisp/?zlG=3/");
+    expect(bustWispUrl("wss://e.example/wisp/?a=1", 4)).toBe("wss://e.example/wisp/?a=1/&zlG=4/");
   });
 });
 
