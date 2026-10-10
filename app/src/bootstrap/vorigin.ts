@@ -11,24 +11,28 @@
      a page-supplied claim, and installs it as a non-enumerable
      window.__zlVO.
    - the filter: page-registered "message" listeners (addEventListener
-     and window.onmessage) receive events whose origin is re-labelled
-     with ev.source.__zlVO when the sender carries the marker, and
-     whose source is re-labelled with the shared contentWindow proxy
-     when the sender is a child this realm has already read through
-     contentWindow (#132 identity: gstatic's channel establisher
-     checks ev.source === iframe.contentWindow, and the shimmed
-     getter hands out the proxy). Events from the engine itself
-     (worker pushes, unmarked frames, native child realms) keep
-     their native origin and source.
+     and window.onmessage) receive events whose source is re-labelled
+     with the shared contentWindow proxy when the sender is a child
+     this realm has already read through contentWindow (#132
+     identity: gstatic's channel establisher checks ev.source ===
+     iframe.contentWindow, and the shimmed getter hands out the
+     proxy). ev.origin deliberately stays the native ENGINE origin
+     (#132 follow-up: recipients such as the reCAPTCHA channel
+     establishers derive the origin they expect from the rewritten
+     src/co= URLs, which point at the engine; a virtual-origin
+     relabel made every origin check fail and the setup port was
+     never taken, so the widget timed out). Events from the engine
+     itself (worker pushes, unmarked frames, native child realms)
+     keep their native origin and source.
 
    Honest tradeoffs, deliberate (#32 relaxation, user-authorized):
    page-realm scripts can read their own site's origin from __zlVO at
    runtime (the destination still never enters the injected init
-   script), and a spoofed __zlVO can relabel a message with another
-   virtual site's origin - but every engine frame is already
-   same-origin scriptable, so no new capability is granted. Without
-   a controller, or when the reply never lands, the module installs
-   nothing and listeners keep the native engine-origin view. */
+   script); the marker no longer drives an origin relabel (see the
+   filter note above), it only feeds the sender-side parity checks
+   in postmsg. Without a controller, or when the reply never lands,
+   the module installs nothing and listeners keep the native
+   engine-origin view. */
 
 import { swc } from "./siteid";
 import { childProxyByFrame } from "./postmsg";
@@ -61,7 +65,7 @@ export function applyVirtualOrigin(w: Record<string, unknown>): void {
     return; // no channel: no marker, and no filter to feed
   }
 
-  /* ---- filter: re-label engine-origin message events ------------- */
+  /* ---- filter: re-label engine-origin message event sources ------ */
   const relabel = (ev: unknown): unknown => {
     const e = ev as { origin?: unknown; source?: unknown };
     if (!e || e.origin !== real) return ev;
@@ -85,13 +89,12 @@ export function applyVirtualOrigin(w: Record<string, unknown>): void {
         }
       }
     }
-    const vo = (src as Record<string, unknown> | null | undefined)?.__zlVO;
-    if (typeof vo !== "string" || !vo) return ev;
-    try {
-      Object.defineProperty(e, "origin", { get: () => vo, configurable: true });
-    } catch {
-      /* not redefinable: the listener sees the engine origin */
-    }
+    /* #132 follow-up: ev.origin deliberately stays the native ENGINE
+       origin. Channel establishers (reCAPTCHA gstatic among them)
+       derive the origin they expect from the rewritten src/co= URLs,
+       which point at the engine; relabeling to the sender's virtual
+       origin made every origin check fail and the setup port was
+       never taken (the widget timed out on exactly that). */
     return ev;
   };
 

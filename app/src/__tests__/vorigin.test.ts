@@ -75,7 +75,7 @@ describe("applyVirtualOrigin (#130)", () => {
     expect("__zlVO" in w).toBe(false);
   });
 
-  it("re-labels a marked sender's engine-origin event for addEventListener", () => {
+  it("keeps a marked sender's engine-origin event for addEventListener (#132 follow-up)", () => {
     const { w, listeners } = fakeWindow();
     stubController();
     applyVirtualOrigin(w);
@@ -92,7 +92,7 @@ describe("applyVirtualOrigin (#130)", () => {
     (fwd as Listener)(ev);
     expect(l).toHaveBeenCalledTimes(1);
     expect(l.mock.calls[0][0]).toBe(ev); // same event object
-    expect((ev as { origin: unknown }).origin).toBe("https://site.example");
+    expect((ev as { origin: unknown }).origin).toBe("https://engine.example");
   });
 
   it("leaves unmarked senders and foreign-origin events untouched", () => {
@@ -131,7 +131,7 @@ describe("applyVirtualOrigin (#130)", () => {
     expect(listeners.get("click")?.[0]).toBe(l);
   });
 
-  it("re-labels for window.onmessage assignments", () => {
+  it("re-labels source for window.onmessage assignments, origin stays native", () => {
     const { w } = fakeWindow();
     stubController();
     applyVirtualOrigin(w);
@@ -146,7 +146,7 @@ describe("applyVirtualOrigin (#130)", () => {
     };
     fwd(ev);
     expect(l).toHaveBeenCalledTimes(1);
-    expect((ev as { origin: unknown }).origin).toBe("https://site.example");
+    expect((ev as { origin: unknown }).origin).toBe("https://engine.example");
   });
 
   it("installs nothing without a controller (honest absence)", () => {

@@ -142,7 +142,14 @@ each realm asks the engine for its own virtual origin
 route, never a page-supplied claim) and marks its window with
 it, and page message listeners see events re-labelled with the
 sender's virtual origin - the unproxied view end to end, both
-postMessage call shapes covered. #131 repairs the last
+postMessage call shapes covered. A #132 follow-up (measured
+live) removes that origin relabel: recipients such as the
+reCAPTCHA channel establishers derive the origin they expect
+from the rewritten src/co= URLs, which point at the engine, so
+a virtual-origin relabel made every origin check fail and the
+setup port was never taken; ev.origin now deliberately stays
+the native engine origin while ev.source keeps the identity
+relabel. #131 repairs the last
 measured seam: that wrapper re-emits from its OWN realm, so the
 anchor's parent.postMessage arrived stamped with the page's window as ev.source (from=self) and the page's grecaptcha
 dropped it; each child now shadows its configurable window.parent
