@@ -162,3 +162,29 @@ describe("zl:teardown clears engine state (#87)", () => {
     expect(documentCookieRead("https://x.example/")).toBe("");
   });
 });
+
+describe("zl:getVirtualOrigin (#130)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org" } });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("answers a proxied page with its own route's origin", async () => {
+    const { ev, posted } = mkEvent(
+      "https://w.example.org/j/aHR0cHM6Ly93d3cuZ29vZ2xlLmNvbQ",
+      { type: "zl:getVirtualOrigin" },
+    );
+    await handleControlEvent(ev, deps);
+    expect(posted).toEqual([{ ok: true, vo: "https://www.google.com" }]);
+  });
+
+  it("fails closed for an undecodable route", async () => {
+    const { ev, posted } = mkEvent("https://w.example.org/j/abc", {
+      type: "zl:getVirtualOrigin",
+    });
+    await handleControlEvent(ev, deps);
+    expect(posted).toEqual([{ ok: true, vo: null }]);
+  });
+});

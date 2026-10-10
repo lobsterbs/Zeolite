@@ -126,27 +126,30 @@ bypass, no Google login flows. What we ship instead:
   honest signal, and which fingerprint profiles correlate with fewer
   challenges (that is the spoofing feedback loop).
 
-Honest gap (2026-10-09, verified live): Google reCAPTCHA widgets
+Honest gap (2026-10-10, verified live): Google reCAPTCHA widgets
 boot through the engine - api.js and the anchor load, the
 checkbox is clickable, and #127 restored the upstream Referer
 that an origin-only Referrer-Policy page would otherwise drop.
-#128 repairs same-site frame messaging: a page addressing its
-own frame by the virtual origin no longer has the message
-dropped by the browser (the payload is delivered locally with
-the intended origin; both call shapes are handled, including the
-legacy WebKit postMessage(msg, transfer[, targetOrigin]) order,
-whose exact argument list is replayed at the native boundary).
-#129 routes challenge-widget frames
-through the engine too: #120's provider-direct 302 was an IP
-leak (the #32 class) and left the anchor cross-origin, so the
-widget's postMessage to the embedder was dropped and the
-challenge spun; engine-routed, the #128 delivery carries the
-widget protocol end to end. What remains unfixable:
-unforgeable location reads inside frames (#32 class), a null
-ev.source on the synthetic path, and the datacenter IP failing
-Google's risk engine even on a direct headless load. The
-no-bypass rule stands; hCaptcha and Cloudflare Turnstile frames
-take the same engine-routed path.
+#129 routes challenge-widget frames through the engine too:
+#120's provider-direct 302 was an IP leak (the #32 class) and
+left the anchor cross-origin, so the widget's postMessage to the
+embedder was dropped and the challenge spun. #130 finishes the
+frame protocol: every engine frame is one real origin, so a
+virtual targetOrigin is rewritten to the engine origin and
+delivered natively (real ev.source, truly transferred ports);
+each realm asks the engine for its own virtual origin
+(zl:getVirtualOrigin, recovered worker-side from the client's
+route, never a page-supplied claim) and marks its window with
+it, and page message listeners see events re-labelled with the
+sender's virtual origin - the unproxied view end to end, both
+postMessage call shapes covered. Deliberate #32 relaxation
+(user-authorized): page-realm scripts can read their own site's
+origin at runtime; a spoofed marker grants nothing new, every
+engine frame is already same-origin scriptable. What remains
+unfixable: unforgeable location reads inside frames (#32 class)
+and the datacenter IP failing Google's risk engine even on a
+direct headless load. The no-bypass rule stands; hCaptcha and
+Cloudflare Turnstile frames take the same engine-routed path.
 ## Build order
 
 1. Network inspector ring + devtools streaming (it debugs the rest).

@@ -2,12 +2,13 @@
    <head> opens. Behavior patches only: storage scoping/virtualization,
    cookies, the worker port relay, WebSocket routing, the serviceWorker
    shim, the navigation guard (#28), the find loader (#29), the postMessage
-   targetOrigin repair (#128) and the cross-site channel isolation (#37). URL-level fetch/XHR need no
+   targetOrigin repair (#128), the virtual-origin marker + message-event
+   origin filter (#130) and the cross-site channel isolation (#37). URL-level fetch/XHR need no
    patch: pages navigate engine-local paths the SW intercepts.
 
    Source modules under ./bootstrap bundle into one synchronous
    artifact (patches must exist before page scripts run); the CI size
-   gate covers the built artifact. Budget: under 20 KiB minified.
+   gate covers the built artifact. Budget: under 23 KiB minified.
 
    Budget history (raises recorded in the workflow file): 5 KiB
    original, 6.5 for the #28 nav guard, 8 for the single-file
@@ -18,7 +19,9 @@
    dedicated-Worker hook, 19 for #106/#108 (popup activation guard,
    child-realm isolation), 20 for #109 (popup sync-open, relative
    navigation-bound re-emit), 21 for #121 (the zl:engineUpdate
-   reload listener). Deliberate raises, never creep.
+   reload listener), 22.5 for #128/#129 (the postMessage repair),
+   23 for #130 (virtual-origin marker + message-event origin
+   filter). Deliberate raises, never creep.
 
    Page-global contract (#32): window.__ZL = { site: "<opaque>" } -
    a per-site identity computed from the real destination, which
@@ -36,6 +39,7 @@ import { applyNavGuard } from "./bootstrap/navguard";
 import { applyFindLoad } from "./bootstrap/findload";
 import { applyUpdateReload } from "./bootstrap/update";
 import { applyPostMessage } from "./bootstrap/postmsg";
+import { applyVirtualOrigin } from "./bootstrap/vorigin";
 
 const w = window as unknown as Record<string, unknown>;
 const loc = w.location as Location;
@@ -60,3 +64,5 @@ applyFindLoad(w);
 applyUpdateReload(w);
 /* #128: same-site frame messaging repair (virtual targetOrigin). */
 applyPostMessage(w);
+/* #130: virtual-origin marker + message-event origin filter. */
+applyVirtualOrigin(w);

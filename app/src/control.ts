@@ -66,6 +66,7 @@ export interface ControlMessage {
     | "zl:getTracing"
     | "zl:wsOpen"
     | "zl:docCookie"
+    | "zl:getVirtualOrigin"
     | "zl:downloads"
     | "zl:cancelDownload"
     | "zl:pauseDownload"
@@ -494,6 +495,15 @@ case "zl:tracing":
       if (cid) registerDocCookiePort(cid, port, origin);
       break;
     }
+    case "zl:getVirtualOrigin": {
+      /* #130: this client's own virtual origin, recovered from the
+         sender's engine route (never a page-supplied claim). The page
+         marks its window so recipient frames can label engine-delivered
+         messages with the sender's virtual origin. Undecodable senders
+         fail closed (null: no marker installed). */
+      reply({ ok: true, vo: senderOrigin(e) });
+      break;
+    }
     case "zl:fingerprint":
       /* 1.8 Telluride: resolve + compile the profile, or drop back to
          fully native surfaces. */
@@ -828,6 +838,6 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag",
+  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag",
 ]);
 

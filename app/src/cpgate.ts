@@ -26,6 +26,10 @@ export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
   "zl:wsOpen",
   "zl:ext",
   "zl:ping",
+  /* #130: the page's OWN virtual origin, recovered worker-side from
+     the sender's route; a page-supplied claim is never read, so this
+     grants no cross-site capability. */
+  "zl:getVirtualOrigin",
 ]);
 
 /** Pathname half of the sender classification: true when a client at
