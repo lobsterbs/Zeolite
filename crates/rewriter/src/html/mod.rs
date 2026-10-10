@@ -2165,4 +2165,49 @@ mod tests {
             out
         );
     }
+
+    #[test]
+    fn vite_mapdeps_relative_assets_route_against_module_base() {
+        // #131: Vite's __vite__mapDeps dependency map is a plain
+        // string array of dot-relative asset paths. The runtime
+        // resolves them against the module URL before any fetch, so
+        // they must encode against the SCRIPT's base here - not the
+        // document's - or every chunk lands on an engine-origin path
+        // no referrer recovery can resolve correctly.
+        let base = "https://cdn.example.com/serp/_app/immutable/entry/app.js";
+        let mut c = cfg();
+        c.origin = "https://engine.example.org".to_string();
+        let mut r = Rewriter::new(c.clone());
+        r.set_base(base);
+        let js = r#"m.f=["../chunks/aB12.js","../nodes/0.Cd.js","../assets/app.css"];"#;
+        let out = r.rewrite_js_body(js);
+        for (dep, abs) in [
+            (
+                "../chunks/aB12.js",
+                "https://cdn.example.com/serp/_app/immutable/chunks/aB12.js",
+            ),
+            (
+                "../nodes/0.Cd.js",
+                "https://cdn.example.com/serp/_app/immutable/nodes/0.Cd.js",
+            ),
+            (
+                "../assets/app.css",
+                "https://cdn.example.com/serp/_app/immutable/assets/app.css",
+            ),
+        ] {
+            assert!(
+                out.contains(&format!("{}{}{}", '"', c.encode_url(abs), '"')),
+                "dep {} routed: {}",
+                dep,
+                out
+            );
+            assert!(!out.contains(dep), "raw dep {} gone: {}", dep, out);
+        }
+        // Idempotent: a second pass over the routed output keeps
+        // every route single-wrapped.
+        let mut r2 = Rewriter::new(c);
+        r2.set_base(base);
+        let twice = r2.rewrite_js_body(&out);
+        assert_eq!(twice, out);
+    }
 }

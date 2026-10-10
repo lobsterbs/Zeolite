@@ -91,6 +91,14 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
                         out.push_str(&rewrite_quoted_body(inner, enc));
                     }
                     out.push(q);
+                } else if unesc.is_none() && looks_like_rel_asset(inner) {
+                    // #131: never route escaped literals (the same
+                    // rule as rewrite_quoted_body - broken JS is
+                    // worse than a missed rewrite the runtime paths
+                    // still recover).
+                    out.push(q);
+                    out.push_str(&enc(inner.trim()));
+                    out.push(q);
                 } else {
                     out.push_str(&js[i..i + 1 + close + 1]);
                 }
@@ -294,6 +302,35 @@ fn looks_like_url(s: &str) -> bool {
     t.starts_with("//") && t.len() > 3 && t.as_bytes()[2].is_ascii_alphanumeric()
 }
 
+/// #131: dot-relative web-asset literals. Bundlers ship dependency
+/// maps as plain string arrays (Vite's __vite__mapDeps:
+/// "../chunks/x.js", "./app.css"), and the runtime resolves them
+/// against the module's URL before any fetch or import - the SW only
+/// ever sees an engine-origin path that every referrer-based recovery
+/// resolves against the wrong base (the document, not the module).
+/// Route them like absolute URL literals: enc resolves against the
+/// serving script's own base. ponytail: the gate is a dot prefix plus
+/// a static web-asset extension, no whitespace, no escapes; root-
+/// relative and bare filenames stay untouched (document-base
+/// resolution at runtime + the bootstrap fetch wrapper are correct
+/// there). Widen the extension list only on a live site that needs
+/// it - a string that merely looks like an asset path but is used in
+/// equality or string surgery is the false-positive ceiling.
+fn looks_like_rel_asset(s: &str) -> bool {
+    // Whitespace gate sees the raw literal: a padded string stays
+    // untouched instead of being trimmed into a route.
+    if s.chars().any(|c| c.is_ascii_whitespace()) || s.contains('\\') {
+        return false;
+    }
+    if !(s.starts_with("./") || s.starts_with("../")) {
+        return false;
+    }
+    let lower = s.to_ascii_lowercase();
+    [".js", ".mjs", ".css", ".wasm"]
+        .iter()
+        .any(|e| lower.ends_with(e))
+}
+
 /// #75: the JSON escaped-slash form. Undo it only when it is the sole
 /// escape form in the literal; any other backslash sequence returns
 /// None (the literal is left untouched by the caller).
@@ -480,7 +517,7 @@ mod tests {
     fn import_meta_and_property_access_untouched() {
         // import.meta: no string follows the token. x.from(...) and
         // cfg.import(...): the '.' guard excludes property access.
-        let js = "import.meta.url; const u = x.from('./keep.js'); cfg.import('./keep2.js');";
+        let js = "import.meta.url; const u = x.from('./keep'); cfg.import('pkg/x');";
         let out = rewrite_script(js, &|u| format!("[{}]", u));
         assert_eq!(out, js);
     }
@@ -494,5 +531,27 @@ mod tests {
         assert!(out.contains("No matches from "), "{}", out);
         assert!(out.contains(".concat(w,"), "{}", out);
         assert!(out.contains(r"'[https://x.example/a.js]'"), "{}", out);
+    }
+
+    #[test]
+    fn rel_asset_literals_route() {
+        // #131: bundler dependency maps carry dot-relative asset
+        // paths as plain strings (Vite __vite__mapDeps); they must
+        // route at serve time exactly like absolute URL literals.
+        let js = r#"m.f||(m.f=["../nodes/0.A.js","./a.css","../b/x.mjs"]);"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[../nodes/0.A.js]""#), "{}", out);
+        assert!(out.contains(r#""[./a.css]""#), "{}", out);
+        assert!(out.contains(r#""[../b/x.mjs]""#), "{}", out);
+    }
+
+    #[test]
+    fn rel_asset_gates_stay_conservative() {
+        // No dot prefix, no web-asset extension, whitespace, escapes:
+        // every one of those stays verbatim (the runtime referrer
+        // recovery still handles genuine fetch-time relatives).
+        let js = r#"var a="x.js",b="../api/data",c="./y\n.js",d="../z.txt",e=" ./q.js";"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
     }
 }
