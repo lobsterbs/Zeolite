@@ -50,6 +50,7 @@ import { wispTransport } from "./transport";
 
 import { virtualOriginHeaders, virtualRefererFallback } from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
+import { recordAssetBase, recoverFlatAsset } from "./assetbases";
 import { applySetCookie, cookieHeaderFor, isPassChallenge, jarHeaders, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
@@ -1602,6 +1603,32 @@ export function handleFetch(e: FetchEvent): void {
             );
           }
           curStage = "UPSTREAM_RESPONSE";
+          /* #134: runtime-built module asset names (React chunks mint
+             <hash>.module.css at runtime) resolve against the page
+             origin and 404 there; the real assets sit on CDN bases
+             the page itself already loaded script/style from. Record
+             those bases on successful cross-origin script/style loads,
+             then retry a failed flat-named script/style against them. */
+          if (resp.status === 200 && (dest === "script" || dest === "style") && initiator)
+            recordAssetBase(initiator, target);
+          if (resp.status >= 400 && (dest === "script" || dest === "style")) {
+            const rec = await recoverFlatAsset(initiator ?? "", target, dest, e.request.headers, (u2, init2) =>
+              wispTransport.fetch(u2, init2));
+            if (rec) {
+              DIAG.emit({
+                traceId,
+                requestId: traceId,
+                category: "REWRITE",
+                severity: "info",
+                stage: "UPSTREAM_RESPONSE",
+                message: "flat module asset recovered against an observed asset base (#134)",
+                url: target,
+              });
+              hopUrl = rec.url;
+              resp = rec.resp;
+            }
+          }
+
           DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
           /* A 3xx that escaped the hop loop - cap reached, a hop whose
              one-shot body cannot replay, or no resolvable Location - is
