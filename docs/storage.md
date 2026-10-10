@@ -102,7 +102,11 @@ engine-origin-wide channel leaks across sites unless it is scoped
   real name; the page-visible `.name` keeps the page's spelling, so
   two virtual sites never hear each other.
 - **window.name**: scoped through the site-scoped sessionStorage;
-  same-site reloads keep it, another virtual site starts empty.
+  same-site reloads keep it, another virtual site starts empty. A fresh
+  context seeds its real browsing-context name from its frame element
+  (#132: recaptcha's bframe resolves its anchor through it, so an empty
+  name broke the widget's cross-frame channel); top-level windows have
+  no frame element and still start empty.
 - **cookieStore**: it reads the real engine-origin cookie jar, not
   the virtual per-site jar, and its async/change-event semantics
   cannot be built on the jar without faking. It is removed at

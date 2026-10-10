@@ -15,7 +15,12 @@
    - window.name: one browsing context is reused across virtual sites
      and the raw value survives the switch. It is scoped through the
      (already site-scoped) sessionStorage: reloads and same-site
-     navigations keep it, another virtual site starts from empty.
+     navigations keep it, another virtual site starts from empty. A
+     fresh context seeds its real browsing-context name from the frame
+     element (#132 follow-up: gstatic's recaptcha bframe resolves its
+     anchor by name, parent.frames["a-<id>"], so an empty name broke
+     the widget's cross-frame channel); top-level windows have no
+     frame element and still start from empty.
    - cookieStore: it reads the real engine-origin cookie jar, not the
      virtual per-site jar. It cannot be implemented correctly on top of
      the jar (async semantics, change events) without faking, so it is
@@ -190,7 +195,21 @@ export function applyIsolation(
       const KEY = "__zl-name";
       let nm = "";
       try {
-        nm = SS.getItem(KEY) ?? "";
+        const cur = SS.getItem(KEY);
+        nm = cur ?? "";
+        if (cur === null) {
+          /* #132 follow-up: fresh scoped context - keep the browsing
+             context's real name (recaptcha's bframe resolves its
+             anchor through it: parent.frames["a-<id>"]). Top-level
+             windows (no frame element) still start empty. */
+          try {
+            const fe = (w as { frameElement?: Element | null }).frameElement;
+            const attr = fe?.getAttribute("name") ?? "";
+            if (attr) nm = attr;
+          } catch {
+            /* frameElement unreadable (cross-origin): empty start */
+          }
+        }
       } catch {
         /* storage threw: name starts empty */
       }

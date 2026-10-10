@@ -172,6 +172,38 @@ describe("#37 isolation", () => {
     expect((b.w as { name: unknown }).name).toBe("");
   });
 
+  it("window.name seeds from frameElement on a fresh context (#132)", () => {
+    const session = fakeStore();
+    const P = "zl:aaa:";
+    const el = {
+      getAttribute: (n: string) => (n === "name" ? "c-7f3a" : null),
+    };
+    const a1 = fakeWindow(undefined, session.store);
+    a1.w.frameElement = el;
+    isolate(a1.w, P);
+    expect((a1.w as { name: unknown }).name).toBe("c-7f3a");
+    // Same site, fresh context: restored from the scoped store.
+    const a2 = fakeWindow(undefined, session.store);
+    a2.w.frameElement = el;
+    isolate(a2.w, P);
+    expect((a2.w as { name: unknown }).name).toBe("c-7f3a");
+    // Page writes still win and persist.
+    (a2.w as { name: unknown }).name = "renamed";
+    expect((a2.w as { name: unknown }).name).toBe("renamed");
+    // No frame element (top-level): empty start.
+    const top = fakeWindow(undefined, fakeStore().store);
+    isolate(top.w, P);
+    expect((top.w as { name: unknown }).name).toBe("");
+    // A fresh store for another site seeds from its own frame element.
+    const bel = {
+      getAttribute: (n: string) => (n === "name" ? "a-1b2c" : null),
+    };
+    const b = fakeWindow(undefined, fakeStore().store);
+    b.w.frameElement = bel;
+    isolate(b.w, "zl:bbb:");
+    expect((b.w as { name: unknown }).name).toBe("a-1b2c");
+  });
+
   it("BroadcastChannel moves to a prefixed real name, page spelling kept", () => {
     const a = fakeWindow();
     const b = fakeWindow();
