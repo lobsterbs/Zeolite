@@ -100,6 +100,27 @@ describe("rewriteModuleWorkerImports", () => {
     expect(decodePath(out2.match(/import\("([^"]+)"\)/)![1])).toBe("https://api.site/c.js");
   });
 
+  it("#134 nested templates keep backtick parity: the import after still rewrites", () => {
+    const src = "const a=" + BT + "x ${b?" + BT + "inner" + BT + ":c} y" + BT + ";const m=import(\"./lazy.js\");";
+    const out = rewriteModuleWorkerImports(P, W, E, src);
+    expect(decodePath(out.match(/import\("([^"]+)"\)/)![1])).toBe("https://api.site/lazy.js");
+  });
+
+  it("#134 the play2048 shape: a URL template before the import no longer swallows it", () => {
+    const src =
+      'o.map(e=>' + BT + '${e}' + BT + ').join("\\n");return' + BT + 'https://docs.google.com/${s}' + BT + '});' +
+      'const Bg={en:()=>pt(()=>import("./index-BynxPbO3.js"),[])}';
+    const out = rewriteModuleWorkerImports(P, W, E, src);
+    expect(out).not.toContain('import("./index-BynxPbO3.js")');
+    expect(decodePath(out.match(/import\("([^"]+)"\)/)![1])).toBe("https://api.site/index-BynxPbO3.js");
+  });
+
+  it("#134 quotes and comments inside ${ } substitutions keep parity", () => {
+    const src = "const t=" + BT + "a ${JSON.stringify({k:\"v\"}) /* c */} b" + BT + ";import(\"./z.js\")";
+    const out = rewriteModuleWorkerImports(P, W, E, src);
+    expect(decodePath(out.match(/import\("([^"]+)"\)/)![1])).toBe("https://api.site/z.js");
+  });
+
   it("follows the rotated prefix", () => {
     setScheme("/zl/");
     const out = rewriteModuleWorkerImports("/zl/", W, E, 'import "./a.js";');

@@ -32,13 +32,18 @@
    specifiers are rewritten only in code context.
 
    Honest limits, all missed-rewrite (never corruption): template
-   literals are opaque text to the pass (their ${...} expressions are
-   not rewritten); from/import as property names (x.from = "...") are
-   left alone; the regex/division discrimination is heuristic (same
+   literals scan with ${ } substitution awareness (#134: an opaque
+   first-backtick scan inverted parity on nested templates and a
+   phantom line comment then swallowed play2048's entry chunk), but
+   their substitution EXPRESSIONS are never rewritten and a regex
+   literal inside a substitution is not discriminated;
+   from/import as property names (x.from = "...") are left alone;
+   the regex/division discrimination is heuristic (same
    keyword/preceding-byte rule as the wasm scanner, tuned so false
    positives copy verbatim and false negatives only miss rewrites that
    the runtime bootstrap and decode-side referrer recovery still
    handle). */
+
 
 import { encodeDest, isEnginePath, setScheme } from "./codec";
 
@@ -112,10 +117,10 @@ function isIdPart(c: number): boolean {
   return isIdStart(c) || (c >= 48 && c <= 57);
 }
 
-/** Closing quote of the literal opened at `from` (exclusive start),
-    or -1: EOF or a newline inside a normal string (malformed JS).
-    Templates scan to their closing backtick: the whole template,
-    including its substitutions, is opaque text. */
+/** Closing quote of the normal string opened at `from` (exclusive
+    start), or -1: EOF or a newline inside the literal (malformed JS).
+    Templates do NOT come here: a ${ } substitution may hold nested
+    quotes and templates, so they scan in findTemplateEnd. */
 function findStringEnd(src: string, from: number, quote: number): number {
   for (let i = from; i < src.length; i++) {
     const c = src.charCodeAt(i);
@@ -124,7 +129,92 @@ function findStringEnd(src: string, from: number, quote: number): number {
       continue;
     }
     if (c === quote) return i;
-    if (quote !== 96 /* ` */ && (c === 10 || c === 13)) return -1;
+    if (c === 10 || c === 13) return -1;
+  }
+  return -1;
+}
+
+/** Closing backtick of the template opened before `from`, or -1.
+    #134: this pass used to scan a template as opaque text to the
+    FIRST backtick, so a nested template inside a ${ } substitution
+    closed the outer template early and inverted backtick parity for
+    the rest of the file. On play2048's entry chunk the inverted scan
+    then read the "//" of "https://docs.google.com/..." as a line
+    comment that swallowed 100KB of code - including the lazy-chunk
+    import() specifier the page needed, which resolved against the
+    engine route and MIME-failed. Substitutions now scan as
+    expressions so nested quotes and templates keep the parity
+    honest; the pass still never rewrites inside a substitution. */
+function findTemplateEnd(src: string, from: number): number {
+  const n = src.length;
+  let i = from;
+  while (i < n) {
+    const c = src.charCodeAt(i);
+    if (c === 92 /* \\ */) {
+      i += 2;
+      continue;
+    }
+    if (c === 96 /* ` */) return i;
+    if (c === 36 /* $ */ && i + 1 < n && src.charCodeAt(i + 1) === 123 /* { */) {
+      const j = findTemplateExprEnd(src, i + 2);
+      if (j === -1) return -1;
+      i = j + 1;
+      continue;
+    }
+    i++;
+  }
+  return -1;
+}
+
+/** Closing '}' of the ${ } substitution opened before `from`, or -1.
+    Tracks brace depth; skips nested strings (with escapes), line and
+    block comments, and nested templates (recursively). Honest limit:
+    a regex literal inside a substitution is not discriminated, so
+    braces or quotes inside one can mis-scan - a missed rewrite at
+    worst, never corruption. */
+function findTemplateExprEnd(src: string, from: number): number {
+  const n = src.length;
+  let depth = 1;
+  let i = from;
+  while (i < n) {
+    const c = src.charCodeAt(i);
+    if (c === 92 /* \\ */) {
+      i += 2;
+      continue;
+    }
+    if (c === 34 /* " */ || c === 39 /* ' */) {
+      const e = findStringEnd(src, i + 1, c);
+      if (e === -1) return -1;
+      i = e + 1;
+      continue;
+    }
+    if (c === 96 /* ` */) {
+      const e = findTemplateEnd(src, i + 1);
+      if (e === -1) return -1;
+      i = e + 1;
+      continue;
+    }
+    if (c === 47 /* / */ && i + 1 < n) {
+      const d = src.charCodeAt(i + 1);
+      if (d === 47 /* / */) {
+        const nl = src.indexOf("\n", i);
+        if (nl === -1) return -1;
+        i = nl + 1;
+        continue;
+      }
+      if (d === 42 /* * */) {
+        const e = src.indexOf("*/", i + 2);
+        if (e === -1) return -1;
+        i = e + 2;
+        continue;
+      }
+    }
+    if (c === 123 /* { */) depth++;
+    else if (c === 125 /* } */) {
+      depth--;
+      if (depth === 0) return i;
+    }
+    i++;
   }
   return -1;
 }
@@ -225,7 +315,21 @@ export function rewriteModuleWorkerImports(
       lastWord = "";
       continue;
     }
-    if (c === 34 || c === 39 || c === 96) {
+    if (c === 96) {
+      const end = findTemplateEnd(src, i + 1);
+      if (end !== -1) {
+        out += src.slice(i, end + 1);
+        i = end + 1;
+        lastSig = 120; /* a template literal is a value */
+        lastWord = "";
+        continue;
+      }
+      /* Unterminated template: the remainder is the template's text;
+         nothing after it can be rewritten. */
+      out += src.slice(i);
+      break;
+    }
+    if (c === 34 || c === 39) {
       const end = findStringEnd(src, i + 1, c);
       if (end !== -1) {
         out += src.slice(i, end + 1);
@@ -233,12 +337,6 @@ export function rewriteModuleWorkerImports(
         lastSig = 120; /* a string literal is a value */
         lastWord = "";
         continue;
-      }
-      if (c === 96) {
-        /* Unterminated template: the remainder is the template's text;
-           nothing after it can be rewritten. */
-        out += src.slice(i);
-        break;
       }
       /* Unterminated normal quote: treat the opener as a plain byte
          (the wasm scanner's recover) so one malformed literal cannot
