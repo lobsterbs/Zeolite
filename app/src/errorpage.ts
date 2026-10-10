@@ -101,6 +101,12 @@ export interface ErrorPageInput {
   traceId?: string;
   /** HTTP status the engine answered this navigation with. */
   status?: number;
+  /** Failure attribution: "engine" marks an engine-internal failure
+      (rewrite, route machinery) - the page then says plainly that
+      this is a Zeolite bug and asks for a report. "upstream" (and
+      absent) stay neutral: a TLS or DNS failure is the network
+      truth, not an engine defect to report. */
+  attribution?: "engine" | "upstream";
 }
 
 /** The engine error document. Pure and deterministic: same input,
@@ -114,6 +120,7 @@ export function errorPage(input: ErrorPageInput): string {
     ...(reason ? { reason } : {}),
     ...(input.traceId ? { traceId: input.traceId } : {}),
     ...(typeof input.status === "number" ? { status: input.status } : {}),
+    ...(input.attribution ? { attribution: input.attribution } : {}),
   });
   const row = (k: string, v: string): string =>
     `
@@ -141,6 +148,7 @@ pre { display: inline-block; text-align: left; max-width: 100%;
   color: #6b6b70; margin: 0 0 1.5em; overflow-x: auto; }
 h1 { font-size: 1.0625rem; font-weight: 600; margin: 0 0 .4em; }
 p { margin: 0 0 1.5em; color: #6b6b70; }
+p.zlbug { color: #b3261e; }
 dl { font: .8125rem/1.8 ui-monospace, Menlo, Consolas, monospace;
   color: #6b6b70; margin: 0 0 1.75em; }
 dl > div { display: flex; gap: 1.25em; text-align: left; }
@@ -153,6 +161,7 @@ button:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }
 @media (prefers-color-scheme: dark) {
   body { background: #0f0f10; color: #e8e8ea; }
   pre, p, dl { color: #9b9ba0; }
+  p.zlbug { color: #ff8a80; }
 }
 </style>
 </head>
@@ -161,6 +170,7 @@ button:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }
 <pre>${esc(LOGO)}</pre>
 <h1>Could not load this page</h1>
 <p>${esc(CATEGORY_TEXT[input.category])}</p>
+${input.attribution === "engine" ? `<p class="zlbug">This is a Zeolite engine bug, not a problem with the site. Please report it: https://github.com/lobsterbs/Zeolite/issues (include the Trace ID).</p>` : ""}
 <dl>${rows}
 </dl>
 <form method="get" action="${esc(input.route)}"><button type="submit">Try again</button></form>

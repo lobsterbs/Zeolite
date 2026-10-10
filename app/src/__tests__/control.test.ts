@@ -218,3 +218,52 @@ describe("zl:config imageLazy toggle (lazy images host push)", () => {
     expect(r.imageLazy).toBe(true);
   });
 });
+
+import { loadEnter, loadLeave, loadResetForTests } from "../loadstate";
+
+describe("zl:loadState dispatch (loading indicator)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org" } });
+    loadResetForTests();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    loadResetForTests();
+  });
+
+  it("reports the per-host in-flight count and stream count", async () => {
+    const { replies, reply } = mkReplies();
+    loadEnter("https://a.example.org/x");
+    loadEnter("https://a.example.org/y");
+    loadEnter("https://b.example.org/z");
+    await dispatchCore({ type: "zl:loadState", host: "a.example.org" } as unknown as ControlMessage, {
+      e: {} as ExtendableMessageEvent,
+      reply,
+      port: {},
+      persistRoute: async () => {},
+    });
+    expect(replies).toEqual([{ ok: true, inflight: 2, streams: 0 }]);
+    loadLeave("https://a.example.org/x");
+    loadLeave("https://a.example.org/y");
+    loadLeave("https://b.example.org/z");
+  });
+
+  it("answers the global count when no host is given", async () => {
+    const { replies, reply } = mkReplies();
+    loadEnter("https://a.example.org/x");
+    await dispatchCore({ type: "zl:loadState" } as unknown as ControlMessage, {
+      e: {} as ExtendableMessageEvent,
+      reply,
+      port: {},
+      persistRoute: async () => {},
+    });
+    expect(replies).toEqual([{ ok: true, inflight: 1, streams: 0 }]);
+    loadLeave("https://a.example.org/x");
+  });
+
+  it("refuses a proxied-page sender (host-only gate)", async () => {
+    const { ev, posted } = mkEvent("https://w.example.org/j/abc", { type: "zl:loadState" });
+    await handleControlEvent(ev, deps);
+    expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
+  });
+});

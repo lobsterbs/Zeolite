@@ -103,3 +103,34 @@ describe("errorPage", () => {
     }
   });
 });
+
+describe("errorPage attribution (engine bug reporting)", () => {
+  it("marks engine-internal failures plainly and links the issue tracker", () => {
+    const p = errorPage({
+      route: "/j/x",
+      category: "stream",
+      engineVersion: "v",
+      reason: "rewriter wasm panicked",
+      traceId: "t9",
+      status: 502,
+      attribution: "engine",
+    });
+    expect(p).toContain("This is a Zeolite engine bug");
+    expect(p).toContain("github.com/lobsterbs/Zeolite/issues");
+    expect(p).toContain("attribution&quot;:&quot;engine&quot;");
+    expect(p).toContain("p class=" + String.fromCharCode(34) + "zlbug" + String.fromCharCode(34));
+  });
+
+  it("keeps upstream failures neutral: no report line", () => {
+    const p = errorPage({
+      route: "/j/x",
+      category: "tls",
+      engineVersion: "v",
+      status: 502,
+      attribution: "upstream",
+    });
+    expect(p).not.toContain("engine bug");
+    expect(p).not.toContain("github.com/lobsterbs");
+    expect(p).toContain("attribution&quot;:&quot;upstream&quot;");
+  });
+});

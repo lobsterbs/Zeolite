@@ -8,6 +8,7 @@
    WebSocket opening and the live engine name are re-exported through
    the same seam; WS bridging stays in sw.ts (#88). */
 import { DIAG } from "./diag";
+import { loadEnter, loadLeave } from "./loadstate";
 import { transportState, waitForTransportState } from "./transport-lifecycle";
 import { ZL_WISP_URL } from "./config";
 import {
@@ -113,32 +114,41 @@ function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
-  /* #119: the lifecycle machine (not the dead-but-present client)
-     owns the answer to whether the transport is alive. A request
-     landing in the dead window waits for the reconnect instead of
-     racing it. */
-  if (transportState() === "dead") {
-    await waitForTransportState("connected", WAIT_FOR_RECONNECT_MS);
-  }
-  await ensureCurl();
+  /* Loading-indicator accounting (zl:loadState): the transport seam
+     is the one place every upstream request passes through, so the
+     in-flight counter rides it; the finally covers every settle
+     path (success, honest failure, retry). */
+  loadEnter(dest);
   try {
-    return await withDeadline(zlCurlFetch(dest, init), WISP_TTFB_DEADLINE_MS);
-  } catch (err) {
-    if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw err;
-    DIAG.emit({
-      category: "TRANSPORT",
-      severity: "error",
-      message:
-        err instanceof WispStallError
-          ? "transport stall: no first byte within " + WISP_TTFB_DEADLINE_MS + "ms; reset, retrying once"
-          : "transport failure; reset, retrying once on a fresh connection",
-      technicalReason: String(err),
-      url: ZL_WISP_URL,
-    });
-    zlCurlReset();
-    curlReady = null; // force re-init inside the next ensureCurl()
+    /* #119: the lifecycle machine (not the dead-but-present client)
+       owns the answer to whether the transport is alive. A request
+       landing in the dead window waits for the reconnect instead of
+       racing it. */
+    if (transportState() === "dead") {
+      await waitForTransportState("connected", WAIT_FOR_RECONNECT_MS);
+    }
     await ensureCurl();
-    return withDeadline(zlCurlFetch(dest, init), WISP_TTFB_DEADLINE_MS);
+    try {
+      return await withDeadline(zlCurlFetch(dest, init), WISP_TTFB_DEADLINE_MS);
+    } catch (err) {
+      if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw err;
+      DIAG.emit({
+        category: "TRANSPORT",
+        severity: "error",
+        message:
+          err instanceof WispStallError
+            ? "transport stall: no first byte within " + WISP_TTFB_DEADLINE_MS + "ms; reset, retrying once"
+            : "transport failure; reset, retrying once on a fresh connection",
+        technicalReason: String(err),
+        url: ZL_WISP_URL,
+      });
+      zlCurlReset();
+      curlReady = null; // force re-init inside the next ensureCurl()
+      await ensureCurl();
+      return withDeadline(zlCurlFetch(dest, init), WISP_TTFB_DEADLINE_MS);
+    }
+  } finally {
+    loadLeave(dest);
   }
 }
 

@@ -20,7 +20,12 @@ service worker answers with a minimal HTML page it owns:
   engine route (no scripts, so it works on a cold cache);
 - a machine-readable `<meta name="zl-error">` payload (JSON:
   category, engine version, route, and when known: reason, traceId,
-  status) for embedders and DevTools.
+  status, attribution) for embedders and DevTools;
+- an attribution line when the failure is engine-internal (a
+  rewrite or route-machinery failure): the page says plainly that
+  this is a Zeolite bug, not the site's fault, and links the issue
+  tracker with the trace id. Transport and network failures stay
+  neutral (the upstream truth is not an engine defect).
 
 Since #32 the page never prints the destination URL. The address bar
 already shows the opaque engine route of the failed navigation;

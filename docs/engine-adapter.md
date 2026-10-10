@@ -101,6 +101,7 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 | `zl:siteRoute` | `site`, `enabled` | per-site interception toggle (403 when disabled) |
 | `zl:teardown` | - | drop all SW caches, `unregister()` |
 | `zl:find` | `dest`, `cmd` (`find`/`next`/`prev`/`clear`), `pattern`, `options` (`caseSensitive`, `wholeWord`, `wrap`) | in-page find in the addressed proxied document (#29): the page-side finder replies `{ ok, matches, ordinal (1-based), highlight }`; open shadow roots searched, CSS Custom Highlight API where available (`highlight: "none"` = counts only). Addressing is controller-side: `dest` selects the client SW-side and the findLoad message posted to the page carries no destination (#32) |
+| `zl:loadState` | `host?` | loading-indicator query: in-flight upstream request count for one destination host (absent = the global sum) plus the rewrite streams currently pumping; TTFB semantics (a request counts until its headers arrive or it fails). Host-only: proxied-page senders are refused |
 
 Page-internal messages (sent by the injected bootstrap, not the host
 app): `zl:wsOpen` (`url`, `protocols`, optional `origin`) bridges a

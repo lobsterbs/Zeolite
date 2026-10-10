@@ -24,6 +24,8 @@ import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade,
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
 import { currentEngine, wispTransport } from "./transport";
+import { loadInflight } from "./loadstate";
+import { activeStreams } from "./streams-alive";
 import { contextOf } from "./vctx";
 import { wsBridge } from "./ws-runtime";
 import type { PortLike } from "./wsbridge";
@@ -82,7 +84,8 @@ export interface ControlMessage {
     | "zl:find"
     | "zl:getJars"
     | "zl:clearJar"
-    | "zl:transport";
+    | "zl:transport"
+  | "zl:loadState";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -371,6 +374,18 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       }
       break;
     }
+case "zl:loadState": {
+  /* Host-only loading-indicator query: how many upstream requests
+     for a destination host (absent host = the global sum) are
+     still in flight, plus the rewrite streams currently pumping.
+     TTFB semantics: a request counts until its headers arrive or
+     it fails; document bodies rewriting past TTFB are the
+     streams number. Refused for proxied-page senders by the gate
+     above: the counts must not enumerate other sites. */
+  const host = typeof (msg as { host?: unknown }).host === "string" ? (msg as { host?: string }).host : undefined;
+  reply({ ok: true, inflight: loadInflight(host || undefined), streams: activeStreams() });
+  break;
+}
 case "zl:tracing":
       /* 1.2 Halide: opt-in rewrite tracing ring. Off by default;
          resets to off on SW restart, so the host re-sends it. */
@@ -842,6 +857,6 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag",
+  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState",
 ]);
 

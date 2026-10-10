@@ -18,6 +18,7 @@
      zl:sameSite policy | zl:importSession mode rule
      zl:getJars | zl:clearJar profile origin
      zl:downloadState id status | zl:listMenus extId
+     zl:loadState host (loading indicator poll)
 
    Host-only gate (#41): proxied pages are SW clients too, so
    control messages are host-only; a proxied document may send only

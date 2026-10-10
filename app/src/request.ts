@@ -2116,6 +2116,7 @@ export function handleFetch(e: FetchEvent): void {
                 reason: String(err),
                 traceId,
                 status: 502,
+                attribution: failure.cause === "upstream" ? "upstream" : "engine",
               }),
               { status: 502, headers: { "content-type": "text/html; charset=utf-8" } },
             );
