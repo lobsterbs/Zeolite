@@ -14,7 +14,7 @@
    turns those into the header decisions a real browser would have made.
    Pure code: no self.location, no fetch, trivially testable. */
 
-import { decodePath } from "./codec";
+import { decodePath, recoverPath, unwrapDest } from "./codec";
 
 export interface VirtualOriginHeaders {
   /** Origin value to send; absent = send none. */
@@ -87,8 +87,13 @@ export function senderVirtualOrigin(
     return null;
   }
   if (cu.origin !== engineOrigin) return null;
-  const dest = decodePath(cu.pathname);
-  if (!dest) return null;
+  /* #112 directory-shaped routes carry a plaintext tail after the
+      keyed token, so decodePath alone fails; retry with recoverPath -
+      the same MAC-verified recovery the request engine uses - and
+      peel nested routes the same way it does. */
+  const raw = decodePath(cu.pathname) ?? recoverPath(cu.pathname);
+  if (!raw) return null;
+  const dest = unwrapDest(raw);
   let du: URL;
   try {
     du = new URL(dest);

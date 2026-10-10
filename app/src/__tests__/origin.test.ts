@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { senderVirtualOrigin, virtualOriginHeaders, virtualRefererFallback } from "../origin";
-import { encodeDest, setScheme } from "../codec";
+import { b64uEncode, encodeDest, setRouteKeys, setScheme } from "../codec";
 
 describe("virtualOriginHeaders (issue #23: upstream Origin / Sec-Fetch-Site)", () => {
   const PAGE = "https://chatgpt.com/";
@@ -85,6 +85,15 @@ describe("senderVirtualOrigin (bug-scout: control-message sender verification)",
     setScheme("/zl/");
     expect(senderVirtualOrigin("https://engine.host/", ENGINE)).toBeNull();
     expect(senderVirtualOrigin("https://engine.host/devtools.html", ENGINE)).toBeNull();
+  });
+
+  it("recovers the sender's origin from a directory-shaped route (#112)", () => {
+    setScheme("/zl/");
+    setRouteKeys([b64uEncode(new Uint8Array(16).fill(7))]);
+    const dir =
+      "https://engine.host" + encodeDest("https://www.google.com/recaptcha/enterprise") + "/api2/anchor?ar=1&k=1";
+    expect(senderVirtualOrigin(dir, ENGINE)).toBe("https://www.google.com");
+    setRouteKeys([]);
   });
 
   it("fails closed for a foreign-origin sender", () => {
