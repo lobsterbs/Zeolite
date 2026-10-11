@@ -85,6 +85,37 @@ function activeOrigins(): Array<{ origin: string; cookies: Cookie[] }> {
   return out;
 }
 
+
+/* ---- cookies.onChanged (LB #76: more APIs) ------------------------ */
+
+/* Fires for extension-driven set/remove (cause explicit). Upstream
+   Set-Cookie jar merges are not surfaced yet; compat.ts documents
+   that gap instead of firing half the truth for page traffic. */
+export interface CookieChange {
+  cause: "explicit";
+  removed: boolean;
+  cookie: Record<string, unknown>;
+}
+
+export type CookieChangeListener = (change: CookieChange) => void;
+
+const cookieListeners = new Set<CookieChangeListener>();
+
+export function onCookieChanged(l: CookieChangeListener): () => void {
+  cookieListeners.add(l);
+  return () => cookieListeners.delete(l);
+}
+
+function emitCookieChange(change: CookieChange): void {
+  for (const l of cookieListeners) {
+    try {
+      l(change);
+    } catch {
+      /* a listener must never break the API call */
+    }
+  }
+}
+
 /** Permission + shape gate shared by every call. Returns the parsed
     URL facts, or an error string. */
 function gate(ext: ExtensionRecord, url: unknown): UrlFacts | string {
@@ -205,7 +236,11 @@ export function cookiesSet(
      secure, ...) resolves to null, never a fake view. */
   const r = documentCookieWrite(String(details.url), parts.join("; "));
   if (!r.stored && !r.deleted) return Promise.resolve(null);
-  return cookiesGet(ext, { url: details.url, name });
+  const rep = cookiesGet(ext, { url: details.url, name });
+  void rep.then((c) => {
+    if (c) emitCookieChange({ cause: "explicit", removed: !!r.deleted, cookie: c });
+  });
+  return rep;
 }
 
 export function cookiesRemove(
@@ -239,5 +274,15 @@ export function cookiesRemove(
     const [domain, hostOnly, cpath] = t.split("|");
     return { name, domain, hostOnly: hostOnly === "1", path: cpath };
   });
-  return Promise.resolve(jarRemoveIdentities(ids) > 0 ? { url: String(details.url), name } : null);
+  const removedIds = jarRemoveIdentities(ids);
+  if (removedIds > 0) {
+    for (const id of ids) {
+      emitCookieChange({
+        cause: "explicit",
+        removed: true,
+        cookie: { name, domain: id.domain, hostOnly: id.hostOnly, path: id.path },
+      });
+    }
+  }
+  return Promise.resolve(removedIds > 0 ? { url: String(details.url), name } : null);
 }

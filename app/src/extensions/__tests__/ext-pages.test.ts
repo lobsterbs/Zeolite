@@ -11,6 +11,7 @@ import {
 } from "../serve";
 import { handleExtPageCall, pageCallList } from "../pageapi";
 import { MESSENGER } from "../context";
+import { dispatchExtControl } from "../control";
 import type { ExtensionRecord } from "../types";
 
 const enc = new TextEncoder();
@@ -31,6 +32,25 @@ let seq = 0;
 async function install(name: string, perms: string[], files: Record<string, string> = {}): Promise<ExtensionRecord> {
   await extensions.startup();
   const { id } = await extensions.installFiles(pkg(name + " #" + seq++, perms, files));
+  return extensions.get(id)!;
+}
+
+/* Options-page fixture: the manifest must DECLARE the options page
+   for zl:openExtPage to resolve it (pageExt only ships the file). */
+async function optsPageExt(): Promise<ExtensionRecord> {
+  await extensions.startup();
+  const manifest = {
+    manifest_version: 2,
+    name: "OptsPage #" + seq++,
+    version: "1.0",
+    permissions: [],
+    options_page: "options.html",
+  };
+  const m = new Map<string, Uint8Array>([
+    ["manifest.json", enc.encode(JSON.stringify(manifest))],
+    ["options.html", enc.encode(PAGE_HTML)],
+  ]);
+  const { id } = await extensions.installFiles(m);
   return extensions.get(id)!;
 }
 
@@ -236,5 +256,43 @@ describe("extension pages (#40)", () => {
     /* No SW-observed page destination: fails closed. */
     const anon = await serveExtensionAsset(js.req, js.url, { nav: false });
     expect(anon.status).toBe(404);
+  });
+});
+
+describe("zl:openExtPage dispatch (LB #76 open-options button)", () => {
+  it("mints a token-bearing URL that serves the options page", async () => {
+    const rec = await optsPageExt();
+    const replies: unknown[] = [];
+    await dispatchExtControl(
+      { type: "zl:openExtPage", extId: rec.id, which: "options" } as never,
+      { e: {} as ExtendableMessageEvent, reply: (p: unknown) => replies.push(p) },
+    );
+    const r = replies[0] as { ok: boolean; url?: string; error?: string };
+    expect(r.ok).toBe(true);
+    expect(r.url).toBeTruthy();
+    expect(r.url!.startsWith(EXT_ROUTE + rec.id + "/options.html?zlPageTok=")).toBe(true);
+    const u = new URL("https://sw.example" + r.url);
+    const served = await serveExtensionAsset(new Request(u.href), u, {
+      nav: true,
+      resultingClientId: "open1",
+    });
+    expect(served.status).toBe(200);
+    expect(await served.text()).toContain("options");
+  });
+
+  it("answers honestly for a missing page or unknown extension", async () => {
+    const rec = await optsPageExt();
+    const replies: unknown[] = [];
+    const reply = (p: unknown) => replies.push(p);
+    await dispatchExtControl(
+      { type: "zl:openExtPage", extId: rec.id, which: "popup" } as never,
+      { e: {} as ExtendableMessageEvent, reply },
+    );
+    expect(replies[0]).toMatchObject({ ok: false, error: "no such popup page" });
+    await dispatchExtControl(
+      { type: "zl:openExtPage", extId: "f".repeat(32), which: "options" } as never,
+      { e: {} as ExtendableMessageEvent, reply },
+    );
+    expect(replies[1]).toMatchObject({ ok: false, error: "no such options page" });
   });
 });

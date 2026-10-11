@@ -245,6 +245,66 @@ function pathMatch(reqPath: string, cookiePath: string): boolean {
   return reqPath.startsWith(cookiePath) && (cookiePath.endsWith("/") || reqPath[cookiePath.length] === "/");
 }
 
+/* RFC 6265 5.1.1 cookie-date parser (the tough-cookie algorithm).
+   Cookie dates are not ISO dates: JS Date.parse accepts formats
+   the cookie grammar rejects and can reject dates it must accept.
+   Tokenize on the RFC 6265 delimiter set (0x9, 0x20-0x2F, 0x3B-0x40,
+   0x5B-0x60, 0x7B-0x7E; ":" is NOT a delimiter, it lives inside the
+   time token), find time, day-of-month, month and year, apply the
+   2-digit-year windowing, and fail closed. */
+const COOKIE_MONTHS: Record<string, number> = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+
+export function parseCookieDate(s: string): number | null {
+  let hour = -1, minute = -1, second = -1;
+  let day = -1, month = -1, year = -1;
+  let foundTime = false, foundDay = false, foundMonth = false, foundYear = false;
+  let overflowDay = 0;
+  for (const tok of s.split(/[\x09\x20-\x2F\x3B-\x40\x5B-\x60\x7B-\x7E]+/)) {
+    if (!tok) continue;
+    if (!foundTime) {
+      const m = /^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/.exec(tok);
+      if (m) {
+        hour = Number(m[1]);
+        minute = Number(m[2]);
+        second = m[3] === undefined ? 0 : Number(m[3]);
+        foundTime = true;
+        continue;
+      }
+    }
+    if (!foundDay) {
+      const m = /^(\d{1,2})(?!\d)/.exec(tok);
+      if (m) {
+        const d = Number(m[1]);
+        if (d >= 1 && d <= 31) { day = d; foundDay = true; continue; }
+        if (!overflowDay && d >= 60 && d <= 99) { overflowDay = d; continue; }
+      }
+    }
+    if (!foundMonth) {
+      const mm = /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.exec(tok);
+      if (mm) { month = COOKIE_MONTHS[mm[1].toLowerCase()]; foundMonth = true; continue; }
+    }
+    if (!foundYear) {
+      const m = /^(\d{2,4})(?!\d)/.exec(tok);
+      if (m) {
+        let y = Number(m[1]);
+        if (m[1].length === 2) y = y >= 70 ? 1900 + y : 2000 + y;
+        year = y; foundYear = true; continue;
+      }
+    }
+  }
+  if (overflowDay && day === -1) {
+    /* day-of-month > 31: clamp per the 5.1.1 overflow rule */
+    day = overflowDay - 1;
+    if (day >= 1 && day <= 31) foundDay = true;
+  }
+  if (!foundTime || !foundDay || !foundMonth || !foundYear) return null;
+  if (year < 1601 || hour > 23 || minute > 59 || second > 59) return null;
+  return Date.UTC(year, month, day, hour, minute, second);
+}
+
 /** Parse and admit one Set-Cookie header for a response URL.
     Rejects (hard gate) any cookie whose Domain does not scope the
     response host. Deletion follows max-age<=0 or an already-past
@@ -309,8 +369,11 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
         break;
       }
       case "expires": {
-        const t = Date.parse(val);
-        if (!Number.isNaN(t)) {
+        /* 5.1.1 grammar, not Date.parse: cookie dates are their own
+           format and the jar must not accept (or reject) them by
+           ISO rules. */
+        const t = parseCookieDate(val);
+        if (t !== null && !Number.isNaN(t)) {
           expires = t;
           hasExpires = true;
         }

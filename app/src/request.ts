@@ -30,7 +30,6 @@ import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitReco
 import { loadPolicy, policyMatch, type CompiledPolicy } from "./policy";
 import { relayFetch } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
-import { httpsUpgraded } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, siteUaFor, type ResourceType } from "./rules";
@@ -58,7 +57,7 @@ import { applySetCookie, cookieHeaderFor, isPassChallenge, jarHeaders, type Cook
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
    control plane are call sites. */
-import { getFpProfile, getFpWorkerScript, isHttpsUpgrade, navHandlesEnabled, pushDocCookieView, setHttpsUpgrade, setNavHandles, setRouteKey, siteDisabled, siteProfileFor, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, pushDocCookieView, setHttpsUpgrade, setNavHandles, setRouteKey, siteDisabled, siteProfileFor, VCTX, ZEOLITE_VERSION } from "./swstate";
 
 import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, serveExtensionAsset } from "./extensions";
 
@@ -977,7 +976,29 @@ export function handleFetch(e: FetchEvent): void {
         if (handleDest) {
           dest0 = handleDest;
         } else if (e.request.mode === "navigate") {
-          return navOutcome(e, url, 404, "route", "zeolite: bad or expired navigation handle");
+          /* #144: pathname-routed SPAs parked on the opaque handle
+             route push location.pathname-built URLs as
+             <handle>/<suffix> navigations. Recover them with the
+             same tail semantics the fetch strand uses (#143): the
+             suffix appends to the token destination own page
+             path, the requesting client context as the base when
+             one exists. A bare expired or rotated handle keeps
+             the honest 404 strand, and a suffix that recovers to
+             nothing strands too - never a guess. */
+          const navhNavSlash = navhTail.indexOf("/");
+          const navhNavCtx = navhNavSlash >= 0 ? contextOf(VCTX, e.clientId) : null;
+          const navhNavRec =
+            navhNavSlash >= 0
+              ? navhTailDest(
+                  navhTail,
+                  navhNavCtx ? navhNavCtx.currentUrl : null,
+                  looksKeyedToken(currentPrefix() + navhTail.slice(0, navhNavSlash)),
+                  decodeNavHandle,
+                )
+              : null;
+          if (!navhNavRec)
+            return navOutcome(e, url, 404, "route", "zeolite: bad or expired navigation handle");
+          dest0 = navhNavRec;
         } else {
           /* #143 follow-up: a page parked on the opaque handle route
              cannot read its real path (LegacyUnforgeable location),
@@ -989,8 +1010,8 @@ export function handleFetch(e: FetchEvent): void {
              the handle token as the context-less fallback;
              token-shaped tails that do not decode keep the honest
              404 (a rotation strand, never a guess). Navigations
-             never recover: a suffix-bearing or undecodable
-             navigation is a strand. */
+             recover in their own branch above (#144); this fetch
+             branch strands only what recovers to nothing. */
           const navhCtx = contextOf(VCTX, e.clientId);
           /* Token shape is a property of the head segment: a
              suffix-bearing tail is never one token, and a bare tail
@@ -1196,7 +1217,20 @@ export function handleFetch(e: FetchEvent): void {
          same-origin paths, foreign-origin requests) resolves here
          before cache or transport; mixed-content subresources and
          redirect targets pass the same seam on their own fetch. */
-      target = httpsUpgraded(target, isHttpsUpgrade());
+      /* LB #76 HTTPS-only: the error page proceed-anyway link reloads
+         the route with zlHttpOk=1. That click exempts the destination
+         host from the upgrade for this SW session (never persisted),
+         and the marker is stripped so the upstream never sees it. */
+      if (url.searchParams.get("zlHttpOk") === "1") {
+        httpExemptAdd(target);
+        if (routeCarriesQuery && url.search) {
+          const q = new URLSearchParams(url.searchParams);
+          q.delete("zlHttpOk");
+          const qs = q.toString();
+          target = qs ? bareDest + "?" + qs : bareDest;
+        }
+      }
+      target = destUpgraded(target);
       /* #52 parity with the server-side anubis bridge: the challenge
          page's return URL was rewritten into an engine route, so the
          pass-challenge request carries redir pointing at the engine
@@ -1503,7 +1537,7 @@ export function handleFetch(e: FetchEvent): void {
           });
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
         }
-        if (ruleDec.url || ic.url) target = httpsUpgraded(ic.url ?? ruleDec.url ?? target, isHttpsUpgrade());
+        if (ruleDec.url || ic.url) target = destUpgraded(ic.url ?? ruleDec.url ?? target);
 
         /* Cache-first for proxied GETs. */
         if (e.request.method === "GET") {
@@ -1744,7 +1778,7 @@ export function handleFetch(e: FetchEvent): void {
             }
             /* #53: the engine-side hop chain bypasses the fetch
                choke point, so each hop upgrades here too. */
-            next = httpsUpgraded(next, isHttpsUpgrade());
+            next = destUpgraded(next);
             if (resp.status === 307 || resp.status === 308) {
               if (hopBody) break; /* one-shot stream: cannot replay */
             } else if (resp.status === 303 || hopMethod === "POST") {
@@ -2313,6 +2347,7 @@ export function handleFetch(e: FetchEvent): void {
                 traceId,
                 status: 502,
                 attribution: failure.cause === "upstream" ? "upstream" : "engine",
+                httpProceed: httpProceedHref(url) ?? undefined,
               }),
               { status: 502, headers: { "content-type": "text/html; charset=utf-8" } },
             );
@@ -2339,6 +2374,33 @@ export function handleFetch(e: FetchEvent): void {
     own query, exactly like a normal engine route. Token decode is
     MAC-verified, so a foreign path that merely looks like a route
     fails closed and passes through untouched. */
+/** LB #76 HTTPS-only: the proceed-anyway link for a navigation that
+    failed after the upgrade. The route still encodes the original
+    cleartext destination, so the page can offer exactly one
+    escape: reload this route with zlHttpOk=1, which exempts the
+    host for the session and fetches it over cleartext. Null when
+    the upgrade is off, the route does not decode to a cleartext
+    destination, or the host is already exempt. */
+export function httpProceedHref(url: URL): string | null {
+  if (!isHttpsUpgrade()) return null;
+  let orig: string | null = null;
+  try {
+    if (url.pathname.startsWith(NAVH + "/")) {
+      const t = url.pathname.slice(NAVH.length + 1).split(/[?#]/)[0];
+      orig = decodeNavHandle(t.split("/")[0]);
+    } else if (isEnginePath(url.pathname)) {
+      orig = decodePath(url.pathname);
+      if (!orig) orig = recoverPath(url.pathname);
+    }
+  } catch {
+    orig = null;
+  }
+  if (!orig || !orig.startsWith("http://")) return null;
+  if (httpExemptHas(orig)) return null;
+  const sep = url.search ? "&" : "?";
+  return url.pathname + url.search + sep + "zlHttpOk=1";
+}
+
 /** #143 follow-up: recover the destination of a NAVH-prefix tail that
     is not a bare handle token. Suffix-bearing tails (<token>/<suffix>)
     are page-built appends to location.pathname: resolve the suffix

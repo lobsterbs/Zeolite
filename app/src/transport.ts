@@ -21,6 +21,7 @@ import {
   openWebSocket,
   type TransportEngine,
 } from "./libcurl-transport-vendored";
+import { relayAvailable, relayFetch } from "./relayfetch";
 
 export { currentEngine, openWebSocket, type TransportEngine };
 
@@ -87,7 +88,67 @@ async function ensureCurl(): Promise<void> {
    imported by request.ts, importing back would close a module cycle.
    The abandoned fetch keeps running after the deadline fires; its
    answer is dropped, never served. */
-const WISP_TTFB_DEADLINE_MS = 30_000;
+let WISP_TTFB_DEADLINE_MS = 30_000;
+
+/* 2026-10-11 YouTube-class stall storm (user diag): one wedged wisp
+   socket makes every in-flight request eat the full 30s TTFB
+   deadline, and each one resets and retries the same singleton, so a
+   media-heavy page hangs in a reset storm instead of failing fast.
+   After STALL_THRESHOLD stalls within STALL_WINDOW_MS the transport
+   enters a cooldown: requests ride the embedder relay first when a
+   channel is registered (#137) and otherwise still try wisp (a
+   standalone embed has no relay; hard-failing would break it for the
+   whole window). Any first-byte success clears the window and the
+   cooldown: one delivered answer is evidence the socket is healthy
+   again. The cooldown expires on its own. */
+const STALL_WINDOW_MS = 60_000;
+const STALL_THRESHOLD = 3;
+const COOLDOWN_MS = 60_000;
+const stallTimes: number[] = [];
+let cooldownUntil = 0;
+
+function transportCooling(): boolean {
+  return Date.now() < cooldownUntil;
+}
+
+function recordStall(): void {
+  const now = Date.now();
+  stallTimes.push(now);
+  while (stallTimes.length > 0 && now - stallTimes[0] > STALL_WINDOW_MS) stallTimes.shift();
+  if (stallTimes.length >= STALL_THRESHOLD && now >= cooldownUntil) {
+    cooldownUntil = now + COOLDOWN_MS;
+    DIAG.emit({
+      category: "TRANSPORT",
+      severity: "warning",
+      message:
+        "wisp stall storm: " +
+        stallTimes.length +
+        " stalls within " +
+        STALL_WINDOW_MS / 1000 +
+        "s; relay-first cooldown for " +
+        COOLDOWN_MS / 1000 +
+        "s",
+      url: ZL_WISP_URL,
+    });
+  }
+}
+
+function stallClear(): void {
+  stallTimes.length = 0;
+  cooldownUntil = 0;
+}
+
+/* Test hooks: the deadline is the production value, tests shrink it
+   and reset the storm state between cases. */
+export function transportResetForTests(deadlineMs: number): void {
+  WISP_TTFB_DEADLINE_MS = deadlineMs;
+  stallTimes.length = 0;
+  cooldownUntil = 0;
+}
+
+export function wispCoolingForTests(): boolean {
+  return transportCooling();
+}
 
 /* #119: how long a request that arrives while the transport is
    known-dead waits for the reconnect before proceeding on the
@@ -120,6 +181,24 @@ async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
      path (success, honest failure, retry). */
   loadEnter(dest);
   try {
+    /* Stall-storm cooldown: prefer the embedder relay while the wisp
+       socket is known to wedge; without a channel (or for a body the
+       relay cannot carry) fall through to the wisp path honestly. */
+    if (transportCooling() && relayAvailable()) {
+      const relayInit = {
+        method: init?.method ?? "GET",
+        headers: init?.headers instanceof Headers ? init.headers : new Headers(init?.headers),
+        body: init?.body as string | ArrayBuffer | null | undefined,
+      };
+      const rr = await relayFetch(dest, relayInit, "");
+      if (rr) return rr;
+      DIAG.emit({
+        category: "TRANSPORT",
+        severity: "info",
+        message: "cooldown relay could not carry this request; trying wisp",
+        url: dest,
+      });
+    }
     /* #119: the lifecycle machine (not the dead-but-present client)
        owns the answer to whether the transport is alive. A request
        landing in the dead window waits for the reconnect instead of
@@ -129,9 +208,14 @@ async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
     }
     await ensureCurl();
     try {
-      return await withDeadline(zlCurlFetch(dest, init), WISP_TTFB_DEADLINE_MS);
+      const resp = await withDeadline(zlCurlFetch(dest, init), WISP_TTFB_DEADLINE_MS);
+      /* A first-byte success is evidence the socket is healthy:
+         clear the storm window and any cooldown. */
+      stallClear();
+      return resp;
     } catch (err) {
       if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw err;
+      if (err instanceof WispStallError) recordStall();
       DIAG.emit({
         category: "TRANSPORT",
         severity: "error",

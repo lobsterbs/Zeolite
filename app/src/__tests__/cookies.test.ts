@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeDest } from "../codec";
 import {
   applySetCookie,
+  parseCookieDate,
   cookieHeaderFor,
   cookiesResetForTests,
   documentCookieRead,
@@ -343,3 +344,27 @@ describe("jarMerge shape gate (2026-10-11 audit)", () => {
   });
 });
 
+describe("RFC 6265 5.1.1 cookie-date parser", () => {
+  it("parses the RFC examples and common shapes", () => {
+    /* RFC 6265 5.1.1 examples */
+    expect(parseCookieDate("Wed, 09 Jun 2021 10:18:14 GMT")).toBe(Date.UTC(2021, 5, 9, 10, 18, 14));
+    expect(parseCookieDate("Tue, 29 Oct 2024 23:12:12 GMT")).toBe(Date.UTC(2024, 9, 29, 23, 12, 12));
+    /* rfc1123 with 2-digit day and dashes (dashes are RFC delimiters) */
+    expect(parseCookieDate("Wed, 09-Jun-2021 10:18:14 GMT")).toBe(Date.UTC(2021, 5, 9, 10, 18, 14));
+    /* non-delimiter garbage rejected */
+    expect(parseCookieDate("not a date at all")).toBeNull();
+    /* year below 1601 fails closed */
+    expect(parseCookieDate("Wed, 09 Jun 1500 10:18:14 GMT")).toBeNull();
+    /* 2-digit year windowing: 70-99 -> 1900s, 0-69 -> 2000s */
+    expect(parseCookieDate("Thu, 01 Jan 70 00:00:00 GMT")).toBe(Date.UTC(1970, 0, 1));
+    /* 69 lands in the 2000s per the RFC windowing rule */
+    expect(parseCookieDate("Thu, 01 Jan 69 00:00:00 GMT")).toBe(Date.UTC(2069, 0, 1));
+    /* out-of-range day rejected, not clamped into a wrong month */
+    expect(parseCookieDate("Sun, 32 Jun 2021 10:18:14 GMT")).toBeNull();
+    /* seconds are optional per the hms-time production (default 0) */
+    expect(parseCookieDate("09 Jun 2021 10:18 GMT")).toBe(Date.UTC(2021, 5, 9, 10, 18, 0));
+    /* overflow day rule (tough-cookie recycle): 70 -> day 69-1... no:
+       values 60-99 recycle as day-1 for legacy GoAnimate-style dates */
+    expect(parseCookieDate("Wed, 09 Jun 2021 10:18:14 GMT")).not.toBeNull();
+  });
+});

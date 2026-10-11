@@ -107,6 +107,11 @@ export interface ErrorPageInput {
       absent) stay neutral: a TLS or DNS failure is the network
       truth, not an engine defect to report. */
   attribution?: "engine" | "upstream";
+  /** LB #76: when the original destination was cleartext and the
+      HTTPS-only upgrade failed, the page offers one proceed-anyway
+      link (this site, this session). The href is engine-computed
+      (zlHttpOk=1); the marker is stripped before the upstream. */
+  httpProceed?: string;
 }
 
 /** The engine error document. Pure and deterministic: same input,
@@ -174,6 +179,7 @@ ${input.attribution === "engine" ? `<p class="zlbug">This is a Zeolite engine bu
 <dl>${rows}
 </dl>
 <form method="get" action="${esc(input.route)}"><button type="submit">Try again</button></form>
+${input.httpProceed ? `<form method="get" action="${esc(input.httpProceed)}" style="margin-top:.75em"><button type="submit">Proceed over HTTP (this site, this session)</button></form>` : ""}
 </main>
 </body>
 </html>

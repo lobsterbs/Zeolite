@@ -64,6 +64,7 @@ export interface ControlMessage {
     | "zl:installExtFiles"
     | "zl:extEnable"
     | "zl:extInfo"
+    | "zl:extUninstall"
     | "zl:adblock"
     | "zl:tracing"
     | "zl:getTracing"

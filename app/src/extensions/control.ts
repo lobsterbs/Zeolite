@@ -166,6 +166,22 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
       );
       break;
     }
+    case "zl:extUninstall": {
+      /* UI -> SW (LB #76): remove an installed extension for real.
+         The manager owns the cleanup (record, storage, menus,
+         alarms, background); the reply refreshes the panel. */
+      if (typeof msg.extId !== "string" || !msg.extId) {
+        reply({ ok: false, error: "bad zl:extUninstall" });
+        break;
+      }
+      e.waitUntil(
+        extensions.uninstall(msg.extId).then(
+          () => reply({ ok: true }),
+          (err) => reply({ ok: false, error: String(err) }),
+        ),
+      );
+      break;
+    }
     case "zl:extInfo": {
       /* UI -> SW: one extension's detail card. The panel already has
          the summary from zl:listExt; this adds the manifest surface
@@ -406,6 +422,6 @@ async function handleExtMessage(
 // labels the switch in dispatchExtControl below handles. control.test.ts
 // pins it against that switch.
 export const EXT_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ext", "zl:tabs", "zl:listExt", "zl:installExt", "zl:installExtFiles", "zl:extEnable", "zl:extInfo", "zl:menuClick", "zl:listMenus", "zl:notifyEvent", "zl:extPage", "zl:openExtPage", "zl:downloadState",
+  "zl:ext", "zl:tabs", "zl:listExt", "zl:installExt", "zl:installExtFiles", "zl:extEnable", "zl:extInfo", "zl:extUninstall", "zl:menuClick", "zl:listMenus", "zl:notifyEvent", "zl:extPage", "zl:openExtPage", "zl:downloadState",
 ]);
 

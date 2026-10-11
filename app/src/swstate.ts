@@ -27,6 +27,7 @@ import {
   type FingerprintProfile,
 } from "./fingerprint";
 import { ruleFor, ruleProfile, siteRules } from "./siteconfig";
+import { httpsUpgraded } from "./config";
 import { currentEngine } from "./transport";
 
 export const ZEOLITE_VERSION = "3.0 Diamond";
@@ -67,7 +68,7 @@ let routeKeyB64: string | null = null;
    point and per redirect hop, so the engine never fetches cleartext
    while it is on. No silent downgrade: a failed https fetch fails
    through the normal error pipeline. */
-let httpsUpgrade = false;
+let httpsUpgrade = true;
 /* #63: opt-in refusal of the plaintext ?url= initial navigation.
    Hosts adopt zl:navHandle and flip this so the legacy embed can no
    longer appear browser-visible on the deployment. Persists with the
@@ -89,6 +90,43 @@ export function isHttpsUpgrade(): boolean {
 
 export function setHttpsUpgrade(on: boolean): void {
   httpsUpgrade = on;
+}
+
+/* ---- HTTPS-only proceed-anyway (LB #76) ---------------------------- */
+
+/* Hosts the user explicitly allowed over cleartext through the
+   error page proceed link (zlHttpOk=1). Ephemeral like the toggle:
+   resets on SW restart, the host re-sends the toggle and the user
+   can re-allow. A session-scoped user decision, never persisted,
+   never silent. */
+const httpExempt = new Set<string>();
+
+function hostOf(dest: string): string | null {
+  try {
+    return new URL(dest).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+export function httpExemptAdd(dest: string): void {
+  const h = hostOf(dest);
+  if (h) httpExempt.add(h);
+}
+
+export function httpExemptHas(dest: string): boolean {
+  const h = hostOf(dest);
+  if (!h) return false;
+  for (const site of httpExempt) {
+    if (h === site || h.endsWith("." + site)) return true;
+  }
+  return false;
+}
+
+/** The upgrade choke point with the exemption folded in: on only
+    when the toggle is on and the host is not user-exempt. */
+export function destUpgraded(dest: string): string {
+  return httpsUpgraded(dest, isHttpsUpgrade() && !httpExemptHas(dest));
 }
 
 export function navHandlesEnabled(): boolean {

@@ -27,7 +27,9 @@ import type {
   NotificationClosedListener,
   ButtonClickedListener,
 } from "./notifications";
-import { cookiesGet, cookiesGetAll, cookiesSet, cookiesRemove } from "./cookies";
+import { cookiesGet, cookiesGetAll, cookiesSet, cookiesRemove, onCookieChanged } from "./cookies";
+import type { CookieChangeListener } from "./cookies";
+import { isApiDetached } from "./apis";
 import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
 import type { ExtensionStorageArea, StorageValue } from "./storage";
@@ -374,6 +376,7 @@ export function buildApi(
           getAll: (d?: Record<string, unknown>) => cookiesGetAll(ext, d),
           set: (d: Record<string, unknown> = {}) => cookiesSet(ext, d),
           remove: (d: Record<string, unknown> = {}) => cookiesRemove(ext, d),
+          onChanged: bridged<CookieChangeListener>((l) => onCookieChanged(l)),
         };
       })()
     : undefined;
@@ -506,20 +509,19 @@ export function buildApi(
 
   const browser: Record<string, unknown> = {
     runtime,
-    ...(storageNs ? { storage: storageNs } : {}),
+    ...(storageNs && !isApiDetached("storage") ? { storage: storageNs } : {}),
     tabs: tabsNs,
     windows: windowsNs,
     scripting: scriptingNs,
-    webNavigation: webNavigationNs,
-    contextMenus: contextMenusNs,
-    menus: contextMenusNs,
-    downloads: downloadsNs,
+    ...(isApiDetached("webNavigation") ? {} : { webNavigation: webNavigationNs }),
+    ...(isApiDetached("menus") ? {} : { contextMenus: contextMenusNs, menus: contextMenusNs }),
+    ...(isApiDetached("downloads") ? {} : { downloads: downloadsNs }),
     permissions: permissionsNs,
-    management: managementNs,
-    ...(webRequestNs ? { webRequest: webRequestNs } : {}),
-    ...(alarmsNs ? { alarms: alarmsNs } : {}),
-    ...(notificationsNs ? { notifications: notificationsNs } : {}),
-    ...(cookiesNs ? { cookies: cookiesNs } : {}),
+    ...(isApiDetached("management") ? {} : { management: managementNs }),
+    ...(webRequestNs && !isApiDetached("webRequest") ? { webRequest: webRequestNs } : {}),
+    ...(alarmsNs && !isApiDetached("alarms") ? { alarms: alarmsNs } : {}),
+    ...(notificationsNs && !isApiDetached("notifications") ? { notifications: notificationsNs } : {}),
+    ...(cookiesNs && !isApiDetached("cookies") ? { cookies: cookiesNs } : {}),
   };
   /* Firefox-style chrome.* alias over the same implementations. */
   return { browser, chrome: browser };

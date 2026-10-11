@@ -64,6 +64,8 @@ Zeolite does not depend on LobsterBrowse and can be built as a standalone engine
 - **Virtual origins** — per-site cookie jars and storage namespaces.
 - **Cross-origin subresource routing** — proxied clients route foreign HTTP(S) requests through the engine; host-app traffic remains direct.
 - **Opaque page identity** — destination URLs can remain engine-side while pages use opaque routes.
+- **HTTPS-only by default** — `http://` destinations upgrade to `https://`; when a site has no TLS the error page offers a one-click proceed-over-HTTP that exempts that host for the session (#144 adjacent, LB #76).
+- **Modular extension APIs** — optional `browser.*` namespaces (alarms, cookies, downloads, management, menus, notifications, storage, webNavigation, webRequest) can be detached and reattached at runtime; detached namespaces are absent from the surface so feature detection stays honest.
 - **WebSocket bridge** — page WebSockets can be carried through the engine; plaintext `ws://` is upgraded to `wss://` by design.
 - **Downloads** — streamed, cancellable download tracking with persistent registry state.
 - **Session export/import** — encrypted AES-256-GCM session data with replace and merge modes.
@@ -130,9 +132,14 @@ as engine bugs, environmental walls, or documented design limits.
 
 - **SPA routers that branch on `location.pathname`** (play2048.co, some
   Google AI Mode surfaces) render their own client-side 404 view because
-  the page identity is opaque by design. Reintroducing a plaintext
-  destination would fix the class at a privacy cost and is a recorded
-  design decision, not a bug.
+  the page identity is opaque by design. `window.location` is
+  `[LegacyUnforgeable]`, so no page shim can virtualize it. #144 narrows
+  the class: navigations that append a real path to an opaque route token
+  are recovered to the true destination server-side (`navhTailDest`),
+  which is why github.com appends now boot. Routers that branch on the
+  bare opaque token without a path suffix remain unfixable without
+  reintroducing a plaintext destination, a recorded design decision, not
+  a bug.
 - **Runtime-constructed asset names** - single-segment script/style names
   built by page code at runtime (github.com module CSS) are recovered by
   the global observed asset-base heuristic (#134).
