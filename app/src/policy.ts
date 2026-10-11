@@ -39,6 +39,11 @@ export interface PolicyRule {
   types: Set<ResourceType> | null;
   /** Short operator explanation for diagnostics. */
   reason: string | null;
+  /** #138: "rewrite" upgrades native onto the rewrite path;
+      "native" demotes the JS literal pass for proven hosts.
+      #137: "relay" moves the fetch onto the embedder's network
+      stack for TLS-fingerprint-blocked hosts. */
+  route: "rewrite" | "native" | "relay";
 }
 
 export interface CompiledPolicy {
@@ -129,9 +134,9 @@ export function compilePolicy(source: string): CompiledPolicy {
       if (types.size === 0) types = null;
     }
     const rv = child(node, "route")?.args[0];
-    if (rv !== "rewrite") {
+    if (rv !== "rewrite" && rv !== "native" && rv !== "relay") {
       throw new Error(
-        'policy: rule "' + id + '": route must be "rewrite" (native is the default; required rewrites cannot be demoted)',
+        'policy: rule "' + id + '": route must be "rewrite", "native" or "relay"',
       );
     }
     let reason: string | null = null;
@@ -150,6 +155,7 @@ export function compilePolicy(source: string): CompiledPolicy {
       path,
       types,
       reason,
+      route: rv,
     });
   }
   return { rules };

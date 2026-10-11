@@ -59,6 +59,29 @@ export function isFlatPath(pathname: string): boolean {
   return /^\/[^/]+$/.test(pathname);
 }
 
+/** #143: runtime-built module assets are minted against the
+    page DIRECTORY too, not just the origin root: github repo
+    pages resolved React chunk css as
+    /<owner>/<repo>/<chunk>.<hash>.module.css, which the root-only
+    flat gate rejected, so no CDN retry ever fired and the React
+    app never booted. Accept a short path whose FINAL segment is
+    the minted name; deeper paths must carry a content hash or a
+    .module. marker so page routes are never retried against
+    CDN bases. */
+export function isRecoverableAssetPath(pathname: string): boolean {
+  const segs = pathname.split("/").filter(Boolean);
+  const last = segs.length ? segs[segs.length - 1] : "";
+  if (!last) return false;
+  if (segs.length === 1) return true;
+  if (segs.length > 4) return false;
+  return /[0-9a-f]{6,}/i.test(last) || last.includes(".module.");
+}
+
+/** Observed-base count for the diagnostics at the fetch seam. */
+export function assetBaseCount(initiator: string): number {
+  return (assetBases.get(originOf(initiator)) ?? []).length;
+}
+
 function mimeOkFor(dest: string, ct: string): boolean {
   const c = (ct || "").split(";")[0].trim().toLowerCase();
   if (dest === "style") return c === "text/css";
@@ -106,13 +129,14 @@ export async function recoverFlatAsset(
   } catch {
     return null;
   }
-  if (!isFlatPath(u.pathname)) return null;
+  if (!isRecoverableAssetPath(u.pathname)) return null;
   const safe = new Headers();
   for (const h of ["user-agent", "accept", "accept-language"]) {
     const v = reqHeaders.get(h);
     if (v) safe.set(h, v);
   }
-  const flat = u.pathname.slice(1);
+  const flat = u.pathname.split("/").filter(Boolean).pop() || "";
+  if (!flat) return null;
   /* A bare fetch() has no destination signal, so gate on an
      extension: runtime-built binary assets (a glb, a fragment)
      carry one; beacon-shaped single-segment misses do not and

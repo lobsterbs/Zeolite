@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { isFlatPath, recordAssetBase, recoverFlatAsset, resetAssetBases } from "../assetbases";
+import { assetBaseCount, isFlatPath, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, resetAssetBases } from "../assetbases";
 
 const mkResp = (status: number, ct: string) =>
   new Response("body", { status, headers: { "content-type": ct } });
@@ -180,5 +180,71 @@ describe("asset base registry (#134)", () => {
       async () => mkResp(200, "image/png"),
     );
     expect(rec?.url).toBe("https://cdn.example/assets/hero-99c76cd962f04df2.png");
+  });
+});
+
+describe("directory-minted flat names (#143)", () => {
+  beforeEach(() => resetAssetBases());
+
+  it("recovers a chunk css minted against the page directory (github repo pages)", async () => {
+    recordAssetBase("https://github.com/", "https://github.githubassets.com/assets/app.js");
+    const rec = await recoverFlatAsset(
+      "https://github.com/",
+      "https://github.com/lobsterbs/react-core.3792087592bf207a.module.css",
+      "style",
+      new Headers(),
+      async (u) => {
+        if (u === "https://github.githubassets.com/assets/react-core.3792087592bf207a.module.css")
+          return new Response("body", { status: 200, headers: { "content-type": "text/css" } });
+        return new Response("x", { status: 404 });
+      },
+    );
+    expect(rec?.url).toBe(
+      "https://github.githubassets.com/assets/react-core.3792087592bf207a.module.css",
+    );
+  });
+
+  it("rejects directory paths whose last segment carries no hash or module marker", async () => {
+    recordAssetBase("https://p.example/", "https://cdn.example/assets/x.js");
+    let calls = 0;
+    const rec = await recoverFlatAsset(
+      "https://p.example/",
+      "https://p.example/settings/flat.css",
+      "style",
+      new Headers(),
+      async () => {
+        calls++;
+        return new Response("body", { status: 200, headers: { "content-type": "text/css" } });
+      },
+    );
+    expect(rec).toBeNull();
+    expect(calls).toBe(0);
+  });
+
+  it("rejects deep paths past the segment cap", async () => {
+    recordAssetBase("https://p.example/", "https://cdn.example/assets/x.js");
+    const rec = await recoverFlatAsset(
+      "https://p.example/",
+      "https://p.example/a/b/c/d/e.chunk.3792087592bf207a.module.css",
+      "style",
+      new Headers(),
+      async () => new Response("body", { status: 200, headers: { "content-type": "text/css" } }),
+    );
+    expect(rec).toBeNull();
+  });
+
+  it("isRecoverableAssetPath: root-flat always, deeper needs a mint marker", () => {
+    expect(isRecoverableAssetPath("/flat.css")).toBe(true);
+    expect(isRecoverableAssetPath("/owner/repo/x.3792087592bf207a.module.css")).toBe(true);
+    expect(isRecoverableAssetPath("/owner/repo/flat.css")).toBe(false);
+    expect(isRecoverableAssetPath("/a/b/c/d/e.module.css")).toBe(false);
+    expect(isRecoverableAssetPath("")).toBe(false);
+  });
+
+  it("assetBaseCount reports the observed bases for the initiator origin", () => {
+    expect(assetBaseCount("https://github.com/")).toBe(0);
+    recordAssetBase("https://github.com/", "https://github.githubassets.com/assets/app.js");
+    expect(assetBaseCount("https://github.com/")).toBe(1);
+    expect(assetBaseCount("")).toBe(0);
   });
 });

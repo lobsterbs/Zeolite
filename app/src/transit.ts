@@ -38,7 +38,10 @@ export type FallbackReason =
    (the unremarkable default), and a blocked request carries the gate
    that denied it, so every decision is explainable without
    re-reading the call site. */
-export type NativeReason = "NON_DOCUMENT_RESOURCE";
+/* #138: a policy rule with route "native" demoted the JS literal
+   pass for a proven host; the decision explains itself like a
+   fallback does, so the compat matrix can track the share. */
+export type NativeReason = "NON_DOCUMENT_RESOURCE" | "POLICY_NATIVE";
 export type BlockReason = "BLOCKED_RULES" | "BLOCKED_INTERCEPT" | "BLOCKED_WEBREQUEST";
 export type TransitReason = FallbackReason | NativeReason | BlockReason;
 
@@ -66,7 +69,7 @@ export function originOf(url: string): OriginContext | null {
    fallback always carries a FallbackReason, a block a BlockReason,
    a native transport the default's own reason. */
 export type TransitDecision =
-  | { mode: "NativeTransit"; reason: NativeReason }
+  | { mode: "NativeTransit"; reason: NativeReason; ruleId?: string }
   | { mode: "RewriteFallback"; reason: FallbackReason; ruleId?: string }
   | { mode: "Blocked"; reason: BlockReason };
 
@@ -74,7 +77,9 @@ export type TransitDecision =
     explain themselves; native is the unremarkable default and stays
     silent (every netLog row would otherwise read the same). */
 export function reasonOf(dec: TransitDecision): string | undefined {
-  return dec.mode === "NativeTransit" ? undefined : dec.reason;
+  /* #138: the unremarkable default stays silent; a policy-native
+     decision explains itself so telemetry keeps the share honest. */
+  return dec.mode === "NativeTransit" && dec.reason === "NON_DOCUMENT_RESOURCE" ? undefined : dec.reason;
 }
 
 /** Request destinations that load a document, one list for the
@@ -216,6 +221,7 @@ const epoch = Date.now();
 const FALLBACK_LIMIT = 64;
 let nativeCount = 0;
 let fallbackCount = 0;
+let relayCount = 0;
 const fallbacks: FallbackEvent[] = [];
 
 /** Record one COMPLETED request's final transport decision (blocked
@@ -242,19 +248,28 @@ export function transitRecord(traceId: string, url: string, dec: TransitDecision
   if (fallbacks.length > FALLBACK_LIMIT) fallbacks.shift();
 }
 
+/** #137: one completed embedder-relayed fetch (policy route "relay").
+    Counter-only like native: the traceDecision at the transport choke
+    point carries the rule id. */
+export function relayRecord(): void {
+  relayCount++;
+}
+
 /** Counters + recent fallbacks for zl:getNetLog consumers. */
 export function transitStats(): {
   native: number;
   fallback: number;
+  relay: number;
   fallbacks: FallbackEvent[];
   epoch: number;
 } {
-  return { native: nativeCount, fallback: fallbackCount, fallbacks: [...fallbacks], epoch };
+  return { native: nativeCount, fallback: fallbackCount, relay: relayCount, fallbacks: [...fallbacks], epoch };
 }
 
 /** Tests only: reset counters and ring. */
 export function transitResetForTests(): void {
   nativeCount = 0;
   fallbackCount = 0;
+  relayCount = 0;
   fallbacks.length = 0;
 }

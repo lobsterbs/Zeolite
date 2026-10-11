@@ -39,28 +39,44 @@ Fields:
   (document, script, style, image, font, media, websocket, worker,
   manifest, eventsource, wasm, fetch, other). Optional; absent
   means all types.
-- route: required, and "rewrite" is the only accepted value.
+- route: required. "rewrite" upgrades matching requests onto the
+  rewrite path; "native" (#138) demotes the JS literal pass for
+  proven hosts; "relay" (#137) moves the fetch onto the embedder's
+  network stack for TLS-fingerprint-blocked hosts.
 - reason: optional short operator explanation.
 
 ## What a rule can and cannot do
 
-A matching rule upgrades the default native decision onto the
+route "rewrite" upgrades the default native decision onto the
 rewrite path (reason code POLICY_REWRITE, the rule id attached to
 the fallback ring entry and the TRANSPORT_FALLBACK event).
 
-It cannot do the opposite. Documents, stylesheets and transformed
-scripts REQUIRE rewriting, and native is already the default for
-everything else, so a route that demotes a required rewrite or
-affirms the default would either break the page or state a
-no-op as policy. Validation rejects both with a clear error, and
-the engine keeps the defaults.
+route "native" (#138) demotes the JS literal pass for a host
+proven to work with raw script bodies: runtime navigation already
+flows through the patched fetch/XHR/WS seams, so literal hits
+there are dead code. Documents and stylesheets are never demoted,
+and the demotion records a POLICY_NATIVE transit decision with the
+rule id so the native share stays honest in telemetry.
+
+route "relay" (#137) moves matching fetches onto the embedder's
+network stack (native TLS, embedder-side SSRF validation) for
+hosts that reject the wasm TLS ClientHello shapes at the
+handshake. The embedder must have registered a relay channel
+(zl:relayRegister); without it the fetch falls back to wisp with a
+TRANSPORT warning, and the decision is recorded (result "relay")
+so diagnostics keep the share honest.
+
+Documents, stylesheets and transformed scripts REQUIRE rewriting,
+so no route demotes those passes; a route value outside the three
+above is rejected with a clear error and the engine keeps the
+defaults.
 
 ## Validation and failure behavior
 
 Syntax errors carry the KDL parser's line number. Semantic errors
 name the rule: unexpected nodes or properties, duplicate ids,
-unknown resource types, non-string match values, anything other
-than route "rewrite". A missing file means "no policy". A
+unknown resource types, non-string match values, an unknown
+route value. A missing file means "no policy". A
 malformed file is rejected with a TRANSPORT diagnostics event and
 the defaults stay active: routing never changes silently.
 

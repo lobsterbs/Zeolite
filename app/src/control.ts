@@ -23,6 +23,7 @@ import { decryptSession, encryptSession } from "./session";
 import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setSiteEnabled } from "./swstate";
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
+import { relayRegister } from "./relayfetch";
 import { currentEngine, wispTransport } from "./transport";
 import { loadInflight } from "./loadstate";
 import { activeStreams } from "./streams-alive";
@@ -78,6 +79,7 @@ export interface ControlMessage {
     | "zl:exportSession"
     | "zl:importSession"
     | "zl:sameSite"
+    | "zl:relayRegister"
     | "zl:fingerprint"
     | "zl:recordStart"
     | "zl:recordStop"
@@ -233,6 +235,21 @@ export interface CoreCtx {
 export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<void> {
   const { e, reply, port, persistRoute } = ctx;
   switch (msg?.type) {
+    case "zl:relayRegister": {
+      /* #137: the embedder registers its relay port. Host-only by the
+         #41 gate (not in PAGE_MESSAGES); the port carries policy-
+         relayed fetches: zl:fetchRelay out, head/chunk/end/error
+         frames back. The ok reply rides the same port, so the
+         embedder's handler must tolerate non-relay frames. */
+      const rp = e.ports[0];
+      if (rp) {
+        relayRegister(rp);
+        reply({ ok: true });
+      } else {
+        reply({ ok: false, error: "relay registration needs a port" });
+      }
+      break;
+    }
     case "zl:ping":
       /* Issue #17: echo the live route shape so embedders can detect a
          revert to defaults (worker restart, storage wipe) and re-push
@@ -857,6 +874,6 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState",
+  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister",
 ]);
 

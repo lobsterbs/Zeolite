@@ -101,8 +101,9 @@ describe("TransitDecision model (#94)", () => {
       expect(reasonOf(dec)).toBe(dec.reason);
     }
   });
-  it("reasonOf is silent for native, explicit for fallback and blocked", () => {
+  it("reasonOf is silent for native, explicit for fallback, policy-native and blocked", () => {
     expect(reasonOf(native)).toBeUndefined();
+    expect(reasonOf({ mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: "r" })).toBe("POLICY_NATIVE");
     expect(reasonOf({ mode: "RewriteFallback", reason: "CSS_URL_REWRITE_REQUIRED" })).toBe(
       "CSS_URL_REWRITE_REQUIRED",
     );

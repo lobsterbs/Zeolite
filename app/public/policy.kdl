@@ -1,19 +1,28 @@
-// Compatibility policy (issues #135, #136). This file is
-// intentionally EMPTY: no rule means every request keeps the
-// default transit decision (native transport; rewriting only
-// where the engine requires it). Grammar: docs/policy.md.
+// Compatibility policy (issues #135, #136, #137, #138). Rules let an
+// operator override the default transit decision for narrowly scoped
+// compatibility cases. Grammar: docs/policy.md.
 //
 //   rule "short-id" priority=10 {
 //     match host="cdn.example.com" path="/assets/"  // both optional
 //     types "script" "fetch"                        // optional
-//     route "rewrite"                               // the only route
-//     reason "why this site needs the rewrite path"
+//     route "rewrite"                               // or "native" or "relay"
+//     reason "short operator explanation"           // optional
 //   }
 //
-// A rule upgrades matching requests from native transport onto
-// the rewrite path. It cannot do the opposite: documents,
-// stylesheets and transformed scripts REQUIRE rewriting, and
-// native is already the default for everything else. Highest
-// priority wins; on equal priority the later rule wins. A
+// route "rewrite" upgrades matching requests onto the rewrite path.
+// route "native" (#138) demotes the JS literal pass for hosts whose
+// raw script bodies work through the patched runtime seams.
+// route "relay" (#137) moves the fetch onto the embedder's network
+// stack for hosts that block the wasm TLS ClientHello shapes.
+// Highest priority wins; on equal priority the later rule wins. A
 // rejected file keeps the defaults active (diagnostics carry the
 // error).
+
+// #137: duckduckgo.com rejects the wasm TLS client shapes at the
+// handshake (libcurl error 35, epoxy UnexpectedEof) while native
+// stacks from the same IP pass; the embedder relays with its own TLS.
+rule "ddg-relay" {
+  match host="duckduckgo.com"
+  route "relay"
+  reason "TLS-fingerprint block: wasm ClientHello rejected, embedder relay"
+}

@@ -30,9 +30,21 @@ describe("compilePolicy", () => {
     expect(() => compilePolicy('block "x"')).toThrow(/unexpected node/);
   });
 
-  it("rejects non-rewrite or missing routes", () => {
-    expect(() => compilePolicy('rule "r" { route "native" }')).toThrow(/route must be/);
+  it("rejects unknown or missing routes", () => {
+    expect(() => compilePolicy('rule "r" { route "banana" }')).toThrow(/route must be/);
     expect(() => compilePolicy('rule "r" { }')).toThrow(/route must be/);
+  });
+
+  /* #138: route "native" demotes the JS literal pass for proven hosts. */
+  it("parses route native", () => {
+    const p = compilePolicy('rule "r" priority=2 { route "native" }');
+    expect(p.rules[0]).toMatchObject({ id: "r", priority: 2, route: "native" });
+  });
+
+  /* #137: route "relay" moves the fetch onto the embedder's stack. */
+  it("parses route relay", () => {
+    const p = compilePolicy('rule "r" priority=2 { route "relay" }');
+    expect(p.rules[0]).toMatchObject({ id: "r", priority: 2, route: "relay" });
   });
 
   it("rejects duplicate ids", () => {
@@ -127,7 +139,7 @@ describe("loadPolicy", () => {
   it("malformed file means empty policy", async () => {
     const orig = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response('rule "x" { route "native" }', { status: 200 })) as typeof fetch;
+      new Response('rule "x" { route "banana" }', { status: 200 })) as typeof fetch;
     expect((await loadPolicy()).rules).toEqual([]);
     globalThis.fetch = orig;
   });

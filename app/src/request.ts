@@ -26,8 +26,9 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
-import { loadPolicy, policyMatch } from "./policy";
+import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
+import { loadPolicy, policyMatch, type CompiledPolicy } from "./policy";
+import { relayFetch } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
 import { httpsUpgraded } from "./config";
 import { ruleFor, siteRules } from "./siteconfig";
@@ -51,7 +52,7 @@ import { wispTransport } from "./transport";
 
 import { virtualOriginHeaders, virtualRefererFallback } from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
-import { isRecoverableAssetDest, recordAssetBase, recoverFlatAsset } from "./assetbases";
+import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset } from "./assetbases";
 import { applySetCookie, cookieHeaderFor, isPassChallenge, jarHeaders, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
@@ -93,6 +94,61 @@ const MAX_REDIRECT_HOPS = 10;
    transport fetch keeps running after a deadline rejection; its
    answer is dropped, never served. */
 const NAV_TTFB_DEADLINE_MS = 30_000;
+
+/* #140: settle guarantee for page-initiated subresource bodies. A
+   transport stream can stall mid-body (live: a lazy image request
+   on search.brave.com/videos stayed pending past 30s and held the
+   embedder loading indicator on through zl:loadState). Navigation
+   keeps its own TTFB deadline; event-stream and long-poll responses
+   are long-lived by design, so only IDLE stalls are killed, never
+   total duration: a stream that keeps sending bytes stays alive. */
+const BODY_STALL_DEADLINE_MS = 20_000;
+
+export function withBodyStallDeadline(resp: Response, ms: number, traceId: string, url: string): Response {
+  if (!(ms > 0) || !resp.body) return resp;
+  const ct = (resp.headers.get("content-type") ?? "").toLowerCase();
+  if (ct.includes("text/event-stream")) return resp;
+  const reader = resp.body.getReader();
+  const stream = new ReadableStream({
+    async pull(controller) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const chunk = await new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("body stall: no bytes for " + ms + "ms")), ms);
+          reader.read().then(resolve, reject);
+        });
+        clearTimeout(timer);
+        if (chunk.done) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunk.value);
+      } catch (err) {
+        clearTimeout(timer);
+        DIAG.emit({
+          traceId,
+          requestId: traceId,
+          category: "TRANSPORT",
+          cause: "proxy",
+          severity: "warning",
+          stage: "UPSTREAM_RESPONSE",
+          message: "body stall deadline: upstream stopped sending, stream errored for the page",
+          url,
+        });
+        try {
+          await reader.cancel();
+        } catch {
+          /* already gone */
+        }
+        controller.error(err);
+      }
+    },
+    cancel() {
+      return reader.cancel();
+    },
+  });
+  return new Response(stream, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+}
 
 export function withDeadline<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
   if (!(ms > 0)) return p;
@@ -363,6 +419,42 @@ export function surfaceNotModified(h: Headers): Response {
     surface to the caller), so no redirect hint is passed. #115: when
     the stored entry carries validators, the fetch is conditional
     (If-None-Match / If-Modified-Since) so the origin can answer 304. */
+/* #137: the transport choke point for every upstream fetch. A rule
+   with route "relay" moves the fetch onto the embedder's network
+   stack (native TLS): duckduckgo.com-class hosts block the wasm TLS
+   ClientHello shapes at the handshake, so wisp cannot carry them.
+   Everything else rides wisp exactly as before. ponytail: relayed
+   bodies are strings/ArrayBuffers only; stream bodies fall back to
+   wisp (relayFetch answers null) and the fetch stays honest. */
+async function upstreamFetch(
+  dest: string,
+  init: { method: string; headers: Headers; body?: BodyInit | null },
+  policy: CompiledPolicy,
+  rtype: ResourceType,
+  traceId: string,
+): Promise<Response> {
+  const rule = policyMatch(policy, dest, rtype);
+  if (rule && rule.route === "relay") {
+    const rr = await relayFetch(dest, init, traceId);
+    if (rr) {
+      traceDecision({ subsystem: "policy", rule: rule.id, original: dest, result: "relay", resource: rtype, traceId });
+      relayRecord();
+      return rr;
+    }
+    DIAG.emit({
+      traceId,
+      requestId: traceId,
+      category: "TRANSPORT",
+      cause: "proxy",
+      severity: "warning",
+      stage: "UPSTREAM_REQUEST",
+      message: 'policy route "relay" without an embedder channel: fetch falls back to the wisp transport',
+      url: dest,
+    });
+  }
+  return wispTransport.fetch(dest, init);
+}
+
 async function wispFetchCacheBypass(
   req: Request,
   validators?: { etag?: string | null; lastModified?: string | null },
@@ -1287,7 +1379,7 @@ export function handleFetch(e: FetchEvent): void {
            demoted, so the upgrade is the only effect. */
         const policy = await loadPolicy();
         const policyRule = policyMatch(policy, target, rtype);
-        if (policyRule && decision.mode === "NativeTransit") {
+        if (policyRule && policyRule.route === "rewrite" && decision.mode === "NativeTransit") {
           decision = {
             mode: "RewriteFallback",
             reason: "POLICY_REWRITE",
@@ -1371,7 +1463,16 @@ export function handleFetch(e: FetchEvent): void {
         if (e.request.method === "GET") {
           const hit = await pageCacheMatch(e.request, (p) => e.waitUntil(p));
           if (hit) {
-            const dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
+            let dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
+            if (
+              dec.mode === "RewriteFallback" &&
+              dec.reason === "JS_LITERAL_REWRITE_REQUIRED" &&
+              policyRule &&
+              policyRule.route === "native" &&
+              (dest === "script" || dest === "")
+            ) {
+              dec = { mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: policyRule.id };
+            }
             transitRecord(traceId, target, dec);
             /* #95: a decision that leaves the native path is an
                explainable event on the always-on diag stream (the
@@ -1576,7 +1677,7 @@ export function handleFetch(e: FetchEvent): void {
             ? undefined
             : e.request.body;
           let resp = await withDeadline(
-            wispTransport.fetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody }),
+            upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody }, policy, rtype, traceId),
             reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
             "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
           );
@@ -1619,11 +1720,14 @@ export function handleFetch(e: FetchEvent): void {
             DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
             hopUrl = next;
             resp = await withDeadline(
-              wispTransport.fetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody }),
+              upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody }, policy, rtype, traceId),
               reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
               "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
             );
           }
+          /* #140: every page-initiated subresource settles: an idle-stalled
+             upstream body errors instead of pending forever. */
+          if (!reqCtx.navigation) resp = withBodyStallDeadline(resp, BODY_STALL_DEADLINE_MS, traceId, target);
           curStage = "UPSTREAM_RESPONSE";
           /* #134: runtime-built module asset names (React chunks mint
              <hash>.module.css at runtime) resolve against the page
@@ -1648,6 +1752,33 @@ export function handleFetch(e: FetchEvent): void {
               });
               hopUrl = rec.url;
               resp = rec.resp;
+            } else if (assetBaseCount(initiator ?? "") > 0) {
+              /* #143: the miss is now visible in diagnostics either way -
+                 all observed bases answered badly, or the path shape
+                 was rejected - so a silent no-retry never hides a
+                 recoverable asset again. */
+              let shapeOk = false;
+              try {
+                shapeOk = isRecoverableAssetPath(new URL(target).pathname);
+              } catch {
+                shapeOk = false;
+              }
+              DIAG.emit({
+                traceId,
+                requestId: traceId,
+                category: "REWRITE",
+                severity: "warning",
+                stage: "UPSTREAM_RESPONSE",
+                message:
+                  "flat asset recovery miss: " +
+                  (shapeOk
+                    ? "every observed base answered badly"
+                    : "path shape rejected by the gate") +
+                  " (" +
+                  assetBaseCount(initiator ?? "") +
+                  " bases recorded)",
+                url: target,
+              });
             }
           }
 
@@ -1771,7 +1902,24 @@ export function handleFetch(e: FetchEvent): void {
              refresh (no url=) carries no destination and passes. */
           mapRefreshHeader(outHeaders, finalDest ?? target);
           void applyOnResponse(plugins, target, resp.status, outHeaders);
-          const dec = refineWithContent(decision, resp.headers.get("content-type") ?? "", dest);
+          let dec = refineWithContent(decision, resp.headers.get("content-type") ?? "", dest);
+          /* #138: a policy rule with route "native" demotes the JS
+             literal pass for a host proven to work with raw
+             bodies: runtime navigation already flows through the
+             patched fetch/XHR/WS seams, so literal hits there are
+             dead code. Workers keep their passes (prelude and
+             specifiers are behavioral, not cosmetic); documents
+             and stylesheets are not demotable at all. */
+          if (
+            dec.mode === "RewriteFallback" &&
+            dec.reason === "JS_LITERAL_REWRITE_REQUIRED" &&
+            policyRule &&
+            policyRule.route === "native" &&
+            (dest === "script" || dest === "")
+          ) {
+            dec = { mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: policyRule.id };
+            traceDecision({ subsystem: "policy", rule: policyRule.id, original: target, result: "native", resource: rtype, traceId });
+          }
           /* #95: same explainable-decision event on the response path
              (every document, stylesheet and transformed script body
              lands here, so the reason is in the diag stream, not just
@@ -1841,7 +1989,9 @@ export function handleFetch(e: FetchEvent): void {
           /* #47: destination "" JS (fetch/XHR + eval) transforms too,
              so its raw store must be skipped exactly like script-dest
              JS - the branch below stores the transformed copy. */
-          const scriptServe = JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && !!resp.body;
+          const policyNativeJs = dec.mode === "NativeTransit" && dec.reason === "POLICY_NATIVE";
+          const scriptServe =
+            JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && !!resp.body && !policyNativeJs;
           if (
             e.request.method === "GET" &&
             !workerServe &&
@@ -2007,7 +2157,7 @@ export function handleFetch(e: FetchEvent): void {
              HTML and CSS rewrite by content type with no destination
              gate, JS alone was gated. Inline module scripts are a
              rewriter gap (#36): the parser path, not this seam. */
-          if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body) {
+          if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body && !policyNativeJs) {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
