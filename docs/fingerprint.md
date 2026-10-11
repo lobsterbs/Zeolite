@@ -115,3 +115,28 @@ itself to specific engines with the `engines` field; under an
 unlisted engine `zl:fingerprint` refuses with the reason instead of
 silently applying. Measured JA3 values per engine are pending a
 parity run; none are invented here.
+
+## Detectability surfaces (#141)
+
+navigator.serviceWorker: a proxied page sees the engine's
+controlling worker (controller, getRegistration) and honestly so.
+Registration state is shared browser state a page shim cannot
+keep consistent, and faking it adds its own detection surface;
+documented limit, not patched.
+
+AudioContext: profiles may set audioNoise (default off). When on,
+AnalyserNode float/byte frequency reads carry deterministic noise
+seeded from canvasSeed, so one profile always yields one surface
+and the surface coheres with the active UA profile instead of
+adding a mismatched-pair signal.
+
+WebGL: UNMASKED_VENDOR/RENDERER come from the profile (ANGLE
+strings paired with the UA), shipped since 1.8 Telluride.
+
+TLS fingerprint: unchanged by device profiles by design; the
+blocked-host class is served by the embedder relay (#137, policy
+route "relay"), and JA3/H2 profiles remain the transport-side
+work tracked in the fingerprint transport binding.
+
+Timing: the transport adds latency; the engine documents rather
+than smooths it. Route strings stay opaque since #32.

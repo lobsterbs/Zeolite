@@ -55,6 +55,10 @@ export interface FingerprintProfile {
   /** WebGL UNMASKED_VENDOR/UNMASKED_RENDERER; both or neither. */
   webglVendor: string | null;
   webglRenderer: string | null;
+  /** #141: deterministic AnalyserNode read noise, seeded from
+      canvasSeed so one profile yields one surface; false = native. */
+  audioNoise: boolean;
+
   /** Deterministic seed for canvas perturbation; fixed strings, never
       randomized per session. */
   canvasSeed: string;
@@ -82,6 +86,7 @@ export const DEFAULT_PROFILE: FingerprintProfile = {
   webglVendor: "Google Inc. (NVIDIA)",
   webglRenderer:
     "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 (0x00001f83) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  audioNoise: false,
   canvasSeed: "zeolite-telluride",
   engines: ["libcurl", "epoxy"],
 };
@@ -187,6 +192,14 @@ export function resolveProfile(input: unknown): FingerprintProfile {
     throw new Error("canvasSeed must be a non-empty string (<= 128 chars)");
   } else canvasSeed = p.canvasSeed;
 
+  /* #141: AnalyserNode noise is a profile-driven option; absent
+     means off, never invented. */
+  let audioNoise: boolean;
+  if (p.audioNoise === undefined || p.audioNoise === null) audioNoise = false;
+  else if (typeof p.audioNoise !== "boolean") {
+    throw new Error("audioNoise must be a boolean");
+  } else audioNoise = p.audioNoise;
+
   /* #71: optional engine binding. Absent = valid for both engines;
      anything else must be a non-empty list of known engine names.
      Duplicates collapse; order is preserved for the refusal message. */
@@ -214,6 +227,7 @@ export function resolveProfile(input: unknown): FingerprintProfile {
     screen,
     webglVendor: (vendor as string | null) ?? null,
     webglRenderer: (renderer as string | null) ?? null,
+    audioNoise,
     canvasSeed,
     engines,
   };
@@ -323,6 +337,24 @@ try {
 } catch (e) {}`);
   }
 
+  if (p.audioNoise) {
+    parts.push(`
+try {
+  /* #141: deterministic AnalyserNode read noise, seeded from the
+     same canvas seed so one profile always yields one surface. */
+  var zlASeed = ${canvasSeedHash(p.canvasSeed)};
+  var zlGFF = AnalyserNode.prototype.getFloatFrequencyData;
+  AnalyserNode.prototype.getFloatFrequencyData = function (array) {
+    zlGFF.call(this, array);
+    for (var i = 0; i < array.length; i++) array[i] += (((zlASeed >>> (i % 29)) & 15) - 8) / 100;
+  };
+  var zlGBF = AnalyserNode.prototype.getByteFrequencyData;
+  AnalyserNode.prototype.getByteFrequencyData = function (array) {
+    zlGBF.call(this, array);
+    for (var i = 0; i < array.length; i++) array[i] = (array[i] + (((zlASeed >>> (i % 29)) & 7) - 3)) & 255;
+  };
+} catch (e) {}`);
+  }
   parts.push(`
 try {
   var zlSeed = ${canvasSeedHash(p.canvasSeed)};

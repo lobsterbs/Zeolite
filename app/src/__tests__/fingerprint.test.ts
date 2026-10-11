@@ -82,6 +82,14 @@ describe("resolveProfile", () => {
     expect(p.utcOffsetMin).toBe(0);
   });
 
+  it("audioNoise defaults off, accepts booleans, refuses others (#141)", () => {
+    const off = resolveProfile({ userAgent: DEFAULT_PROFILE.userAgent });
+    expect(off.audioNoise).toBe(false);
+    const on = resolveProfile({ userAgent: DEFAULT_PROFILE.userAgent, audioNoise: true });
+    expect(on.audioNoise).toBe(true);
+    expect(() => resolveProfile({ userAgent: DEFAULT_PROFILE.userAgent, audioNoise: "yes" })).toThrow("audioNoise");
+  });
+
   it("defaults the engine binding to both engines and validates it (#71)", () => {
     const p = resolveProfile({ userAgent: DEFAULT_PROFILE.userAgent });
     expect(p.engines).toEqual(["libcurl", "epoxy"]);
