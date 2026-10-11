@@ -147,7 +147,16 @@ export function withBodyStallDeadline(resp: Response, ms: number, traceId: strin
       return reader.cancel();
     },
   });
-  return new Response(stream, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+  const out = new Response(stream, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+  /* #10: Response construction drops set-cookie (forbidden
+     response-header name), and the cookie jar reads the transport
+     rawHeaders pairs - carry them onto the wrapped response so
+     upstream cookies still land in the jar. */
+  const raw = (resp as Response & { rawHeaders?: Array<[string, string]> }).rawHeaders;
+  if (Array.isArray(raw)) {
+    (out as Response & { rawHeaders?: Array<[string, string]> }).rawHeaders = raw;
+  }
+  return out;
 }
 
 export function withDeadline<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {

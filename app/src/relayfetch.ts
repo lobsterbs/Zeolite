@@ -142,9 +142,18 @@ export async function relayFetch(
       cleanup();
     },
   });
-  return new Response(nullBody ? null : stream, {
+  const out = new Response(nullBody ? null : stream, {
     status: first.status,
     statusText: first.statusText,
     headers: h,
   });
+  /* #10: Response construction drops set-cookie (forbidden
+     response-header name), so the jar rawHeaders view carries the
+     relayed cookies explicitly; the embedder edge already strips
+     them from what the page can read. */
+  (out as Response & { rawHeaders?: Array<[string, string]> }).rawHeaders = [
+    ...first.headers,
+    ...(first.setCookies ?? []).map((c): [string, string] => ["set-cookie", c]),
+  ];
+  return out;
 }

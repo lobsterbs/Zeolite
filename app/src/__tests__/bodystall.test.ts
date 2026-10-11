@@ -45,4 +45,13 @@ describe("withBodyStallDeadline (#140)", () => {
     const empty = new Response(null, { status: 204 });
     expect(withBodyStallDeadline(empty, 60, "t4", "u")).toBe(empty);
   });
+
+  it("carries rawHeaders so the jar still sees set-cookie (#10)", () => {
+    const resp = new Response(stalledBody(), { status: 200, headers: { "content-type": "text/html" } });
+    (resp as Response & { rawHeaders?: Array<[string, string]> }).rawHeaders = [["set-cookie", "a=b; Path=/"]];
+    const wrapped = withBodyStallDeadline(resp, 60, "t5", "https://x.example/") as Response & {
+      rawHeaders?: Array<[string, string]>;
+    };
+    expect(wrapped.rawHeaders).toEqual([["set-cookie", "a=b; Path=/"]]);
+  });
 });

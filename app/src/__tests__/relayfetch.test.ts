@@ -78,4 +78,15 @@ describe("relayFetch (#137)", () => {
     expect(resp!.status).toBe(304);
     expect(resp!.body).toBeNull();
   });
+
+  it("attaches rawHeaders so the jar sees relayed set-cookie (#10)", async () => {
+    const p = reg();
+    const respP = relayFetch("https://ddg.example/", { method: "GET", headers: new Headers() }, "t6");
+    const sent = p.posted[0] as { rid: number };
+    p.deliver(head(sent.rid, { setCookies: ["kl=no; Path=/"] }));
+    p.deliver({ type: "zl:relayEnd", rid: sent.rid });
+    const resp = await respP;
+    const raw = (resp as Response & { rawHeaders?: Array<[string, string]> }).rawHeaders ?? [];
+    expect(raw.some(([k, v]) => k.toLowerCase() === "set-cookie" && v.includes("kl=no"))).toBe(true);
+  });
 });
