@@ -12,6 +12,7 @@ import {
   setScheme,
 } from "../codec";
 import { NAV } from "../bootstrap/navguard";
+import { navhTailDest } from "../request";
 import { PAGE_MESSAGES, senderIsProxiedPath } from "../cpgate";
 
 /* Issue #63 (#54 design D): the opaque initial-navigation handle.
@@ -110,5 +111,68 @@ describe("navHandle sender gate (#41/#63)", () => {
   it("mintableDest still bounds handle destinations", () => {
     expect(mintableDest("https://example.com/")).toBe(true);
     expect(mintableDest("ftp://example.com/")).toBe(false);
+  });
+});
+
+describe("navhTailDest (#143 follow-up: opaque-route relative recovery)", () => {
+  const PAGE = "https://github.com/lobsterbs/Zeolite";
+  const never = (_t: string): string | null => null;
+
+  it("resolves a token-bearing suffix append against the token destination", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle(PAGE)!;
+    expect(navhTailDest(tok + "/latest-commit", null, true, decodeNavHandle)).toBe(
+      "https://github.com/lobsterbs/Zeolite/latest-commit",
+    );
+  });
+
+  it("appends via the context when the token expired (long-lived page)", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle(PAGE, -1)!; /* expired */
+    expect(navhTailDest(tok + "/latest-commit", PAGE, true, decodeNavHandle)).toBe(
+      "https://github.com/lobsterbs/Zeolite/latest-commit",
+    );
+  });
+
+  it("strips the context URL query from the append base", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle(PAGE, -1)!;
+    expect(navhTailDest(tok + "/latest-commit", PAGE + "?tab=readme", true, never)).toBe(
+      "https://github.com/lobsterbs/Zeolite/latest-commit",
+    );
+  });
+
+  it("keeps a trailing-slash context from doubling the slash", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle(PAGE, -1)!;
+    expect(navhTailDest(tok + "/x.png", "https://example.com/dir/", true, never)).toBe(
+      "https://example.com/dir/x.png",
+    );
+  });
+
+  it("returns null for a token-shaped suffix tail with no context and a dead token", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle(PAGE, -1)!;
+    expect(navhTailDest(tok + "/latest-commit", null, true, never)).toBeNull();
+  });
+
+  it("resolves a non-token tail with ordinary URL (directory) semantics", () => {
+    expect(navhTailDest("img/x.png", "https://example.com/a/b/page.html", false, never)).toBe(
+      "https://example.com/a/b/img/x.png",
+    );
+  });
+
+  it("keeps the honest null for a token-shaped bare tail even with a context", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle(PAGE, -1)!; /* expired */
+    expect(navhTailDest(tok, PAGE, true, decodeNavHandle)).toBeNull();
+  });
+
+  it("preserves percent-encoding in the suffix", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle(PAGE, -1)!;
+    expect(navhTailDest(tok + "/a%20b.png", PAGE, true, never)).toBe(
+      "https://github.com/lobsterbs/Zeolite/a%20b.png",
+    );
   });
 });

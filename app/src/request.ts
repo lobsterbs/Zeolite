@@ -966,9 +966,46 @@ export function handleFetch(e: FetchEvent): void {
            restart or a key rotation still navigates). An expired,
            tampered or wrong-key tail fails closed to the same
            navigation strand a bad route gets - never a guess. */
-        const handleDest = decodeNavHandle(url.pathname.slice(NAVH.length + 1).split(/[?#]/)[0]);
-        if (!handleDest) return navOutcome(e, url, 404, "route", "zeolite: bad or expired navigation handle");
-        dest0 = handleDest;
+        const navhTail = url.pathname.slice(NAVH.length + 1).split(/[?#]/)[0];
+        /* #63 unchanged contract first: a bare, unexpired handle is
+           the navigation itself (and a bare subresource fetch of the
+           handle route keeps serving the handle destination). A tail
+           with a "/" cannot be a token: the URL parser drops the
+           token segment whenever it resolves a relative input, so
+           <token>/<suffix> is always a page-built path. */
+        const handleDest = navhTail.includes("/") ? null : decodeNavHandle(navhTail);
+        if (handleDest) {
+          dest0 = handleDest;
+        } else if (e.request.mode === "navigate") {
+          return navOutcome(e, url, 404, "route", "zeolite: bad or expired navigation handle");
+        } else {
+          /* #143 follow-up: a page parked on the opaque handle route
+             cannot read its real path (LegacyUnforgeable location),
+             so runtime URL building that appends to
+             location.pathname arrives as <handle>/<suffix>, and a
+             relative fetch the URL parser resolves against the
+             opaque location arrives as a bare tail. Both recover
+             against the requesting client virtual context (#33),
+             the handle token as the context-less fallback;
+             token-shaped tails that do not decode keep the honest
+             404 (a rotation strand, never a guess). Navigations
+             never recover: a suffix-bearing or undecodable
+             navigation is a strand. */
+          const navhCtx = contextOf(VCTX, e.clientId);
+          /* Token shape is a property of the head segment: a
+             suffix-bearing tail is never one token, and a bare tail
+             is judged whole. */
+          const navhSlash = navhTail.indexOf("/");
+          const navhHead = navhSlash >= 0 ? navhTail.slice(0, navhSlash) : navhTail;
+          const navhRec = navhTailDest(
+            navhTail,
+            navhCtx ? navhCtx.currentUrl : null,
+            looksKeyedToken(currentPrefix() + navhHead),
+            decodeNavHandle,
+          );
+          if (!navhRec) return navOutcome(e, url, 404, "route", "zeolite: bad or expired navigation handle");
+          dest0 = navhRec;
+        }
       } else if (url.pathname.includes(NAVP)) {
         /* #101: a same-origin child realm (an about:blank iframe the
            page's own JS created) has no virtual context and an
@@ -2302,6 +2339,68 @@ export function handleFetch(e: FetchEvent): void {
     own query, exactly like a normal engine route. Token decode is
     MAC-verified, so a foreign path that merely looks like a route
     fails closed and passes through untouched. */
+/** #143 follow-up: recover the destination of a NAVH-prefix tail that
+    is not a bare handle token. Suffix-bearing tails (<token>/<suffix>)
+    are page-built appends to location.pathname: resolve the suffix
+    against the page-path append base (the client virtual context URL,
+    the token own destination as the fallback), NOT directory
+    semantics - the page meant <real page path>/<suffix>. Bare tails
+    are relative fetches the URL parser resolved against the opaque
+    location (which drops the token): resolve with ordinary URL
+    semantics against the context. A token-shaped bare tail that does
+    not decode returns null - the honest strand. Pure: the caller owns
+    the navigation gate and the 404. */
+export function navhTailDest(
+  tail: string,
+  contextUrl: string | null,
+  tokenShaped: boolean,
+  tokenDest: (token: string) => string | null,
+): string | null {
+  const pageBase = (u: string | null): string | null => {
+    if (!u) return null;
+    try {
+      const p = new URL(u);
+      return p.origin + p.pathname;
+    } catch {
+      return null;
+    }
+  };
+  const resolved = (base: string): string | null => {
+    try {
+      return new URL(tail, base).href;
+    } catch {
+      return null;
+    }
+  };
+  const slash = tail.indexOf("/");
+  if (slash >= 0) {
+    const head = tail.slice(0, slash);
+    const tokenBase = pageBase(tokenDest(head));
+    if (tokenBase || tokenShaped) {
+      /* <token>/<suffix>: a page-built append to the opaque route -
+         the URL parser drops the token segment whenever it resolves
+         a relative input, so a token-bearing tail is never a
+         parser resolution. */
+      let base = tokenBase ?? pageBase(contextUrl);
+      if (!base) return null;
+      if (!base.endsWith("/")) base += "/";
+      try {
+        return new URL(tail.slice(slash + 1), base).href;
+      } catch {
+        return null;
+      }
+    }
+    /* Parser-resolved relative against the opaque location: the URL
+       parser dropped the token, so ordinary URL semantics against
+       the page context are the page intent. */
+    return contextUrl ? resolved(contextUrl) : null;
+  }
+  /* Bare tail: a token-shaped one that did not decode is a rotation
+     strand (null); a path-like one resolves against the context. */
+  if (contextUrl && !tokenShaped) return resolved(contextUrl);
+  return null;
+}
+
 export function derefSelfRoute(target: string, engineOrigin: string): string {
   let u: URL;
   try {
