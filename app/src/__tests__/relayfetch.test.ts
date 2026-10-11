@@ -89,4 +89,61 @@ describe("relayFetch (#137)", () => {
     const raw = (resp as Response & { rawHeaders?: Array<[string, string]> }).rawHeaders ?? [];
     expect(raw.some(([k, v]) => k.toLowerCase() === "set-cookie" && v.includes("kl=no"))).toBe(true);
   });
+
+  /* #145: abort propagation. The engine must not keep an embedder
+     fetch alive after the caller aborted. */
+  const errOf = (p: Promise<unknown>) =>
+    p.then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: Error) => e,
+    );
+
+  it("rejects an already-aborted signal without sending a request frame (#145)", async () => {
+    const p = reg();
+    const ac = new AbortController();
+    ac.abort();
+    const err = await errOf(
+      relayFetch("https://x.example/", { method: "GET", headers: new Headers(), signal: ac.signal }, "t7"),
+    );
+    expect(err.name).toBe("AbortError");
+    expect(p.posted).toHaveLength(0);
+  });
+
+  it("aborts a pending relay: posts zl:relayCancel and rejects the fetch (#145)", async () => {
+    const p = reg();
+    const ac = new AbortController();
+    const respP = relayFetch("https://x.example/", { method: "GET", headers: new Headers(), signal: ac.signal }, "t8");
+    const rid = (p.posted[0] as { rid: number }).rid;
+    ac.abort();
+    const err = await errOf(respP);
+    expect(err.name).toBe("AbortError");
+    expect(p.posted.some((m) => (m as { type: string }).type === "zl:relayCancel")).toBe(true);
+    expect(rid).toBeGreaterThan(0);
+  });
+
+  it("errors the body stream when the abort fires mid-body (#145)", async () => {
+    const p = reg();
+    const ac = new AbortController();
+    const respP = relayFetch("https://x.example/", { method: "GET", headers: new Headers(), signal: ac.signal }, "t9");
+    const rid = (p.posted[0] as { rid: number }).rid;
+    p.deliver(head(rid));
+    const resp = await respP;
+    ac.abort();
+    const err = await errOf(resp!.body!.getReader().read());
+    expect(err.name).toBe("AbortError");
+    expect(p.posted.some((m) => (m as { type: string }).type === "zl:relayCancel")).toBe(true);
+  });
+
+  it("notifies the embedder when the caller cancels the body stream (#145)", async () => {
+    const p = reg();
+    const respP = relayFetch("https://x.example/", { method: "GET", headers: new Headers() }, "t10");
+    const rid = (p.posted[0] as { rid: number }).rid;
+    p.deliver(head(rid));
+    p.deliver({ type: "zl:relayEnd", rid });
+    const resp = await respP;
+    await resp!.body!.cancel();
+    expect(p.posted.some((m) => (m as { type: string }).type === "zl:relayCancel")).toBe(true);
+  });
 });

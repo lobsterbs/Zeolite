@@ -189,6 +189,7 @@ async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
         method: init?.method ?? "GET",
         headers: init?.headers instanceof Headers ? init.headers : new Headers(init?.headers),
         body: init?.body as string | ArrayBuffer | null | undefined,
+        signal: init?.signal ?? undefined,
       };
       const rr = await relayFetch(dest, relayInit, "");
       if (rr) return rr;

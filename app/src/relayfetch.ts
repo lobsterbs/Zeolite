@@ -61,7 +61,7 @@ export function relayAvailable(): boolean {
     channel, untransportable body) so the caller falls back to wisp. */
 export async function relayFetch(
   dest: string,
-  init: { method: string; headers: Headers; body?: BodyInit | null },
+  init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
   traceId: string,
 ): Promise<Response | null> {
   const port = hostPort;
@@ -70,21 +70,52 @@ export async function relayFetch(
   if (body !== undefined && body !== null && typeof body !== "string" && !(body instanceof ArrayBuffer)) {
     return null;
   }
+  /* #145: an aborted caller must not keep an embedder fetch alive.
+     The abort rides both ways: the pending fetch (or body read)
+     rejects with AbortError, and a zl:relayCancel frame tells the
+     embedder to drop its /zlrelay connection, which drops the
+     server-side upstream request instead of streaming it out. */
+  const signal = init.signal;
+  const abortErr = () => {
+    const e = new Error("The operation was aborted.");
+    e.name = "AbortError";
+    return e;
+  };
+  if (signal?.aborted) throw abortErr();
   const rid = ++ridSeq;
   const queue: RelayMsg[] = [];
   let wake: (() => void) | null = null;
+  let aborted = false;
+  const cancelUpstream = () => port.postMessage({ type: "zl:relayCancel", rid });
   waiters.set(rid, (m) => {
     queue.push(m);
     const w = wake;
     wake = null;
     w?.();
   });
-  const cleanup = () => waiters.delete(rid);
+  const onAbort = () => {
+    if (aborted) return;
+    aborted = true;
+    cancelUpstream();
+    waiters.delete(rid);
+    const w = wake;
+    wake = null;
+    w?.();
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const cleanup = () => {
+    waiters.delete(rid);
+    signal?.removeEventListener("abort", onAbort);
+  };
   const take = (): Promise<RelayMsg> =>
-    new Promise((resolve) => {
+    new Promise((resolve, reject) => {
+      if (aborted) {
+        reject(abortErr());
+        return;
+      }
       const m = queue.shift();
       if (m) resolve(m);
-      else wake = () => resolve(queue.shift() as RelayMsg);
+      else wake = () => (aborted ? reject(abortErr()) : resolve(queue.shift() as RelayMsg));
     });
   port.postMessage({
     type: "zl:fetchRelay",
@@ -94,7 +125,13 @@ export async function relayFetch(
     headers: Array.from(init.headers.entries()),
     body,
   });
-  const first = await take();
+  let first: RelayMsg;
+  try {
+    first = await take();
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
   if (first.type === "zl:relayError") {
     cleanup();
     DIAG.emit({
@@ -129,7 +166,14 @@ export async function relayFetch(
   const nullBody = first.status === 204 || first.status === 205 || first.status === 304;
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
-      const m = await take();
+      let m: RelayMsg;
+      try {
+        m = await take();
+      } catch (err) {
+        cleanup();
+        controller.error(err);
+        return;
+      }
       if (m.type === "zl:relayChunk") {
         controller.enqueue(m.bytes);
         return;
@@ -140,6 +184,7 @@ export async function relayFetch(
     },
     cancel() {
       cleanup();
+      cancelUpstream();
     },
   });
   const out = new Response(nullBody ? null : stream, {

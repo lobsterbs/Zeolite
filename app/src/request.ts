@@ -433,10 +433,12 @@ export function surfaceNotModified(h: Headers): Response {
    ClientHello shapes at the handshake, so wisp cannot carry them.
    Everything else rides wisp exactly as before. ponytail: relayed
    bodies are strings/ArrayBuffers only; stream bodies fall back to
-   wisp (relayFetch answers null) and the fetch stays honest. */
+   wisp (relayFetch answers null) and the fetch stays honest. #145: the
+   caller's AbortSignal rides both paths so a page abort cancels the
+   upstream request instead of letting it finish unseen. */
 async function upstreamFetch(
   dest: string,
-  init: { method: string; headers: Headers; body?: BodyInit | null },
+  init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
   policy: CompiledPolicy,
   rtype: ResourceType,
   traceId: string,
@@ -1757,7 +1759,7 @@ export function handleFetch(e: FetchEvent): void {
             ? undefined
             : e.request.body;
           let resp = await withDeadline(
-            upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody }, policy, rtype, traceId),
+            upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: e.request.signal }, policy, rtype, traceId),
             reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
             "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
           );
@@ -1800,7 +1802,7 @@ export function handleFetch(e: FetchEvent): void {
             DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
             hopUrl = next;
             resp = await withDeadline(
-              upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody }, policy, rtype, traceId),
+              upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: e.request.signal }, policy, rtype, traceId),
               reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
               "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
             );

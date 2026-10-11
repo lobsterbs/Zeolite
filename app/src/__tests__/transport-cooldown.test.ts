@@ -89,4 +89,34 @@ describe("wisp stall-storm cooldown", () => {
     expect(resp.status).toBe(200);
     expect(await resp.text()).toBe("");
   });
+
+  it("cooldown relay propagates the abort signal to the embedder (#145)", async () => {
+    h.fetchImpl = () => new Promise<Response>(() => {});
+    await Promise.allSettled([
+      wispTransport.fetch("https://a.example/1"),
+      wispTransport.fetch("https://a.example/2"),
+      wispTransport.fetch("https://a.example/3"),
+    ]);
+    expect(wispCoolingForTests()).toBe(true);
+    class QuietPort {
+      sent: unknown[] = [];
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      postMessage(m: unknown): void {
+        this.sent.push(m);
+      }
+    }
+    const port = new QuietPort();
+    relayRegister(port as unknown as MessagePort);
+    const ac = new AbortController();
+    const respP = wispTransport.fetch("https://a.example/abortme", { signal: ac.signal });
+    ac.abort();
+    const err = await respP.then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: Error) => e,
+    );
+    expect(err.name).toBe("AbortError");
+    expect(port.sent.some((m) => (m as { type: string }).type === "zl:relayCancel")).toBe(true);
+  });
 });
