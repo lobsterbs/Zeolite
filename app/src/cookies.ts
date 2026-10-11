@@ -365,6 +365,7 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
     return { name, stored: false, deleted: false };
   }
 
+  const idx = jar.findIndex(sameCookie);
   const fresh: Cookie = {
     name,
     value,
@@ -375,9 +376,10 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
     httpOnly,
     sameSite,
     expires: expiry,
-    created: now,
+    /* RFC 6265 5.3.11: replacing a cookie keeps the original
+       creation-time; only a genuinely new identity gets now. */
+    created: idx >= 0 ? jar[idx].created : now,
   };
-  const idx = jar.findIndex(sameCookie);
   if (idx >= 0) jar[idx] = fresh;
   else jar.push(fresh);
   jars.set(key, jar);
@@ -740,16 +742,13 @@ export function jarMerge(
     const jar = jars.get(jarKey(key)) ?? [];
     let touched = false;
     for (const raw of entry[1]) {
-      const c = raw as Partial<Cookie>;
-      if (
-        typeof c?.name !== "string" ||
-        typeof c?.domain !== "string" ||
-        typeof c?.hostOnly !== "boolean" ||
-        typeof c?.path !== "string" ||
-        typeof c?.value !== "string"
-      ) {
-        continue;
-      }
+      /* 2026-10-11 audit: the same stored-cookie shape gate jarLoad
+         uses. The old loose check admitted records missing
+         secure/httpOnly/expires/created; an undefined expiry then
+         read as never-expired in document.cookie while the
+         request-header path purged it as expired. */
+      if (!isStoredCookie(raw)) continue;
+      const c = raw;
       const sameCookie = (x: Cookie) =>
         x.name === c.name && x.domain === c.domain && x.hostOnly === c.hostOnly && x.path === c.path;
       const idx = jar.findIndex(sameCookie);

@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeDest } from "../codec";
 import {
   applySetCookie,
@@ -310,3 +310,36 @@ describe("RFC 6265 audit fixes (2026-10)", () => {
     expect(documentCookieRead("https://a.example/other")).toBe("");
   });
 });
+
+describe("RFC 6265 5.3.11: replacement keeps creation-time", () => {
+  it("re-admitting a cookie keeps the original created stamp", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1000);
+      applySetCookie("https://a.example/", resp(["a=1"]));
+      vi.setSystemTime(5000);
+      const r = applySetCookie("https://a.example/", resp(["a=2"]));
+      expect(r[0].stored).toBe(true);
+      const list = jarSnapshot().get(registerOrigin("https://a.example").id)!;
+      expect(list).toHaveLength(1);
+      expect(list[0].value).toBe("2");
+      expect(list[0].created).toBe(1000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("jarMerge shape gate (2026-10-11 audit)", () => {
+  it("drops imported records missing required cookie fields", () => {
+    const id = registerOrigin("https://a.example").id;
+    const ok = { name: "ok", value: "1", domain: "a.example", hostOnly: true, path: "/", secure: false, httpOnly: false, sameSite: null, expires: 0, created: 1 };
+    const missing = { name: "bad", value: "1", domain: "a.example", hostOnly: true, path: "/" };
+    const r = jarMerge([[id, [ok, missing]]], "import-wins");
+    expect(r.cookies).toBe(1);
+    const list = jarSnapshot().get(id)!;
+    expect(list).toHaveLength(1);
+    expect(list[0].name).toBe("ok");
+  });
+});
+
