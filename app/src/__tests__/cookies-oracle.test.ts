@@ -5,6 +5,7 @@ import {
   applySetCookie,
   cookieHeaderFor,
   cookiesResetForTests,
+  documentCookieRead,
   parseCookieDate,
   setSameSitePolicy,
 } from "../cookies";
@@ -169,6 +170,19 @@ describe("cookie jar oracle (tough-cookie reference)", () => {
     admit("https://example.com/", "y=1");
     expect(ours("https://example.com/")).toBe(ref(seq, "https://example.com/"));
     expect(ours("https://example.com/")).toBe("x=1; y=1");
+  });
+
+  it("document.cookie reads order longer paths first, like the reference", () => {
+    const seq: Array<[string, string]> = [
+      ["shallow=1; Path=/dir", "https://example.com/dir/sub/page"],
+      ["deep=1; Path=/dir/sub", "https://example.com/dir/sub/page"],
+      ["deepTie=1; Path=/dir/sub", "https://example.com/dir/sub/page"],
+    ];
+    admit("https://example.com/dir/sub/page", "shallow=1; Path=/dir");
+    admit("https://example.com/dir/sub/page", "deep=1; Path=/dir/sub");
+    admit("https://example.com/dir/sub/page", "deepTie=1; Path=/dir/sub");
+    expect(ours("https://example.com/dir/sub/page")).toBe(ref(seq, "https://example.com/dir/sub/page"));
+    expect(documentCookieRead("https://example.com/dir/sub/page")).toBe("deep=1; deepTie=1; shallow=1");
   });
 
   it("HttpOnly cookies attach to engine (http) requests", () => {

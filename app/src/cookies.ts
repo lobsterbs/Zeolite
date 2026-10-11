@@ -539,7 +539,10 @@ export function documentCookieRead(pageUrl: string): string {
       if (domainOk && (!c.secure || u.secure) && pathMatch(u.path, c.path)) matched.push(c);
     }
   }
-  matched.sort((a, b) => a.created - b.created);
+  /* RFC 6265 5.4: same ordering the Cookie header uses, longer
+     paths first then creation order, so document.cookie serializes
+     identically to an engine request for the same URL. */
+  matched.sort((a, b) => b.path.length - a.path.length || a.created - b.created);
   return matched.map((c) => c.name + "=" + c.value).join("; ");
 }
 
