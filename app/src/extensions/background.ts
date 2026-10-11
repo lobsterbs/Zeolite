@@ -176,7 +176,29 @@ export async function bootExtension(
       "self",
       '"use strict";\n' + code.join("\n;\n"),
     );
-    fn(ctx.api.browser, ctx.api.chrome, sandboxSelf);
+    /* #139: polyfill-shaped extensions detect globalThis.browser /
+       globalThis.chrome at load (verified against
+       webextension-polyfill 0.12.0: it requires
+       globalThis.chrome.runtime.id, and skips its callback wrapping
+       when globalThis.browser.runtime.id exists). The Function-scope
+       params alone hide both, so the polyfill throws at load. Expose
+       the extension's own API objects on the global during the
+       synchronous execution only, then restore: the boot is sync, no
+       other extension code can interleave, and async callbacks keep
+       the scope params, so nothing leaks past the boot. */
+    const g = globalThis as Record<string, unknown>;
+    const prevBrowser = g.browser;
+    const prevChrome = g.chrome;
+    g.browser = ctx.api.browser;
+    g.chrome = ctx.api.chrome;
+    try {
+      fn(ctx.api.browser, ctx.api.chrome, sandboxSelf);
+    } finally {
+      if (prevBrowser === undefined) delete g.browser;
+      else g.browser = prevBrowser;
+      if (prevChrome === undefined) delete g.chrome;
+      else g.chrome = prevChrome;
+    }
     extensions.setState(live.id, "running", null);
   } catch (e) {
     extensions.setState(live.id, "error", "background: " + String(e));
