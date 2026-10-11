@@ -364,10 +364,14 @@ export function keyedSiteToken(origin: string): string | null {
     null when the path is not an engine route or the tail is not
     base64url. Shared by decodePath and looksKeyedToken so the two can
     never disagree about what a tail is. */
+/* Anchored: an engine route always STARTS with the prefix. A path
+   that merely contains the prefix mid-way (a page asset, a page-
+   built pushState path) must decode to nothing here; recovering a
+   token out of a hostile tail is recoverPath's job, behind its
+   keyed gates. */
 function tailBytes(path: string): Uint8Array | null {
-  const i = path.indexOf(prefix);
-  if (i < 0) return null;
-  return b64uDecode(path.slice(i + prefix.length).split(/[?#]/)[0]);
+  if (!path.startsWith(prefix)) return null;
+  return b64uDecode(path.slice(prefix.length).split(/[?#]/)[0]);
 }
 
 /** Shape-only check: does an engine path's tail look like a v1 keyed

@@ -67,6 +67,15 @@ describe("unwrapDest", () => {
     expect(decodePath("/j/-A")).toBeNull();
   });
 
+  it("a mid-path prefix never decodes as a route", () => {
+    /* Anchored tail: only a path that starts with the scheme prefix
+       is an engine route. A path that merely contains the prefix
+       must decode to nothing; hostile-tail recovery is recoverPath,
+       with its keyed gates. */
+    setScheme("/j/");
+    expect(decodePath("/assets" + encodeDestLegacy("https://example.com/"))).toBeNull();
+  });
+
   it("returns non-http input unchanged", () => {
     expect(unwrapDest("")).toBe("");
     expect(unwrapDest("data:text/plain,hi")).toBe("data:text/plain,hi");

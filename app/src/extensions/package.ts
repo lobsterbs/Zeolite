@@ -31,13 +31,33 @@ function u32(b: Uint8Array, o: number): number {
   return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
 }
 
-async function inflateRaw(comp: Uint8Array): Promise<Uint8Array> {
-  const copy = comp.slice();
-  const stream = new Blob([copy.buffer as ArrayBuffer]).stream().pipeThrough(
+/* Inflation is capped DURING decompression, not after: a small
+   compressed tail can otherwise expand gigabytes inside the worker
+   before the declared-size check ever runs (decompression bomb). */
+async function inflateRaw(comp: Uint8Array, maxBytes: number): Promise<Uint8Array> {
+  const stream = new Blob([comp.slice().buffer as ArrayBuffer]).stream().pipeThrough(
     new DecompressionStream("deflate-raw")
   );
-  const buf = await new Response(stream).arrayBuffer();
-  return new Uint8Array(buf);
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done || !value) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      void reader.cancel().catch(() => undefined);
+      throw new Error("zeolite: inflated entry exceeds size limit");
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
+  }
+  return out;
 }
 
 /* Throws on any violation; never returns a partial unsafe result. */
@@ -104,7 +124,7 @@ export async function readZip(
     const lExtra = u16(bytes, localOff + 28);
     const dataStart = localOff + 30 + lName + lExtra;
     const comp = bytes.subarray(dataStart, dataStart + compSize);
-    const data = method === 0 ? comp : await inflateRaw(comp);
+    const data = method === 0 ? comp : await inflateRaw(comp, limits.maxFileBytes);
     if (data.length !== size) {
       throw new Error("zeolite: size mismatch after decompression for " + name);
     }
