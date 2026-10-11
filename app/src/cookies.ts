@@ -26,6 +26,7 @@ import { encodeDest } from "./codec";
 import { DIAG } from "./diag";
 import { traceDecision } from "./tracing";
 import { openDb, idbGet, idbPut, STORE_COOKIES } from "./extensions/idb";
+import { getDomain, getPublicSuffix } from "tldts";
 
 export type SameSite = "strict" | "lax" | "none";
 
@@ -197,10 +198,10 @@ function parseUrl(u: string): ParsedUrl | null {
   }
 }
 
-/* ponytail: dotless-Domain heuristic instead of a public-suffix list:
-   a Domain with no dot that is not the host itself is refused, which
-   blocks TLD-wide cookies (Domain=com). A real PSL replaces this if
-   a site ever legitimately needs it. */
+/* Dotless-Domain heuristic (the PSL gate below covers multi-label
+   public suffixes): a Domain with no dot that is not the host itself
+   is refused, which blocks TLD-wide cookies (Domain=com) and keeps a
+   dotless intranet host from scoping any other host. */
 function looksLikeIp(host: string): boolean {
   return /^\d+\.\d+\.\d+\.\d+$/.test(host);
 }
@@ -209,13 +210,24 @@ function domainMatch(host: string, domain: string): boolean {
   return host === domain || (host.endsWith("." + domain) && !looksLikeIp(host));
 }
 
-/* ponytail: site-for-cookies approximation without a public-suffix list:
-   the last two host labels (single-label and IP hosts are their own
-   site), the same approximation the domain gate already relies on. */
+/* RFC 6265 5.3 step 5, the browsers' rule (PSL via tldts): a cookie
+   Domain that is itself a public suffix (com, co.uk, github.io) can
+   never be admitted. Unknown hosts resolve to null and never block
+   admission here; the dotless refusal in the gate still catches bare
+   TLDs when the PSL is not consulted. */
+function isPublicSuffix(domain: string): boolean {
+  if (!domain.includes(".")) return false;
+  return getPublicSuffix(domain, { allowPrivateDomains: true }) === domain;
+}
+
+/* Site-for-cookies boundary via the public suffix list (tldts): the
+   registrable domain, the same computation browsers use for the
+   SameSite site key (private-section suffixes included, so
+   b.github.io is its own site). Single-label and IP hosts, and hosts
+   the PSL cannot resolve, are their own site. */
 function siteOfHost(host: string): string {
   if (looksLikeIp(host) || !host.includes(".")) return host;
-  const parts = host.split(".");
-  return parts.slice(-2).join(".");
+  return getDomain(host, { allowPrivateDomains: true }) ?? host;
 }
 
 /* SameSite gate (2.2 Arsenide, opt-in). Off = attach as before. Under
@@ -392,8 +404,8 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
   path = path || defaultPath(u.path);
 
   /* Isolation hard gate: the cookie may only scope the response host
-     (or a parent domain of it). */
-  if (!hostOnly && (!domainMatch(u.host, domain) || (!domain.includes(".") && domain !== u.host))) {
+     (or a parent domain of it), and never a public suffix itself. */
+  if (!hostOnly && (isPublicSuffix(domain) || !domainMatch(u.host, domain) || (!domain.includes(".") && domain !== u.host))) {
     DIAG.emit({
       category: "COOKIE",
       cause: "blocked",

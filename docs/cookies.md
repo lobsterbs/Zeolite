@@ -24,8 +24,9 @@ of a response and admits each cookie with:
 
 - `Domain`: stored with the leading dot stripped; a cookie is rejected
   when its Domain does not scope the response host (domain-match).
-  Dotless domains that are not the host itself are refused (a cheap
-  stand-in for a public-suffix list, blocking `Domain=com`).
+  Dotless domains that are not the host itself are refused, and the
+  public suffix list (tldts) refuses any Domain that is itself a
+  public suffix: `Domain=com`, `Domain=co.uk`, `Domain=github.io`.
 - `Path`: defaults to the RFC 6265 default-path (the response path's
   directory); request matching is RFC 6265 path-match.
 - `Secure`: stored; secure cookies attach only to https requests.
@@ -69,10 +70,11 @@ SameSite enforcement on. Off by default. Under `"approx"`:
   top-level navigations.
 
 This is an approximation, honestly: every proxied request is
-engine-initiated, the engine only sees the referrer, and the
-site-for-cookies computation is the last-two-host-labels heuristic (no
-public-suffix list). Requests the SW follows across redirect hops keep
-the original initiator context.
+engine-initiated, the engine only sees the referrer. The
+site-for-cookies computation itself is exact: the registrable domain
+via the public suffix list (tldts, private-section suffixes included),
+the same site key browsers use. Requests the SW follows across
+redirect hops keep the original initiator context.
 
 ## Redirect hops (2.2 Arsenide)
 

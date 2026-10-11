@@ -9,11 +9,17 @@
     "test": "vitest run"
   },
   "devDependencies": {
+    "@types/whatwg-url": "^13.0.0",
     "esbuild": "^0.21.3",
     "fake-indexeddb": "^6.0.0",
+    "tough-cookie": "^6.0.2",
     "typescript": "^5.5.0",
     "vite": "^7.1.0",
     "vite-plugin-wasm": "^3.6.0",
-    "vitest": "^3.2.0"
+    "vitest": "^3.2.0",
+    "whatwg-url": "^17.2.0"
+  },
+  "dependencies": {
+    "tldts": "^7.4.18"
   }
 }
