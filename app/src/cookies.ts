@@ -280,8 +280,13 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
     const val = i < 0 ? "" : p.slice(i + 1).trim();
     switch (key) {
       case "domain": {
-        domain = val.replace(/^\./, "").toLowerCase();
-        hostOnly = false;
+        /* RFC 6265 5.2.3: an empty Domain attribute is ignored - the
+           cookie stays host-only instead of becoming a bare-host
+           domain cookie that subdomains would match. */
+        if (val !== "") {
+          domain = (val.startsWith(".") ? val.slice(1) : val).toLowerCase();
+          hostOnly = false;
+        }
         break;
       }
       case "path": {
@@ -437,9 +442,9 @@ export function cookieHeaderFor(requestUrl: string, ctx?: CookieRequestContext):
   return matched.length ? matched.map((c) => c.name + "=" + c.value).join("; ") : null;
 }
 
-/** document.cookie read (RFC 6265 5.4): every cookie that
-    domain-and-scope matches the document origin, regardless of path,
-    never the HttpOnly ones. Expired cookies are filtered out here.
+/** document.cookie read (RFC 6265 5.4): every cookie whose domain
+    and path scope match the document URL, never the HttpOnly ones.
+    Expired cookies are filtered out here.
     The page keeps an eventually-consistent cache because the getter
     is synchronous while this jar lives in the SW. */
 export function documentCookieRead(pageUrl: string): string {
@@ -452,7 +457,9 @@ export function documentCookieRead(pageUrl: string): string {
     for (const c of list) {
       if (c.httpOnly || (c.expires !== 0 && c.expires <= now)) continue;
       const domainOk = c.hostOnly ? u.host === c.domain : domainMatch(u.host, c.domain);
-      if (domainOk && (!c.secure || u.secure)) matched.push(c);
+      /* RFC 6265 5.4: path scope applies to document.cookie reads
+         too, the same match request cookies use. */
+      if (domainOk && (!c.secure || u.secure) && pathMatch(u.path, c.path)) matched.push(c);
     }
   }
   matched.sort((a, b) => a.created - b.created);
@@ -648,6 +655,24 @@ export async function jarPersist(): Promise<void> {
   await idbPut(db, STORE_COOKIES, "origins", ids);
 }
 
+/** Shape check for a persisted or imported cookie record: storage
+    and host imports are untrusted input, and a malformed cookie
+    reaching the matching code would throw mid-request. */
+function isStoredCookie(c: unknown): c is Cookie {
+  const o = c as Partial<Cookie>;
+  return (
+    typeof o?.name === "string" &&
+    typeof o?.value === "string" &&
+    typeof o?.domain === "string" &&
+    typeof o?.hostOnly === "boolean" &&
+    typeof o?.path === "string" &&
+    typeof o?.secure === "boolean" &&
+    typeof o?.httpOnly === "boolean" &&
+    typeof o?.expires === "number" &&
+    typeof o?.created === "number"
+  );
+}
+
 /** Restore the persisted jar (SW activate). Storage failures mean an
     in-memory jar, never an engine failure. */
 export async function jarLoad(): Promise<void> {
@@ -667,7 +692,11 @@ export async function jarLoad(): Promise<void> {
     if (Array.isArray(rec)) {
       for (const entry of rec) {
         if (Array.isArray(entry) && typeof entry[0] === "string" && Array.isArray(entry[1])) {
-          jars.set(entry[0], entry[1]);
+          /* Persisted records are untrusted storage: a corrupted or
+             hand-edited record must never reach the matching code (a
+             non-string domain would throw mid-request). */
+          const list = entry[1].filter(isStoredCookie);
+          if (list.length) jars.set(entry[0], list);
         }
       }
     }
@@ -684,7 +713,10 @@ export function jarReplace(entries: Array<[string, unknown[]]>): void {
   for (const key of [...jars.keys()]) if (inProfile(key)) jars.delete(key);
   for (const entry of entries) {
     if (Array.isArray(entry) && typeof entry[0] === "string" && Array.isArray(entry[1])) {
-      jars.set(jarKey(entry[0]), entry[1] as Cookie[]);
+      /* The doc comment says malformed records are dropped: hold that
+         promise per cookie, the same shape check jarLoad uses. */
+      const list = entry[1].filter(isStoredCookie);
+      if (list.length) jars.set(jarKey(entry[0]), list);
     }
   }
   jarPersist().catch(() => undefined);

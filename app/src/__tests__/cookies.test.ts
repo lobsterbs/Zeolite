@@ -5,6 +5,7 @@ import {
   applySetCookie,
   cookieHeaderFor,
   cookiesResetForTests,
+  documentCookieRead,
   jarHeaders,
   jarLoad,
   jarMerge,
@@ -290,5 +291,22 @@ describe("jarHeaders (issue #10: transport set-cookie visibility)", () => {
     ];
     applySetCookie("https://fixture.example/set", jarHeaders(resp));
     expect(cookieHeaderFor("https://fixture.example/")).toBe("s=a; s2=b");
+  });
+});
+
+describe("RFC 6265 audit fixes (2026-10)", () => {
+  it("an empty Domain attribute is ignored: the cookie stays host-only", () => {
+    const r = applySetCookie("https://a.example/", resp(["sid=9; Domain="]));
+    expect(r[0].stored).toBe(true);
+    /* host-only: subdomains never match */
+    expect(cookieHeaderFor("https://a.example/")).toBe("sid=9");
+    expect(cookieHeaderFor("https://sub.a.example/")).toBeNull();
+  });
+
+  it("document.cookie hides cookies scoped to a different path (5.4)", () => {
+    applySetCookie("https://a.example/deep/x", resp(["p=1"]));
+    expect(documentCookieRead("https://a.example/deep/x")).toBe("p=1");
+    expect(documentCookieRead("https://a.example/deep/y")).toBe("p=1");
+    expect(documentCookieRead("https://a.example/other")).toBe("");
   });
 });

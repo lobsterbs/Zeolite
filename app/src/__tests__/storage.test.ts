@@ -27,7 +27,10 @@ describe("document.cookie virtualization (1.5)", () => {
   it("round-trips name=value through the jar", () => {
     const r = documentCookieWrite("https://a.example/x/y", "sid=1");
     expect(r.stored).toBe(true);
-    expect(documentCookieRead("https://a.example/other")).toBe("sid=1");
+    /* 2026-10 audit: RFC 6265 5.4 path scope - the cookie lives under
+       /x, so only a read under /x sees it. */
+    expect(documentCookieRead("https://a.example/x/z")).toBe("sid=1");
+    expect(documentCookieRead("https://a.example/other")).toBe("");
   });
 
   it("ignores the HttpOnly attribute on script writes", () => {
@@ -35,9 +38,10 @@ describe("document.cookie virtualization (1.5)", () => {
     expect(documentCookieRead("https://a.example/")).toBe("x=2");
   });
 
-  it("shows every origin cookie regardless of path", () => {
+  it("path-scopes document.cookie reads (RFC 6265 5.4, 2026-10 audit)", () => {
     documentCookieWrite("https://a.example/deep/dir/page", "p=3; Path=/deep/dir");
-    expect(documentCookieRead("https://a.example/elsewhere")).toBe("p=3");
+    expect(documentCookieRead("https://a.example/deep/dir/elsewhere")).toBe("p=3");
+    expect(documentCookieRead("https://a.example/other")).toBe("");
   });
 
   it("deletes via max-age=0", () => {

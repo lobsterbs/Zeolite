@@ -1,5 +1,6 @@
 import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it } from "vitest";
+import { idbPut, openDb, STORE_COOKIES } from "../extensions/idb";
 import {
   cookiesResetForTests,
   documentCookieWrite,
@@ -95,5 +96,32 @@ describe("jar clear (#41 zl:clearJar)", () => {
     expect(jarClearScope(undefined, "UPPER")).toEqual({ ok: false, error: "invalid origin", jars: 0, cookies: 0 });
     /* nothing was cleared by the refused calls */
     expect(jarEnumeration()[0].cookies).toBe(1);
+  });
+});
+
+describe("jar persistence hardening (2026-10 audit)", () => {
+  it("drops corrupted persisted records instead of admitting them", async () => {
+    const id = registerOrigin("https://a.example").id;
+    const valid = {
+      name: "ok",
+      value: "1",
+      domain: "a.example",
+      hostOnly: true,
+      path: "/",
+      secure: false,
+      httpOnly: false,
+      sameSite: null,
+      expires: 0,
+      created: 1,
+    };
+    /* Corrupt the durable record behind the jar's back, then reload. */
+    const db = await openDb();
+    const payload = JSON.parse(JSON.stringify([[id, [valid, { junk: "x" }]]]));
+    await idbPut(db, STORE_COOKIES, "jar", payload);
+    await jarLoad();
+    const origins = jarEnumeration()[0].origins;
+    expect(origins).toHaveLength(1);
+    expect(origins[0].cookies).toHaveLength(1);
+    expect(origins[0].cookies[0].name).toBe("ok");
   });
 });
