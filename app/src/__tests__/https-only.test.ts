@@ -66,3 +66,20 @@ describe("proceed-anyway link (LB #76)", () => {
     expect(httpProceedHref(new URL(enc, "https://w.example.org"))).toBeNull();
   });
 });
+
+describe("loopback is never upgraded (HTTPS-only default vs local harnesses)", () => {
+  it("potentially-trustworthy hosts stay http even with the toggle on", () => {
+    for (const d of [
+      "http://127.0.0.1:7101/dir/page.html",
+      "http://localhost:6002/?url=x",
+      "http://sub.localhost/a",
+      "http://[::1]:8080/x",
+    ]) {
+      expect(destUpgraded(d)).toBe(d);
+    }
+  });
+
+  it("remote http hosts still upgrade", () => {
+    expect(destUpgraded("http://example.com/a")).toBe("https://example.com/a");
+  });
+});

@@ -123,10 +123,29 @@ export function httpExemptHas(dest: string): boolean {
   return false;
 }
 
-/** The upgrade choke point with the exemption folded in: on only
-    when the toggle is on and the host is not user-exempt. */
+/** The upgrade choke point with the exemptions folded in: on only
+    when the toggle is on, the host is not user-exempt, and the host
+    is not potentially trustworthy. */
 export function destUpgraded(dest: string): string {
+  const h = hostOf(dest);
+  if (h && isLoopbackHost(h)) return dest;
   return httpsUpgraded(dest, isHttpsUpgrade() && !httpExemptHas(dest));
+}
+
+/* Potentially-trustworthy hosts (localhost, loopback) are never
+   upgraded, mirroring browser HTTPS-First semantics: an http://
+   loopback origin is already trusted, local embedders and the E2E
+   harness run plain-http servers on 127.0.0.1, and no upgrade can
+   ever succeed there. Not a policy hole: a remote site cannot make
+   the engine treat loopback as anything else. */
+function isLoopbackHost(h: string): boolean {
+  return (
+    h === "localhost" ||
+    h.endsWith(".localhost") ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h) ||
+    h === "::1" ||
+    h === "[::1]"
+  );
 }
 
 export function navHandlesEnabled(): boolean {
