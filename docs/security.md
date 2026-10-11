@@ -1,8 +1,13 @@
-# Security audit (3.0 Diamond re-audit)
+# Security self-review (3.0 Diamond re-audit)
 
-Scope: the 2.0 Graphene audit re-run at 3.0 against the surface added
-since, plus corrections of findings the 2.0 text listed as open but
-2.x has since closed. Findings reference real code seams; nothing is
+This is an internal self-review by the project author, not an
+external audit: no third party has reviewed this surface, and the
+title should never be read as one. Scope: the 2.0 Graphene audit
+re-run at 3.0 against the surface added since, plus corrections of
+findings the 2.0 text listed as open but 2.x has since closed.
+Methodology: manual review of every code seam named below, with a
+CI-gated test pinning each closed finding (no finding is closed on
+assertion alone). Findings reference real code seams; nothing is
 claimed beyond what the code does.
 
 ## Destination policy (SSRF) - one enforcement point

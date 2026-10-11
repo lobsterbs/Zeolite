@@ -105,6 +105,12 @@ export async function encryptSession(passphrase: string, payload: unknown): Prom
 export async function decryptSession(passphrase: string, blob: unknown): Promise<unknown> {
   if (typeof blob !== "object" || blob === null) throw new Error("not a session blob");
   const b = blob as Partial<SessionBlob>;
+  /* b.iter is bounded BEFORE deriveKey runs: [1, 1_000_000]. The
+     ceiling caps a crafted blob at ~1M PBKDF2-SHA256 rounds (well
+     under a second), so import cannot be stalled. Deliberately no
+     SESSION_ITERATIONS floor: a weaker count gains the blob author
+     nothing (they already control the content) and a floor would
+     break imported blobs if SESSION_ITERATIONS ever rises (#146). */
   if (b.zlSession !== 1 || b.alg !== ALG || typeof b.iter !== "number" || b.iter < 1 || b.iter > 1_000_000) {
     throw new Error("not a Zeolite session blob");
   }
