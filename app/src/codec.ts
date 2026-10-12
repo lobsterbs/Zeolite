@@ -316,7 +316,12 @@ export const NAVH_TTL_MS = 120_000;
 
 /** Mint an opaque navigation handle for an absolute http(s)
     destination: b64u of a keyed token whose payload is
-    NAVH_TAG || expiry || ":" || dest. Stateless by construction -
+    NAVH_TAG || expiry || ":" || origin. #144: the origin is the
+    destination's scheme://host only - the real path and query ride
+    as the visible handle-URL suffix (buildNavHandleUrl), so
+    pathname-routed SPAs see a routable location while the host stays
+    opaque; legacy tokens carry the full destination and still
+    decode. Stateless by construction -
     nothing to persist, so a SW restart cannot strand it - and decode
     walks the full route-key history, so a minted handle survives a
     key rotation too. TTL-only, not single-use: the issue allows
@@ -328,7 +333,15 @@ export const NAVH_TTL_MS = 120_000;
     stop. */
 export function encodeNavHandle(dest: string, ttlMs: number = NAVH_TTL_MS): string | null {
   if (!routeKey || !mintableDest(dest)) return null;
-  return b64uEncode(keyedToken(routeKey, NAVH_TAG + String(Date.now() + ttlMs) + ":" + dest));
+  /* #144: the payload names the origin, never the full destination;
+     the real path and query are the visible handle-URL suffix. */
+  let origin = dest;
+  try {
+    origin = new URL(dest).origin;
+  } catch {
+    return null;
+  }
+  return b64uEncode(keyedToken(routeKey, NAVH_TAG + String(Date.now() + ttlMs) + ":" + origin));
 }
 
 /** Handle tail -> destination, or null (bad tail, no key held, wrong
@@ -348,6 +361,46 @@ export function decodeNavHandle(token: string): string | null {
     if (mintableDest(dest)) return dest;
   }
   return null;
+}
+
+/** #144: resolve a full NAVH route tail - <token>, or <token>/
+    <real path> on the new shape - to the destination it names. New
+    tokens carry the origin only, so the visible path suffix resolves
+    against it from the root; legacy tokens carry the full
+    destination and arrive tailless. Null = a bad or expired token,
+    or an unresolvable tail - the honest strand, never a guess. */
+export function decodeNavHandlePath(tail: string): string | null {
+  const slash = tail.indexOf("/");
+  const token = slash < 0 ? tail : tail.slice(0, slash);
+  const rest = slash < 0 ? "" : tail.slice(slash + 1);
+  const dest = decodeNavHandle(token);
+  if (dest === null) return null;
+  if (rest === "") return dest;
+  try {
+    return new URL(rest, dest.endsWith("/") ? dest : dest + "/").href;
+  } catch {
+    return null;
+  }
+}
+
+/** #144: mint the full handle route URL for an absolute http(s)
+    destination: NAVH + "/" + <origin-only token> + <real path> +
+    <real query>. The path and query are visible by design - the
+    recorded #144 decision (docs/security.md) - so pathname-routed
+    SPAs see a routable location while the host stays opaque to the
+    browser, history and extensions. A bare "/" destination omits
+    the suffix. Null = no route key or a non-mintable destination;
+    the caller keeps the legacy ?url= embed. */
+export function buildNavHandleUrl(dest: string, ttlMs: number = NAVH_TTL_MS): string | null {
+  const token = encodeNavHandle(dest, ttlMs);
+  if (token === null) return null;
+  let u: URL;
+  try {
+    u = new URL(dest);
+  } catch {
+    return null;
+  }
+  return NAVH + "/" + token + (u.pathname === "/" ? "" : u.pathname) + u.search;
 }
 
 /** Keyed per-origin site identity (#32 hardening on #55's key): a
@@ -667,7 +720,10 @@ export function passChallengeRedirFixed(dest: string, engineOrigin: string): str
      handle with its own decoder. */
   let decoded: string | null;
   if (path.startsWith(NAVH + "/")) {
-    decoded = decodeNavHandle(path.slice(NAVH.length + 1).split(/[?#]/)[0]);
+    /* #144: the handle URL carries the real path after the token (the
+       real query is the route query, tailQuery above); resolve the
+       token plus tail back to the full destination. */
+    decoded = decodeNavHandlePath(path.slice(NAVH.length + 1));
   } else {
     if (!isEnginePath(path)) return null;
     decoded = decodePath(path);

@@ -715,7 +715,9 @@ async function main() {
     /* window.location is LegacyUnforgeable: the engine cannot present
        the virtual destination's path on it. The page sees the opaque
        engine route. PINNED so a future virtualization change (which
-       must not leak destinations per #32) is caught by CI. */
+       must not leak destinations per #32) is caught by CI. #144 scope
+       note: this pins REGULAR engine routes; navh handle routes carry
+       the real path by recorded decision (docs/security.md). */
     assert(String(px).startsWith("/"), "pathname lost its shape: " + px);
     assert(!String(px).includes("torture"), "pathname suddenly exposes the destination path: " + px);
     assert(String(d) === "/dir/torture.html", "direct pathname (oracle sanity): " + d);

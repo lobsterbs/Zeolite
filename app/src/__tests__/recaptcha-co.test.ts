@@ -63,7 +63,8 @@ describe("virtualRecaptchaCo referrer decode (#113)", () => {
   it("rewrites co= through a nav-handle referrer", () => {
     setRouteKey(KEY);
     const token = encodeNavHandle(PAGE)!;
-    const ref = ENGINE + "/__zl_navh__/" + token;
+    /* #144: the handle carries the real path as a visible suffix */
+    const ref = ENGINE + "/__zl_navh__/" + token + "/wiki/Page";
     expect(virtualRecaptchaCo(anchor(b64(ENGINE + ":443")), ref, ENGINE))
       .toBe(anchor(b64("https://www.google.com:443")));
   });

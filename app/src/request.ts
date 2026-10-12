@@ -14,7 +14,7 @@
    this module keeps calling decideTransport/refineWithContent at the
    same seams the old handler did. */
 /// <reference lib="webworker" />
-import { b64uDecode, b64uEncode, decodeLegacyRoute, decodeNavHandle, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { b64uDecode, b64uEncode, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
@@ -977,6 +977,11 @@ export function handleFetch(e: FetchEvent): void {
         const handleDest = navhTail.includes("/") ? null : decodeNavHandle(navhTail);
         if (handleDest) {
           dest0 = handleDest;
+          /* #144: an origin-only token leaves the real query in the
+             route search, so the query merge below applies - but
+             never onto a legacy full-dest token that already carries
+             one (issue #38: no doubled queries). */
+          routeCarriesQuery = !handleDest.includes("?");
         } else if (e.request.mode === "navigate") {
           /* #144: pathname-routed SPAs parked on the opaque handle
              route push location.pathname-built URLs as
@@ -1001,6 +1006,10 @@ export function handleFetch(e: FetchEvent): void {
           if (!navhNavRec)
             return navOutcome(e, url, 404, "route", "zeolite: bad or expired navigation handle");
           dest0 = navhNavRec;
+          /* #144: the tail resolution is query-free by construction
+             (navhTail strips the search); the real query rides in the
+             route search. */
+          routeCarriesQuery = true;
         } else {
           /* #143 follow-up: a page parked on the opaque handle route
              cannot read its real path (LegacyUnforgeable location),
@@ -1028,6 +1037,7 @@ export function handleFetch(e: FetchEvent): void {
           );
           if (!navhRec) return navOutcome(e, url, 404, "route", "zeolite: bad or expired navigation handle");
           dest0 = navhRec;
+          routeCarriesQuery = true; /* #144: the real query rides in the route search */
         }
       } else if (url.pathname.includes(NAVP)) {
         /* #101: a same-origin child realm (an about:blank iframe the
@@ -2445,6 +2455,28 @@ export function navhTailDest(
          the URL parser drops the token segment whenever it resolves
          a relative input, so a token-bearing tail is never a
          parser resolution. */
+      /* #144: a new-shape handle parks the page at
+         <handle>/<token>/<real path>, so a page append arrives as
+         <real path>/<append> - an ABSOLUTE path from the root, not a
+         relative one. When the client context confirms it (the
+         context's own path prefixes the tail), resolve against the
+         context ORIGIN; the append base below would double the
+         path. Legacy tails (an append to a bare token) never match
+         their own context path this way. */
+      if (!tokenBase && contextUrl) {
+        try {
+          const cu = new URL(contextUrl);
+          /* the parked tail has no leading slash (it follows the
+             token segment), the context path does: compare stripped. */
+          const cp = cu.pathname.startsWith("/") ? cu.pathname.slice(1) : cu.pathname;
+          const abs = tail.slice(slash + 1);
+          if (cp !== "" && (abs === cp || abs.startsWith(cp + "/"))) {
+            return new URL(abs, cu.origin + "/").href;
+          }
+        } catch {
+          /* fall through to the append base */
+        }
+      }
       let base = tokenBase ?? pageBase(contextUrl);
       if (!base) return null;
       if (!base.endsWith("/")) base += "/";
@@ -2483,7 +2515,7 @@ export function derefSelfRoute(target: string, engineOrigin: string): string {
     return target;
   let decoded: string | null = null;
   if (u.pathname.startsWith(NAVH + "/")) {
-    decoded = decodeNavHandle(u.pathname.slice(NAVH.length + 1).split(/[?#]/)[0]);
+    decoded = decodeNavHandlePath(u.pathname.slice(NAVH.length + 1).split(/[?#]/)[0]);
   } else {
     decoded = decodePath(u.pathname);
     if (!decoded) decoded = recoverPath(u.pathname);
@@ -2576,7 +2608,7 @@ function referrerOrigin(referrer: string): string | null {
     const refU = new URL(referrer, "https://zl.invalid/");
     let ref = decodePath(refU.pathname);
     if (!ref && refU.pathname.startsWith(NAVH + "/"))
-      ref = decodeNavHandle(refU.pathname.slice(NAVH.length + 1));
+      ref = decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1));
     /* #113: legacy /zl/ routes from cold starts or pre-#113 dists
        also fail decodePath when the prefix is not configured yet.
        decodeLegacyRoute recovers them at the escape seam. */
@@ -2623,7 +2655,10 @@ function forwardedHeaders(req: Request, target: string, initiator?: string): Hea
        page on a navh route past its window degrades to an omitted
        Referer again. */
     if (!ref && refU.pathname.startsWith(NAVH + "/")) {
-      ref = decodeNavHandle(refU.pathname.slice(NAVH.length + 1));
+      /* #144: the handle route carries the real path after the token
+         (the real query is the route search, appended below), so the
+         Referer is the full upstream page URL. */
+      ref = decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1));
     }
     /* #113: legacy /zl/ routes from cold starts or pre-#113 dists
        also fail decodePath when the prefix is not configured yet.

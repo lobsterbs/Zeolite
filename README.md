@@ -131,15 +131,19 @@ as engine bugs, environmental walls, or documented design limits.
 ### Documented design limits
 
 - **SPA routers that branch on `location.pathname`** (play2048.co, some
-  Google AI Mode surfaces) render their own client-side 404 view because
-  the page identity is opaque by design. `window.location` is
-  `[LegacyUnforgeable]`, so no page shim can virtualize it. #144 narrows
-  the class: navigations that append a real path to an opaque route token
-  are recovered to the true destination server-side (`navhTailDest`),
-  which is why github.com appends now boot. Routers that branch on the
-  bare opaque token without a path suffix remain unfixable without
-  reintroducing a plaintext destination, a recorded design decision, not
-  a bug.
+  Google AI Mode surfaces) used to render their own client-side 404 view
+  because the page identity was fully opaque. `window.location` is
+  `[LegacyUnforgeable]`, so no page shim can virtualize it. #144 ships
+  the split-identity handle: `zl:navHandle` answers
+  `/__zl_navh__/<opaque token>/<real path>?<real query>` - the token
+  carries the destination origin only, the real path and query are
+  visible on the route, so pathname routing and location-relative URL
+  building work without any location virtualization (this is why the
+  github.com append class now boots). The host stays opaque to the
+  browser, history and extensions; the path exposure is a recorded
+  decision (docs/security.md). Routers that string-match the bare
+  opaque token without tolerating the suffix remain limited by the
+  LegacyUnforgeable location, a recorded design decision, not a bug.
 - **Runtime-constructed asset names** - single-segment script/style names
   built by page code at runtime (github.com module CSS) are recovered by
   the global observed asset-base heuristic (#134).

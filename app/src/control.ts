@@ -2,7 +2,7 @@
  * Extracted from sw.ts (issues #85, #90, #91). Core zl: handling lives here;
  * extension-facing zl: messages are forwarded to ./extensions/control. */
 
-import { NAVH, currentPrefix, decodePath, encodeDest, encodeNavHandle, mintableDest, setScheme } from "./codec";
+import { buildNavHandleUrl, currentPrefix, decodePath, encodeDest, mintableDest, setScheme } from "./codec";
 import type { JarConflictRule } from "./cookies";
 import { documentCookieRead, documentCookieWrite, jarClear, jarClearScope, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy } from "./cookies";
 import { PAGE_MESSAGES, senderIsProxiedPath } from "./cpgate";
@@ -326,12 +326,17 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         reply({ ok: false, error: "navHandle needs an absolute http(s) dest" });
         break;
       }
-      const token = encodeNavHandle(msg.dest);
-      if (token === null) {
+      /* #144: the handle URL is NAVH + "/" + <origin-only token> +
+         <real path> + <real query>. The path is visible by design so
+         pathname-routed SPAs can route; the host stays opaque to the
+         browser, history and extensions (decision recorded in
+         docs/security.md). */
+      const url = buildNavHandleUrl(msg.dest);
+      if (url === null) {
         reply({ ok: false, error: "navHandle unavailable: no route key (storage degraded); keep the legacy ?url= embed" });
         break;
       }
-      reply({ ok: true, url: NAVH + "/" + token });
+      reply({ ok: true, url });
       break;
     }
     case "zl:adblock":

@@ -2,11 +2,14 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   b64uDecode,
   b64uEncode,
+  buildNavHandleUrl,
   decodeNavHandle,
+  decodeNavHandlePath,
   decodePath,
   encodeDest,
   encodeNavHandle,
   mintableDest,
+  NAVH,
   setRouteKey,
   setRouteKeys,
   setScheme,
@@ -38,7 +41,17 @@ describe("navigation handle codec (#63)", () => {
     const dest = "https://secret.example/private?q=1";
     const token = encodeNavHandle(dest)!;
     expect(token).toBeTruthy();
-    expect(decodeNavHandle(token)).toBe(dest);
+    /* #144: the payload carries the origin only; the path and query
+       ride as the visible handle-URL suffix. */
+    expect(decodeNavHandle(token)).toBe("https://secret.example");
+    /* the handle URL mints its own token (the expiry is embedded, so
+       two mints differ); pin the shape and the decodable suffix */
+    const url = buildNavHandleUrl(dest)!;
+    expect(url.startsWith(NAVH + "/")).toBe(true);
+    expect(url.endsWith("/private?q=1")).toBe(true);
+    expect(decodeNavHandle(url.slice(NAVH.length + 1).split("/")[0])).toBe("https://secret.example");
+    expect(decodeNavHandlePath(token + "/private")).toBe("https://secret.example/private");
+    expect(decodeNavHandle(token + "/private")).toBeNull();
     /* The token never carries the destination decodably: the payload
        is keystream-XORed, so the legacy decode of the tail bytes
        reveals nothing. */
@@ -72,7 +85,7 @@ describe("navigation handle codec (#63)", () => {
        loads the full history, so a handle minted before either event
        still navigates - nothing was persisted, nothing strands. */
     setRouteKeys([KEY_B, KEY_A]);
-    expect(decodeNavHandle(token)).toBe("https://rotate.example/page");
+    expect(decodeNavHandle(token)).toBe("https://rotate.example");
     /* A history that never held the minting key fails closed. */
     setRouteKeys([KEY_B]);
     expect(decodeNavHandle(token)).toBeNull();
@@ -118,10 +131,12 @@ describe("navhTailDest (#143 follow-up: opaque-route relative recovery)", () => 
   const PAGE = "https://github.com/lobsterbs/Zeolite";
   const never = (_t: string): string | null => null;
 
-  it("resolves a token-bearing suffix append against the token destination", () => {
+  it("resolves a token-bearing suffix against the token origin (#144)", () => {
     setRouteKey(KEY_A);
+    /* #144: the token carries the origin only; the tail is the real
+       page path from the root. */
     const tok = encodeNavHandle(PAGE)!;
-    expect(navhTailDest(tok + "/latest-commit", null, true, decodeNavHandle)).toBe(
+    expect(navhTailDest(tok + "/lobsterbs/Zeolite/latest-commit", null, true, decodeNavHandle)).toBe(
       "https://github.com/lobsterbs/Zeolite/latest-commit",
     );
   });
@@ -132,6 +147,14 @@ describe("navhTailDest (#143 follow-up: opaque-route relative recovery)", () => 
     expect(navhTailDest(tok + "/latest-commit", PAGE, true, decodeNavHandle)).toBe(
       "https://github.com/lobsterbs/Zeolite/latest-commit",
     );
+  });
+
+  it("resolves an expired new-shape tail as an absolute path via the context (#144)", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle(PAGE, -1)!; /* expired */
+    expect(
+      navhTailDest(tok + "/lobsterbs/Zeolite/latest-commit", PAGE + "?tab=readme", true, decodeNavHandle),
+    ).toBe("https://github.com/lobsterbs/Zeolite/latest-commit");
   });
 
   it("strips the context URL query from the append base", () => {
@@ -174,5 +197,39 @@ describe("navhTailDest (#143 follow-up: opaque-route relative recovery)", () => 
     expect(navhTailDest(tok + "/a%20b.png", PAGE, true, never)).toBe(
       "https://github.com/lobsterbs/Zeolite/a%20b.png",
     );
+  });
+});
+
+describe("handle URL shape (#144: opaque host, visible path)", () => {
+  it("mints NAVH/<token>/<real path> with the query on the route", () => {
+    setRouteKey(KEY_A);
+    const url = buildNavHandleUrl("https://secret.example/dir/page.html?q=1#frag")!;
+    expect(url.startsWith(NAVH + "/")).toBe(true);
+    expect(url.endsWith("/dir/page.html?q=1")).toBe(true);
+    /* the host never appears; the path does (the #144 decision) */
+    expect(url).not.toContain("secret.example");
+    expect(url).not.toContain("#");
+  });
+
+  it("omits the suffix for a bare-origin destination", () => {
+    setRouteKey(KEY_A);
+    const url = buildNavHandleUrl("https://example.com/")!;
+    expect(url.startsWith(NAVH + "/")).toBe(true);
+    expect(url.slice(NAVH.length + 1)).not.toContain("/");
+    expect(decodeNavHandle(url.slice(NAVH.length + 1))).toBe("https://example.com");
+  });
+
+  it("resolves a suffix tail to the full destination", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle("https://example.com/dir/page.html")!;
+    expect(decodeNavHandlePath(tok)).toBe("https://example.com");
+    expect(decodeNavHandlePath(tok + "/dir/page.html")).toBe("https://example.com/dir/page.html");
+  });
+
+  it("keeps the honest null for expired or garbage tails", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle("https://example.com/x", -1)!;
+    expect(decodeNavHandlePath(tok)).toBeNull();
+    expect(decodeNavHandlePath("garbage!!/x")).toBeNull();
   });
 });

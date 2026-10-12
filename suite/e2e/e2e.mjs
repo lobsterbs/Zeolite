@@ -346,13 +346,23 @@ async function main() {
     }), dest);
     assert(handle.ok, "navHandle refused: " + JSON.stringify(handle));
     assert(String(handle.url).startsWith("/__zl_navh__/"), "handle route shape: " + handle.url);
+    /* #144: the real path rides as a visible suffix after the token */
+    assert(String(handle.url).endsWith("/dir/landing.html"), "#144 path suffix missing: " + handle.url);
     assert(!JSON.stringify(handle).includes("7102"), "handle reply leaks the destination: " + JSON.stringify(handle));
     const pg2 = await context.newPage();
     attachRecorder(pg2);
     await pg2.goto(ENGINE + handle.url);
     eq(await pg2.locator("#zl-landing").textContent(), "zl-landing", "handle navigation served the target");
     assert(pg2.url().startsWith(ENGINE + "/__zl_navh__/"), "handle navigation left the route: " + pg2.url());
-    return "navigated via /__zl_navh__/<keyed token>";
+    /* #144: the real path is visible in location.pathname, so a
+       pathname-routing SPA sees a routable suffix, and a
+       location-relative fetch resolves against the page's own
+       directory upstream. */
+    const pn = await pg2.evaluate(() => location.pathname);
+    assert(pn.includes("/dir/landing.html"), "#144 path suffix not visible in location.pathname: " + pn);
+    const rel = await pg2.evaluate(() => fetch("img.png").then((r) => r.status).catch(() => "err"));
+    eq(String(rel), "200", "relative fetch from the handle page: " + rel);
+    return "navigated via /__zl_navh__/<keyed token>/<real path>";
   });
 
   await check("handle: a proxied page cannot mint navigation handles (#63/#41 gate)", async () => {

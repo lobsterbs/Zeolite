@@ -25,7 +25,8 @@ describe("derefSelfRoute (#112 follow-up)", () => {
     setRouteKey(KEY);
     const tok = encodeNavHandle("https://www.google.com/sorry/index");
     if (tok === null) throw new Error("nav handle mint failed");
-    expect(derefSelfRoute("https://www.google.com/__zl_navh__/" + tok + "?x=1", ENGINE))
+    /* #144: the handle route carries the real path as its suffix */
+    expect(derefSelfRoute("https://www.google.com/__zl_navh__/" + tok + "/sorry/index?x=1", ENGINE))
       .toBe("https://www.google.com/sorry/index?x=1");
   });
 

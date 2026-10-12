@@ -34,13 +34,16 @@ Documented in docs/matrix.md; a module/classic-aware key is the fix.
 
 `window.location` is LegacyUnforgeable: pathname, search, origin and
 friends cannot be intercepted by a page shim, and the page sees the
-opaque engine route. SPAs that route on `location.pathname` (for example
-Google's `/j/...` routes) cannot work client-side without reintroducing
-the plaintext-destination leak that issue #32 closed. Virtualizing the
-forgeable surfaces (`document.URL`, `documentURI`, `baseURI`) plus a
-rewriter AST pass over free `location` reads is the tracked direction;
-it needs a deliberate design decision because initScript output is
-CI-tested to never contain the destination.
+engine route. #144 splits the identity on nav-handle routes: the real
+path and query ride after the opaque token
+(`/__zl_navh__/<token>/<real path>?<real query>`), so SPAs that route on
+`location.pathname` and pages that build URLs relative to their location
+work without any location virtualization. The destination HOST stays
+opaque - only the token can name it. Routers that string-match the exact
+bare token still cannot work client-side; virtualizing the forgeable
+surfaces (`document.URL`, `documentURI`, `baseURI`) plus a rewriter AST
+pass over free `location` reads stays the tracked direction for those.
+initScript output is CI-tested to never contain the destination host.
 
 ## Referer on undecodable routes
 

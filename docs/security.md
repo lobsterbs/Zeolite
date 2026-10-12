@@ -372,9 +372,19 @@ Covered - no plaintext destination on the surface:
   decode of the tail yields keystream garbage, never http(s). Pinned
   by the browser e2e leak-inventory check and the navhandle unit
   tests.
-- Initial navigation via `zl:navHandle` (#63): the handle route is a
-  keyed token with a TTL; the mint reply and the navigated URL carry
-  no decodable destination.
+- Initial navigation via `zl:navHandle` (#63, #144): the handle route
+  is a keyed token with a TTL carrying the destination ORIGIN only;
+  the real path and query ride as a visible route suffix, so the
+  mint reply and the navigated URL never carry the host decodably.
+  #144 decision record: path and query exposure is deliberate - a
+  pathname-routed SPA cannot boot otherwise and the LegacyUnforgeable
+  location cannot be virtualized. The host, the only part an
+  enterprise URLBlocklist/URLAllowlist entry can key on, stays
+  opaque; host-keyed blocklist entries cannot match the page
+  observable URLs. Paths and queries can still carry identifying
+  content (account slugs, search terms); a host that needs full
+  opacity simply does not adopt navHandles (the legacy `?url=`
+  embed leaks far more - the entire URL, plaintext).
 - Storage tokens, WS retarget URLs, the error page: opaque or
   engine-shaped; unchanged from the sections above.
 - The runtime navguard marker branch: the SW-side `/__zl_nav__/`
@@ -396,7 +406,10 @@ Documented residuals - decodable, bounded, by design:
   `zl:navHandle` and flips `navHandles` (#63); the engine refuses it
   only on the opt-in, so migration is the host's choice.
 
-Open: none at this capture date. The browser e2e leak-inventory
+Open: one - #144's enterprise blocklist acceptance (a real Chrome
+policy run, not reasoning, per the issue's own bar) is pending a
+browser session; the host-opaque token guarantees it by construction.
+The browser e2e leak-inventory
 check walks every captured request URL and the proxied page's
 resource-timing names and fails on any `/j/` or `/__zl_navh__/` tail
 that legacy-decodes to http(s); the list above is what it pins.

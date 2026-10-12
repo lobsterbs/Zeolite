@@ -114,7 +114,8 @@ describe("passChallengeRedirFixed (absolute engine URL, anubis 1.26+)", () => {
     expect(token).not.toBeNull();
     const fixed = passChallengeRedirFixed(pcAbs(NAVH + "/" + token!), ORIGIN);
     expect(fixed).not.toBeNull();
-    expect(new URL(fixed!).searchParams.get("redir")).toBe("https://www.startpage.com/");
+    /* #144: the token carries the origin only */
+    expect(new URL(fixed!).searchParams.get("redir")).toBe("https://www.startpage.com");
     setRouteKey(null);
   });
 
@@ -123,6 +124,17 @@ describe("passChallengeRedirFixed (absolute engine URL, anubis 1.26+)", () => {
     const token = encodeNavHandle("https://www.startpage.com/", -1);
     expect(token).not.toBeNull();
     expect(passChallengeRedirFixed(pcAbs(NAVH + "/" + token!), ORIGIN)).toBeNull();
+    setRouteKey(null);
+  });
+
+  it("resolves a #144 suffix handle redir with its path and query", () => {
+    setRouteKey(b64uEncode(crypto.getRandomValues(new Uint8Array(16))));
+    const token = encodeNavHandle("https://www.startpage.com/")!;
+    const fixed = passChallengeRedirFixed(pcAbs(NAVH + "/" + token + "/sp/search?query=test"), ORIGIN);
+    expect(fixed).not.toBeNull();
+    expect(new URL(fixed!).searchParams.get("redir")).toBe(
+      "https://www.startpage.com/sp/search?query=test",
+    );
     setRouteKey(null);
   });
 });
