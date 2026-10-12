@@ -86,6 +86,13 @@ describe("transport reset (#74)", () => {
     expect(isConnectClassError("Request failed with error code 7: Could not connect to server")).toBe(true);
     expect(isConnectClassError("Request failed with error code 75: unassigned")).toBe(false);
     expect(isConnectClassError("Request failed with error code 6: Could not resolve host")).toBe(false);
+    // #147: epoxy connect-class surface (dead wisp socket).
+    expect(isConnectClassError("Hyper client: hyper_util::client::legacy::Error(Connect, Wisp(MuxTaskEnded)) (client error (Wisp: MuxTaskEnded (Multiplexor task ended)))")).toBe(true);
+    expect(isConnectClassError("Wisp: MuxTaskEnded (Multiplexor task ended)")).toBe(true);
+    expect(isConnectClassError("Wisp transport already closed")).toBe(true);
+    expect(isConnectClassError("Failed to receive multiplexor message")).toBe(true);
+    expect(isConnectClassError("Websocket implementation error: websocket closed")).toBe(true);
+    expect(isConnectClassError("Hyper: error reading a body from connection")).toBe(false);
     expect(isConnectClassError("Request failed with error code 3: URL using bad format")).toBe(false);
   });
 

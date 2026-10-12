@@ -745,9 +745,18 @@ import { setTransportState, transportState } from "./transport-lifecycle";
    Both signatures join the connect class: the request-time
    reset+retry rides a fresh wisp connection with an empty stream
    table. A genuine TLS/connect failure pays one reset and retry,
-   then surfaces honestly. */
+   then surfaces honestly.
+   #147: the epoxy engine surfaces the same class through its own
+   strings: a dead wisp socket fails the pending hyper connect with
+   "Wisp(MuxTaskEnded)" ("Multiplexor task ended"), mux send/receive
+   reports "failed to (send|receive) multiplexor message", a closed
+   shim socket answers "websocket implementation error: websocket
+   closed". All connect-class: reset+retry rides a fresh EpoxyClient;
+   a connect-stage failure has no body to double-read. Mid-body
+   hyper errors ("error reading a body from connection") stay
+   unmatched and fail honestly. */
 const CONNECT_CLASS_RE =
-  /websocket did not open|failed sending data|failure when receiving data|server returned nothing|error code (?:7|35|52|55|56)\b/i;
+  /websocket did not open|failed sending data|failure when receiving data|server returned nothing|error code (?:7|35|52|55|56)\b|muxtaskended|multiplexor task ended|wisp transport already closed|failed to (?:send|receive) multiplexor message|websocket implementation error: websocket closed/i;
 
 export function isConnectClassError(err: unknown): boolean {
   return CONNECT_CLASS_RE.test(String(err));
