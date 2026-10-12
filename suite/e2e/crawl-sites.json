@@ -1,0 +1,1382 @@
+[
+ {
+  "c": "news",
+  "u": "https://bbc.com"
+ },
+ {
+  "c": "news",
+  "u": "https://cnn.com"
+ },
+ {
+  "c": "news",
+  "u": "https://nytimes.com"
+ },
+ {
+  "c": "news",
+  "u": "https://theguardian.com"
+ },
+ {
+  "c": "news",
+  "u": "https://reuters.com"
+ },
+ {
+  "c": "news",
+  "u": "https://apnews.com"
+ },
+ {
+  "c": "news",
+  "u": "https://aljazeera.com"
+ },
+ {
+  "c": "news",
+  "u": "https://dw.com"
+ },
+ {
+  "c": "news",
+  "u": "https://france24.com"
+ },
+ {
+  "c": "news",
+  "u": "https://npr.org"
+ },
+ {
+  "c": "news",
+  "u": "https://wsj.com"
+ },
+ {
+  "c": "news",
+  "u": "https://ft.com"
+ },
+ {
+  "c": "news",
+  "u": "https://bloomberg.com"
+ },
+ {
+  "c": "news",
+  "u": "https://cnbc.com"
+ },
+ {
+  "c": "news",
+  "u": "https://techcrunch.com"
+ },
+ {
+  "c": "news",
+  "u": "https://theverge.com"
+ },
+ {
+  "c": "news",
+  "u": "https://wired.com"
+ },
+ {
+  "c": "news",
+  "u": "https://arstechnica.com"
+ },
+ {
+  "c": "news",
+  "u": "https://engadget.com"
+ },
+ {
+  "c": "news",
+  "u": "https://gizmodo.com"
+ },
+ {
+  "c": "news",
+  "u": "https://slate.com"
+ },
+ {
+  "c": "news",
+  "u": "https://vox.com"
+ },
+ {
+  "c": "news",
+  "u": "https://axios.com"
+ },
+ {
+  "c": "news",
+  "u": "https://politico.com"
+ },
+ {
+  "c": "news",
+  "u": "https://theatlantic.com"
+ },
+ {
+  "c": "news",
+  "u": "https://newyorker.com"
+ },
+ {
+  "c": "news",
+  "u": "https://economist.com"
+ },
+ {
+  "c": "news",
+  "u": "https://time.com"
+ },
+ {
+  "c": "news",
+  "u": "https://newsweek.com"
+ },
+ {
+  "c": "news",
+  "u": "https://cbsnews.com"
+ },
+ {
+  "c": "news",
+  "u": "https://nbcnews.com"
+ },
+ {
+  "c": "news",
+  "u": "https://abcnews.go.com"
+ },
+ {
+  "c": "news",
+  "u": "https://foxnews.com"
+ },
+ {
+  "c": "news",
+  "u": "https://usatoday.com"
+ },
+ {
+  "c": "news",
+  "u": "https://latimes.com"
+ },
+ {
+  "c": "news",
+  "u": "https://seattletimes.com"
+ },
+ {
+  "c": "news",
+  "u": "https://sfgate.com"
+ },
+ {
+  "c": "news",
+  "u": "https://chicagotribune.com"
+ },
+ {
+  "c": "news",
+  "u": "https://denverpost.com"
+ },
+ {
+  "c": "news",
+  "u": "https://startribune.com"
+ },
+ {
+  "c": "news",
+  "u": "https://dallasnews.com"
+ },
+ {
+  "c": "news",
+  "u": "https://cbc.ca"
+ },
+ {
+  "c": "news",
+  "u": "https://ctvnews.ca"
+ },
+ {
+  "c": "news",
+  "u": "https://globeandmail.com"
+ },
+ {
+  "c": "news",
+  "u": "https://smh.com.au"
+ },
+ {
+  "c": "news",
+  "u": "https://news.com.au"
+ },
+ {
+  "c": "news",
+  "u": "https://theage.com.au"
+ },
+ {
+  "c": "news",
+  "u": "https://stuff.co.nz"
+ },
+ {
+  "c": "news",
+  "u": "https://indiatimes.com"
+ },
+ {
+  "c": "news",
+  "u": "https://hindustantimes.com"
+ },
+ {
+  "c": "news",
+  "u": "https://ndtv.com"
+ },
+ {
+  "c": "news",
+  "u": "https://thehindu.com"
+ },
+ {
+  "c": "news",
+  "u": "https://bbc.co.uk"
+ },
+ {
+  "c": "news",
+  "u": "https://spiegel.de"
+ },
+ {
+  "c": "news",
+  "u": "https://zeit.de"
+ },
+ {
+  "c": "news",
+  "u": "https://faz.net"
+ },
+ {
+  "c": "news",
+  "u": "https://lemonde.fr"
+ },
+ {
+  "c": "news",
+  "u": "https://lefigaro.fr"
+ },
+ {
+  "c": "news",
+  "u": "https://elpais.com"
+ },
+ {
+  "c": "news",
+  "u": "https://elmundo.es"
+ },
+ {
+  "c": "news",
+  "u": "https://corriere.it"
+ },
+ {
+  "c": "news",
+  "u": "https://repubblica.it"
+ },
+ {
+  "c": "news",
+  "u": "https://nos.nl"
+ },
+ {
+  "c": "news",
+  "u": "https://nu.nl"
+ },
+ {
+  "c": "news",
+  "u": "https://aftenposten.no"
+ },
+ {
+  "c": "news",
+  "u": "https://vg.no"
+ },
+ {
+  "c": "news",
+  "u": "https://nrk.no"
+ },
+ {
+  "c": "news",
+  "u": "https://finn.no"
+ },
+ {
+  "c": "news",
+  "u": "https://dr.dk"
+ },
+ {
+  "c": "news",
+  "u": "https://svt.se"
+ },
+ {
+  "c": "news",
+  "u": "https://yle.fi"
+ },
+ {
+  "c": "news",
+  "u": "https://hs.fi"
+ },
+ {
+  "c": "news",
+  "u": "https://tvn24.pl"
+ },
+ {
+  "c": "reference",
+  "u": "https://wikipedia.org"
+ },
+ {
+  "c": "reference",
+  "u": "https://en.wiktionary.org"
+ },
+ {
+  "c": "reference",
+  "u": "https://britannica.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://wikihow.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://dictionary.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://merriam-webster.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://thesaurus.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://urbandictionary.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://etymonline.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://stanford.edu"
+ },
+ {
+  "c": "reference",
+  "u": "https://mit.edu"
+ },
+ {
+  "c": "reference",
+  "u": "https://harvard.edu"
+ },
+ {
+  "c": "reference",
+  "u": "https://berkeley.edu"
+ },
+ {
+  "c": "reference",
+  "u": "https://ox.ac.uk"
+ },
+ {
+  "c": "reference",
+  "u": "https://cam.ac.uk"
+ },
+ {
+  "c": "reference",
+  "u": "https://coursera.org"
+ },
+ {
+  "c": "reference",
+  "u": "https://edx.org"
+ },
+ {
+  "c": "reference",
+  "u": "https://khanacademy.org"
+ },
+ {
+  "c": "reference",
+  "u": "https://duolingo.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://scholar.google.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://arxiv.org"
+ },
+ {
+  "c": "reference",
+  "u": "https://nature.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://sciencedirect.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://springer.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://ieee.org"
+ },
+ {
+  "c": "reference",
+  "u": "https://acm.org"
+ },
+ {
+  "c": "reference",
+  "u": "https://pubmed.ncbi.nlm.nih.gov"
+ },
+ {
+  "c": "reference",
+  "u": "https://sciencedaily.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://howstuffworks.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://history.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://nationalgeographic.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://smithsonianmag.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://snopes.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://politifact.com"
+ },
+ {
+  "c": "reference",
+  "u": "https://factcheck.org"
+ },
+ {
+  "c": "reference",
+  "u": "https://jstor.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://github.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://gitlab.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://stackoverflow.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://superuser.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://serverfault.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://stackexchange.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://developer.mozilla.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://docs.python.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://docs.rs"
+ },
+ {
+  "c": "dev",
+  "u": "https://crates.io"
+ },
+ {
+  "c": "dev",
+  "u": "https://npmjs.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://pypi.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://rubygems.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://mvnrepository.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://dev.to"
+ },
+ {
+  "c": "dev",
+  "u": "https://hashnode.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://medium.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://news.ycombinator.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://lobste.rs"
+ },
+ {
+  "c": "dev",
+  "u": "https://producthunt.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://caniuse.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://reactjs.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://vuejs.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://angular.io"
+ },
+ {
+  "c": "dev",
+  "u": "https://deno.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://nodejs.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://go.dev"
+ },
+ {
+  "c": "dev",
+  "u": "https://rust-lang.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://kernel.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://postgresql.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://sqlite.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://redis.io"
+ },
+ {
+  "c": "dev",
+  "u": "https://mongodb.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://docker.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://kubernetes.io"
+ },
+ {
+  "c": "dev",
+  "u": "https://w3.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://whatwg.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://ietf.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://iana.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://chromium.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://mozilla.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://web.archive.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://codeberg.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://sourceforge.net"
+ },
+ {
+  "c": "dev",
+  "u": "https://bitbucket.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://freebsd.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://archlinux.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://debian.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://ubuntu.com"
+ },
+ {
+  "c": "dev",
+  "u": "https://fedoraproject.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://opensuse.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://manjaro.org"
+ },
+ {
+  "c": "dev",
+  "u": "https://wiki.gentoo.org"
+ },
+ {
+  "c": "shopping",
+  "u": "https://amazon.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://ebay.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://walmart.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://etsy.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://aliexpress.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://target.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://bestbuy.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://newegg.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://ikea.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://adidas.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://nike.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://zara.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://asos.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://bhphotovideo.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://homedepot.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://lowes.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://wayfair.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://overstock.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://costco.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://walgreens.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://cvs.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://ulta.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://sephora.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://chewy.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://gamestop.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://lego.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://dell.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://apple.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://hp.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://lenovo.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://acer.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://asus.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://msi.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://logitech.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://razer.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://canon.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://nikon.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://sony.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://samsung.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://lg.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://dyson.com"
+ },
+ {
+  "c": "shopping",
+  "u": "https://rei.com"
+ },
+ {
+  "c": "social",
+  "u": "https://reddit.com"
+ },
+ {
+  "c": "social",
+  "u": "https://old.reddit.com"
+ },
+ {
+  "c": "social",
+  "u": "https://twitter.com"
+ },
+ {
+  "c": "social",
+  "u": "https://x.com"
+ },
+ {
+  "c": "social",
+  "u": "https://instagram.com"
+ },
+ {
+  "c": "social",
+  "u": "https://facebook.com"
+ },
+ {
+  "c": "social",
+  "u": "https://linkedin.com"
+ },
+ {
+  "c": "social",
+  "u": "https://tiktok.com"
+ },
+ {
+  "c": "social",
+  "u": "https://pinterest.com"
+ },
+ {
+  "c": "social",
+  "u": "https://tumblr.com"
+ },
+ {
+  "c": "social",
+  "u": "https://mastodon.social"
+ },
+ {
+  "c": "social",
+  "u": "https://quora.com"
+ },
+ {
+  "c": "social",
+  "u": "https://discord.com"
+ },
+ {
+  "c": "social",
+  "u": "https://twitch.tv"
+ },
+ {
+  "c": "social",
+  "u": "https://9gag.com"
+ },
+ {
+  "c": "social",
+  "u": "https://imgur.com"
+ },
+ {
+  "c": "social",
+  "u": "https://snapchat.com"
+ },
+ {
+  "c": "social",
+  "u": "https://whatsapp.com"
+ },
+ {
+  "c": "social",
+  "u": "https://telegram.org"
+ },
+ {
+  "c": "social",
+  "u": "https://signal.org"
+ },
+ {
+  "c": "social",
+  "u": "https://vk.com"
+ },
+ {
+  "c": "social",
+  "u": "https://weibo.com"
+ },
+ {
+  "c": "social",
+  "u": "https://xing.com"
+ },
+ {
+  "c": "social",
+  "u": "https://meetup.com"
+ },
+ {
+  "c": "social",
+  "u": "https://wordpress.com"
+ },
+ {
+  "c": "social",
+  "u": "https://blogger.com"
+ },
+ {
+  "c": "social",
+  "u": "https://substack.com"
+ },
+ {
+  "c": "social",
+  "u": "https://patreon.com"
+ },
+ {
+  "c": "social",
+  "u": "https://buymeacoffee.com"
+ },
+ {
+  "c": "media",
+  "u": "https://youtube.com"
+ },
+ {
+  "c": "media",
+  "u": "https://vimeo.com"
+ },
+ {
+  "c": "media",
+  "u": "https://dailymotion.com"
+ },
+ {
+  "c": "media",
+  "u": "https://rumble.com"
+ },
+ {
+  "c": "media",
+  "u": "https://odysee.com"
+ },
+ {
+  "c": "media",
+  "u": "https://ted.com"
+ },
+ {
+  "c": "media",
+  "u": "https://netflix.com"
+ },
+ {
+  "c": "media",
+  "u": "https://hulu.com"
+ },
+ {
+  "c": "media",
+  "u": "https://disneyplus.com"
+ },
+ {
+  "c": "media",
+  "u": "https://primevideo.com"
+ },
+ {
+  "c": "media",
+  "u": "https://max.com"
+ },
+ {
+  "c": "media",
+  "u": "https://peacocktv.com"
+ },
+ {
+  "c": "media",
+  "u": "https://crunchyroll.com"
+ },
+ {
+  "c": "media",
+  "u": "https://tubitv.com"
+ },
+ {
+  "c": "media",
+  "u": "https://pluto.tv"
+ },
+ {
+  "c": "media",
+  "u": "https://pbs.org"
+ },
+ {
+  "c": "media",
+  "u": "https://imdb.com"
+ },
+ {
+  "c": "media",
+  "u": "https://rottentomatoes.com"
+ },
+ {
+  "c": "media",
+  "u": "https://metacritic.com"
+ },
+ {
+  "c": "media",
+  "u": "https://letterboxd.com"
+ },
+ {
+  "c": "media",
+  "u": "https://spotify.com"
+ },
+ {
+  "c": "media",
+  "u": "https://soundcloud.com"
+ },
+ {
+  "c": "media",
+  "u": "https://last.fm"
+ },
+ {
+  "c": "media",
+  "u": "https://bandcamp.com"
+ },
+ {
+  "c": "media",
+  "u": "https://mixcloud.com"
+ },
+ {
+  "c": "media",
+  "u": "https://genius.com"
+ },
+ {
+  "c": "media",
+  "u": "https://azlyrics.com"
+ },
+ {
+  "c": "media",
+  "u": "https://ultimate-guitar.com"
+ },
+ {
+  "c": "media",
+  "u": "https://archive.org"
+ },
+ {
+  "c": "media",
+  "u": "https://gutenberg.org"
+ },
+ {
+  "c": "media",
+  "u": "https://audible.com"
+ },
+ {
+  "c": "media",
+  "u": "https://openlibrary.org"
+ },
+ {
+  "c": "media",
+  "u": "https://goodreads.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://google.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://bing.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://duckduckgo.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://search.brave.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://startpage.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://mojeek.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://ecosia.org"
+ },
+ {
+  "c": "tools",
+  "u": "https://yandex.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://baidu.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://yahoo.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://aol.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://ask.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://wolframalpha.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://openstreetmap.org"
+ },
+ {
+  "c": "tools",
+  "u": "https://mapquest.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://translate.google.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://deepl.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://weather.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://accuweather.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://wunderground.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://timeanddate.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://coinmarketcap.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://coindesk.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://cointelegraph.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://investopedia.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://tradingview.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://xe.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://paypal.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://stripe.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://shopify.com"
+ },
+ {
+  "c": "tools",
+  "u": "https://who.is"
+ },
+ {
+  "c": "tools",
+  "u": "https://downforeveryoneorjustme.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://booking.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://airbnb.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://expedia.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://kayak.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://tripadvisor.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://yelp.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://opentable.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://foursquare.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://grubhub.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://doordash.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://instacart.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://zillow.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://realtor.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://apartments.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://craigslist.org"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://cars.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://autotrader.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://kbb.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://carfax.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://uber.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://lyft.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://delta.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://united.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://southwest.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://ryanair.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://easyjet.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://lufthansa.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://bahn.de"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://trenitalia.com"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://vr.no"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://entur.no"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://nasa.gov"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://noaa.gov"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://weather.gov"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://usa.gov"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://europa.eu"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://gov.uk"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://canada.ca"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://un.org"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://who.int"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://worldbank.org"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://regjeringen.no"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://udi.no"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://skatteetaten.no"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://nav.no"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://helsenorge.no"
+ },
+ {
+  "c": "travel-gov",
+  "u": "https://yr.no"
+ }
+]
