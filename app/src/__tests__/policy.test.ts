@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { compilePolicy, policyMatch, loadPolicy, policyResetForTests } from "../policy";
+import shippedPolicy from "../../public/policy.kdl?raw";
 
 /* KDL nodes terminate at newlines, so every rule child sits on its
    own line (single-line rules would absorb later children as args). */
@@ -156,5 +157,33 @@ describe("loadPolicy", () => {
     expect(p.rules).toHaveLength(1);
     expect(calls).toBe(1);
     globalThis.fetch = orig;
+  });
+});
+/* The shipped app/public/policy.kdl is production data served to the
+   SW at engine origin. Gate it in CI: an unparseable edit would fall
+   back to defaults and silently drop every relay host. */
+describe("shipped policy.kdl", () => {
+  const p = compilePolicy(shippedPolicy);
+
+  it("compiles with rules", () => {
+    expect(p.rules.length).toBeGreaterThan(0);
+  });
+
+  it("relays the #137 ddg host", () => {
+    expect(policyMatch(p, "https://duckduckgo.com/", "document")).toMatchObject({ route: "relay" });
+    expect(policyMatch(p, "https://html.duckduckgo.com/html/", "document")).toMatchObject({ route: "relay" });
+  });
+
+  it("relays the #149 blocked hosts (wasm TLS/h2 shapes rejected upstream)", () => {
+    for (const host of [
+      "cbc.ca", "www.cbc.ca", "united.com", "www.united.com",
+      "opentable.com", "acer.com", "slither.io", "delta.com",
+    ]) {
+      expect(policyMatch(p, "https://" + host + "/", "document"), host).toMatchObject({ route: "relay" });
+    }
+  });
+
+  it("leaves unrelated hosts on the default transit", () => {
+    expect(policyMatch(p, "https://example.com/", "document")).toBeNull();
   });
 });

@@ -26,3 +26,48 @@ rule "ddg-relay" {
   route "relay"
   reason "TLS-fingerprint block: wasm ClientHello rejected, embedder relay"
 }
+
+// #149 (closed not_planned): the hosts below reject the wasm TLS/h2
+// client shapes deterministically while direct fetches from the same
+// egress pass: cbc/united/opentable/acer fail in the HTTP/2 framing
+// layer (libcurl error 92, epoxy RST_STREAM(1) INTERNAL_ERROR),
+// slither.io fails at the TLS handshake (libcurl error 35, epoxy
+// handshake eof). The wisp relay itself is byte-honest (a native TLS
+// client carried through the exact same tunnel gets identical
+// responses, suite/e2e/wisp-tls-probe.mjs), so the block is upstream
+// bot management fingerprinting the wasm stacks. The embedder relays
+// these hosts with its own TLS.
+rule "cbc-relay" {
+  match host="cbc.ca"
+  route "relay"
+  reason "#149: h2 framing reject of wasm client shapes, embedder relay"
+}
+rule "united-relay" {
+  match host="united.com"
+  route "relay"
+  reason "#149: h2 framing reject of wasm client shapes, embedder relay"
+}
+rule "opentable-relay" {
+  match host="opentable.com"
+  route "relay"
+  reason "#149: h2 framing reject of wasm client shapes, embedder relay"
+}
+rule "acer-relay" {
+  match host="acer.com"
+  route "relay"
+  reason "#149: h2 framing reject of wasm client shapes, embedder relay"
+}
+rule "slither-relay" {
+  match host="slither.io"
+  route "relay"
+  reason "#149: TLS handshake reject of wasm ClientHello, embedder relay"
+}
+
+// delta.com: TLS connect refused from the test egress (egress-level,
+// not proven upstream), relay gives it a native stack + the
+// deployer's egress.
+rule "delta-relay" {
+  match host="delta.com"
+  route "relay"
+  reason "#149: TLS connect refused at test egress, embedder relay"
+}
