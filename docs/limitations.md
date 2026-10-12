@@ -68,3 +68,19 @@ the wire fingerprint is that of the vendored stack, not a real browser
 stack. Per-site FingerprintProfile data (siteconfig) aligns the
 document surface (UA, languages, headers) with the wire surface where
 possible, but JA3/H2 coherence is bounded by the transport stack.
+
+## Compat-probe single-row connect timeouts
+
+The real-site compat probe (suite/probe.mjs) can fail a single row
+with close reason 0x43 (ConnectTimedOut) when the runner its server
+runs on cannot reach one host: the outbound TCP connect from the
+server to that destination times out while every other probe site,
+including other properties of the same provider, passes through the
+same wisp session. The classifier labels such a row client-defect
+(the direct baseline was not a 3xx/403/429/451 gate), but it is an
+egress condition of the runner network, not an engine defect - the
+honest check is a local rerun with the same binary. Observed:
+google-consent on CI run 38219174704 failed with 0x43 while
+google-home and google-search passed through the engine on the same
+session; three local probe runs with the same build passed
+google-consent 3/3 (the next CI run confirmed green).
