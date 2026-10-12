@@ -1,4 +1,4 @@
-/* w14 crawl v3: 345 sites through the pin-54 engine dist bytes.
+/* w14 crawl v3: sites through the pinned engine dist bytes.
    Fresh context per site. Per-site: consent-overlay dismissal
    (honest click on the site own accept button), scroll round-trip
    (window then largest scrollable container), captcha press
@@ -6,10 +6,11 @@
    navigation, button click, link navigation. Engine error pages
    captured with reason/category/trace. Server stdio to file +
    auto-restart on connection-refused streaks.
-   Env: ZL_ENGINE ZL_OUT ZL_PROG ZL_SRVLOG ZL_STATIC ZL_BIN ZL_WORKERS.
-   ponytail: frame.evaluate calls are unbounded; on finn.no a wedged
-   renderer stalled one probe for ~32 min before finishing. Upgrade path:
-   per-call watchdog racing a timer. */
+   Env: ZL_ENGINE ZL_OUT ZL_PROG ZL_SRVLOG ZL_STATIC ZL_BIN ZL_WORKERS
+   ZL_RESUME=1 (skip sites already present in ZL_OUT).
+   Every frame/page evaluate races a watchdog (EV_MS): a wedged
+   renderer answers null after the cap instead of stalling the
+   worker forever (finn.no once hung one probe for ~32 min). */
 import { spawn } from 'node:child_process';
 import { appendFileSync, writeFileSync, readFileSync, openSync } from 'node:fs';
 import { chromium } from 'playwright';
@@ -21,7 +22,7 @@ const SRVLOG = process.env.ZL_SRVLOG || '/home/sprite/w14-server.log';
 const STATIC = process.env.ZL_STATIC || '/home/sprite/w14static';
 const BIN = process.env.ZL_BIN || '/home/sprite/Zeolite/target/release/zeolite-server';
 const WORKERS = Number(process.env.ZL_WORKERS || 3);
-const GOTO_MS = 25000, FRAME_WAIT_MS = 20000, SETTLE_MS = 12000;
+const GOTO_MS = 25000, FRAME_WAIT_MS = 20000, SETTLE_MS = 12000, EV_MS = 8000;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -92,6 +93,11 @@ async function restartServer() {
   await waitHealth(15000);
 }
 
+/* Watchdogged evaluate: a wedged renderer answers null after ms. */
+async function evT(target, expr, ms = EV_MS) {
+  try { return await Promise.race([target.evaluate(expr), sleep(ms).then(() => null)]); } catch { return null; }
+}
+
 async function contentFrame(pg, budgetMs) {
   const t0 = Date.now();
   while (Date.now() - t0 < budgetMs) {
@@ -100,8 +106,8 @@ async function contentFrame(pg, budgetMs) {
       try {
         const url = f.url();
         if (!url.includes('/j/') && !url.includes('__zl_navh__')) continue;
-        const n = await f.evaluate('document.querySelectorAll(String.fromCharCode(42)).length');
-        if (n >= 8) return f;
+        const n = await evT(f, 'document.querySelectorAll(String.fromCharCode(42)).length', 5000);
+        if (n !== null && n >= 8) return f;
       } catch {}
     }
     await sleep(400);
@@ -109,7 +115,7 @@ async function contentFrame(pg, budgetMs) {
   return null;
 }
 
-async function evalM(fr) { return fr.evaluate(METRICS).catch(() => null); }
+async function evalM(fr) { return evT(fr, METRICS); }
 
 async function probe(ctx, site) {
   const r = { c: site.c, site: site.u, loaded: false, hasFrame: false, title: '', els: 0, links: 0, buttons: 0, inputs: 0, imgs: 0, imgsOk: 0, textLen: 0, consentDismissed: false, scrollOk: false, captchaProviders: [], captchaPressable: false, captchaPressed: false, captchaOutcome: '', typeOk: false, submitNavOk: false, afterSubmitUrl: '', clickOk: false, linkNavOk: false, afterLinkUrl: '', consoleErrs: 0, pageErrs: 0, errPage: null, bodyText: '', frameUrl: '', loadMs: 0, totalMs: 0 };
@@ -130,7 +136,7 @@ async function probe(ctx, site) {
     }
     const fr = await contentFrame(pg, FRAME_WAIT_MS);
     r.loadMs = Date.now() - t0;
-    if (!fr) { r.embedStatus = await pg.evaluate(() => { const el = document.getElementById('zl-status'); return el ? el.textContent : '(none)'; }).catch(() => '(eval failed)'); r.topUrl = pg.url(); return r; }
+    if (!fr) { r.embedStatus = await evT(pg, '(() => { const el = document.getElementById(String.fromCharCode(122,108,45,115,116,97,116,117,115)); return el ? el.textContent : String(40,110,111,110,101,41); })()', 5000); r.topUrl = pg.url(); return r; }
     r.hasFrame = true;
     let m = null;
     const tw0 = Date.now();
@@ -160,12 +166,12 @@ async function probe(ctx, site) {
 
     /* 1. scroll round-trip: window, else largest scrollable container */
     try {
-      await fr.evaluate('window.scrollBy(0, 1200)');
-      r.scrollOk = (await fr.evaluate('window.scrollY')) > 50;
+      await evT(fr, 'window.scrollBy(0, 1200)', 5000);
+      r.scrollOk = (await evT(fr, 'window.scrollY', 5000)) > 50;
       if (!r.scrollOk) {
-        r.scrollOk = await fr.evaluate("(() => { const els = [...document.querySelectorAll('div')].filter(e => e.scrollHeight > e.clientHeight + 300); els.sort((a, b) => b.scrollHeight - a.scrollHeight); if (els[0]) { els[0].scrollTop = 600; return els[0].scrollTop > 50; } return false; })()");
+        r.scrollOk = !!(await evT(fr, "(() => { const els = [...document.querySelectorAll('div')].filter(e => e.scrollHeight > e.clientHeight + 300); els.sort((a, b) => b.scrollHeight - a.scrollHeight); if (els[0]) { els[0].scrollTop = 600; return els[0].scrollTop > 50; } return false; })()", 6000));
       }
-      await fr.evaluate('window.scrollTo(0, 0)');
+      await evT(fr, 'window.scrollTo(0, 0)', 5000);
     } catch {}
 
     /* 2. captcha: one honest press on the visible widget, no solve logic */
@@ -227,7 +233,21 @@ async function probe(ctx, site) {
 async function main() {
   startServer();
   if (!(await waitHealth(20000))) { console.error('server did not come up'); process.exit(1); }
-  writeFileSync(OUT, '');
+  /* ZL_RESUME=1: keep existing OUT rows and skip sites already
+     probed in them, so a killed crawl continues instead of
+     restarting from zero. */
+  const resume = process.env.ZL_RESUME === '1';
+  const seen = new Set();
+  if (resume) {
+    try {
+      for (const l of readFileSync(OUT, 'utf8').split('\n')) {
+        if (!l.trim()) continue;
+        try { const j = JSON.parse(l); if (j && j.site) seen.add(j.site); } catch {}
+      }
+    } catch {}
+  } else {
+    writeFileSync(OUT, '');
+  }
   writeFileSync(PROG, '');
   let next = 0; const done = { n: 0 };
   const browsers = await Promise.all(Array.from({ length: WORKERS }, () => chromium.launch({ headless: true })));
@@ -236,6 +256,7 @@ async function main() {
       const i = next++;
       if (i >= LIST.length) return;
       const site = LIST[i];
+      if (resume && seen.has(site.u)) { done.n++; writeFileSync(PROG, JSON.stringify({ done: done.n, total: LIST.length, last: site.u, cls: 'skip', serverStarts, t: new Date().toISOString() })); continue; }
       let ctx;
       try { ctx = await browser.newContext({ userAgent: UA, viewport: { width: 1366, height: 900 } }); } catch { return; }
       let r;
@@ -270,7 +291,7 @@ async function main() {
     errPages: rows.filter(r => r.errPage).map(r => ({ site: r.site, cat: r.errPage.category, reason: r.errPage.reason, trace: r.errPage.trace })),
     consoleClean: rows.filter(r => r.cls === 'ok' && r.consoleErrs === 0).length,
   };
-  writeFileSync('/home/sprite/w14-summary.json', JSON.stringify(sum, null, 2));
+  writeFileSync(OUT.replace(/\.jsonl$/, '') + '-summary.json', JSON.stringify(sum, null, 2));
   console.log(JSON.stringify(sum, null, 2));
 }
 main().catch(e => { console.error('FATAL', e); try { server && server.kill('SIGKILL'); } catch {} process.exit(1); });
