@@ -2,7 +2,7 @@
  * Extracted from sw.ts (issues #85, #90, #91). Core zl: handling lives here;
  * extension-facing zl: messages are forwarded to ./extensions/control. */
 
-import { buildNavHandleUrl, currentPrefix, decodePath, encodeDest, mintableDest, setScheme } from "./codec";
+import { buildNavHandleUrl, currentPrefix, decodeClientUrl, encodeDest, mintableDest, setScheme } from "./codec";
 import type { JarConflictRule } from "./cookies";
 import { documentCookieRead, documentCookieWrite, jarClear, jarClearScope, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy } from "./cookies";
 import { PAGE_MESSAGES, senderIsProxiedPath } from "./cpgate";
@@ -485,7 +485,7 @@ case "zl:tracing":
           let home = contextOf(VCTX, (e.source as { id?: string } | null)?.id)?.targetOrigin ?? null;
           if (!home) {
             const client = e.source;
-            const cu = client && "url" in client ? decodePath(new URL((client as { url: string }).url, self.location.origin).pathname) : null;
+            const cu = client && "url" in client ? decodeClientUrl(new URL((client as { url: string }).url, self.location.origin)) : null;
             home = cu ? new URL(cu).origin : null;
           }
           if (!home) {
@@ -652,7 +652,7 @@ case "zl:tracing":
           for (const c of cs) {
             try {
               const cu = new URL(c.url, self.location.origin);
-              if (decodePath(cu.pathname) + cu.search === msg.dest) {
+              if (decodeClientUrl(cu) === msg.dest) {
                 target = c;
                 break;
               }

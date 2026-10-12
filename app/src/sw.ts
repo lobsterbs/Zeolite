@@ -45,7 +45,7 @@ import { initTransform, prewarmRewriter } from "./transform";
 /* The tabs.sendMessage dispatch decodes a client's engine path to
    match the target tab's destination (codec is shared with the
    request engine). */
-import { decodePath } from "./codec";
+import { decodeClientUrl } from "./codec";
 /* #87: the shared service-worker runtime state (degraded flag, route
    key, fingerprint scripts, per-site profile cache) lives in
    ./swstate; this entrypoint and the request engine are call sites. */
@@ -168,7 +168,7 @@ const initReady = (async () => {
         let cdest = "";
         try {
           const cu = new URL(c.url, self.location.origin);
-          cdest = decodePath(cu.pathname) + cu.search;
+          cdest = decodeClientUrl(cu) ?? "";
         } catch {
           continue;
         }

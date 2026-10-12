@@ -383,6 +383,23 @@ export function decodeNavHandlePath(tail: string): string | null {
   }
 }
 
+/** #151: a controlled page's client URL is either a /j/ route or a
+    #144 NAVH handle. decodePath alone cannot resolve a NAVH client:
+    it returns null there, and the historical
+    decodePath(pathname) + search derivation coerced that null into
+    the truthy string "null" - a garbage destination that matches no
+    host pattern, silently stranding every extension message sent
+    from a handle-navigated page. Every client-URL-to-destination
+    derivation goes through here. */
+export function decodeClientUrl(u: URL): string | null {
+  if (u.pathname.startsWith(NAVH + "/")) {
+    const d = decodeNavHandlePath(u.pathname.slice(NAVH.length + 1));
+    return d === null ? null : d + u.search;
+  }
+  const d = decodePath(u.pathname);
+  return d === null ? null : d + u.search;
+}
+
 /** #144: mint the full handle route URL for an absolute http(s)
     destination: NAVH + "/" + <origin-only token> + <real path> +
     <real query>. The path and query are visible by design - the

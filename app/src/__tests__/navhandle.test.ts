@@ -3,6 +3,7 @@ import {
   b64uDecode,
   b64uEncode,
   buildNavHandleUrl,
+  decodeClientUrl,
   decodeNavHandle,
   decodeNavHandlePath,
   decodePath,
@@ -231,5 +232,39 @@ describe("handle URL shape (#144: opaque host, visible path)", () => {
     const tok = encodeNavHandle("https://example.com/x", -1)!;
     expect(decodeNavHandlePath(tok)).toBeNull();
     expect(decodeNavHandlePath("garbage!!/x")).toBeNull();
+  });
+});
+
+describe("client-URL destination derivation (#151)", () => {
+  it("resolves a /j/ route client to its destination", () => {
+    setRouteKey(KEY_A);
+    const path = encodeDest("https://example.com/dir/page.html?q=1");
+    expect(decodeClientUrl(new URL("http://engine.example" + path))).toBe("https://example.com/dir/page.html?q=1");
+  });
+
+  it("resolves a NAVH client to its destination, not the token payload", () => {
+    setRouteKey(KEY_A);
+    const url = buildNavHandleUrl("https://example.com/dir/page.html?q=1")!;
+    const u = new URL("http://engine.example" + url);
+    expect(u.pathname.startsWith(NAVH + "/")).toBe(true);
+    expect(decodeClientUrl(u)).toBe("https://example.com/dir/page.html?q=1");
+  });
+
+  it("keeps the honest null for undecodable clients", () => {
+    setRouteKey(KEY_A);
+    expect(decodeClientUrl(new URL("http://engine.example/not-a-route"))).toBeNull();
+    const expired = buildNavHandleUrl("https://example.com/x", -1)!;
+    expect(decodeClientUrl(new URL("http://engine.example" + expired))).toBeNull();
+  });
+
+  it("never coerces an undecodable client into the truthy string null", () => {
+    setRouteKey(null);
+    const u = new URL("http://engine.example/__zl_navh__/AAAAAAAAAAAAAAAA");
+    expect(decodeClientUrl(u)).toBeNull();
+    expect(decodeClientUrl(u) === "null").toBe(false);
+  });
+
+  it("classifies NAVH pages as proxied senders", () => {
+    expect(senderIsProxiedPath(NAVH + "/token-abc")).toBe(true);
   });
 });

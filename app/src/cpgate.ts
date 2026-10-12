@@ -7,7 +7,7 @@
    not be able to mint initial-navigation handles for arbitrary
    destinations. */
 
-import { isEnginePath } from "./codec";
+import { isEnginePath, NAVH } from "./codec";
 import { NAV } from "./bootstrap/navguard";
 /* The constants come from serve, not the barrel: serve's module graph
    is proven vitest-import-safe (ext-pages.test.ts), the barrel pulls
@@ -33,12 +33,16 @@ export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
 ]);
 
 /** Pathname half of the sender classification: true when a client at
-    this pathname is a proxied page (an engine route, a navguard
-    marker, or extension code), not a host page. #48: /zl-ext/ and
-    /zl-cs/ host extension code, never host pages. */
+    this pathname is a proxied page (an engine route, a NAVH handle
+    (#144), a navguard marker, or extension code), not a host page.
+    #48: /zl-ext/ and /zl-cs/ host extension code, never host pages.
+    #151: a handle-navigated page is a proxied page; without the NAVH
+    arm it classified as a host page and every host-only control
+    message was accepted from it. */
 export function senderIsProxiedPath(pathname: string): boolean {
   return (
     isEnginePath(pathname) ||
+    pathname.startsWith(NAVH) ||
     pathname.startsWith(NAV) ||
     pathname.startsWith(EXT_ROUTE) ||
     pathname.startsWith(CS_ROUTE)

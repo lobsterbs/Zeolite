@@ -157,7 +157,7 @@ export const BRIDGE_SOURCE = `(function () {
       .then(function (code) {
         try {
           var browser = apiObject();
-          new Function("browser", "chrome", '"use strict";\n' + code)(browser, browser);
+          new Function("browser", "chrome", '"use strict";\\n' + code)(browser, browser);
         } catch (e) {
           console.error("[zeolite cs " + cfg.ext + "]", e);
         }

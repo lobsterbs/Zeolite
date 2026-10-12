@@ -1,7 +1,7 @@
 /* Extension control facade: extension-facing zl: dispatch plus the
  * content-script bridge handler (issue #91). */
 
-import { decodePath } from "../codec";
+import { decodeClientUrl } from "../codec";
 import type { ControlMessage } from "../control";
 import { bootInstalled, wakeExtension } from "./background";
 import { contentScriptMatches } from "./content-scripts";
@@ -356,7 +356,7 @@ async function handleExtMessage(
   const src = ev.source as Client | null;
   if (!src || !src.url) return { ok: false, error: "unknown sender" };
   const su = new URL(src.url, self.location.origin);
-  const dest = decodePath(su.pathname) + su.search;
+  const dest = decodeClientUrl(su);
   if (!dest) return { ok: false, error: "unknown sender page" };
   const rec = extensions.get(m.extId);
   if (!rec || !rec.enabled) return { ok: false, error: "no such extension" };

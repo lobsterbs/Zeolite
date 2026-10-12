@@ -31,6 +31,42 @@ describe("ExtensionMessenger", () => {
       /cross-extension/,
     );
   });
+  it("treats a listener's plain return value as the sync reply (#152)", async () => {
+    const m = new ExtensionMessenger();
+    m.onMessage(ID, () => ({ pong: true }));
+    await expect(m.sendMessage(ID, sender, { ping: 1 })).resolves.toEqual({ pong: true });
+  });
+  it("treats a listener's returned Promise as the async reply (#152)", async () => {
+    const m = new ExtensionMessenger();
+    m.onMessage(ID, async () => ({ pong: true, async: true }));
+    await expect(m.sendMessage(ID, sender, { ping: 1 })).resolves.toEqual({
+      pong: true,
+      async: true,
+    });
+  });
+  it("rejects the send when a listener's returned Promise rejects (#152)", async () => {
+    const m = new ExtensionMessenger();
+    m.onMessage(ID, async () => {
+      throw new Error("bg exploded");
+    });
+    await expect(m.sendMessage(ID, sender, {})).rejects.toThrow(/bg exploded/);
+  });
+  it("keeps return true as the Chrome async-sendResponse contract", async () => {
+    const m = new ExtensionMessenger();
+    m.onMessage(ID, (_msg, _from, send) => {
+      setTimeout(() => send({ late: true }), 10);
+      return true;
+    });
+    await expect(m.sendMessage(ID, sender, {})).resolves.toEqual({ late: true });
+  });
+  it("lets a later listener answer when an earlier one stays silent", async () => {
+    const m = new ExtensionMessenger();
+    m.onMessage(ID, () => {
+      /* silent */
+    });
+    m.onMessage(ID, () => "second wins");
+    await expect(m.sendMessage(ID, sender, {})).resolves.toBe("second wins");
+  });
   it("runs ports end to end", () => {
     const m = new ExtensionMessenger();
     let got: unknown = null;

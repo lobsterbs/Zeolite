@@ -18,7 +18,7 @@ export interface MessageSender {
 }
 
 export type SendResponse = (response?: unknown) => void;
-export type MessageListener = (msg: unknown, sender: MessageSender, sendResponse: SendResponse) => boolean | void;
+export type MessageListener = (msg: unknown, sender: MessageSender, sendResponse: SendResponse) => unknown;
 export type ConnectListener = (port: ExtensionPort) => void;
 
 export class ExtensionPort {
@@ -110,7 +110,13 @@ export class ExtensionMessenger {
 
   /* Fire-and-response messaging within one extension. Returns a
      promise with the responder's reply, or rejects when no listener
-     answered. */
+     answered. Response semantics follow the Gecko contract
+     (runtime.onMessage): a listener may call sendResponse, OR return
+     a plain value (sync response), OR return a Promise (async
+     response, rejection fails the send). Returning true is the one
+     Chrome-ism kept: it promises a later sendResponse. With multiple
+     listeners the first response wins; a listener that neither
+     responds nor keeps the channel open does not end the send. */
   async sendMessage(
     id: ExtensionId,
     from: MessageSender,
@@ -124,7 +130,6 @@ export class ExtensionMessenger {
       throw new Error("zeolite: could not establish connection. Receiving end does not exist");
     }
     let settled = false;
-    const responders: SendResponse[] = [];
     const reply = new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!settled) {
@@ -132,17 +137,38 @@ export class ExtensionMessenger {
           reject(new Error("zeolite: message listener did not respond"));
         }
       }, 30000);
+      const respond = (r?: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(r);
+      };
+      const fail = (e: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      };
+      let keptOpen = false;
+      let pending = 0;
       for (const l of set) {
-        const sendResponse: SendResponse = (r?: unknown) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve(r);
-        };
-        responders.push(sendResponse);
-        const keepOpen = l(msg, from, sendResponse);
-        if (keepOpen !== true) sendResponse(undefined);
+        const sendResponse: SendResponse = respond;
+        const ret = l(msg, from, sendResponse);
+        if (ret !== null && ret !== undefined && typeof (ret as { then?: unknown }).then === "function") {
+          /* Gecko async response: the returned promise IS the reply. */
+          pending++;
+          Promise.resolve(ret).then(respond, fail);
+        } else if (ret !== undefined && ret !== null && ret !== true) {
+          /* Gecko sync response: the returned value IS the reply. */
+          respond(ret);
+        } else if (ret === true) {
+          keptOpen = true;
+        }
       }
+      /* Every listener stayed silent and none promised a reply: the
+         honest result is a fulfilled-undefined send (pinned by
+         messaging.test.ts). */
+      if (!settled && pending === 0 && !keptOpen) respond(undefined);
     });
     return reply;
   }
@@ -172,4 +198,3 @@ export class ExtensionMessenger {
     return caller;
   }
 }
-
