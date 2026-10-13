@@ -32,7 +32,7 @@ import { applyIsolation } from "./bootstrap/isolation";
 import { applyCookie } from "./bootstrap/cookie";
 import { applyRelay } from "./bootstrap/relay";
 import { applyWs } from "./bootstrap/ws";
-import { applyReemit } from "./bootstrap/mint";
+import { applyReemit, routeAnchor } from "./bootstrap/mint";
 import { applyNavGuard } from "./bootstrap/navguard";
 import { applyFindLoad } from "./bootstrap/findload";
 import { applyUpdateNotice } from "./bootstrap/update";
@@ -53,7 +53,10 @@ const st = applyStorage(w, P);
 applyCookie(site);
 applyRelay(w, site, loc.href);
 applyWs(w);
-applyReemit(w);
+/* #157: anchor the re-emit patch to the page's own engine route, so
+   root-relative fetch/XHR/beacon inputs re-emit through the parent
+   marker instead of escaping to the proxy origin root. */
+applyReemit(w, routeAnchor(loc.href));
 applyIsolation(w, P, st);
 applyNavGuard(w, loc.href, loc.origin, site);
 applyFindLoad(w);

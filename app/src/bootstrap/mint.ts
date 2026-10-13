@@ -21,7 +21,7 @@
    request); a failed mint is deleted from the memo so a retry after
    the worker settles can succeed. */
 
-import { NAVP } from "./navguard";
+import { NAVP, navExcluded } from "./navguard";
 import { swc } from "./siteid";
 
 type AnyRecord = Record<string, any>;
@@ -68,6 +68,31 @@ export function mintRoute(dest: string, timeout = 5000): Promise<string | null> 
 
 /** #54 residual 2: wrap the page's subresource seams so cross-origin
     inputs ride minted engine routes instead of plaintext URLs. */
+/* #157: an engine route minted under ANY scheme prefix reads
+   <prefix>/<opaque token>/... - a second path segment that is a
+   long b64url run. Real site paths never look like that, so this
+   is the honest cross-prefix route detector for both anchoring
+   and the never-re-emit exclusion. */
+const tokenShaped = (v: string): boolean => {
+  const seg = v.split("/")[2] ?? "";
+  return /^[\w-]{12,}$/.test(seg);
+};
+
+/** #157: the top-level proxied page anchors its own re-emissions
+    the same way the nav guard anchors a child realm. Only an
+    engine-route-shaped pathname anchors (a /__zl_ marker route or
+    a token-bearing scheme route); a non-route same-origin context
+    (the demo page, devtools) stays inert. */
+export function routeAnchor(loc: string): string | undefined {
+  let p: string;
+  try {
+    p = new URL(loc).pathname;
+  } catch {
+    return undefined;
+  }
+  return p.startsWith("/__zl_") || tokenShaped(p) ? p : undefined;
+}
+
 export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string): void {
   const loc = w.location as { href: string; origin: string } | undefined;
   if (!loc || typeof loc.href !== "string") return;
@@ -95,21 +120,9 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
      its destination. Absolute and scheme inputs are unchanged
      (crossDest / native), engine-route-shaped paths stay native,
      and without an anchor nothing changes. */
-  const engPrefix = parentRoutePath?.match(/^\/[^/]+\//)?.[0];
+  const engPrefix = parentRoutePath?.match(/^\/[^\/]+\//)?.[0];
   const relRoute = (v: string): string | null => {
-    /* engine-route-shaped paths stay native; scheme and
-       protocol-relative inputs are crossDest's or the native
-       path's job; empty and fragment-only inputs resolve to the
-       child's own base natively and are not re-emitted. */
-    if (
-      !engPrefix ||
-      !parentRoutePath ||
-      v.startsWith(engPrefix) ||
-      !v ||
-      v[0] === "#" ||
-      v.startsWith("//") ||
-      /^[a-z][a-z0-9+.-]*:/i.test(v)
-    )
+    if (!engPrefix || !parentRoutePath || navExcluded(v, engPrefix) || tokenShaped(v))
       return null;
     return parentRoutePath + NAVP + "/" + encodeURIComponent(v);
   };

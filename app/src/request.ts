@@ -14,7 +14,7 @@
    this module keeps calling decideTransport/refineWithContent at the
    same seams the old handler did. */
 /// <reference lib="webworker" />
-import { b64uDecode, b64uEncode, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { b64uDecode, b64uEncode, decodeClientUrl, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
@@ -696,6 +696,51 @@ export async function persistRoute(prefix: string): Promise<void> {
    failure is visible in the embedder's DevTools network panel and
    joinable with the diagnostics rings - a strand is never a silent
    404. */
+/** #101/#157: resolve a <parent route>/__zl_prel__/<encoded input>
+    path to its destination. The parent may be a scheme route or a
+    NAVH handle (decodeClientUrl) or a NAV navigation route (legacy
+    b64 marker payload). Null = bad route, never a guess. */
+export function navpResolve(pathname: string): string | null {
+  const cut = pathname.indexOf(NAVP);
+  if (cut < 0) return null;
+  const parent = pathname.slice(0, cut);
+  let base: string | null = null;
+  if (parent.startsWith(NAV + "/")) {
+    const b = b64uDecode(parent.slice(NAV.length + 1).split(/[?#]/)[0]);
+    try {
+      const d = b ? new TextDecoder().decode(b) : null;
+      base = d && /^https?:\/\//.test(d) ? d : null;
+    } catch {
+      base = null;
+    }
+  } else {
+    try {
+      /* the base origin never matters: decodeClientUrl reads only
+         the pathname and the search */
+      base = decodeClientUrl(new URL(parent, "https://engine.invalid"));
+    } catch {
+      base = null;
+    }
+  }
+  if (!base) return null;
+  let rel: string | null = null;
+  try {
+    const after = pathname.slice(cut + NAVP.length);
+    /* the emitted shape is <NAVP>/<encoded input>: drop the
+       separator slash so a root-relative input stays
+       root-relative instead of turning protocol-relative, and a
+       relative input keeps directory semantics */
+    rel = decodeURIComponent((after.startsWith("/") ? after.slice(1) : after).split(/[?#]/)[0]);
+  } catch {
+    return null;
+  }
+  try {
+    const dest = new URL(rel, base).href;
+    return /^https?:\/\//.test(dest) ? dest : null;
+  } catch {
+    return null;
+  }
+}
 function navOutcome(
   e: FetchEvent,
   url: URL,
@@ -935,6 +980,19 @@ export function handleFetch(e: FetchEvent): void {
           return new Response(null, { status: 204, headers: h });
         }
         dest0 = url.href;
+      } else if (url.pathname.includes(NAVP)) {
+        /* #101: a root-relative or relative input re-emitted by the
+           page or a guarded child realm as <parent route>/<NAVP>/
+           <encoded input>; the parent decodes to its destination and
+           the tail resolves against it. #157: this branch runs BEFORE
+           the NAV and NAVH branches (a NAVH parent carries the marker
+           inside its plaintext suffix, where the handle branch would
+           resolve it into the upstream path), and the parent decode
+           covers scheme routes, NAVH handles and NAV navigation
+           routes. A bad route is never guessed. */
+        const navpDest = navpResolve(url.pathname);
+        if (!navpDest) return navOutcome(e, url, 404, "route", "zeolite: bad route");
+        dest0 = navpDest;
       } else if (url.pathname.startsWith(NAV + "/")) {
         /* Issue #28: the bootstrap nav guard rewrites absolute
            cross-origin URLs (window.open, anchor/area/iframe/form/link
@@ -1039,36 +1097,6 @@ export function handleFetch(e: FetchEvent): void {
           dest0 = navhRec;
           routeCarriesQuery = true; /* #144: the real query rides in the route search */
         }
-      } else if (url.pathname.includes(NAVP)) {
-        /* #101: a same-origin child realm (an about:blank iframe the
-           page's own JS created) has no virtual context and an
-           undecodable about:blank referrer, so its root-relative
-           fetches used to fall through the escaped-path recovery to
-           a silent passthrough and 404 on the proxy origin. The
-           child's reemit patch rewrites them to <parent route>/
-           <NAVP>/<encoded relative input>; decode the parent route
-           and resolve the tail against its destination. A tampered
-           or undecodable parent is a bad route, exactly like the
-           NAV and NAVH markers - never a guess. */
-        const navpCut = url.pathname.indexOf(NAVP);
-        const navpBase = decodePath(url.pathname.slice(0, navpCut));
-        let navpRel: string | null = null;
-        try {
-          navpRel = decodeURIComponent(url.pathname.slice(navpCut + NAVP.length).split(/[?#]/)[0]);
-        } catch {
-          /* a malformed escape stays a bad route */
-        }
-        let navpDest: string | null = null;
-        if (navpBase && navpRel !== null) {
-          try {
-            navpDest = new URL(navpRel, navpBase).href;
-          } catch {
-            /* an unresolvable tail stays a bad route */
-          }
-        }
-        if (!navpDest || !/^https?:\/\//.test(navpDest))
-          return navOutcome(e, url, 404, "route", "zeolite: bad route");
-        dest0 = navpDest;
       } else if (isEnginePath(url.pathname)) {
         let raw = decodePath(url.pathname);
         let carriesQuery = true;

@@ -43,6 +43,22 @@ export const NAV = "/__zl_nav__";
    destination. */
 export const NAVP = "/__zl_prel__";
 
+/** #101/#109/#157: true when a navigation- or fetch-bound input
+    must stay native: engine surfaces and markers, fragments,
+    protocol-relative and scheme inputs, empties. Shared by the
+    nav guard's rel marker and the re-emit patch. */
+export const navExcluded = (v: string, engPrefix?: string): boolean =>
+  !v ||
+  (!!engPrefix && v.startsWith(engPrefix)) ||
+  v[0] === "#" ||
+  v.startsWith("//") ||
+  v.startsWith("/__zl_") ||
+  v === "/bootstrap.js" ||
+  v.startsWith("/zlsw") ||
+  v.startsWith("/libcurl") ||
+  v.startsWith("/zl-") ||
+  /^[a-z][a-z0-9+.-]*:/i.test(v);
+
 /* Opaque marker encoding (issue #32): the marker carries the target
    base64url-encoded - the same opacity level as every other engine
    route - so no plaintext destination appears in a DOM attribute, the
@@ -122,21 +138,7 @@ export function applyNavGuard(
   }
   const engPrefix = ownRoutePath?.match(/^\/[^/]+\//)?.[0];
   const navRel = (v: string): string | null => {
-    if (
-      !ownRoutePath ||
-      !engPrefix ||
-      !v ||
-      v.startsWith(engPrefix) ||
-      v[0] === "#" ||
-      v.startsWith("//") ||
-      v.startsWith("/__zl_") ||
-      v === "/bootstrap.js" ||
-      v.startsWith("/zlsw") ||
-      v.startsWith("/libcurl") ||
-      v.startsWith("/zl-") ||
-      /^[a-z][a-z0-9+.-]*:/i.test(v)
-    )
-      return null;
+    if (!ownRoutePath || !engPrefix || navExcluded(v, engPrefix)) return null;
     return ownRoutePath + NAVP + "/" + encodeURIComponent(v);
   };
   /* Reads must return what the page wrote: frameworks compare href

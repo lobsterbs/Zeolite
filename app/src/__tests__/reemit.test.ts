@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyReemit, mintRoute } from "../bootstrap/mint";
+import { applyReemit, mintRoute, routeAnchor } from "../bootstrap/mint";
 import { mintUrlViaRelay } from "../worker-prelude";
 
 /* #54 residuals 2-3: the page-realm mint client and the re-emission
@@ -360,5 +360,40 @@ describe("parent-relative re-emission (#101)", () => {
     applyReemit(e.w, PARENT);
     new e.w.EventSource("/events");
     expect(e.esMade[0].url).toBe(PARENT + "/__zl_prel__/" + encodeURIComponent("/events"));
+  });
+});
+
+describe("top-level anchor and exclusions (#157)", () => {
+  const PARENT2 = "/j/abc123";
+
+  it("anchors only engine-route-shaped paths", () => {
+    expect(routeAnchor("https://engine.host/zl/A1b2C3d4E5f6G7h8I9j0K1L2/x")).toBe("/zl/A1b2C3d4E5f6G7h8I9j0K1L2/x");
+    expect(routeAnchor("https://engine.host/__zl_navh__/tok/tail/path")).toBe("/__zl_navh__/tok/tail/path");
+    expect(routeAnchor("https://engine.host/__zl_nav__/abc123456789/path")).toBe("/__zl_nav__/abc123456789/path");
+    expect(routeAnchor("https://engine.host/")).toBeUndefined();
+    expect(routeAnchor("https://engine.host/devtools.html")).toBeUndefined();
+    expect(routeAnchor("https://engine.host/en/us/products")).toBeUndefined();
+  });
+
+  it("never re-emits engine surfaces or other-scheme routes", async () => {
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT2);
+    await e.w.fetch("/zlsw/sw.js");
+    await e.w.fetch("/__zl_nav__/target123456789");
+    await e.w.fetch("/zl/A1b2C3d4E5f6G7h8I9j0K1L2/img.png");
+    await e.w.fetch("/bootstrap.js");
+    expect(e.calls.map((c: { input: unknown }) => c.input)).toEqual([
+      "/zlsw/sw.js",
+      "/__zl_nav__/target123456789",
+      "/zl/A1b2C3d4E5f6G7h8I9j0K1L2/img.png",
+      "/bootstrap.js",
+    ]);
+  });
+
+  it("still re-emits root-relative site paths when anchored", async () => {
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT2);
+    await e.w.fetch("/error/e.gif?x=1");
+    expect(e.calls[0].input).toBe(PARENT2 + "/__zl_prel__/" + encodeURIComponent("/error/e.gif?x=1"));
   });
 });

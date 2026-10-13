@@ -16,7 +16,7 @@ import {
   setScheme,
 } from "../codec";
 import { NAV } from "../bootstrap/navguard";
-import { navhTailDest } from "../request";
+import { navhTailDest, navpResolve } from "../request";
 import { PAGE_MESSAGES, senderIsProxiedPath } from "../cpgate";
 
 /* Issue #63 (#54 design D): the opaque initial-navigation handle.
@@ -266,5 +266,42 @@ describe("client-URL destination derivation (#151)", () => {
 
   it("classifies NAVH pages as proxied senders", () => {
     expect(senderIsProxiedPath(NAVH + "/token-abc")).toBe(true);
+  });
+});
+
+describe("parent-relative route resolution (#101/#157)", () => {
+  beforeEach(() => {
+    setScheme("/j/");
+    setRouteKey(null);
+  });
+
+  it("resolves a scheme-route parent with its tail", () => {
+    setRouteKey(KEY_A);
+    const parent = encodeDest("https://example.com/dir/page.html");
+    expect(navpResolve(parent + "/__zl_prel__/" + encodeURIComponent("/img/logo.png"))).toBe("https://example.com/img/logo.png");
+  });
+
+  it("resolves a NAVH handle parent with its tail", () => {
+    setRouteKey(KEY_A);
+    const url = buildNavHandleUrl("https://example.com/dir/page.html")!;
+    const path = url.split("?")[0] + "/__zl_prel__/" + encodeURIComponent("/error/e.gif?x=1");
+    expect(navpResolve(path)).toBe("https://example.com/error/e.gif?x=1");
+  });
+
+  it("resolves a NAV navigation-route parent with its tail", () => {
+    const path =
+      NAV +
+      "/" +
+      b64uEncode(new TextEncoder().encode("https://example.com/nav")) +
+      "/__zl_prel__/" +
+      encodeURIComponent("/a/b");
+    expect(navpResolve(path)).toBe("https://example.com/a/b");
+  });
+
+  it("keeps the honest null for bad parents and malformed escapes", () => {
+    setRouteKey(KEY_A);
+    expect(navpResolve("/not-a-route/__zl_prel__/%2F")).toBeNull();
+    expect(navpResolve("/j/abc/__zl_prel__/%zz")).toBeNull();
+    expect(navpResolve("/j/abc")).toBeNull();
   });
 });
