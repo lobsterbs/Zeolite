@@ -220,13 +220,14 @@ self.addEventListener("activate", (e) => {
     (async () => {
       await self.clients.claim();
       /* #121: the freshly-activated worker announces itself to every
-         window client (proxied pages reload once per engine sha; the
+         window client (proxied pages get a console note + window
+         CustomEvent once per engine sha, never a reload; the
          embedding host's own window can surface the alert). After
          claim, so matchAll sees the claimed clients. */
       try {
         await broadcastEngineUpdate();
       } catch {
-        /* best-effort: the reload guard is idempotent, a dropped
+        /* best-effort: the notice guard is idempotent, a dropped
            broadcast costs one update cycle */
       }
       /* Warm the transport so the first proxied request skips libcurl

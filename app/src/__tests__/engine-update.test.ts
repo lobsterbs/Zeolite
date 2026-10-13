@@ -1,17 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyUpdateReload } from "../bootstrap/update";
+import { applyUpdateNotice } from "../bootstrap/update";
 import { broadcastEngineUpdate, engineSha, startUpdateChecks } from "../updates";
 import { ZEOLITE_VERSION } from "../swstate";
 
-/* #121: stale-engine alerting. The bootstrap listener reloads a page
-   once per engine sha; the worker module hashes its own script,
-   broadcasts zl:engineUpdate to window clients and polls
-   registration.update(). */
+/* #121: stale-engine alerting. The bootstrap listener logs a console
+   note and re-dispatches a window CustomEvent once per engine sha; it
+   never reloads (refresh-spam rule: reloads are user-initiated).
+   The worker module hashes its own script, broadcasts
+   zl:engineUpdate to window clients and polls registration.update(). */
 
-describe("applyUpdateReload (#121 bootstrap)", () => {
+describe("applyUpdateNotice (#121 bootstrap)", () => {
   const mk = (storage?: Storage) => {
     const store = new Map<string, string>();
+    const info = vi.fn();
     const reload = vi.fn();
+    const dispatched: unknown[] = [];
     let handler: ((ev: MessageEvent) => void) | undefined;
     const sessionStorage: Storage =
       storage ??
@@ -28,39 +31,59 @@ describe("applyUpdateReload (#121 bootstrap)", () => {
         },
       },
       sessionStorage,
+      console: { info },
+      dispatchEvent: (e: unknown) => {
+        dispatched.push(e);
+        return true;
+      },
       location: { reload },
     };
-    applyUpdateReload(w as unknown as Record<string, unknown>);
+    applyUpdateNotice(w as unknown as Record<string, unknown>);
     return {
       fire: (d: unknown) => handler!({ data: d } as MessageEvent),
+      info,
       reload,
+      dispatched,
       store,
     };
   };
 
-  it("reloads once per engine sha and skips replays of the same sha", () => {
-    const { fire, reload, store } = mk();
-    fire({ type: "zl:engineUpdate", sha: "aaaa" });
-    expect(reload).toHaveBeenCalledTimes(1);
+  it("notifies once per engine sha and skips replays of the same sha", () => {
+    const { fire, info, dispatched, store } = mk();
+    fire({ type: "zl:engineUpdate", sha: "aaaa", version: "1.2.3" });
+    expect(info).toHaveBeenCalledTimes(1);
     expect(store.get("zlUpd")).toBe("aaaa");
-    fire({ type: "zl:engineUpdate", sha: "aaaa" });
-    expect(reload).toHaveBeenCalledTimes(1);
-    fire({ type: "zl:engineUpdate", sha: "bbbb" });
-    expect(reload).toHaveBeenCalledTimes(2);
+    expect(dispatched).toHaveLength(1);
+    const ev = dispatched[0] as CustomEvent;
+    expect(ev.type).toBe("zl:engineUpdate");
+    expect(ev.detail).toEqual({ sha: "aaaa", version: "1.2.3" });
+    fire({ type: "zl:engineUpdate", sha: "aaaa", version: "1.2.3" });
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(dispatched).toHaveLength(1);
+    fire({ type: "zl:engineUpdate", sha: "bbbb", version: "1.2.3" });
+    expect(info).toHaveBeenCalledTimes(2);
     expect(store.get("zlUpd")).toBe("bbbb");
   });
 
-  it("ignores non-update and malformed messages", () => {
+  it("never reloads the page (refresh-spam rule)", () => {
     const { fire, reload } = mk();
+    fire({ type: "zl:engineUpdate", sha: "aaaa", version: "1.2.3" });
+    fire({ type: "zl:engineUpdate", sha: "bbbb", version: "1.2.3" });
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("ignores non-update and malformed messages", () => {
+    const { fire, info, dispatched } = mk();
     fire({ type: "zl:tabsOp", op: {} });
     fire({ type: "zl:engineUpdate" });
     fire(null);
     fire("string");
-    expect(reload).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
+    expect(dispatched).toHaveLength(0);
   });
 
-  it("reloads even when storage throws (sandboxed frame)", () => {
-    const { fire, reload } = mk({
+  it("notifies even when storage throws (sandboxed frame)", () => {
+    const { fire, info } = mk({
       getItem: () => {
         throw new Error("no storage");
       },
@@ -68,13 +91,13 @@ describe("applyUpdateReload (#121 bootstrap)", () => {
         throw new Error("no storage");
       },
     } as unknown as Storage);
-    fire({ type: "zl:engineUpdate", sha: "aaaa" });
-    expect(reload).toHaveBeenCalledTimes(1);
+    fire({ type: "zl:engineUpdate", sha: "aaaa", version: "1.2.3" });
+    expect(info).toHaveBeenCalledTimes(1);
   });
 
   it("is inert without a serviceWorker container", () => {
     const w = { navigator: {}, location: { reload: vi.fn() } };
-    expect(() => applyUpdateReload(w as unknown as Record<string, unknown>)).not.toThrow();
+    expect(() => applyUpdateNotice(w as unknown as Record<string, unknown>)).not.toThrow();
   });
 });
 

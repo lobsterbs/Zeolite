@@ -11,9 +11,11 @@
      and takes over via clients.claim().
    - the NEW worker, once active, broadcasts zl:engineUpdate to
      every window client: engine-served pages (the proxied-page
-     bootstrap listens) reload once per engine sha, and the
-     embedding host's own window - same origin, in scope - sees the
-     same message and can surface the alert.
+     bootstrap listens) log a console note and re-dispatch a window
+     CustomEvent once per engine sha (the bootstrap never reloads
+     on its own; reloads are user-initiated), and the embedding
+     host's own window - same origin, in scope - sees the same
+     message and can surface the alert.
 
    Detection and replacement only: nothing about running pages is
    patched in place. */
@@ -50,7 +52,7 @@ export async function engineSha(): Promise<string | null> {
 
 /** Announce the active engine to every window client. Best-effort by
     design: a dropped message costs one update cycle, and the
-    client-side reload guard is keyed by sha so replays are inert. */
+    client-side notice guard is keyed by sha so replays are inert. */
 export async function broadcastEngineUpdate(): Promise<void> {
   let sha: string | null = null;
   try {
@@ -73,7 +75,7 @@ export function startUpdateChecks(): void {
       DIAG.emit({
         category: "SERVICE_WORKER",
         severity: "info",
-        message: "new engine version found; installing (pages reload once it activates)",
+        message: "new engine version found; installing (pages are notified; users reload to pick it up)",
       });
     });
   } catch {

@@ -9,14 +9,15 @@
 
    Source modules under ./bootstrap bundle into one synchronous
    artifact (patches must exist before page scripts run); the CI size
-   gate covers the built artifact. Budget: under 24 KiB minified.
+   gate covers the built artifact. Budget: under 25088 bytes minified
+   (last raise: 24576 -> 25088 for #132).
 
    Budget raises (each decided with the feature, never creep): 5 KiB
    original; 6.5 #28 nav guard; 8 #35 single file; 10 #37 isolation;
    11 #28 iframe observer; 12 #58/#59 srcdoc + setAttribute; 16 #54
    page-realm mint client; 18 #54 worker hook; 19 #106/#108 child
    isolation + popup guard; 20 #109 popup sync-open; 21 #121
-   engineUpdate reload; 22.5 #128/#129 postMessage repair; 23 #130
+   engineUpdate notice; 22.5 #128/#129 postMessage repair; 23 #130
    vorigin marker + filter; 24 #132 contentWindow sender half +
    virtual-origin parity drop.
 
@@ -34,7 +35,7 @@ import { applyWs } from "./bootstrap/ws";
 import { applyReemit } from "./bootstrap/mint";
 import { applyNavGuard } from "./bootstrap/navguard";
 import { applyFindLoad } from "./bootstrap/findload";
-import { applyUpdateReload } from "./bootstrap/update";
+import { applyUpdateNotice } from "./bootstrap/update";
 import { applyPostMessage } from "./bootstrap/postmsg";
 import { applyVirtualOrigin } from "./bootstrap/vorigin";
 
@@ -56,9 +57,10 @@ applyReemit(w);
 applyIsolation(w, P, st);
 applyNavGuard(w, loc.href, loc.origin, site);
 applyFindLoad(w);
-/* #121: reload once per engine sha when the worker broadcasts
-   zl:engineUpdate (a stale page keeps its old rewritten DOM). */
-applyUpdateReload(w);
+/* #121: notice (console note + window CustomEvent, never a
+   reload) when the worker broadcasts zl:engineUpdate; a stale page
+   keeps its old rewritten DOM until the user reloads it. */
+applyUpdateNotice(w);
 /* #128: same-site frame messaging repair (virtual targetOrigin). */
 applyPostMessage(w);
 /* #130: virtual-origin marker + message-event origin filter. */
