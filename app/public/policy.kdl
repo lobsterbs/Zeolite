@@ -18,6 +18,21 @@
 // rejected file keeps the defaults active (diagnostics carry the
 // error).
 
+// Wave 17 (2026-10-13): the LobsterBrowse deployment keeps wisp
+// password auth ON (operator decision) while the engine bundle's
+// wisp client cannot authenticate - the vendored transport has no
+// password support and receives no credentials - so every wisp
+// connection from the service worker is refused (wisp v1 and v2
+// both close with auth reasons) and the wasm transit is dead on
+// that deployment. The match-less rule below routes every upstream
+// fetch onto the embedder relay so the engine serves pages at all;
+// it sits FIRST in the file so any later rule overrides it on equal
+// priority, and a future auth-capable wisp client can delete it.
+rule "default-relay" {
+  route "relay"
+  reason "deployment wisp auth rejects the wasm client: relay all fetches"
+}
+
 // #137: duckduckgo.com rejects the wasm TLS client shapes at the
 // handshake (libcurl error 35, epoxy UnexpectedEof) while native
 // stacks from the same IP pass; the embedder relays with its own TLS.

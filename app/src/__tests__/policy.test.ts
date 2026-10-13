@@ -183,7 +183,14 @@ describe("shipped policy.kdl", () => {
     }
   });
 
-  it("leaves unrelated hosts on the default transit", () => {
-    expect(policyMatch(p, "https://example.com/", "document")).toBeNull();
+  /* Wave 17: the shipped file carries a match-less catch-all
+     (first in the file, so later specific rules win ties) because the
+     LB deployment keeps wisp auth the wasm client cannot pass -
+     every upstream fetch rides the embedder relay there. */
+  it("rides the catch-all relay for unrelated hosts and hop domains", () => {
+    for (const host of ["example.com", "slither.com", "wikipedia.org"]) {
+      expect(policyMatch(p, "https://" + host + "/", "document"), host).toMatchObject({ id: "default-relay", route: "relay" });
+    }
+    expect(policyMatch(p, "https://example.com/x.js", "script")).toMatchObject({ id: "default-relay", route: "relay" });
   });
 });
