@@ -50,7 +50,7 @@ Implemented in `app/src/engine.ts` (class `ZeoliteEngine`). Field-for-field with
 export interface ZeoliteEngine {
   /** Register the SW on the engine origin, wait for control, push
    *  config (URL scheme rotation) to it. Idempotent. */
-  init(config: EngineConfig): Promise<void>;
+  init(config: EngineConfig): Promise<boolean>;  // false: SW active but this page is not controlled; host reloads once (its own guard) or fails visibly
   /** Navigate to a destination (returns the engine-local route URL). */
   navigate(target: string): string;
   /** Opaque route for a destination (#55): the SW mints it with its

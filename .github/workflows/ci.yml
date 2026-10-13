@@ -519,3 +519,11 @@ jobs:
             grep -E "^\[FAIL\]|HARNESS-ERROR" torture.out | head -40 | while IFS= read -r l; do echo "::error::TORTURE $l"; done
             exit 1
           fi
+      - name: Reload-count suite (refresh-spam regression)
+        run: |
+          node suite/e2e/reload-count.mjs 2>&1 | tee reload.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\[FAIL\]|HARNESS-ERROR" reload.out | head -20 | while IFS= read -r l; do echo "::error::RELOAD $l"; done
+            exit 1
+          fi

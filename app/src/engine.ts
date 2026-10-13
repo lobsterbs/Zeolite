@@ -4,7 +4,9 @@
 
    Design points:
    - init(): registers the SW on the engine origin, waits for control,
-     then pushes config (route prefix) to it; the scheme is fixed
+     then pushes config (route prefix) to it; resolves false when the
+     page is still uncontrolled so the host can reload once (guarded)
+     or fail visibly instead of being told success; the scheme is fixed
      "b64u" since #32 (mirror removed; see docs/engine-adapter.md).
    - navigate(): pure function over the codec; returns the engine-local
      route for a destination.
@@ -41,8 +43,11 @@ export class ZeoliteEngine {
     profile: "default",
   };
 
-  /** Register the SW, wait for control, push config. Idempotent. */
-  async init(config: EngineConfig = {}): Promise<void> {
+  /** Register the SW, wait for control, push config. Idempotent.
+      Resolves false when the SW never took control of this page: the
+      host decides (one guarded reload or a visible failure), init()
+      no longer reports missing control as success. */
+  async init(config: EngineConfig = {}): Promise<boolean> {
     this.config = { ...this.config, ...config };
     /* Scheme is fixed "b64u" since #32; only the prefix is
        configurable (pathScheme stays in the config type for adapter
@@ -62,11 +67,13 @@ export class ZeoliteEngine {
       await new Promise((r) => setTimeout(r, 100));
     }
     if (!navigator.serviceWorker.controller) {
-      // First-ever load on this origin: SW claims on the next navigation.
-      // The host should reload once; init() will then fully succeed.
-      return;
+      // First-ever load on this origin: the SW claims on the next
+      // navigation. The host decides: reload once (its own guard) or
+      // fail visibly - init() reports the missing control honestly.
+      return false;
     }
     await this.post({ type: "zl:config", prefix: this.config.pathPrefix, httpsUpgrade: this.config.httpsUpgrade });
+    return true;
   }
 
   /** Engine-local route for a destination (usable as an iframe src). */

@@ -18,15 +18,22 @@ export function applyUpdateNotice(w: Record<string, unknown>): void {
     | undefined;
   const ns = nav && nav.serviceWorker;
   if (!ns || typeof ns.addEventListener !== "function") return;
+  /* Page-lifetime sha guard: a storage-less frame (the catch below)
+     has no zlUpd dedupe, so a re-broadcast of the same sha would
+     re-fire the notice on every message. */
+  let lastSha: string | null = null;
   ns.addEventListener("message", (ev: MessageEvent) => {
     const d = ev.data as { type?: unknown; sha?: unknown; version?: unknown } | null;
     if (!d || d.type !== "zl:engineUpdate" || typeof d.sha !== "string") return;
+    if (d.sha === lastSha) return;
+    lastSha = d.sha;
     try {
       const ss = w.sessionStorage as Storage;
       if (ss.getItem("zlUpd") === d.sha) return;
       ss.setItem("zlUpd", d.sha);
     } catch {
-      /* storage unavailable (sandboxed frame): notify anyway */
+      /* storage unavailable (sandboxed frame): notify once per sha
+         (lastSha above), never per message */
     }
     const con = w.console as { info?: (m: string) => void } | undefined;
     if (con && typeof con.info === "function") {

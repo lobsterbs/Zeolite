@@ -93,6 +93,12 @@ describe("applyUpdateNotice (#121 bootstrap)", () => {
     } as unknown as Storage);
     fire({ type: "zl:engineUpdate", sha: "aaaa", version: "1.2.3" });
     expect(info).toHaveBeenCalledTimes(1);
+    /* no storage = no zlUpd guard, so the page-lifetime lastSha guard
+       must cap repeat broadcasts of the same sha */
+    fire({ type: "zl:engineUpdate", sha: "aaaa", version: "1.2.3" });
+    expect(info).toHaveBeenCalledTimes(1);
+    fire({ type: "zl:engineUpdate", sha: "bbbb", version: "1.2.3" });
+    expect(info).toHaveBeenCalledTimes(2);
   });
 
   it("is inert without a serviceWorker container", () => {
