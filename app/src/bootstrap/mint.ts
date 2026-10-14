@@ -21,7 +21,7 @@
    request); a failed mint is deleted from the memo so a retry after
    the worker settles can succeed. */
 
-import { NAVP, navExcluded } from "./navguard";
+import { makeRel, tokenShaped } from "./navguard";
 import { swc } from "./siteid";
 
 type AnyRecord = Record<string, any>;
@@ -68,16 +68,6 @@ export function mintRoute(dest: string, timeout = 5000): Promise<string | null> 
 
 /** #54 residual 2: wrap the page's subresource seams so cross-origin
     inputs ride minted engine routes instead of plaintext URLs. */
-/* #157: an engine route minted under ANY scheme prefix reads
-   <prefix>/<opaque token>/... - a second path segment that is a
-   long b64url run. Real site paths never look like that, so this
-   is the honest cross-prefix route detector for both anchoring
-   and the never-re-emit exclusion. */
-const tokenShaped = (v: string): boolean => {
-  const seg = v.split("/")[2] ?? "";
-  return /^[\w-]{12,}$/.test(seg);
-};
-
 /** #157: the top-level proxied page anchors its own re-emissions
     the same way the nav guard anchors a child realm. Only an
     engine-route-shaped pathname anchors (a /__zl_ marker route or
@@ -120,12 +110,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
      its destination. Absolute and scheme inputs are unchanged
      (crossDest / native), engine-route-shaped paths stay native,
      and without an anchor nothing changes. */
-  const engPrefix = parentRoutePath?.match(/^\/[^\/]+\//)?.[0];
-  const relRoute = (v: string): string | null => {
-    if (!engPrefix || !parentRoutePath || navExcluded(v, engPrefix) || tokenShaped(v))
-      return null;
-    return parentRoutePath + NAVP + "/" + encodeURIComponent(v);
-  };
+  const relRoute = makeRel(parentRoutePath, loc.origin);
 
   /* fetch(): string/URL inputs re-emit through the minted route;
      Request objects carry one-shot bodies (native, documented

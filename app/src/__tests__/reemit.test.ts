@@ -397,3 +397,56 @@ describe("top-level anchor and exclusions (#157)", () => {
     expect(e.calls[0].input).toBe(PARENT2 + "/__zl_prel__/" + encodeURIComponent("/error/e.gif?x=1"));
   });
 });
+
+describe("own-origin absolute re-anchor (#157/#159)", () => {
+  /* Pages re-state site paths through location.origin (delta
+     Tealeaf beacons, chatgpt unauth-mweb beacons); the scheme rule
+     used to keep those absolute engine-origin inputs native and they
+     escaped to the engine origin root. They now re-anchor to
+     pathname+search and re-emit through the parent marker route. */
+  const PARENT = "/j/abc123";
+  const OWNURL = "https://engine.host/unauth-mweb/events/page-view";
+  const MARKER = PARENT + "/__zl_prel__/" + encodeURIComponent("/unauth-mweb/events/page-view");
+
+  it("re-anchors an absolute own-origin fetch input", async () => {
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT);
+    await e.w.fetch(OWNURL);
+    expect(e.calls[0].input).toBe(MARKER);
+  });
+
+  it("re-anchors an absolute own-origin async XHR open", () => {
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT);
+    const x = new e.w.XMLHttpRequest();
+    x.open("GET", OWNURL, true);
+    expect(e.xhrLog[0]).toBe("open:GET|" + MARKER + "|true|null|null");
+  });
+
+  it("re-anchors own-origin sendBeacon and EventSource targets", () => {
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT);
+    expect(e.w.navigator.sendBeacon(OWNURL, "d")).toBe(true);
+    new e.w.EventSource(OWNURL);
+    expect(e.beacons.length).toBe(0);
+    expect(e.calls[0].input).toBe(MARKER);
+    expect(e.esMade[0].url).toBe(MARKER);
+  });
+
+  it("keeps an absolute cross-origin input on the mint path", async () => {
+    stubMint("/j/x9");
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT);
+    await e.w.fetch("https://cdn.example.net/lib.js");
+    await settle();
+    expect(e.calls[0].input).toBe("/j/x9");
+  });
+
+  it("keeps an absolute engine-route own-origin URL native", async () => {
+    const e = fakeWindow();
+    applyReemit(e.w, PARENT);
+    const u = "https://engine.host/zl/A1b2C3d4E5f6G7h8I9j0K1L2/img.png";
+    await e.w.fetch(u);
+    expect(e.calls[0].input).toBe(u);
+  });
+});

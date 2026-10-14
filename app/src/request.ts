@@ -700,7 +700,14 @@ export async function persistRoute(prefix: string): Promise<void> {
     path to its destination. The parent may be a scheme route or a
     NAVH handle (decodeClientUrl) or a NAV navigation route (legacy
     b64 marker payload). Null = bad route, never a guess. */
-export function navpResolve(pathname: string): string | null {
+export function navpResolve(pathname: string, engineOrigin?: string): string | null {
+  /* #157/#159: emitters that predate the own-origin re-anchor (or
+     unpatched realms) can still pass an absolute engine-origin URL
+     as the tail; resolved as absolute it would fetch the engine
+     origin root. The strip happens at the shared decode so every
+     emitter is covered; tests inject the origin, the SW passes
+     none. */
+  const eo = engineOrigin ?? (typeof self !== "undefined" && self.location ? self.location.origin : "");
   const cut = pathname.indexOf(NAVP);
   if (cut < 0) return null;
   const parent = pathname.slice(0, cut);
@@ -735,8 +742,15 @@ export function navpResolve(pathname: string): string | null {
     return null;
   }
   try {
-    const dest = new URL(rel, base).href;
-    return /^https?:\/\//.test(dest) ? dest : null;
+    const dest = new URL(rel, base);
+    /* #157/#159: an engine-origin absolute tail re-resolves as its
+       path against the parent destination: the page meant the
+       site's path, not the engine origin root. */
+    if (eo && dest.origin === eo && (dest.protocol === "https:" || dest.protocol === "http:")) {
+      const re = new URL(dest.pathname + dest.search, base);
+      return re.protocol === "https:" || re.protocol === "http:" ? re.href : null;
+    }
+    return dest.protocol === "https:" || dest.protocol === "http:" ? dest.href : null;
   } catch {
     return null;
   }
@@ -2119,6 +2133,26 @@ export function handleFetch(e: FetchEvent): void {
             !(DOC_DESTS.has(dest) && respCt === "")
           ) {
             void pageCacheStore(e.request, resp.clone());
+          }
+          /* #158/#159: script and worker destinations must never
+             receive an HTML/CSS error body: module scripts hard-fail
+             the whole graph on the MIME mismatch and classic scripts
+             execute the error page as JS (live: claude's bundle
+             SyntaxError). A non-JS error status answers an honest
+             JS-typed body carrying the upstream status instead, so
+             module loading reports a clean failure and the rest of
+             the graph proceeds. Success-path odd types stay
+             untouched. */
+          if (
+            (dest === "script" || isWorkerDestination(e.request.destination)) &&
+            resp.status >= 400 &&
+            !isJs(resp)
+          ) {
+            WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            return new Response("/* upstream " + resp.status + " */", {
+              status: resp.status,
+              headers: { "content-type": "application/javascript; charset=utf-8" },
+            });
           }
           if ((isHtml(resp) || (respCt === "" && DOC_DESTS.has(dest) && resp.body)) && resp.body) {
             curStage = "REWRITE_STARTED";

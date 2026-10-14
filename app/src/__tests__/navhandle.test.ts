@@ -304,4 +304,31 @@ describe("parent-relative route resolution (#101/#157)", () => {
     expect(navpResolve("/j/abc/__zl_prel__/%zz")).toBeNull();
     expect(navpResolve("/j/abc")).toBeNull();
   });
+
+  /* #157/#159: an absolute engine-origin tail strips to its path and
+     re-resolves against the parent destination (pages re-state site
+     paths through location.origin). */
+  it("strips an engine-origin absolute tail to the site path", () => {
+    setRouteKey(KEY_A);
+    const parent = encodeDest("https://example.com/dir/page.html");
+    expect(
+      navpResolve(parent + "/__zl_prel__/" + encodeURIComponent("https://engine.host/img/logo.png"), "https://engine.host"),
+    ).toBe("https://example.com/img/logo.png");
+  });
+
+  it("keeps a cross-origin absolute tail absolute", () => {
+    setRouteKey(KEY_A);
+    const parent = encodeDest("https://example.com/dir/page.html");
+    expect(
+      navpResolve(parent + "/__zl_prel__/" + encodeURIComponent("https://cdn.example.net/lib.js"), "https://engine.host"),
+    ).toBe("https://cdn.example.net/lib.js");
+  });
+
+  it("strips the engine-origin tail on a NAVH parent too", () => {
+    setRouteKey(KEY_A);
+    const url = buildNavHandleUrl("https://example.com/dir/page.html")!;
+    const path = url.split("?")[0] + "/__zl_prel__/" + encodeURIComponent("https://engine.host/error/e.gif?x=1");
+    expect(navpResolve(path, "https://engine.host")).toBe("https://example.com/error/e.gif?x=1");
+  });
 });
+

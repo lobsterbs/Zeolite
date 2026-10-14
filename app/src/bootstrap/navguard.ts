@@ -47,6 +47,27 @@ export const NAVP = "/__zl_prel__";
     must stay native: engine surfaces and markers, fragments,
     protocol-relative and scheme inputs, empties. Shared by the
     nav guard's rel marker and the re-emit patch. */
+/* #157/#159: an absolute http(s) URL on the page's own (engine)
+    origin is the page re-stating a site path through
+    location.origin (delta Tealeaf, chatgpt unauth-mweb beacons).
+    navExcluded's scheme rule keeps it native, so it escaped to the
+    engine origin root (SPA 444/404 class). Re-anchored to its
+    pathname+search it re-emits through the parent route like any
+    root-relative input; engine-route paths stay excluded by the
+    own-prefix rule, and cross-origin or non-http(s) inputs return
+    null (untouched). */
+function ownOriginPath(v: string, origin: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    return null;
+  }
+  /* the protocol check is load-bearing: a blob: URL inherits the
+     page's http(s) origin, an origin match alone is not enough */
+  return /^https?:$/.test(u.protocol) && u.origin === origin ? u.pathname + u.search : null;
+}
+
 export const navExcluded = (v: string, engPrefix?: string): boolean =>
   !v ||
   (!!engPrefix && v.startsWith(engPrefix)) ||
@@ -58,6 +79,40 @@ export const navExcluded = (v: string, engPrefix?: string): boolean =>
   v.startsWith("/libcurl") ||
   v.startsWith("/zl-") ||
   /^[a-z][a-z0-9+.-]*:/i.test(v);
+
+/* #157: an engine route minted under ANY scheme prefix reads
+   <prefix>/<opaque token>/... - a second path segment that is a
+   long b64url run. Real site paths never look like that, so this
+   is the honest cross-prefix route detector for anchoring, the
+   nav guard and the never-re-emit exclusion. */
+export const tokenShaped = (v: string): boolean => {
+  const seg = v.split("/")[2] ?? "";
+  return /^[\w-]{12,}$/.test(seg);
+};
+
+/** #101/#157/#159 shared re-emit helper: a root-relative input
+    re-emits as <routePath>/NAVP/<encodeURIComponent(path)>
+    through the parent route (the SW decodes the parent and
+    resolves the tail against its destination). An absolute
+    own-origin (engine) URL re-anchors to its pathname+search
+    first: the scheme rule in navExcluded alone kept it native
+    and it escaped to the engine origin root (SPA 444/404
+    class, #157/#159). Excluded: the own prefix, engine
+    surfaces, scheme and protocol-relative inputs, fragments,
+    empties and token-shaped routes; without a routePath
+    nothing re-emits. */
+export function makeRel(
+  routePath: string | undefined,
+  origin: string,
+): (v: string) => string | null {
+  const engPrefix = routePath?.match(/^\/[^\/]+\//)?.[0];
+  return (v: string): string | null => {
+    const p = ownOriginPath(v, origin) ?? v;
+    if (!routePath || !engPrefix || navExcluded(p, engPrefix) || tokenShaped(p))
+      return null;
+    return routePath + NAVP + "/" + encodeURIComponent(p);
+  };
+}
 
 /* Opaque marker encoding (issue #32): the marker carries the target
    base64url-encoded - the same opacity level as every other engine
@@ -136,11 +191,7 @@ export function applyNavGuard(
   } catch {
     /* a realm whose loc is not a URL anchors nothing */
   }
-  const engPrefix = ownRoutePath?.match(/^\/[^/]+\//)?.[0];
-  const navRel = (v: string): string | null => {
-    if (!ownRoutePath || !engPrefix || navExcluded(v, engPrefix)) return null;
-    return ownRoutePath + NAVP + "/" + encodeURIComponent(v);
-  };
+  const navRel = makeRel(ownRoutePath, engineOrigin);
   /* Reads must return what the page wrote: frameworks compare href
      values, so the raw string is kept per element and attribute and
      the marker only reaches the browser. Keyed by name since #58:
