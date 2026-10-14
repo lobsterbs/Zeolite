@@ -20,6 +20,7 @@
  * only the initiator origin, so a page cannot smuggle arbitrary
  * handshake headers onto the transport. */
 
+import { acceptLanguageValue } from "./origin";
 import { siteUaFor } from "./rules";
 import { cookieHeaderFor } from "./cookies";
 
@@ -83,7 +84,7 @@ export function wsIdentityHeaders(
   const profile = opts?.profile ?? null;
   if (profile) {
     out.push(["user-agent", profile.userAgent]);
-    out.push(["accept-language", profile.languages.join(",")]);
+    out.push(["accept-language", acceptLanguageValue(profile.languages)]);
   } else {
     const uaFor = opts?.uaFor ?? siteUaFor;
     const ua = uaFor(lookupUrl);

@@ -147,14 +147,29 @@ export function secFetchHeaders(
   const vo = virtualOriginHeaders(initiator, target, method, mode);
   const dest = destination ? destination.toLowerCase() : "empty";
   if (mode === "navigate") {
-    /* A navigation with no attributable initiator is a top-level
-       load: a real browser sends the none/navigate/document/?1 set
-       plus Upgrade-Insecure-Requests, not silence. */
+    /* No virtual initiator decodes: an omnibox/typed tab load. The
+       physical fetch is the engine iframe (dest "iframe"), but the
+       virtual request is the tab's top-level navigation, and a real
+       browser never sends dest "iframe" with site "none" - that
+       impossible combo was a #160-class WAF tell. Claim the exact set
+       a typed navigation produces. */
+    if (!vo.secFetchSite) {
+      return {
+        site: "none",
+        mode: "navigate",
+        dest: "document",
+        user: "?1",
+        upgradeInsecureRequests: true,
+      };
+    }
+    /* Initiated from a virtual page (its own navigation or an
+       embedded frame): site from the virtual initiator, physical
+       dest kept, and no Sec-Fetch-User - real frame loads are not
+       user activation and never carry it. */
     return {
-      site: vo.secFetchSite ?? "none",
+      site: vo.secFetchSite,
       mode: "navigate",
       dest: dest === "empty" ? "document" : dest,
-      user: "?1",
       upgradeInsecureRequests: true,
     };
   }
@@ -258,4 +273,32 @@ export function applyChUa(headers: Headers, userAgent: string): void {
   headers.set("sec-ch-ua-mobile", /Android.+Mobile|iPhone/.test(userAgent) ? "?1" : "?0");
   const plat = chPlatform(userAgent);
   if (plat) headers.set("sec-ch-ua-platform", '"' + plat + '"');
+}
+
+/* The navigation Accept a real Chromium of the claimed major sends.
+   The physical browser's own Accept advertises image formats by ITS
+   major (image/jxl only once Chrome 155 shipped JPEG XL decoding), so
+   a 124 claim carrying a 156-shaped accept is a UA-vs-Accept
+   contradiction a WAF can check. Null for non-Chromium UAs: their
+   accept is whatever the page sent. */
+const CHROME_NAV_ACCEPT =
+  "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7";
+
+export function navigationAccept(userAgent: string): string | null {
+  const m = /(?:Chrome|Chromium)\/(\d+)/.exec(userAgent);
+  if (!m) return null;
+  const major = parseInt(m[1], 10);
+  if (!Number.isFinite(major)) return null;
+  return major >= 155
+    ? CHROME_NAV_ACCEPT.replace("image/avif", "image/jxl,image/avif")
+    : CHROME_NAV_ACCEPT;
+}
+
+/* Accept-Language a real Chromium sends for a profile's list: the
+   first entry unweighted, the rest with Chrome's descending q values
+   ("en-US,en;q=0.9", never a bare "en-US,en" join). */
+export function acceptLanguageValue(languages: string[]): string {
+  return languages
+    .map((l, i) => (i === 0 ? l : l + ";q=" + Math.max(0.1, 1 - 0.1 * i).toFixed(1)))
+    .join(",");
 }

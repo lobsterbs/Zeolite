@@ -58,7 +58,7 @@ describe("wsIdentityHeaders", () => {
     expect(h).toEqual([
       ["origin", "https://page.example"],
       ["user-agent", "ProfileUA/2.0"],
-      ["accept-language", "en-US,en"],
+      ["accept-language", "en-US,en;q=0.9"],
     ]);
   });
 

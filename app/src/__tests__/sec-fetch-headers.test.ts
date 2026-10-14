@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { forwardedHeaders } from "../request";
-import { PROXY_INJECTED_HEADERS, applyChUa, secFetchHeaders } from "../origin";
+import { PROXY_INJECTED_HEADERS, acceptLanguageValue, applyChUa, navigationAccept, secFetchHeaders } from "../origin";
 
 /* 2026-10-14 report: Sec-Fetch headers are BUILT from the virtual
    facts, never copied from the engine request. The exact sets a real
@@ -19,10 +19,29 @@ describe("secFetchHeaders", () => {
     });
   });
 
-  it("subframe navigation keeps its destination", () => {
+  it("typed tab load: the physical iframe destination is virtualized to document", () => {
     const sf = secFetchHeaders(undefined, "https://target.example/", "GET", "navigate", "iframe");
+    expect(sf).toEqual({
+      site: "none",
+      mode: "navigate",
+      dest: "document",
+      user: "?1",
+      upgradeInsecureRequests: true,
+    });
+  });
+
+  it("initiated subframe navigation keeps its destination and drops Sec-Fetch-User", () => {
+    const sf = secFetchHeaders(
+      "https://a.example/page",
+      "https://b.example/",
+      "GET",
+      "navigate",
+      "iframe",
+    );
+    expect(sf.site).toBe("cross-site");
     expect(sf.dest).toBe("iframe");
-    expect(sf.user).toBe("?1");
+    expect(sf.user).toBeUndefined();
+    expect(sf.upgradeInsecureRequests).toBe(true);
   });
 
   it("navigation with a cross-site initiator reports cross-site", () => {
@@ -35,6 +54,9 @@ describe("secFetchHeaders", () => {
     );
     expect(sf.site).toBe("cross-site");
     expect(sf.mode).toBe("navigate");
+    expect(sf.dest).toBe("document");
+    expect(sf.user).toBeUndefined();
+    expect(sf.upgradeInsecureRequests).toBe(true);
   });
 
   it("navigation with a same-origin initiator reports same-origin", () => {
@@ -174,5 +196,32 @@ describe("forwardedHeaders strips proxy-injected hop headers (#160)", () => {
     expect(out.get("sec-fetch-site")).toBeNull();
     /* The rest of the client surface passes through. */
     expect(out.get("user-agent")).toContain("Chrome/");
+  });
+});
+
+
+describe("navigationAccept", () => {
+  it("Chrome 124 claim: the pre-JXL navigation Accept", () => {
+    expect(navigationAccept(CHROME_WIN)).toBe(
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    );
+  });
+
+  it("Chrome 155+ claim advertises image/jxl", () => {
+    expect(navigationAccept(CHROME_WIN.replace("Chrome/124", "Chrome/156"))).toContain(
+      "image/jxl,image/avif,image/webp,image/apng",
+    );
+  });
+
+  it("non-Chromium UA: null (the page accept stands)", () => {
+    expect(navigationAccept(FIREFOX)).toBeNull();
+  });
+});
+
+describe("acceptLanguageValue", () => {
+  it("Chrome q-value shape, not a bare join", () => {
+    expect(acceptLanguageValue(["en-US", "en"])).toBe("en-US,en;q=0.9");
+    expect(acceptLanguageValue(["en-US", "en", "fr"])).toBe("en-US,en;q=0.9,fr;q=0.8");
+    expect(acceptLanguageValue(["de"])).toBe("de");
   });
 });

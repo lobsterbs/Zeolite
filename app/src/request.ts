@@ -49,7 +49,7 @@ import { wispTransport } from "./transport";
 
 
 
-import {PROXY_INJECTED_HEADERS, applyChUa, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
+import {PROXY_INJECTED_HEADERS, acceptLanguageValue, applyChUa, navigationAccept, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset } from "./assetbases";
 import { applySetCookie, cookieHeaderFor, isPassChallenge, jarHeaders, type CookieRequestContext } from "./cookies";
@@ -1867,7 +1867,7 @@ export function handleFetch(e: FetchEvent): void {
             const sp = await siteProfileFor(target);
             if (sp) {
               sendHeaders.set("user-agent", sp.p.userAgent);
-              sendHeaders.set("accept-language", sp.p.languages.join(","));
+              sendHeaders.set("accept-language", acceptLanguageValue(sp.p.languages));
             }
           }
           /* Sec-CH-UA hints must match the FINAL user-agent (profile,
@@ -2852,6 +2852,10 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     "sec-fetch-dest",
     "sec-fetch-user",
     "upgrade-insecure-requests",
+    /* Chrome only began sending Sec-Fetch-Storage-Access in 133; the
+       profile persona predates it, so it is never synthesized - and
+       an engine-observed value is never forwarded either. */
+    "sec-fetch-storage-access",
     /* Proxy-injected hop headers (#160): the reverse proxy in front
        of the SW origin adds x-forwarded-* to the inbound request;
        copying them upstream is a proxy tell no real browser sends. */
@@ -2932,7 +2936,14 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
   const profile = getFpProfile();
   if (profile) {
     out.set("user-agent", profile.userAgent);
-    out.set("accept-language", profile.languages.join(","));
+    out.set("accept-language", acceptLanguageValue(profile.languages));
+    /* The navigation Accept must match the CLAIMED major, not the
+       physical browser's: a Chrome 124 persona carrying image/jxl
+       (a Chrome 155+ format) contradicts its own UA. */
+    if (req.mode === "navigate") {
+      const navAccept = navigationAccept(profile.userAgent);
+      if (navAccept) out.set("accept", navAccept);
+    }
   }
   return out;
 }
