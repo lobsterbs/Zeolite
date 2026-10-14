@@ -374,7 +374,12 @@ mod tests {
             Some(vec!["127.0.0.1:1".parse().unwrap()])
         );
         assert_eq!(test_lookup("other.example.org"), None);
-        set_test_lookup(None);
+        // Cleanup removes ONLY this hostname: cargo test runs the
+        // connect-race tests on parallel threads and a
+        // set_test_lookup(None) here wipes their overrides mid-race,
+        // re-creating the exact CI flake remove_test_lookup exists
+        // to prevent.
+        remove_test_lookup("multi.example.org");
         assert_eq!(test_lookup("multi.example.org"), None);
     }
 
