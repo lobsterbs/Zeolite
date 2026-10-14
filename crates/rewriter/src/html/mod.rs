@@ -595,7 +595,30 @@ impl Rewriter {
                         {
                             None
                         } else {
-                            let e = self.enc(&v);
+                            let mut e = self.enc(&v);
+                            // #161-class self-location: pages find their
+                            // own stub <script> by substring on the
+                            // ORIGINAL src (OneTrust:
+                            // script[src*='otBannerSdk.js']). An opaque
+                            // route loses the filename, the lookup
+                            // returns null and the CMP crashes. The
+                            // destination's last path segment rides as a
+                            // FRAGMENT on the route: substring matching
+                            // works again, and a fragment is client-side
+                            // only, so the fetch target is unchanged
+                            // (browsers strip it before the request;
+                            // resolve/decode never encode it). Scoped to
+                            // script src only: challenge srcs stay
+                            // provider-direct above and anchor href
+                            // fragments carry real semantics.
+                            if name == "script" && lower == "src" && !e.contains('#') {
+                                let abs = resolve(&v, &self.base);
+                                let dest = self.cfg.unwrap_engine_route(&abs).unwrap_or(abs);
+                                if let Some(seg) = last_path_segment(&dest) {
+                                    e.push('#');
+                                    e.push_str(seg);
+                                }
+                            }
                             // <base href> switches the folding base for
                             // every later relative URL (issue #36). Per
                             // HTML only the first base with a non-empty
@@ -658,6 +681,22 @@ impl Rewriter {
         }
         out.push_str(rest);
         out
+    }
+}
+
+/// The last path segment of an absolute URL, query and fragment
+/// stripped ("https://c.com/a/b/sdk.js?v=2" -> "sdk.js"). None when
+/// there is no '/' after the authority (no path) or the path ends at
+/// the root (no segment to expose).
+fn last_path_segment(abs: &str) -> Option<&str> {
+    let bare = abs.split(['#', '?']).next().unwrap_or(abs);
+    let auth = bare.find("://")? + 3;
+    let path_start = bare[auth..].find('/')? + auth;
+    let seg = bare[path_start..].rsplit('/').next()?;
+    if seg.is_empty() {
+        None
+    } else {
+        Some(seg)
     }
 }
 
@@ -1175,10 +1214,12 @@ mod tests {
             out
         );
         // recaptcha script srcs stay routed: that path is verified
-        // working (#112 co= virtualization, #120 frame redirect).
+        // working (#112 co= virtualization, #120 frame redirect). The
+        // filename rides as a route fragment for self-location
+        // (#161 class).
         assert!(
             out.contains(&format!(
-                r#"src="{}""#,
+                r#"src="{}#api.js""#,
                 enc("https://www.google.com/recaptcha/api.js")
             )),
             "got: {}",
@@ -2286,5 +2327,90 @@ mod tests {
         r2.set_base(base);
         let twice = r2.rewrite_js_body(&out);
         assert_eq!(twice, out);
+    }
+
+    /// #161 class: pages locate their CMP stub <script> by substring
+    /// on the ORIGINAL src ("script[src*='otBannerSdk.js']"). An
+    /// opaque route breaks the lookup and the CMP crashes on a null
+    /// tag. The destination's last path segment rides as a fragment
+    /// on the route: substring matching works again and the fetch
+    /// target is unchanged (fragments are stripped before the
+    /// request; the route token never encodes them).
+    #[test]
+    fn script_src_keeps_filename_fragment_for_self_location() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://site.example/dir/page.html");
+        let out = format!(
+            "{}{}",
+            r.process("<script src=\"https://cdn.cmp.example/sdk/otBannerSdk.js\"></script>"),
+            r.finish()
+        );
+        let route = cfg().encode_url("https://cdn.cmp.example/sdk/otBannerSdk.js");
+        assert!(
+            out.contains(&format!("src=\"{}#otBannerSdk.js\"", route)),
+            "filename rides as a route fragment: {}",
+            out
+        );
+        // The route token itself is unchanged: strip the fragment and
+        // decode - the bare destination.
+        let val = out
+            .split("src=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or_default();
+        let decoded = val
+            .split('#')
+            .next()
+            .and_then(|tok| tok.rsplit('/').next())
+            .and_then(crate::encode::b64u_decode)
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default();
+        assert_eq!(decoded, "https://cdn.cmp.example/sdk/otBannerSdk.js");
+    }
+
+    #[test]
+    fn script_src_fragment_shapes() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://site.example/page.html");
+        let out = format!(
+            "{}{}",
+            r.process(
+                "<script src=\"https://cdn.example/a.js?v=2\"></script><script src=\"https://cdn.example/b.js#own\"></script><script src=\"https://cdn.example/\"></script><a href=\"https://cdn.example/c.js\">x</a><img src=\"https://cdn.example/d.png\">"
+            ),
+            r.finish()
+        );
+        // Query is stripped from the filename fragment.
+        let qa = cfg().encode_url("https://cdn.example/a.js?v=2");
+        assert!(
+            out.contains(&format!("src=\"{}#a.js\"", qa)),
+            "query stripped from the fragment: {}",
+            out
+        );
+        // A src that already carries a fragment keeps its own.
+        let qb = cfg().encode_url("https://cdn.example/b.js");
+        assert!(
+            out.contains(&format!("src=\"{}#own\"", qb)),
+            "own fragment kept, no second one: {}",
+            out
+        );
+        // Root-only path: no filename to expose, no fragment.
+        let qc = cfg().encode_url("https://cdn.example/");
+        assert!(
+            out.contains(&format!("src=\"{}\"", qc)),
+            "root-only src untouched: {}",
+            out
+        );
+        // Anchors and images gain no fragment: their fragments (if
+        // any) carry real client-side semantics.
+        assert!(
+            !out.contains("#c.js"),
+            "anchor href gains no fragment: {}",
+            out
+        );
+        assert!(
+            !out.contains("#d.png"),
+            "img src gains no fragment: {}",
+            out
+        );
     }
 }
