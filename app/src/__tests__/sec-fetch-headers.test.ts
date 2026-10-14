@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { applyChUa, secFetchHeaders } from "../origin";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { forwardedHeaders } from "../request";
+import { PROXY_INJECTED_HEADERS, applyChUa, secFetchHeaders } from "../origin";
 
 /* 2026-10-14 report: Sec-Fetch headers are BUILT from the virtual
    facts, never copied from the engine request. The exact sets a real
@@ -109,5 +110,48 @@ describe("applyChUa", () => {
     );
     expect(h.get("sec-ch-ua-mobile")).toBe("?1");
     expect(h.get("sec-ch-ua-platform")).toBe('"Android"');
+  });
+});
+
+
+describe("forwardedHeaders strips proxy-injected hop headers (#160)", () => {
+  /* forwardedHeaders resolves the virtual referrer against
+     self.location.origin; the node test env has no self. */
+  const prevSelf = (globalThis as Record<string, unknown>).self;
+  beforeAll(() => {
+    (globalThis as Record<string, unknown>).self = {
+      location: { origin: "https://engine.example" },
+    };
+  });
+  afterAll(() => {
+    if (prevSelf === undefined) delete (globalThis as Record<string, unknown>).self;
+    else (globalThis as Record<string, unknown>).self = prevSelf;
+  });
+
+  it("never forwards x-forwarded-* to the upstream", () => {
+    const req = new Request("https://engine.example/__zl_navh__/x", {
+      method: "GET",
+      headers: {
+        "x-forwarded-for": "10.0.0.1",
+        "x-forwarded-proto": "https",
+        "x-forwarded-host": "engine.example",
+        "x-forwarded-port": "443",
+        "x-real-ip": "10.0.0.1",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "sec-fetch-site": "same-origin",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "iframe",
+      },
+    });
+    const out = forwardedHeaders(req, "https://target.example/", undefined);
+    for (const h of PROXY_INJECTED_HEADERS) {
+      expect(out.get(h)).toBeNull();
+    }
+    /* Sec-Fetch is never copied from the engine request: the input's
+       "same-origin" value must not survive, and with no initiator
+       the rebuilt set for a cors request stays omitted. */
+    expect(out.get("sec-fetch-site")).toBeNull();
+    /* The rest of the client surface passes through. */
+    expect(out.get("user-agent")).toContain("Chrome/");
   });
 });

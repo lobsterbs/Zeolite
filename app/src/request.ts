@@ -49,7 +49,7 @@ import { wispTransport } from "./transport";
 
 
 
-import { applyChUa, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback } from "./origin";
+import {PROXY_INJECTED_HEADERS, applyChUa, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset } from "./assetbases";
 import { applySetCookie, cookieHeaderFor, isPassChallenge, jarHeaders, type CookieRequestContext } from "./cookies";
@@ -2835,7 +2835,7 @@ export function recordMaskedScript(requested: string, referrer: string, route: s
 
 /** Per-request header surgery: drop hop-by-hop + engine-origin leaks,
     restore the real destination as Referer. */
-function forwardedHeaders(req: Request, target: string, initiator?: string): Headers {
+export function forwardedHeaders(req: Request, target: string, initiator?: string): Headers {
   const out = new Headers();
   /* Sec-Fetch headers are never copied: the SW-visible values
      describe the engine iframe's fetch, not the virtual page's
@@ -2852,6 +2852,10 @@ function forwardedHeaders(req: Request, target: string, initiator?: string): Hea
     "sec-fetch-dest",
     "sec-fetch-user",
     "upgrade-insecure-requests",
+    /* Proxy-injected hop headers (#160): the reverse proxy in front
+       of the SW origin adds x-forwarded-* to the inbound request;
+       copying them upstream is a proxy tell no real browser sends. */
+    ...PROXY_INJECTED_HEADERS,
   ]);
   for (const [k, v] of req.headers) {
     if (!skip.has(k.toLowerCase())) out.set(k, v);

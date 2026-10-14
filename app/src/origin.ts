@@ -181,6 +181,24 @@ function chPlatform(ua: string): string {
   return "";
 }
 
+/* Proxy-injected hop headers. A reverse proxy in front of the SW
+   origin (Render adds x-forwarded-for/-proto/-host/-port on every
+   inbound request) sees its own bookkeeping headers on the engine
+   request, and the generic copy loop below would forward them
+   upstream. Real browsers never send them, so strict WAF zones read
+   them as a proxy tell (#160: shadertoy's Cloudflare zone 403s the
+   relayed document with a terse edge rejection). They describe the
+   proxy->engine hop, never the virtual page. */
+export const PROXY_INJECTED_HEADERS = [
+  "x-forwarded-for",
+  "x-forwarded-proto",
+  "x-forwarded-host",
+  "x-forwarded-port",
+  "x-forwarded-server",
+  "x-forwarded-cluster",
+  "x-real-ip",
+];
+
 export function applyChUa(headers: Headers, userAgent: string): void {
   headers.delete("sec-ch-ua");
   headers.delete("sec-ch-ua-mobile");
