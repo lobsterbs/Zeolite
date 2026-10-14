@@ -285,12 +285,24 @@ fn find_regex_end(s: &str) -> Option<usize> {
 }
 
 /// A URL-like literal: absolute http(s)/ws(s) URL, or protocol-relative.
+/// #153: www.w3.org hosts identity URIs, never fetched resources - the
+/// XML namespace constants (createElementNS/setAttributeNS/lookupPrefix:
+/// "http://www.w3.org/2000/svg", ".../1999/xlink", ".../2000/xmlns/",
+/// MathML, RDF) live in bundled JS as plain string literals. Minting a
+/// route for one silently changes the namespace argument, createElementNS
+/// then builds a plain Element with no .style and React dies mid-commit
+/// (excalidraw's "setting 'width'" + provider cascade); setAttributeNS
+/// throws NamespaceError the same way (delta.com's Tealeaf). No real app
+/// fetches w3.org as a subresource, so the host is excluded wholesale.
 fn looks_like_url(s: &str) -> bool {
     let t = s.trim();
     if t.contains(' ') {
         return false;
     }
     let lower = t.to_ascii_lowercase();
+    if lower.starts_with("http://www.w3.org/") || lower.starts_with("https://www.w3.org/") {
+        return false;
+    }
     if lower.starts_with("http://")
         || lower.starts_with("https://")
         || lower.starts_with("ws://")
@@ -388,6 +400,22 @@ fn utf8_len(b: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn w3_namespace_uris_are_identity_not_urls() {
+        // #153: namespace constants must survive verbatim or
+        // createElementNS builds a plain Element and the app dies.
+        let js = r#"var ns="http://www.w3.org/2000/svg";var xl='http://www.w3.org/1999/xlink';var m="http://www.w3.org/1998/Math/MathML";document.createElementNS(ns,"svg");fetch("https://api.example.com/x");"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""http://www.w3.org/2000/svg""#), "{}", out);
+        assert!(out.contains(r#"'http://www.w3.org/1999/xlink'"#), "{}", out);
+        assert!(
+            out.contains(r#""http://www.w3.org/1998/Math/MathML""#),
+            "{}",
+            out
+        );
+        assert!(out.contains(r#""[https://api.example.com/x]""#), "{}", out);
+    }
 
     #[test]
     fn rewrites_url_literals_only() {
