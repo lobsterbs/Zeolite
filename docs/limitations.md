@@ -16,13 +16,16 @@ its CSP protection; the engine's origin isolation and hostile-header
 stripping are the remaining guardrails. A CSP pass that rewrites
 directive sources is the only real fix and is deliberately not faked.
 
-## POST with a streaming body against a 307/308
+## Redirect hops with an announced body over the replay cap
 
-A redirect whose request body was already partially consumed (streaming
-POST) cannot be replayed by the worker. The hop is surfaced to the page
-with a mapped `Location` and the browser re-issues the request per
-spec. A page that does not follow the redirect sees the submission as
-hung. The DIAG event on the hop explains the behavior.
+The hop chain buffers a request stream body once (cap 32 MiB) and
+replays it on every redirect kind, so 307/308 POSTs follow like a real
+browser; a cross-origin hop drops Authorization per the fetch spec.
+Only a Content-Length-announced body over the cap streams one-shot:
+that hop surfaces to the page with a mapped `Location`, and a page
+that does not follow it sees the submission as hung (the DIAG event
+explains the behavior). An unannounced body that overflows the cap
+mid-buffer fails honestly instead.
 
 ## Shared workers are keyed by URL only
 

@@ -14,6 +14,7 @@ const transportMock = vi.hoisted(() => ({
   gate: undefined as undefined | Promise<void>,
   urls: [] as string[],
   queue: [] as Response[],
+  inits: [] as Array<{ method?: string; headers?: Headers; body?: unknown } | undefined>,
 }));
 
 /* The transport fetch is controllable: the stale-cache tests gate the
@@ -22,9 +23,11 @@ vi.mock("../transport", () => ({
   currentEngine: () => "libcurl",
   wispTransport: {
     ready: async () => {},
-    fetch: async (url: string) => {
+    fetch: async (url: string, init?: { method?: string; headers?: Headers; body?: unknown }) => {
       transportMock.calls++;
       transportMock.urls.push(url);
+      /* snapshot: the hop loop mutates one shared Headers object across hops (the cross-origin Authorization drop), so a live reference would show hop N state at hop 0 */
+      transportMock.inits.push(init ? { method: init.method, headers: new Headers(init.headers), body: init.body } : undefined);
       if (transportMock.gate) await transportMock.gate;
       const queued = transportMock.queue.shift();
       if (queued) return queued;
@@ -33,7 +36,8 @@ vi.mock("../transport", () => ({
   },
 }));
 
-import { classifyRtype, handleFetch, pageCacheMatch, reqDest, withDeadline } from "../request";
+import { classifyRtype, forwardedHeaders, handleFetch, pageCacheMatch, reqDest, withDeadline } from "../request";
+import { setFingerprint } from "../swstate";
 import { establishContext, resolveRelative } from "../vctx";
 import { VCTX } from "../swstate";
 import { encodeDestLegacy } from "../codec";
@@ -322,5 +326,200 @@ describe("redirect finalization updates the client virtual context (#110)", () =
     const served = await armed[0]!;
     expect(served.status).toBe(200);
     expect(resolveRelative(VCTX, "doc-1", "/y")).toBe("https://site.example/y");
+  });
+});
+
+
+/* 2026-10-14 report: the hop chain buffers a stream body once before
+   the loop, so 307/308 (and any body-carrying hop) replay it; the
+   remaining one-shot case is an announced Content-Length over the
+   cap, which surfaces the redirect to the page per spec. */
+describe("redirect body replay (307/308, cap, Authorization)", () => {
+  const ORIGIN = "https://w.example.org";
+
+  const streamBody = (parts: string[]) =>
+    new ReadableStream<Uint8Array>({
+      start(c) {
+        const enc = new TextEncoder();
+        for (const p of parts) c.enqueue(enc.encode(p));
+        c.close();
+      },
+    });
+
+  const mkPostEvent = (target: string, body: unknown, headers: Headers) => {
+    const armed: Promise<Response>[] = [];
+    const ev = {
+      request: {
+        url: ORIGIN + encodeDestLegacy(target),
+        method: "POST",
+        mode: "navigate",
+        destination: "document",
+        credentials: "same-origin",
+        referrer: "",
+        body,
+        headers,
+      },
+      clientId: "post-1",
+      resultingClientId: "post-1-new",
+      respondWith: (p: Promise<Response>) => void armed.push(p),
+      waitUntil: () => {},
+    } as unknown as FetchEvent;
+    return { ev, armed };
+  };
+
+  const bytesOf = (b: unknown) =>
+    new TextDecoder().decode(new Uint8Array(b as ArrayBuffer));
+
+  beforeEach(() => {
+    transportMock.calls = 0;
+    transportMock.gate = undefined;
+    transportMock.urls = [];
+    transportMock.queue = [];
+    transportMock.inits = [];
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN },
+      registration: { scope: ORIGIN + "/" },
+      clients: { get: async () => null },
+    });
+    vi.stubGlobal("caches", {
+      open: async () => {
+        throw new Error("no cache storage");
+      },
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("replays a streamed POST body on a 307 hop", async () => {
+    transportMock.queue = [
+      new Response(null, { status: 307, headers: { location: "https://site.example/next" } }),
+      new Response("ok", { headers: { "content-type": "text/plain" } }),
+    ];
+    const { ev, armed } = mkPostEvent("https://site.example/form", streamBody(["he", "llo=1"]), new Headers());
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(transportMock.urls).toEqual(["https://site.example/form", "https://site.example/next"]);
+    expect(transportMock.inits.map((i) => i?.method)).toEqual(["POST", "POST"]);
+    expect(transportMock.inits[0]?.body).toBeInstanceOf(ArrayBuffer);
+    expect(bytesOf(transportMock.inits[0]?.body)).toBe("hello=1");
+    expect(bytesOf(transportMock.inits[1]?.body)).toBe("hello=1");
+  });
+
+  it("replays a streamed POST body on a 308 hop", async () => {
+    transportMock.queue = [
+      new Response(null, { status: 308, headers: { location: "https://site.example/next" } }),
+      new Response("ok", { headers: { "content-type": "text/plain" } }),
+    ];
+    const { ev, armed } = mkPostEvent("https://site.example/form", streamBody(["a", "=2"]), new Headers());
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(transportMock.urls).toEqual(["https://site.example/form", "https://site.example/next"]);
+    expect(bytesOf(transportMock.inits[1]?.body)).toBe("a=2");
+  });
+
+  it("surfaces the 307 when the announced body is over the replay cap", async () => {
+    const headers = new Headers({ "content-length": String(33 * 1024 * 1024) });
+    transportMock.queue = [
+      new Response(null, { status: 307, headers: { location: "https://site.example/next" } }),
+    ];
+    const { ev, armed } = mkPostEvent("https://site.example/form", streamBody(["x"]), headers);
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(307);
+    expect(transportMock.calls).toBe(1);
+  });
+
+  it("drops Authorization on a cross-origin hop, keeps it same-origin", async () => {
+    transportMock.queue = [
+      new Response(null, { status: 307, headers: { location: "https://other.example/x" } }),
+      new Response("ok", { headers: { "content-type": "text/plain" } }),
+    ];
+    const { ev, armed } = mkPostEvent(
+      "https://site.example/form",
+      streamBody(["a"]),
+      new Headers({ authorization: "Bearer tok" }),
+    );
+    handleFetch(ev);
+    await armed[0]!;
+    expect(transportMock.inits[0]?.headers?.get("authorization")).toBe("Bearer tok");
+    expect(transportMock.inits[1]?.headers?.get("authorization")).toBe(null);
+
+    transportMock.queue = [
+      new Response(null, { status: 307, headers: { location: "https://site.example/next" } }),
+      new Response("ok", { headers: { "content-type": "text/plain" } }),
+    ];
+    transportMock.inits = [];
+    const second = mkPostEvent(
+      "https://site.example/form",
+      streamBody(["a"]),
+      new Headers({ authorization: "Bearer tok" }),
+    );
+    handleFetch(second.ev);
+    await second.armed[0]!;
+    expect(transportMock.inits[1]?.headers?.get("authorization")).toBe("Bearer tok");
+  });
+
+  it("withDeadline aborts the upstream controller when the deadline fires", async () => {
+    const ctl = new AbortController();
+    const never = new Promise<string>(() => {});
+    await expect(withDeadline(never, 25, "no first byte", ctl)).rejects.toThrow(
+      "no first byte",
+    );
+    expect(ctl.signal.aborted).toBe(true);
+  });
+});
+
+/* Storage Access Headers ship in Chrome 133: the persona claim decides
+   whether Sec-Fetch-Storage-Access rides a credentialed cross-site
+   fetch (the physical browser's value is never forwarded). */
+describe("Sec-Fetch-Storage-Access persona synthesis (Chrome 133+)", () => {
+  const UA149 =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+  const UA124 =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+  const req = (credentials: RequestCredentials) =>
+    ({
+      method: "GET",
+      mode: "cors",
+      destination: "script",
+      credentials,
+      headers: new Headers(),
+      referrer: "",
+    }) as unknown as Request;
+
+  afterEach(() => {
+    setFingerprint(null);
+  });
+
+  it("synthesizes none for a 133+ persona on a credentialed cross-site fetch", () => {
+    expect(setFingerprint({ userAgent: UA149 }).ok).toBe(true);
+    const out = forwardedHeaders(req("include"), "https://cdn.other.example/x.js", "https://site.example/");
+    expect(out.get("sec-fetch-site")).toBe("cross-site");
+    expect(out.get("sec-fetch-storage-access")).toBe("none");
+  });
+
+  it("omits it for a pre-133 persona, same-site targets and credential-less fetches", () => {
+    expect(setFingerprint({ userAgent: UA124 }).ok).toBe(true);
+    expect(
+      forwardedHeaders(req("include"), "https://cdn.other.example/x.js", "https://site.example/").get(
+        "sec-fetch-storage-access",
+      ),
+    ).toBe(null);
+    expect(setFingerprint({ userAgent: UA149 }).ok).toBe(true);
+    expect(
+      forwardedHeaders(req("include"), "https://site.example/x.js", "https://site.example/").get(
+        "sec-fetch-storage-access",
+      ),
+    ).toBe(null);
+    expect(
+      forwardedHeaders(req("omit"), "https://cdn.other.example/x.js", "https://site.example/").get(
+        "sec-fetch-storage-access",
+      ),
+    ).toBe(null);
   });
 });

@@ -158,10 +158,20 @@ export function withBodyStallDeadline(resp: Response, ms: number, traceId: strin
   return out;
 }
 
-export function withDeadline<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
+export function withDeadline<T>(
+  p: Promise<T>,
+  ms: number,
+  msg: string,
+  abort?: AbortController,
+): Promise<T> {
   if (!(ms > 0)) return p;
   return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(msg)), ms);
+    const t = setTimeout(() => {
+      /* Abort the underlying fetch too: the deadline must not leave
+         the upstream request running past the failure it reported. */
+      abort?.abort(new Error(msg));
+      reject(new Error(msg));
+    }, ms);
     p.then(
       (v) => {
         clearTimeout(t);
@@ -463,7 +473,8 @@ export function replayCapTrips(): number {
     actually fire for this request: a relay rule with a registered
     channel (the relay carries string/ArrayBuffer only), or a
     Content-Length-announced body the single connect-class retry can
-    replay. An unannounced body with no relay (the chunked/duplex class)
+    replay, or a redirect hop chain that replays the body on every
+    hop (hopReplay). An unannounced body with no relay (the chunked/duplex class)
     streams one-shot instead of buffering or dying past the cap - the
     retry is honestly unavailable for it. Non-stream bodies and
     oversized announced bodies pass through untouched; an overflow
@@ -471,7 +482,7 @@ export function replayCapTrips(): number {
     never a corrupted body. */
 export async function replayableInit(
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
-  opts: { relayPossible?: boolean } = {},
+  opts: { relayPossible?: boolean; hopReplay?: boolean } = {},
 ): Promise<{ method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal }> {
   const body = init.body;
   if (body == null || typeof (body as ReadableStream).getReader !== "function") return init;
@@ -488,7 +499,7 @@ export async function replayableInit(
       });
       return init;
     }
-  } else if (!opts.relayPossible) {
+  } else if (!opts.relayPossible && !opts.hopReplay) {
     return init;
   }
   const reader = (body as ReadableStream<Uint8Array>).getReader();
@@ -1908,18 +1919,45 @@ export function handleFetch(e: FetchEvent): void {
              Set-Cookie. The SW now follows the hop chain itself and
              captures Set-Cookie on every hop. 303 (and POST on 301/302)
              continues as GET per the fetch spec; 307/308 replay the
-             method, which a one-shot stream body cannot do, so those
-             surface to the page with a mapped Location (below) and the
-             browser re-issues the request. */
+             method AND the body, which replayableInit buffers once
+             (cap 32 MiB); a cross-origin hop drops Authorization
+             per spec. Only an announced body over the cap streams one-shot and surfaces with a mapped Location. */
           let hopUrl = target;
           let hopMethod = e.request.method;
           let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
             ? undefined
             : e.request.body;
+          /* 2026-10-14 report: buffer a stream body ONCE before the hop
+             loop so 307/308 (and every other body-carrying hop) can
+             replay it; the only one-shot case left is an announced
+             Content-Length over the cap, which replayableInit streams
+             untouched and the loop surfaces per spec. */
+          if (hopBody != null) {
+            hopBody =
+              (
+                await replayableInit(
+                  { method: hopMethod, headers: sendHeaders, body: hopBody, signal: e.request.signal },
+                  { hopReplay: true },
+                )
+              ).body ?? null;
+          }
+          /* The navigation TTFB deadline must abort the upstream fetch,
+             not only reject this promise: the request otherwise runs
+             on past the user-visible failure holding a transport
+             stream (2026-10-14 report). Non-navigations keep the
+             request signal as-is. */
+          const navAbort = reqCtx.navigation ? new AbortController() : null;
+          const reqSignal = e.request.signal;
+          if (navAbort && reqSignal) {
+            if (reqSignal.aborted) navAbort.abort(reqSignal.reason);
+            else reqSignal.addEventListener("abort", () => navAbort!.abort(reqSignal!.reason), { once: true });
+          }
+          const hopSignal = navAbort ? navAbort.signal : reqSignal;
           let resp = await withDeadline(
-            upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: e.request.signal }, policy, rtype, traceId),
+            upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
             reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
             "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
+            navAbort ?? undefined,
           );
           for (let hops = 0; resp.status >= 300 && resp.status < 400 && hops < MAX_REDIRECT_HOPS; hops++) {
             /* Capture this hop's Set-Cookie against the URL it came from.
@@ -1939,8 +1977,13 @@ export function handleFetch(e: FetchEvent): void {
             /* #53: the engine-side hop chain bypasses the fetch
                choke point, so each hop upgrades here too. */
             next = destUpgraded(next);
+            /* Fetch spec: 307/308 replay the body but a cross-origin
+               hop drops Authorization - the credential is never
+               forwarded to a second origin. */
+            if (new URL(next).origin !== new URL(hopUrl).origin) sendHeaders.delete("authorization");
+            const stillStream = hopBody != null && typeof (hopBody as ReadableStream).getReader === "function";
             if (resp.status === 307 || resp.status === 308) {
-              if (hopBody) break; /* one-shot stream: cannot replay */
+              if (stillStream) break; /* announced over the cap: one-shot stream */
             } else if (resp.status === 303 || hopMethod === "POST") {
               /* The method rewrite drops the body, and the direct
                  browser oracle drops its content-type with it (the
@@ -1949,8 +1992,8 @@ export function handleFetch(e: FetchEvent): void {
               hopMethod = "GET";
               hopBody = undefined;
               sendHeaders.delete("content-type");
-            } else if (hopBody) {
-              break; /* one-shot stream: cannot replay */
+            } else if (stillStream) {
+              break; /* announced over the cap: one-shot stream */
             }
             /* The jar is per-origin: cookies for the hop target, not the
                original one. */
@@ -1960,9 +2003,10 @@ export function handleFetch(e: FetchEvent): void {
             DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
             hopUrl = next;
             resp = await withDeadline(
-              upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: e.request.signal }, policy, rtype, traceId),
+              upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
               reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
               "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
+              navAbort ?? undefined,
             );
           }
           /* #140: every page-initiated subresource settles: an idle-stalled
@@ -2852,9 +2896,9 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     "sec-fetch-dest",
     "sec-fetch-user",
     "upgrade-insecure-requests",
-    /* Chrome only began sending Sec-Fetch-Storage-Access in 133; the
-       profile persona predates it, so it is never synthesized - and
-       an engine-observed value is never forwarded either. */
+    /* The engine-observed physical value is never forwarded; a
+       persona of Chrome 133 or newer gets Sec-Fetch-Storage-Access
+       synthesized below from the persona claim instead. */
     "sec-fetch-storage-access",
     /* Proxy-injected hop headers (#160): the reverse proxy in front
        of the SW origin adds x-forwarded-* to the inbound request;
@@ -2943,6 +2987,20 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     if (req.mode === "navigate") {
       const navAccept = navigationAccept(profile.userAgent);
       if (navAccept) out.set("accept", navAccept);
+    }
+    /* Storage Access Headers ship in Chrome 133: a persona of that
+       major or newer must carry Sec-Fetch-Storage-Access on exactly
+       the requests a real one sends it on (cross-site, credentials
+       include). The persona claim is "none": a proxied page has no
+       unpartitioned storage access to the target origin. */
+    const personaMajor = /(?:Chrome|Chromium)\/(\d+)/.exec(profile.userAgent);
+    if (
+      req.credentials === "include" &&
+      out.get("sec-fetch-site") === "cross-site" &&
+      personaMajor &&
+      parseInt(personaMajor[1], 10) >= 133
+    ) {
+      out.set("sec-fetch-storage-access", "none");
     }
   }
   return out;

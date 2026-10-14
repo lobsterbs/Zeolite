@@ -75,7 +75,7 @@ export interface FingerprintProfile {
     renderer strings a real Chrome would report). */
 export const DEFAULT_PROFILE: FingerprintProfile = {
   userAgent:
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
   platform: "Win32",
   languages: ["en-US", "en"],
   utcOffsetMin: 0,
