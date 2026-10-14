@@ -184,7 +184,31 @@ static TEST_LOOKUP: std::sync::Mutex<Option<std::collections::HashMap<String, Ve
 #[cfg(test)]
 pub(crate) fn set_test_lookup(entries: Option<Vec<(&str, Vec<SocketAddr>)>>) {
     let mut g = TEST_LOOKUP.lock().expect("test lookup lock");
-    *g = entries.map(|v| v.into_iter().map(|(k, s)| (k.to_string(), s)).collect());
+    /* Merge per hostname, never wipe sibling entries: cargo test runs
+    the connect-race tests on parallel threads and a replace-then-
+    clear pair in one test used to delete the other's host mid-race,
+    dropping it onto the real pinned DoH (the CI flake where
+    connect_races_past_a_dead_first_address died as DnsNotFound in
+    ~106ms). */
+    let map = g.get_or_insert_with(std::collections::HashMap::new);
+    match entries {
+        Some(v) => {
+            for (k, addrs) in v {
+                map.insert(k.to_string(), addrs);
+            }
+        }
+        None => map.clear(),
+    }
+}
+
+/* Remove exactly one hostname's override; test cleanup must not
+clear entries another parallel test still depends on. */
+#[cfg(test)]
+pub(crate) fn remove_test_lookup(hostname: &str) {
+    let mut g = TEST_LOOKUP.lock().expect("test lookup lock");
+    if let Some(map) = g.as_mut() {
+        map.remove(hostname);
+    }
 }
 
 #[cfg(test)]

@@ -1951,7 +1951,7 @@ mod tests {
             let _ = good.accept().await;
         });
         crate::dns::set_test_lookup(Some(vec![(
-            "multi.example.org",
+            "deadfirst.example.org",
             vec![dead_addr, SocketAddr::new([127, 0, 0, 1].into(), good_port)],
         )]));
         // The private-IP policy is a session-level concern, not the
@@ -1963,13 +1963,13 @@ mod tests {
         let t0 = Instant::now();
         let res = connect_validated(
             &dest,
-            "multi.example.org",
+            "deadfirst.example.org",
             good_port,
             Duration::from_secs(3),
         )
         .await;
         let elapsed = t0.elapsed();
-        crate::dns::set_test_lookup(None);
+        crate::dns::remove_test_lookup("deadfirst.example.org");
         accept_one.abort();
         assert!(
             res.is_ok(),
@@ -2006,7 +2006,7 @@ mod tests {
             let _ = good.accept().await;
         });
         crate::dns::set_test_lookup(Some(vec![(
-            "multi.example.org",
+            "goodfirst.example.org",
             vec![SocketAddr::new([127, 0, 0, 1].into(), good_port), dead_addr],
         )]));
         let dest = policy::DestinationPolicy {
@@ -2016,13 +2016,13 @@ mod tests {
         let t0 = Instant::now();
         let res = connect_validated(
             &dest,
-            "multi.example.org",
+            "goodfirst.example.org",
             good_port,
             Duration::from_secs(3),
         )
         .await;
         let elapsed = t0.elapsed();
-        crate::dns::set_test_lookup(None);
+        crate::dns::remove_test_lookup("goodfirst.example.org");
         accept_one.abort();
         assert!(res.is_ok(), "good first address must win: {elapsed:?}");
         assert!(
