@@ -81,7 +81,11 @@ describe("applyChUa", () => {
     applyChUa(h, CHROME_WIN);
     expect(h.get("sec-ch-ua")).toContain('"Chromium";v="124"');
     expect(h.get("sec-ch-ua")).toContain('"Google Chrome";v="124"');
-    expect(h.get("sec-ch-ua")).toContain("Not_A Brand");
+    // Grease brand + list order are the exact strings Chrome 124
+    // sends (derived from the Chromium major, not hardcoded).
+    expect(h.get("sec-ch-ua")).toBe(
+      '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    );
     expect(h.get("sec-ch-ua-mobile")).toBe("?0");
     expect(h.get("sec-ch-ua-platform")).toBe('"Windows"');
   });
@@ -110,6 +114,23 @@ describe("applyChUa", () => {
     );
     expect(h.get("sec-ch-ua-mobile")).toBe("?1");
     expect(h.get("sec-ch-ua-platform")).toBe('"Android"');
+  });
+
+  it("grease brand and order follow the Chromium major (Chrome 120 real shape)", () => {
+    const h = new Headers();
+    applyChUa(h, CHROME_WIN.replace("Chrome/124", "Chrome/120"));
+    expect(h.get("sec-ch-ua")).toBe(
+      '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    );
+  });
+
+  it("iPhone Chromium UA reports platform iOS, not macOS", () => {
+    const h = new Headers();
+    applyChUa(
+      h,
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/604.1",
+    );
+    expect(h.get("sec-ch-ua-platform")).toBe('"iOS"');
   });
 });
 

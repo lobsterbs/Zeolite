@@ -176,6 +176,9 @@ function chPlatform(ua: string): string {
   if (/Windows NT/.test(ua)) return "Windows";
   if (/Android/.test(ua)) return "Android";
   if (/CrOS/.test(ua)) return "Chrome OS";
+  // iOS Chromium UAs carry "like Mac OS X": the iOS check must precede
+  // the Mac branch or iPhone/iPad UAs report themselves as macOS.
+  if (/iPhone|iPad/.test(ua)) return "iOS";
   if (/Macintosh|Mac OS X/.test(ua)) return "macOS";
   if (/Linux|X11/.test(ua)) return "Linux";
   return "";
@@ -199,16 +202,59 @@ export const PROXY_INJECTED_HEADERS = [
   "x-real-ip",
 ];
 
+/* Chromium's GREASE brand and the brand-list order are deterministic
+   functions of the major version (verified against
+   components/embedder_support/user_agent_utils.cc:
+   GetGreasedUserAgentBrandVersion, GetRandomOrder, ShuffleBrandList).
+   A fixed "Not_A Brand";v="8" in a fixed order is a list no real
+   Chromium of that major ever sends, a #160-class fingerprint tell. */
+const GREASE_CHARS = [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"];
+const GREASE_VERSIONS = ["8", "99", "24"];
+
+function greasedBrand(major: number): string {
+  return (
+    "Not" +
+    GREASE_CHARS[major % GREASE_CHARS.length] +
+    "A" +
+    GREASE_CHARS[(major + 1) % GREASE_CHARS.length] +
+    "Brand"
+  );
+}
+
+/* Chromium builds [grease, Chromium, own brand] and permutes it with a
+   fixed table indexed by major % 6 (size 3; size 2 uses
+   [seed % 2, (seed + 1) % 2]). Placement direction:
+   out[order[i]] = list[i]. */
+function shuffledBrands(list: string[], major: number): string[] {
+  const orders3 = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+  ];
+  const order =
+    list.length === 3 ? orders3[major % orders3.length] : [major % 2, (major + 1) % 2];
+  const out: string[] = new Array(list.length);
+  for (let i = 0; i < order.length; i++) out[order[i]] = list[i];
+  return out;
+}
+
 export function applyChUa(headers: Headers, userAgent: string): void {
   headers.delete("sec-ch-ua");
   headers.delete("sec-ch-ua-mobile");
   headers.delete("sec-ch-ua-platform");
   const m = /(?:Chrome|Chromium)\/(\d+)/.exec(userAgent);
   if (!m) return;
-  const major = m[1];
-  const brands = ['"Chromium";v="' + major + '"', '"Not_A Brand";v="8"'];
+  const major = parseInt(m[1], 10);
+  if (!Number.isFinite(major)) return;
+  const brands = [
+    '"' + greasedBrand(major) + '";v="' + GREASE_VERSIONS[major % GREASE_VERSIONS.length] + '"',
+    '"Chromium";v="' + major + '"',
+  ];
   if (/Chrome\/\d+/.test(userAgent)) brands.push('"Google Chrome";v="' + major + '"');
-  headers.set("sec-ch-ua", brands.join(", "));
+  headers.set("sec-ch-ua", shuffledBrands(brands, major).join(", "));
   headers.set("sec-ch-ua-mobile", /Android.+Mobile|iPhone/.test(userAgent) ? "?1" : "?0");
   const plat = chPlatform(userAgent);
   if (plat) headers.set("sec-ch-ua-platform", '"' + plat + '"');
