@@ -121,3 +121,77 @@ export function virtualRefererFallback(initiator: string | null | undefined): st
   if (ii.protocol !== "https:" && ii.protocol !== "http:") return null;
   return ii.origin + "/";
 }
+
+/* Full Sec-Fetch construction (2026-10-14 report): only Sec-Fetch-Site
+   used to be recomputed; -Mode, -Dest and -User were copied as the
+   service worker saw them, which describe the engine iframe's fetch,
+   not the virtual page's request (and are absent entirely on browsers
+   that hide them, #40). Build every one of them from the virtual
+   facts: request mode, destination, navigation flag and the virtual
+   initiator. Pure code like the rest of this module. */
+export interface SecFetchHeaderSet {
+  site?: "same-origin" | "same-site" | "cross-site" | "none";
+  mode?: string;
+  dest?: string;
+  user?: "?1";
+  upgradeInsecureRequests?: true;
+}
+
+export function secFetchHeaders(
+  initiator: string | null | undefined,
+  target: string,
+  method: string,
+  mode: string,
+  destination: string,
+): SecFetchHeaderSet {
+  const vo = virtualOriginHeaders(initiator, target, method, mode);
+  const dest = destination ? destination.toLowerCase() : "empty";
+  if (mode === "navigate") {
+    /* A navigation with no attributable initiator is a top-level
+       load: a real browser sends the none/navigate/document/?1 set
+       plus Upgrade-Insecure-Requests, not silence. */
+    return {
+      site: vo.secFetchSite ?? "none",
+      mode: "navigate",
+      dest: dest === "empty" ? "document" : dest,
+      user: "?1",
+      upgradeInsecureRequests: true,
+    };
+  }
+  /* Subresources: site only when the initiator is known (fail
+     closed, the engine origin must never leak upstream), mode and
+     dest from the request's own virtual facts. Sec-Fetch-User is
+     navigation-only in real browsers. */
+  return { site: vo.secFetchSite, mode, dest };
+}
+
+/* Sec-CH-UA family (2026-10-14 report): the transport sends the
+   active profile's UA, and a Chrome UA without client hints is a
+   known bot signal (#160 class). Only when the UA actually is
+   Chromium: a Firefox or Safari UA must carry no Chromium hints.
+   Values are derived from the UA so they cannot contradict it.
+   Deletes first, so the final UA's truth always wins over an
+   earlier layer's hints. */
+function chPlatform(ua: string): string {
+  if (/Windows NT/.test(ua)) return "Windows";
+  if (/Android/.test(ua)) return "Android";
+  if (/CrOS/.test(ua)) return "Chrome OS";
+  if (/Macintosh|Mac OS X/.test(ua)) return "macOS";
+  if (/Linux|X11/.test(ua)) return "Linux";
+  return "";
+}
+
+export function applyChUa(headers: Headers, userAgent: string): void {
+  headers.delete("sec-ch-ua");
+  headers.delete("sec-ch-ua-mobile");
+  headers.delete("sec-ch-ua-platform");
+  const m = /(?:Chrome|Chromium)\/(\d+)/.exec(userAgent);
+  if (!m) return;
+  const major = m[1];
+  const brands = ['"Chromium";v="' + major + '"', '"Not_A Brand";v="8"'];
+  if (/Chrome\/\d+/.test(userAgent)) brands.push('"Google Chrome";v="' + major + '"');
+  headers.set("sec-ch-ua", brands.join(", "));
+  headers.set("sec-ch-ua-mobile", /Android.+Mobile|iPhone/.test(userAgent) ? "?1" : "?0");
+  const plat = chPlatform(userAgent);
+  if (plat) headers.set("sec-ch-ua-platform", '"' + plat + '"');
+}

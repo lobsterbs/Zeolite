@@ -28,7 +28,7 @@ import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
 import { loadPolicy, policyMatch, type CompiledPolicy } from "./policy";
-import { relayFetch } from "./relayfetch";
+import { relayAvailable, relayFetch } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
@@ -49,7 +49,7 @@ import { wispTransport } from "./transport";
 
 
 
-import { virtualOriginHeaders, virtualRefererFallback } from "./origin";
+import { applyChUa, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback } from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset } from "./assetbases";
 import { applySetCookie, cookieHeaderFor, isPassChallenge, jarHeaders, type CookieRequestContext } from "./cookies";
@@ -450,17 +450,47 @@ export function surfaceNotModified(h: Headers): Response {
    the cap fails honestly instead of sending a truncated body. */
 const REPLAY_BODY_CAP = 32 * 1024 * 1024;
 
-/** #155: return an init whose stream body is replaced by a buffered
-    ArrayBuffer. Non-stream bodies and oversized announced bodies
-    pass through untouched; an overflow mid-read throws so the caller
-    serves the honest error strand, never a corrupted body. */
+/* #155 + the 2026-10-14 report: how often the replay cap tripped
+   (announced bodies too big to buffer, unannounced overflow mid-read).
+   A counter, not silence: the streaming tradeoff is visible. */
+let replayCapTripCount = 0;
+export function replayCapTrips(): number {
+  return replayCapTripCount;
+}
+
+/** #155 + the 2026-10-14 report: return an init whose stream body is
+    replaced by a buffered ArrayBuffer, but only when a replay path can
+    actually fire for this request: a relay rule with a registered
+    channel (the relay carries string/ArrayBuffer only), or a
+    Content-Length-announced body the single connect-class retry can
+    replay. An unannounced body with no relay (the chunked/duplex class)
+    streams one-shot instead of buffering or dying past the cap - the
+    retry is honestly unavailable for it. Non-stream bodies and
+    oversized announced bodies pass through untouched; an overflow
+    mid-read throws so the caller serves the honest error strand,
+    never a corrupted body. */
 export async function replayableInit(
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
+  opts: { relayPossible?: boolean } = {},
 ): Promise<{ method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal }> {
   const body = init.body;
   if (body == null || typeof (body as ReadableStream).getReader !== "function") return init;
-  const cl = Number(init.headers?.get("content-length") ?? "");
-  if (cl > REPLAY_BODY_CAP) return init;
+  const clRaw = init.headers?.get("content-length") ?? "";
+  if (/^\d+$/.test(clRaw)) {
+    if (Number(clRaw) > REPLAY_BODY_CAP) {
+      /* Huge announced upload: buffer-free one-shot streaming, the
+         retry cannot replay it anyway. Counted, not silent. */
+      replayCapTripCount++;
+      DIAG.emit({
+        category: "TRANSPORT",
+        severity: "info",
+        message: "announced body over the replay cap: streaming one-shot, no transport retry for this request",
+      });
+      return init;
+    }
+  } else if (!opts.relayPossible) {
+    return init;
+  }
   const reader = (body as ReadableStream<Uint8Array>).getReader();
   const parts: Uint8Array[] = [];
   let total = 0;
@@ -469,6 +499,12 @@ export async function replayableInit(
     if (done) break;
     total += value.byteLength;
     if (total > REPLAY_BODY_CAP) {
+      replayCapTripCount++;
+      DIAG.emit({
+        category: "TRANSPORT",
+        severity: "warning",
+        message: "request body exceeds the replay buffer cap; serving the honest error strand",
+      });
       try {
         await reader.cancel();
       } catch {
@@ -494,9 +530,13 @@ async function upstreamFetch(
   rtype: ResourceType,
   traceId: string,
 ): Promise<Response> {
-  /* #155: one-shot stream buffering before every transport decision */
-  init = await replayableInit(init);
   const rule = policyMatch(policy, dest, rtype);
+  /* #155 + 2026-10-14 report: buffer a stream body only when a replay
+     path can actually fire for this request (a relay rule with a
+     registered channel, or an announced body the single retry can
+     replay); otherwise it streams one-shot. */
+  const relayPossible = !!rule && rule.route === "relay" && relayAvailable();
+  init = await replayableInit(init, { relayPossible });
   if (rule && rule.route === "relay") {
     const rr = await relayFetch(dest, init, traceId);
     if (rr) {
@@ -1710,17 +1750,9 @@ export function handleFetch(e: FetchEvent): void {
                SPA catch-all class) serves the JS-typed comment, never
                the document rewrite a script destination cannot use. */
             const hitCt = hit.headers.get("content-type") ?? "";
-            if (
-              (dest === "script" || isWorkerDestination(e.request.destination)) &&
-              (hitCt.includes("text/html") || hitCt.includes("text/css"))
-            ) {
-              return new Response(
-                "/* upstream " + hit.status + " " + (hitCt.split(";")[0] || "non-JS") + " */",
-                {
-                  status: hit.status,
-                  headers: { "content-type": "application/javascript; charset=utf-8" },
-                },
-              );
+            if (needsScriptBodyMask(dest, e.request.destination, hitCt)) {
+              recordMaskedScript(target, e.request.referrer, target);
+              return maskedScriptResponse(hit.status, hitCt);
             }
             /* Legacy entries predate the content-encoding strip and
                carry a stale upstream encoding over a decoded body:
@@ -1838,6 +1870,10 @@ export function handleFetch(e: FetchEvent): void {
               sendHeaders.set("accept-language", sp.p.languages.join(","));
             }
           }
+          /* Sec-CH-UA hints must match the FINAL user-agent (profile,
+             zl:rules or site profile); applyChUa deletes first, so a
+             non-Chromium final UA carries no stale hints. */
+          applyChUa(sendHeaders, sendHeaders.get("user-agent") ?? "");
           /* 2.2 Arsenide: initiator context for the opt-in SameSite
              policy. Issue #33: the initiator comes from the client's own
              virtual context first (a SW-assigned key, not a page-supplied
@@ -2216,18 +2252,10 @@ export function handleFetch(e: FetchEvent): void {
              proceeds. JS bodies, typeless responses and every other
              destination stay untouched. */
           const sct = resp.headers.get("content-type") ?? "";
-          if (
-            (dest === "script" || isWorkerDestination(e.request.destination)) &&
-            (sct.includes("text/html") || sct.includes("text/css"))
-          ) {
+          if (needsScriptBodyMask(dest, e.request.destination, sct)) {
+            recordMaskedScript(target, e.request.referrer, target);
             WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-            return new Response(
-              "/* upstream " + resp.status + " " + (sct.split(";")[0] || "non-JS") + " */",
-              {
-                status: resp.status,
-                headers: { "content-type": "application/javascript; charset=utf-8" },
-              },
-            );
+            return maskedScriptResponse(resp.status, sct);
           }
           if ((isHtml(resp) || (respCt === "" && DOC_DESTS.has(dest) && resp.body)) && resp.body) {
             curStage = "REWRITE_STARTED";
@@ -2768,11 +2796,63 @@ function percentDecode(s: string): string {
   }
 }
 
+/* #158/#159 made visible (2026-10-14 report): the script-body mask is
+   a stopgap for URL-resolution misses; every masked response is a
+   broken module in disguise. Pure decision + counter so the
+   regression harness can prove the zero-mask shapes and the
+   diagnostics name the real wrong-URL cases (requested path,
+   referrer, resolved route) instead of hiding them. */
+export function needsScriptBodyMask(dest: string, destination: string, contentType: string): boolean {
+  if (dest !== "script" && !isWorkerDestination(destination)) return false;
+  return contentType.includes("text/html") || contentType.includes("text/css");
+}
+
+export function maskedScriptResponse(status: number, contentType: string): Response {
+  return new Response(
+    "/* upstream " + status + " " + (contentType.split(";")[0] || "non-JS") + " */",
+    {
+      status,
+      headers: { "content-type": "application/javascript; charset=utf-8" },
+    },
+  );
+}
+
+let maskedScriptResponses = 0;
+export function maskedScriptCount(): number {
+  return maskedScriptResponses;
+}
+
+export function recordMaskedScript(requested: string, referrer: string, route: string): void {
+  maskedScriptResponses++;
+  DIAG.emit({
+    category: "REWRITE",
+    severity: "warning",
+    message: "masked non-JS body served to a script destination (wrong-URL class; every one counted)",
+    url: requested,
+    technicalReason: "referrer=" + referrer + " resolved-route=" + route,
+  });
+}
+
 /** Per-request header surgery: drop hop-by-hop + engine-origin leaks,
     restore the real destination as Referer. */
 function forwardedHeaders(req: Request, target: string, initiator?: string): Headers {
   const out = new Headers();
-  const skip = new Set(["host", "connection", "referer", "origin", "cookie", "sec-fetch-site"]);
+  /* Sec-Fetch headers are never copied: the SW-visible values
+     describe the engine iframe's fetch, not the virtual page's
+     request (and are absent on browsers that hide them, #40).
+     They are rebuilt below from the virtual facts. */
+  const skip = new Set([
+    "host",
+    "connection",
+    "referer",
+    "origin",
+    "cookie",
+    "sec-fetch-site",
+    "sec-fetch-mode",
+    "sec-fetch-dest",
+    "sec-fetch-user",
+    "upgrade-insecure-requests",
+  ]);
   for (const [k, v] of req.headers) {
     if (!skip.has(k.toLowerCase())) out.set(k, v);
   }
@@ -2835,7 +2915,12 @@ function forwardedHeaders(req: Request, target: string, initiator?: string): Hea
      both from the virtual initiator; unknown initiator sends none. */
   const vo = virtualOriginHeaders(initiator, target, req.method, req.mode);
   if (vo.origin) out.set("origin", vo.origin);
-  if (vo.secFetchSite) out.set("sec-fetch-site", vo.secFetchSite);
+  const sf = secFetchHeaders(initiator, target, req.method, req.mode, req.destination);
+  if (sf.site) out.set("sec-fetch-site", sf.site);
+  if (sf.mode) out.set("sec-fetch-mode", sf.mode);
+  if (sf.dest) out.set("sec-fetch-dest", sf.dest);
+  if (sf.user) out.set("sec-fetch-user", sf.user);
+  if (sf.upgradeInsecureRequests) out.set("upgrade-insecure-requests", "1");
   if (!out.has("accept-language")) out.set("accept-language", "en-US,en;q=0.9");
   /* 1.8 Telluride: while a profile is active, the wire surface must
      match the document surface, so its UA and languages win over
