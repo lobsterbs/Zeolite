@@ -1652,6 +1652,23 @@ export function handleFetch(e: FetchEvent): void {
                conversion instead of hanging the page. */
             if (hit.status === 304) return surfaceNotModified(hit.headers);
             if (hit.status !== 200) return hit;
+            /* #158/#159 same honesty as the fresh path: a script or
+               worker destination cached with an HTML or CSS body (the
+               SPA catch-all class) serves the JS-typed comment, never
+               the document rewrite a script destination cannot use. */
+            const hitCt = hit.headers.get("content-type") ?? "";
+            if (
+              (dest === "script" || isWorkerDestination(e.request.destination)) &&
+              (hitCt.includes("text/html") || hitCt.includes("text/css"))
+            ) {
+              return new Response(
+                "/* upstream " + hit.status + " " + (hitCt.split(";")[0] || "non-JS") + " */",
+                {
+                  status: hit.status,
+                  headers: { "content-type": "application/javascript; charset=utf-8" },
+                },
+              );
+            }
             /* Legacy entries predate the content-encoding strip and
                carry a stale upstream encoding over a decoded body:
                fetch() consumers would decode plaintext a second time.
@@ -2135,24 +2152,29 @@ export function handleFetch(e: FetchEvent): void {
             void pageCacheStore(e.request, resp.clone());
           }
           /* #158/#159: script and worker destinations must never
-             receive an HTML/CSS error body: module scripts hard-fail
-             the whole graph on the MIME mismatch and classic scripts
-             execute the error page as JS (live: claude's bundle
-             SyntaxError). A non-JS error status answers an honest
-             JS-typed body carrying the upstream status instead, so
-             module loading reports a clean failure and the rest of
-             the graph proceeds. Success-path odd types stay
-             untouched. */
+             receive an HTML or CSS body: module scripts hard-fail the
+             whole graph on the MIME mismatch, classic scripts execute
+             the body as JS (live: claude's bundle SyntaxError), and SPA
+             catch-alls answer missing module paths with a 200 HTML
+             document. When the upstream body is explicitly HTML or CSS
+             the script destination gets an honest JS-typed comment
+             carrying the upstream status and type instead, so module
+             loading reports a clean failure and the rest of the graph
+             proceeds. JS bodies, typeless responses and every other
+             destination stay untouched. */
+          const sct = resp.headers.get("content-type") ?? "";
           if (
             (dest === "script" || isWorkerDestination(e.request.destination)) &&
-            resp.status >= 400 &&
-            !isJs(resp)
+            (sct.includes("text/html") || sct.includes("text/css"))
           ) {
             WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
-            return new Response("/* upstream " + resp.status + " */", {
-              status: resp.status,
-              headers: { "content-type": "application/javascript; charset=utf-8" },
-            });
+            return new Response(
+              "/* upstream " + resp.status + " " + (sct.split(";")[0] || "non-JS") + " */",
+              {
+                status: resp.status,
+                headers: { "content-type": "application/javascript; charset=utf-8" },
+              },
+            );
           }
           if ((isHtml(resp) || (respCt === "" && DOC_DESTS.has(dest) && resp.body)) && resp.body) {
             curStage = "REWRITE_STARTED";
