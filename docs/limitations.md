@@ -84,3 +84,19 @@ google-consent on CI run 38219174704 failed with 0x43 while
 google-home and google-search passed through the engine on the same
 session; three local probe runs with the same build passed
 google-consent 3/3 (the next CI run confirmed green).
+
+## Replay buffering is conditional, not universal
+
+Bodies that reach the transport as a ReadableStream are buffered
+once (cap 32 MiB) only when a replay path can actually fire for
+that request: a relay rule with a registered relay channel, or a
+Content-Length-announced body the single connect-class retry can
+replay. Unannounced stream bodies without a relay route (chunked
+uploads, request/response duplexing) stream one-shot: the retry is
+honestly unavailable for them and a mid-request failure cannot be
+replayed. Announced bodies over the cap stream one-shot; an
+unannounced body that overflows the cap mid-read fails honestly.
+Every cap trip is counted (replayCapTrips in app/src/request.ts) and
+logged, and every script-body mask (the #158/#159 honesty layer) is
+counted and logged with the requested path, referrer and resolved
+route.

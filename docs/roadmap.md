@@ -272,6 +272,37 @@ Closes the 1.6/1.8 limits.
   at the next cut, 3.1 Onyx. The 3.x API freeze holds: no public
   surface changed in this phase.
 
+## Unscheduled follow-up: parser-based JS rewriting, location virtualization
+
+2026-10-14 structural finding. JS rewriting is string-literal only
+(crates/rewriter/src/js/literals.rs): anything computed at runtime
+(import(base + name), new URL(x, import.meta.url), location.href,
+document.baseURI) resolves against the engine origin and the
+service worker must infer the intended target from the referrer.
+Every such inference is a site-specific regression risk (the #157
+re-anchor class), and masking a wrong result (the #158/#159 honesty
+layer) keeps the module broken, quietly.
+
+Shipped as the visibility layer while the real work waits: every
+masked script response is counted and logged with the requested
+path, referrer and resolved route (recordMaskedScript in
+app/src/request.ts), so wrong-URL cases are countable instead of
+silent. Rule recorded: no new referrer-guess re-anchor heuristic
+lands without a test proving the intended URL is known, not
+inferred.
+
+Remaining work, unscheduled:
+
+- Parser-based JS rewriting (issue #146): wrap import(),
+  import.meta, new URL, location reads, document.baseURI,
+  fetch/XHR URL arguments and postMessage origins so resolution
+  happens against the virtual URL on the client.
+- location/document.URL virtualization (issue #144): blocked on a
+  deliberate decision. location is LegacyUnforgeable, and
+  virtualizing document.URL/baseURI/origin would reintroduce a
+  plaintext-destination init leak, the exact class the CI pageload
+  tests forbid.
+
 ## Cross-cutting gates (every phase)
 
 - Architecture: LobsterBrowse -> Zeolite public API -> Zeolite runtime ->
