@@ -72,9 +72,10 @@ async function ensureCurl(): Promise<void> {
    where an upstream that closed a pooled connection answers the
    reuse with nothing - the reset drops the connection cache so the
    one retry rides a fresh connection) reset the transport singleton
-   and retry once before the 502 page reaches the user. A request whose body stream was already
-   consumed may fail the retry and surface as before: honest fallback,
-   never a loop - each wispFetch call retries at most once. */
+   and retry once before the 502 page reaches the user. #155: request.ts buffers a stream body once at its upstreamFetch
+   choke point before it reaches here, so the retry replays a buffered
+   body instead of dying on an already-consumed stream; each wispFetch
+   call still retries at most once. */
 
 /* Issue #99 class: the vendored request promise resolves when headers
    arrive, so a request that stalls before the first byte (a silently

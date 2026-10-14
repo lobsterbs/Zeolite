@@ -436,6 +436,57 @@ export function surfaceNotModified(h: Headers): Response {
    wisp (relayFetch answers null) and the fetch stays honest. #145: the
    caller's AbortSignal rides both paths so a page abort cancels the
    upstream request instead of letting it finish unseen. */
+/* #155: a POST body that reaches the transport as a ReadableStream
+   can neither ride the embedder relay (#137: string/ArrayBuffer
+   bodies only) nor survive the transport's single connect-class
+   retry (#74: the retry re-reads an already-consumed stream and
+   the fetch dies as "Failed to construct Request: ReadableStream is
+   disturbed" - youtube.com innertube POSTs, chatgpt/deepseek/twitch
+   API calls all 502 this exact way while GETs ride the relay fine).
+   Buffer a stream body ONCE at this choke point: the relay can then
+   carry it and the retry can replay it. A body that announces a
+   Content-Length over the cap keeps the one-shot streaming behavior
+   (huge uploads never buffer); an unannounced body that overflows
+   the cap fails honestly instead of sending a truncated body. */
+const REPLAY_BODY_CAP = 32 * 1024 * 1024;
+
+/** #155: return an init whose stream body is replaced by a buffered
+    ArrayBuffer. Non-stream bodies and oversized announced bodies
+    pass through untouched; an overflow mid-read throws so the caller
+    serves the honest error strand, never a corrupted body. */
+export async function replayableInit(
+  init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
+): Promise<{ method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal }> {
+  const body = init.body;
+  if (body == null || typeof (body as ReadableStream).getReader !== "function") return init;
+  const cl = Number(init.headers?.get("content-length") ?? "");
+  if (cl > REPLAY_BODY_CAP) return init;
+  const reader = (body as ReadableStream<Uint8Array>).getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > REPLAY_BODY_CAP) {
+      try {
+        await reader.cancel();
+      } catch {
+        /* the stream is already gone */
+      }
+      throw new Error("zeolite: request body exceeds the replay buffer cap");
+    }
+    parts.push(value);
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const part of parts) {
+    buf.set(part, off);
+    off += part.byteLength;
+  }
+  return { ...init, body: buf.buffer };
+}
+
 async function upstreamFetch(
   dest: string,
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
@@ -443,6 +494,8 @@ async function upstreamFetch(
   rtype: ResourceType,
   traceId: string,
 ): Promise<Response> {
+  /* #155: one-shot stream buffering before every transport decision */
+  init = await replayableInit(init);
   const rule = policyMatch(policy, dest, rtype);
   if (rule && rule.route === "relay") {
     const rr = await relayFetch(dest, init, traceId);
