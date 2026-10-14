@@ -155,15 +155,22 @@ fn build_resolver(m: &Mode) -> hickory_resolver::TokioResolver {
     builder.build()
 }
 
-/// Why a pinned lookup failed.
-#[derive(Debug)]
+/// Why a pinned lookup failed. Implements [std::error::Error]: this
+/// type is the crate's public lookup API and downstream servers box
+/// it into generic error handling (LobsterBrowse's reqwest DNS
+/// resolver broke its build when the impl was missing).
+#[derive(Debug, thiserror::Error)]
 pub enum LookupError {
     /// NXDOMAIN/SERVFAIL from the active provider AND the fallback:
     /// the name is filtered out or does not exist. Its own diagnostic,
     /// not a generic unreachable.
+    #[error(
+        "dns filtered or not found: NXDOMAIN/SERVFAIL from the active provider and the fallback"
+    )]
     NotFound,
     /// The resolver could not be reached or answered garbage; the
     /// string names the last error for the log.
+    #[error("pinned resolver lookup failed: {0}")]
     Pinned(String),
 }
 
@@ -248,6 +255,13 @@ pub async fn lookup(hostname: &str, port: u16) -> Result<Vec<SocketAddr>, Lookup
 
 #[cfg(test)]
 mod tests {
+    fn assert_std_error<E: std::error::Error>() {}
+
+    #[test]
+    fn lookup_error_implements_std_error() {
+        assert_std_error::<LookupError>();
+    }
+
     use super::*;
     use hickory_resolver::proto::xfer::Protocol;
 

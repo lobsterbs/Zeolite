@@ -27,6 +27,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 futures = { version = "0.3" }
 kdl = "6"
 tracing = "0.1"
+thiserror = "2"
 # Pinned upstream DNS (privacy: Quad9 by default, Cloudflare optional,
 # never the host resolver or Google; see src/dns.rs).
 hickory-resolver = { version = "0.25", features = ["https-ring", "webpki-roots"] }
