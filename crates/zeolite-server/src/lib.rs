@@ -86,6 +86,11 @@ impl Window {
     }
 }
 
+/// Grace window for existing streams once max_conn_duration is hit:
+/// they finish on their own; past it the connection closes Throttled
+/// (the reconnect-me reason) whether streams remain or not.
+const DRAIN_GRACE: Duration = Duration::from_secs(60);
+
 /// One open wisp stream: the input channel (wisp DATA -> socket), the
 /// relay task handle (aborting it tears the socket down) and shared
 /// bookkeeping for the idle/idle-cap sweeps.
@@ -105,6 +110,10 @@ struct StreamEntry {
 pub enum ConnectFailure {
     Blocked,
     Dns,
+    /// NXDOMAIN/SERVFAIL from both pinned resolvers: the domain is
+    /// DNS-filtered or does not exist. Its own variant so the relay
+    /// log names the class; the wire reason stays UnreachableHost.
+    DnsNotFound,
     Timeout,
     Refused,
     Network,
@@ -114,7 +123,7 @@ impl ConnectFailure {
     pub fn reason(self) -> CloseReason {
         match self {
             Self::Blocked => CloseReason::Blocked,
-            Self::Dns => CloseReason::UnreachableHost,
+            Self::Dns | Self::DnsNotFound => CloseReason::UnreachableHost,
             Self::Timeout => CloseReason::ConnectTimedOut,
             Self::Refused => CloseReason::ConnectionRefused,
             Self::Network => CloseReason::NetworkError,
@@ -160,29 +169,80 @@ async fn connect_validated_steps(
     let addrs =
         match tokio::time::timeout(connect_timeout, crate::dns::lookup(hostname, port)).await {
             Ok(Ok(list)) => list,
+            Ok(Err(crate::dns::LookupError::NotFound)) => {
+                tracing::info!(
+                    hostname,
+                    "dns filtered or not found: NXDOMAIN/SERVFAIL from both pinned providers"
+                );
+                return Err(ConnectFailure::DnsNotFound);
+            }
             Ok(Err(_)) => return Err(ConnectFailure::Dns),
             Err(_) => return Err(ConnectFailure::Timeout),
         };
-    let mut last = ConnectFailure::Dns;
-    for addr in addrs {
-        if dest.check_ip(&addr.ip()) == policy::Verdict::Block {
-            last = ConnectFailure::Blocked;
-            continue;
-        }
-        match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
-            Ok(Ok(s)) => {
-                let _ = s.set_nodelay(true);
-                return Ok(s);
-            }
-            Ok(Err(_e)) => {
-                last = ConnectFailure::Refused;
-            }
-            Err(_) => {
-                last = ConnectFailure::Timeout;
-            }
+    let allowed: Vec<SocketAddr> = addrs
+        .into_iter()
+        .filter(|a| dest.check_ip(&a.ip()) == policy::Verdict::Allow)
+        .collect();
+    if allowed.is_empty() {
+        return Err(ConnectFailure::Blocked);
+    }
+    race_connect(allowed, connect_timeout).await
+}
+
+/// Race the allowed candidate addresses: the first starts at once,
+/// address i starts i x CONNECT_STAGGER later, first success wins.
+/// A blackholed first address (multi-IP CDN hosts, dual-stack) used
+/// to hold every later candidate hostage behind the full connect
+/// timeout, so whether a reachable site loaded depended on resolver
+/// order. Refused (a definitive no from one hop) outranks Timeout
+/// when every attempt failed; the overall deadline stays with the
+/// caller.
+const CONNECT_STAGGER: Duration = Duration::from_millis(250);
+
+type ConnectAttempt =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<TcpStream, ConnectFailure>> + Send>>;
+
+async fn race_connect(
+    addrs: Vec<SocketAddr>,
+    connect_timeout: Duration,
+) -> Result<TcpStream, ConnectFailure> {
+    let mut attempts: Vec<ConnectAttempt> = addrs
+        .into_iter()
+        .enumerate()
+        .map(|(i, addr)| {
+            Box::pin(async move {
+                if i > 0 {
+                    tokio::time::sleep(CONNECT_STAGGER * i as u32).await;
+                }
+                match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
+                    Ok(Ok(s)) => {
+                        let _ = s.set_nodelay(true);
+                        Ok(s)
+                    }
+                    Ok(Err(_)) => Err(ConnectFailure::Refused),
+                    Err(_) => Err(ConnectFailure::Timeout),
+                }
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<TcpStream, ConnectFailure>> + Send>,
+                >
+        })
+        .collect();
+    let mut refused = false;
+    while !attempts.is_empty() {
+        let (res, _idx, rest) = futures::future::select_all(attempts).await;
+        attempts = rest;
+        match res {
+            Ok(s) => return Ok(s),
+            Err(ConnectFailure::Refused) => refused = true,
+            Err(_) => {}
         }
     }
-    Err(last)
+    Err(if refused {
+        ConnectFailure::Refused
+    } else {
+        ConnectFailure::Timeout
+    })
 }
 
 /// Same resolve-then-validate flow for UDP destinations.
@@ -198,6 +258,13 @@ pub async fn udp_dest_validated(
     let addrs =
         match tokio::time::timeout(connect_timeout, crate::dns::lookup(hostname, port)).await {
             Ok(Ok(list)) => list,
+            Ok(Err(crate::dns::LookupError::NotFound)) => {
+                tracing::info!(
+                    hostname,
+                    "dns filtered or not found: NXDOMAIN/SERVFAIL from both pinned providers"
+                );
+                return Err(ConnectFailure::DnsNotFound);
+            }
             Ok(Err(_)) => return Err(ConnectFailure::Dns),
             Err(_) => return Err(ConnectFailure::Timeout),
         };
@@ -226,6 +293,14 @@ pub struct Config {
     /// because a reverse proxy (Render) collapses every peer into one
     /// address and the cap would then be a global one.
     pub max_connections_per_ip: usize,
+    /// Number of trusted reverse-proxy hops in front of the server.
+    /// 0 (default) = every per-IP bucket keys on the socket peer,
+    /// which behind a proxy collapses every user into one address.
+    /// N > 0 = the per-IP key is taken from X-Forwarded-For at depth
+    /// N (client-supplied entries in front of it are discarded). Only
+    /// ever set this behind a proxy you control: without one, clients
+    /// can spoof their per-IP bucket.
+    pub trusted_proxy_hops: usize,
     pub max_streams_per_conn: usize,
     pub connect_timeout: Duration,
     pub stream_idle_timeout: Duration,
@@ -257,9 +332,10 @@ impl Default for Config {
             bind: "127.0.0.1".into(),
             port: 6002,
             static_dir: "app/dist".into(),
-            max_connections: 64,
+            max_connections: 256,
             max_connections_per_ip: 0,
-            max_streams_per_conn: 24,
+            trusted_proxy_hops: 0,
+            max_streams_per_conn: 256,
             connect_timeout: Duration::from_secs(10),
             stream_idle_timeout: Duration::from_secs(300),
             max_conn_duration: Duration::from_secs(3600),
@@ -350,6 +426,7 @@ impl Config {
         cfg.max_connections = env_num("MAX_CONNECTIONS", cfg.max_connections, 1);
         cfg.max_connections_per_ip =
             env_num("MAX_CONNECTIONS_PER_IP", cfg.max_connections_per_ip, 0);
+        cfg.trusted_proxy_hops = env_num("TRUSTED_PROXY_HOPS", cfg.trusted_proxy_hops, 0);
         cfg.max_streams_per_conn =
             env_num("MAX_STREAMS_PER_CONNECTION", cfg.max_streams_per_conn, 1);
         cfg.connect_timeout = env_secs("CONNECT_TIMEOUT", cfg.connect_timeout.as_secs());
@@ -423,6 +500,9 @@ impl Config {
                 "max_connections" => cfg.max_connections = kdl_usize(node, "max_connections", 1)?,
                 "max_connections_per_ip" => {
                     cfg.max_connections_per_ip = kdl_usize(node, "max_connections_per_ip", 0)?
+                }
+                "trusted_proxy_hops" => {
+                    cfg.trusted_proxy_hops = kdl_usize(node, "trusted_proxy_hops", 0)?
                 }
                 "max_streams_per_connection" => {
                     cfg.max_streams_per_conn = kdl_usize(node, "max_streams_per_connection", 1)?
@@ -563,6 +643,10 @@ pub struct Shared {
     pub cfg: Arc<Config>,
     pub dest: policy::DestinationPolicy,
     pub active: AtomicUsize,
+    /// Every Throttled close the server issued (stream cap, drain
+    /// deadline), so the log and diagnostics can see how often the
+    /// cap is the reason a subresource failed.
+    pub throttled_streams: AtomicU64,
     pub password: Option<PasswordAuth>,
     /// Live connection count per peer IP (per-IP limit bookkeeping).
     pub per_ip: Mutex<std::collections::HashMap<std::net::IpAddr, usize>>,
@@ -578,6 +662,7 @@ impl Shared {
             cfg: Arc::new(cfg),
             dest: policy::DestinationPolicy::default(),
             active: AtomicUsize::new(0),
+            throttled_streams: AtomicU64::new(0),
             password,
             per_ip: Mutex::new(std::collections::HashMap::new()),
         })
@@ -607,6 +692,21 @@ impl Drop for ConnGuard {
         }
     }
 }
+/// Client IP from X-Forwarded-For when the deployment sits behind
+/// trusted reverse-proxy hops (TRUSTED_PROXY_HOPS > 0). Proxies
+/// append left to right, so with N trusted hops the client is the
+/// (len - N)th entry; entries in front of it were client-supplied
+/// and are discarded. None = fall back to the socket peer. Only used
+/// for per-IP accounting, never for auth.
+fn trusted_forwarded_ip(headers: &HeaderMap, hops: usize) -> Option<std::net::IpAddr> {
+    let xff = headers.get("x-forwarded-for")?.to_str().ok()?;
+    let parts: Vec<&str> = xff.split(',').map(str::trim).collect();
+    if hops == 0 || parts.len() < hops {
+        return None;
+    }
+    parts[parts.len() - hops].parse().ok()
+}
+
 /// Percent-decode a URL path just enough to catch encoded dotfiles
 /// (%2E, %2e) and traversal (%2E%2E).
 fn percent_decode(path: &str) -> String {
@@ -738,7 +838,11 @@ pub async fn wisp_handler(
         tracing::warn!("connection limit hit; refusing upgrade");
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    let ip = peer.ip();
+    let ip = if sh.cfg.trusted_proxy_hops > 0 {
+        trusted_forwarded_ip(&headers, sh.cfg.trusted_proxy_hops).unwrap_or_else(|| peer.ip())
+    } else {
+        peer.ip()
+    };
     if sh.cfg.max_connections_per_ip > 0 {
         let n = sh
             .per_ip
@@ -984,6 +1088,7 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
         next_sweep: Instant::now() + Duration::from_secs(5),
     };
     let deadline = Instant::now() + shared.cfg.max_conn_duration;
+    let mut draining_since: Option<Instant> = None;
     let mut handshake_done = false;
     let mut auth_verified = false;
 
@@ -1007,9 +1112,32 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
     }
 
     loop {
-        if Instant::now() > deadline {
-            tracing::info!("max connection duration reached");
-            break;
+        if draining_since.is_none() && Instant::now() > deadline {
+            tracing::info!(
+                "max connection duration reached: refusing new streams, draining existing ones"
+            );
+            draining_since = Some(Instant::now());
+        }
+        if let Some(since) = draining_since {
+            /* Existing streams get a grace window to finish; when
+            they have (or the window is up) the connection closes
+            with Throttled, the reason a client reconnects on -
+            instead of hard-killing every live stream on the spot. */
+            if sess.streams.is_empty() || Instant::now() > since + DRAIN_GRACE {
+                let _ = send_packet(
+                    &ws_tx,
+                    &Packet::Close {
+                        stream_id: 0,
+                        reason: CloseReason::Throttled,
+                    },
+                )
+                .await;
+                tracing::info!(
+                    streams = sess.streams.len(),
+                    "connection closed after drain"
+                );
+                break;
+            }
         }
         // Periodic lifecycle sweep interleaved with socket reads.
         let msg = tokio::select! {
@@ -1137,6 +1265,25 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                 // read as a duplicate CONNECT (stream-id reuse) or
                 // count toward the stream limit.
                 sess.reap_finished();
+                if draining_since.is_some() {
+                    // Duration deadline hit: a fresh connection gives
+                    // the client a fresh deadline.
+                    let throttled = shared.throttled_streams.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::warn!(
+                        stream_id,
+                        throttled,
+                        "draining after max duration: CONNECT throttled, client should reconnect"
+                    );
+                    let _ = send_packet(
+                        &ws_tx,
+                        &Packet::Close {
+                            stream_id,
+                            reason: CloseReason::Throttled,
+                        },
+                    )
+                    .await;
+                    continue;
+                }
                 if sess.streams.contains_key(&stream_id) {
                     tracing::warn!(stream_id, "protocol failure: duplicate CONNECT");
                     continue;
@@ -1157,7 +1304,12 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                     continue;
                 }
                 if sess.streams.len() >= shared.cfg.max_streams_per_conn {
-                    tracing::warn!(stream_id, "resource limit: max streams per connection");
+                    let throttled = shared.throttled_streams.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::warn!(
+                        stream_id,
+                        throttled,
+                        "resource limit: max streams per connection"
+                    );
                     let _ = send_packet(
                         &ws_tx,
                         &Packet::Close {
@@ -1759,6 +1911,10 @@ mod tests {
         assert_eq!(ConnectFailure::Blocked.reason(), CloseReason::Blocked);
         assert_eq!(ConnectFailure::Dns.reason(), CloseReason::UnreachableHost);
         assert_eq!(
+            ConnectFailure::DnsNotFound.reason(),
+            CloseReason::UnreachableHost
+        );
+        assert_eq!(
             ConnectFailure::Timeout.reason(),
             CloseReason::ConnectTimedOut
         );
@@ -1767,6 +1923,112 @@ mod tests {
             CloseReason::ConnectionRefused
         );
         assert_eq!(ConnectFailure::Network.reason(), CloseReason::NetworkError);
+    }
+
+    #[tokio::test]
+    async fn connect_races_past_a_dead_first_address() {
+        use socket2::{Domain, Socket, Type};
+        // A backlog-1 listener whose accept queue is already full from
+        // one pending connection: the kernel drops the next SYN, so a
+        // fresh connect hangs exactly like a blackholed address
+        // (multi-IP CDN hosts, dual-stack). Hostname multi.example.org
+        // "resolves" through the test-only DNS override to
+        // [dead, good]; the race must reach the good one.
+        let dead = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+        dead.bind(
+            &"127.0.0.1:0"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+        dead.listen(1).unwrap();
+        let dead_addr = dead.local_addr().unwrap().as_socket().unwrap();
+        let _fills_queue = std::net::TcpStream::connect(dead_addr).unwrap();
+        let good = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let good_port = good.local_addr().unwrap().port();
+        let accept_one = tokio::spawn(async move {
+            let _ = good.accept().await;
+        });
+        crate::dns::set_test_lookup(Some(vec![(
+            "multi.example.org",
+            vec![dead_addr, SocketAddr::new([127, 0, 0, 1].into(), good_port)],
+        )]));
+        // The private-IP policy is a session-level concern, not the
+        // race's; this test owns the address list.
+        let dest = policy::DestinationPolicy {
+            block_local_names: false,
+            block_private_ips: false,
+        };
+        let t0 = Instant::now();
+        let res = connect_validated(
+            &dest,
+            "multi.example.org",
+            good_port,
+            Duration::from_secs(3),
+        )
+        .await;
+        let elapsed = t0.elapsed();
+        crate::dns::set_test_lookup(None);
+        accept_one.abort();
+        assert!(
+            res.is_ok(),
+            "race must reach the good address, took {elapsed:?}"
+        );
+        // The win can only come from the staggered second attempt
+        // (~250ms); the sequential behavior was a full 3s Timeout.
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "dead first address starved the good one: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_race_good_first_is_immediate() {
+        use socket2::{Domain, Socket, Type};
+        // Control: same shapes, good address first. No stagger cost
+        // at all - proves the race does not pay the 250ms when the
+        // first hop answers.
+        let dead = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+        dead.bind(
+            &"127.0.0.1:0"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+        dead.listen(1).unwrap();
+        let dead_addr = dead.local_addr().unwrap().as_socket().unwrap();
+        let _fills_queue = std::net::TcpStream::connect(dead_addr).unwrap();
+        let good = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let good_port = good.local_addr().unwrap().port();
+        let accept_one = tokio::spawn(async move {
+            let _ = good.accept().await;
+        });
+        crate::dns::set_test_lookup(Some(vec![(
+            "multi.example.org",
+            vec![SocketAddr::new([127, 0, 0, 1].into(), good_port), dead_addr],
+        )]));
+        let dest = policy::DestinationPolicy {
+            block_local_names: false,
+            block_private_ips: false,
+        };
+        let t0 = Instant::now();
+        let res = connect_validated(
+            &dest,
+            "multi.example.org",
+            good_port,
+            Duration::from_secs(3),
+        )
+        .await;
+        let elapsed = t0.elapsed();
+        crate::dns::set_test_lookup(None);
+        accept_one.abort();
+        assert!(res.is_ok(), "good first address must win: {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "good-first race should be near-immediate: {elapsed:?}"
+        );
     }
 
     #[test]

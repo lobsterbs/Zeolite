@@ -35,3 +35,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 rand = "0.8"
 sha2 = "0.10"
+# Tests only: a backlog-1 listener to stand in for a blackholed
+# address (already in the tree via tokio/hyper). Never a runtime dep.
+socket2 = "0.6"

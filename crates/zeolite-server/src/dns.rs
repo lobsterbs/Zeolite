@@ -26,11 +26,24 @@
 //!
 //! An unrecognized ZL_DNS value logs a warning and stays on quad9;
 //! it never silently falls back to the system resolver.
+//!
+//! Filtered-answer fallback (2026-10-14 report): the default pinned
+//! endpoint, 9.9.9.9 / dns.quad9.net, is Quad9's MALWARE-BLOCKING
+//! service: a flagged domain answers NXDOMAIN, which used to surface
+//! as a generic UnreachableHost with no retry, so a site that loads
+//! fine through a host resolver looked dead. On NXDOMAIN or SERVFAIL
+//! (hickory folds the whole 5xx response-code family into one
+//! no-records error) the lookup retries ONCE through the other pinned
+//! provider, and only after both refuse does it fail as
+//! LookupError::NotFound, its own diagnostic. The pinned-DoH
+//! invariant is intact: the fallback is the other pinned public
+//! resolver, never the system resolver.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
+#[derive(Debug)]
 pub enum Mode {
     Quad9,
     Cloudflare,
@@ -64,6 +77,16 @@ pub fn mode() -> &'static Mode {
     })
 }
 
+/// The other pinned provider, consulted once when the active one
+/// answers NXDOMAIN/SERVFAIL. System mode has no pinned fallback.
+fn fallback_mode(m: &Mode) -> Option<Mode> {
+    match m {
+        Mode::Quad9 => Some(Mode::Cloudflare),
+        Mode::Cloudflare => Some(Mode::Quad9),
+        Mode::System => None,
+    }
+}
+
 /// The pinned nameserver IPs for a mode (empty for System).
 pub fn nameservers(m: &Mode) -> Vec<IpAddr> {
     match m {
@@ -91,16 +114,22 @@ fn tls_dns_name(m: &Mode) -> &'static str {
 pub fn mode_description() -> String {
     match mode() {
         Mode::Quad9 => {
-            "quad9 DoH (https://dns.quad9.net/dns-query via 9.9.9.9, 149.112.112.112:443) pinned; plaintext DNS and the system resolver unused".into()
+            "quad9 DoH (https://dns.quad9.net/dns-query via 9.9.9.9, 149.112.112.112:443) pinned; NXDOMAIN/SERVFAIL retried once through cloudflare; plaintext DNS and the system resolver unused".into()
         }
         Mode::Cloudflare => {
-            "cloudflare DoH (https://cloudflare-dns.com/dns-query via 1.1.1.1, 1.0.0.1:443) pinned; plaintext DNS and the system resolver unused".into()
+            "cloudflare DoH (https://cloudflare-dns.com/dns-query via 1.1.1.1, 1.0.0.1:443) pinned; NXDOMAIN/SERVFAIL retried once through quad9; plaintext DNS and the system resolver unused".into()
         }
         Mode::System => "system resolver (ZL_DNS=system; not pinned, not encrypted)".into(),
     }
 }
 
+/* The hickory default cache is 32 entries, so a busy session pays a
+DoH round trip often. One shared 1024-entry LRU serves every wisp
+session from this process. */
+const RESOLVER_CACHE_SIZE: usize = 1024;
+
 static PINNED: OnceLock<hickory_resolver::TokioResolver> = OnceLock::new();
+static PINNED_FALLBACK: OnceLock<hickory_resolver::TokioResolver> = OnceLock::new();
 
 /// The DoH resolver config for a mode: one HTTPS nameserver per
 /// pinned IP, TLS name set, default /dns-query endpoint. Extracted so
@@ -117,31 +146,104 @@ fn pinned_config(m: &Mode) -> hickory_resolver::config::ResolverConfig {
     ResolverConfig::from_parts(None, vec![], group)
 }
 
-fn pinned() -> &'static hickory_resolver::TokioResolver {
-    PINNED.get_or_init(|| {
-        let config = pinned_config(mode());
-        let builder = hickory_resolver::TokioResolver::builder_with_config(
-            config,
-            hickory_resolver::name_server::TokioConnectionProvider::default(),
-        );
-        builder.build()
-    })
+fn build_resolver(m: &Mode) -> hickory_resolver::TokioResolver {
+    let mut builder = hickory_resolver::TokioResolver::builder_with_config(
+        pinned_config(m),
+        hickory_resolver::name_server::TokioConnectionProvider::default(),
+    );
+    builder.options_mut().cache_size = RESOLVER_CACHE_SIZE;
+    builder.build()
+}
+
+/// Why a pinned lookup failed.
+#[derive(Debug)]
+pub enum LookupError {
+    /// NXDOMAIN/SERVFAIL from the active provider AND the fallback:
+    /// the name is filtered out or does not exist. Its own diagnostic,
+    /// not a generic unreachable.
+    NotFound,
+    /// The resolver could not be reached or answered garbage; the
+    /// string names the last error for the log.
+    Pinned(String),
+}
+
+/* Test-only resolution override: the connect race tests need a
+hostname that "resolves" to a chosen address list (a dead first
+hop and a good second hop) without real DNS. */
+#[cfg(test)]
+static TEST_LOOKUP: std::sync::Mutex<Option<std::collections::HashMap<String, Vec<SocketAddr>>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_test_lookup(entries: Option<Vec<(&str, Vec<SocketAddr>)>>) {
+    let mut g = TEST_LOOKUP.lock().expect("test lookup lock");
+    *g = entries.map(|v| v.into_iter().map(|(k, s)| (k.to_string(), s)).collect());
+}
+
+#[cfg(test)]
+fn test_lookup(hostname: &str) -> Option<Vec<SocketAddr>> {
+    TEST_LOOKUP
+        .lock()
+        .expect("test lookup lock")
+        .as_ref()
+        .and_then(|m| m.get(hostname).cloned())
 }
 
 /// Resolve a hostname to candidate SocketAddrs through the pinned
 /// DoH resolver. The port is attached locally; the resolver is only
 /// asked for the name. System mode delegates to tokio::net::lookup_host.
-pub async fn lookup(hostname: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
-    if matches!(mode(), Mode::System) {
+pub async fn lookup(hostname: &str, port: u16) -> Result<Vec<SocketAddr>, LookupError> {
+    #[cfg(test)]
+    if let Some(addrs) = test_lookup(hostname) {
+        return Ok(addrs);
+    }
+    let active = mode();
+    if matches!(active, Mode::System) {
         return tokio::net::lookup_host((hostname, port))
             .await
-            .map(Iterator::collect);
+            .map(Iterator::collect)
+            .map_err(|e| LookupError::Pinned(e.to_string()));
     }
-    let answer = pinned()
+    let answer = PINNED
+        .get_or_init(|| build_resolver(active))
         .lookup_ip(hostname)
-        .await
-        .map_err(|e| std::io::Error::other(format!("pinned doh: {e}")))?;
-    Ok(answer.iter().map(|ip| SocketAddr::new(ip, port)).collect())
+        .await;
+    match answer {
+        Ok(a) => {
+            debug!(?active, hostname, "pinned resolver answered");
+            Ok(a.iter().map(|ip| SocketAddr::new(ip, port)).collect())
+        }
+        Err(e) => {
+            if !e.is_no_records_found() {
+                return Err(LookupError::Pinned(e.to_string()));
+            }
+            /* NXDOMAIN/SERVFAIL: the active provider refuses the name
+            (the default quad9 endpoint runs malware blocking). One
+            retry through the other pinned provider keeps a flagged
+            domain from reading as dead; both refusing is
+            NotFound. */
+            let Some(fb) = fallback_mode(active) else {
+                return Err(LookupError::NotFound);
+            };
+            info!(
+                ?active,
+                hostname,
+                "pinned resolver answered NXDOMAIN/SERVFAIL; retrying once through the fallback provider"
+            );
+            match PINNED_FALLBACK
+                .get_or_init(|| build_resolver(&fb))
+                .lookup_ip(hostname)
+                .await
+            {
+                Ok(a) => {
+                    info!(fallback = ?fb, hostname, "fallback pinned resolver answered");
+                    Ok(a.iter().map(|ip| SocketAddr::new(ip, port)).collect())
+                }
+                Err(e2) if e2.is_no_records_found() => Err(LookupError::NotFound),
+                Err(e2) => Err(LookupError::Pinned(e2.to_string())),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +285,19 @@ mod tests {
     }
 
     #[test]
+    fn fallback_swaps_the_pinned_providers_only() {
+        assert!(matches!(
+            fallback_mode(&Mode::Quad9),
+            Some(Mode::Cloudflare)
+        ));
+        assert!(matches!(
+            fallback_mode(&Mode::Cloudflare),
+            Some(Mode::Quad9)
+        ));
+        assert!(fallback_mode(&Mode::System).is_none());
+    }
+
+    #[test]
     fn doh_config_is_https_443_with_pinned_tls_names_no_port53() {
         for m in [Mode::Quad9, Mode::Cloudflare] {
             let cfg = pinned_config(&m);
@@ -208,6 +323,21 @@ mod tests {
             assert!(d.contains("quad9") && d.contains("DoH"));
             assert!(d.contains("system resolver unused"));
         }
+    }
+
+    #[test]
+    fn test_lookup_override_answers_without_network() {
+        set_test_lookup(Some(vec![(
+            "multi.example.org",
+            vec!["127.0.0.1:1".parse().unwrap()],
+        )]));
+        assert_eq!(
+            test_lookup("multi.example.org"),
+            Some(vec!["127.0.0.1:1".parse().unwrap()])
+        );
+        assert_eq!(test_lookup("other.example.org"), None);
+        set_test_lookup(None);
+        assert_eq!(test_lookup("multi.example.org"), None);
     }
 
     // Real-network check: run manually with

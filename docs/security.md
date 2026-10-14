@@ -73,7 +73,12 @@ suite:
   file refuses to start.
 - Optional per-IP connection cap (MAX_CONNECTIONS_PER_IP, default
   off): a reverse proxy collapses all peers into one address, so the
-  default cannot be a per-IP number.
+  default cannot be a per-IP number. Behind a proxy you control, set
+  TRUSTED_PROXY_HOPS to the number of proxy hops in front of the
+  server: the per-IP key is then taken from X-Forwarded-For at that
+  depth (client-supplied entries in front of the trusted suffix are
+  discarded). Never set it without a real proxy in front: without one,
+  clients can spoof their own per-IP bucket.
 - Static responses carry X-Content-Type-Options: nosniff, and an
   opt-in frame-ancestors CSP (ZL_FRAME_ANCESTORS) exists because the
   engine app is designed to be embedded by host applications.
