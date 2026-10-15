@@ -2783,6 +2783,25 @@ mod tests {
     }
 
     #[test]
+    fn comment_close_forms_every_split_matches_one_shot() {
+        // #174: "--!>" closes a comment as "-->" does, whatever the
+        // chunk boundaries; the img after either close is rewritten.
+        let out = assert_split_invariant(
+            "<!-- x --!><img src=\"https://t.example/p.gif\"><!-- y --><!-- z --!><img src=\"https://t.example/q.gif\">",
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/p.gif")),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/q.gif")),
+            "{}",
+            out
+        );
+    }
+
+    #[test]
     fn multibyte_comment_every_split_matches_one_shot() {
         // #177: the retained comment tail cuts on a char boundary
         // wherever the chunk ends; no split may panic or change bytes.
