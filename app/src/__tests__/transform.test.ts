@@ -41,6 +41,7 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
 });
 
 import { cssRewriteStream, initTransform, isCss, isHtml, isJs, rawFrom, rewriteStream } from "../transform";
+import { activeStreams } from "../streams-alive";
 import type { TransformDeps } from "../transform";
 import { initScript } from "../pageload";
 
@@ -205,3 +206,82 @@ describe("transformer seams (#86)", () => {
     expect(out).toBe("var u='/x';");
   });
 });
+
+/* #201: a cancelled consumer must propagate to the upstream reader,
+   and a pre-pump rejection must settle the #99 heartbeat instead of
+   pinning the worker with it armed. */
+describe("stream lifecycle (#201)", () => {
+  it("rawFrom cancels the upstream reader when the consumer cancels", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode("head-"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const reader = body.getReader();
+    const { value: head } = await reader.read();
+    const wrapped = rawFrom(head, reader);
+    const r = wrapped.getReader();
+    expect(new TextDecoder().decode((await r.read()).value!)).toBe("head-");
+    await r.cancel();
+    await new Promise((res) => setTimeout(res, 20));
+    expect(cancelled).toBe(true);
+  });
+
+  it("rewriteStream cancels the upstream reader when the consumer cancels", async () => {
+    const DOC = "<!DOCTYPE html><html><head><title>t</title></head><body>hi</body></html>";
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode(DOC));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const wrapped = rewriteStream(body, BASE, {}, [], "text/html; charset=utf-8");
+    const r = wrapped.getReader();
+    expect(new TextDecoder().decode((await r.read()).value!)).toContain("<!DOCTYPE html>");
+    await r.cancel();
+    await new Promise((res) => setTimeout(res, 20));
+    expect(cancelled).toBe(true);
+  });
+
+  it("rewriteStream settles the heartbeat when the pre-pump await rejects", async () => {
+    initTransform({
+      routeReady: () => Promise.reject(new Error("no key")),
+      routeKey: () => "a2V5",
+      fpScript: () => null,
+      siteScript,
+      setDegraded,
+      lazyImages: () => false,
+    });
+    const out = rewriteStream(streamOf(["<html>x</html>"]), BASE, {}, [], "text/html");
+    await expect(readAll(out)).rejects.toThrow("no key");
+    await new Promise((res) => setTimeout(res, 20));
+    expect(activeStreams()).toBe(0);
+  });
+
+  it("cssRewriteStream cancels the upstream reader when the consumer cancels", async () => {
+    let cancelled = false;
+    const css = "/*" + "x".repeat(70) + "*/body{background:url(a.png)}";
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode(css));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const wrapped = cssRewriteStream(body, BASE, "text/css");
+    const r = wrapped.getReader();
+    expect(new TextDecoder().decode((await r.read()).value!)).toContain("body{background:url(a.png)}");
+    await r.cancel();
+    await new Promise((res) => setTimeout(res, 20));
+    expect(cancelled).toBe(true);
+  });
+});
+

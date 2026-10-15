@@ -97,8 +97,9 @@ const NAV_TTFB_DEADLINE_MS = 30_000;
 /* #140: settle guarantee for page-initiated subresource bodies. A
    transport stream can stall mid-body (live: a lazy image request
    on search.brave.com/videos stayed pending past 30s and held the
-   embedder loading indicator on through zl:loadState). Navigation
-   keeps its own TTFB deadline; event-stream and long-poll responses
+   embedder loading indicator on through zl:loadState). Navigation keeps the TTFB deadline
+   for its headers and this idle bound for its body (#200);
+   event-stream and long-poll responses
    are long-lived by design, so only IDLE stalls are killed, never
    total duration: a stream that keeps sending bytes stays alive. */
 const BODY_STALL_DEADLINE_MS = 20_000;
@@ -2060,6 +2061,10 @@ export function handleFetch(e: FetchEvent): void {
             else sendHeaders.delete("cookie");
             DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
             hopUrl = next;
+            /* #201: the hop's body is never read; cancel it so the
+               upstream reader and the vendored transport stop
+               buffering a response nobody will consume. */
+            if (resp.body) void Promise.resolve(resp.body.cancel()).catch(() => {});
             resp = await withDeadline(
               upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
               reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
@@ -2067,9 +2072,13 @@ export function handleFetch(e: FetchEvent): void {
               navAbort ?? undefined,
             );
           }
-          /* #140: every page-initiated subresource settles: an idle-stalled
-             upstream body errors instead of pending forever. */
-          if (!reqCtx.navigation) resp = withBodyStallDeadline(resp, BODY_STALL_DEADLINE_MS, traceId, target);
+          /* #140/#200: every response settles - an idle-stalled upstream
+             body errors instead of pending forever. The TTFB deadline
+             covers headers only, so a navigation that stalls after its
+             first body byte gets the same IDLE bound: a document that
+             keeps sending bytes stays alive, one that stalls errors
+             into the honest failure path. */
+          resp = withBodyStallDeadline(resp, BODY_STALL_DEADLINE_MS, traceId, target);
           curStage = "UPSTREAM_RESPONSE";
           /* #134: runtime-built module asset names (React chunks mint
              <hash>.module.css at runtime) resolve against the page
@@ -2483,16 +2492,34 @@ export function handleFetch(e: FetchEvent): void {
               (await workerPrelude()) +
               "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n" +
               (preludeW ? "\n" + preludeW : "");
+            /* #201: a cancelled consumer must reach the upstream reader;
+               the reader locks the body, so hoist it and cancel
+               through it. */
+            const rd = resp.body!.getReader();
+            let wpCancelled = false;
             const body = new ReadableStream<Uint8Array>({
               async start(c) {
                 c.enqueue(new TextEncoder().encode(prelude));
-                const rd = resp.body!.getReader();
-                for (;;) {
-                  const { done, value } = await rd.read();
-                  if (done) break;
-                  c.enqueue(value);
+                try {
+                  for (;;) {
+                    const { done, value } = await rd.read();
+                    if (done) break;
+                    c.enqueue(value);
+                  }
+                  c.close();
+                } catch (e) {
+                  /* #201: enqueue/close on a cancelled controller is
+                     teardown, not failure. */
+                  if (!wpCancelled) throw e;
                 }
-                c.close();
+              },
+              async cancel() {
+                wpCancelled = true;
+                try {
+                  await rd.cancel();
+                } catch {
+                  /* already gone */
+                }
               },
             });
             WEBREQ.completed({ ...wrDetails, statusCode: resp.status });

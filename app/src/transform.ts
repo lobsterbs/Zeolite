@@ -133,6 +133,10 @@ export function rawFrom(
   head: Uint8Array | undefined,
   reader: ReadableStreamDefaultReader<Uint8Array>,
 ): ReadableStream<Uint8Array> {
+  /* #201: a cancelled consumer must reach the upstream reader;
+     without a cancel() the vendored transport keeps buffering into
+     a stream nobody reads. */
+  let cancelled = false;
   return new ReadableStream<Uint8Array>({
     async start(c) {
       streamAlive(); // #99: the pump below dispatches no events; keep the worker alive
@@ -144,8 +148,21 @@ export function rawFrom(
           if (value) c.enqueue(value);
         }
         c.close();
+      } catch (e) {
+        /* #201: enqueue/close on a cancelled controller is teardown,
+           not failure; a genuine upstream error still errors the
+           stream. */
+        if (!cancelled) throw e;
       } finally {
         streamDone();
+      }
+    },
+    async cancel() {
+      cancelled = true;
+      try {
+        await reader.cancel();
+      } catch {
+        /* already gone */
       }
     },
   });
@@ -181,16 +198,24 @@ export function rewriteStream(
     origin, so the mint waits for routeReady - a token minted before
     the key settled would split one site's storage across both the
     keyed and the legacy prefix. */
+  /* #201: the upstream reader is hoisted so cancel() can reach it
+     even while the pre-pump awaits still run. */
+  let upstream: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let cancelled = false;
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       streamAlive(); // #99: the pump below dispatches no events; keep the worker alive
-      await deps!.routeReady();
-      const init = initScript(base, deps!.fpScript() ?? (await deps!.siteScript(base)));
-      const emit = (out: string) => {
-        if (out) controller.enqueue(encoder.encode(out));
-      };
-      const reader = body instanceof ReadableStream ? body.getReader() : body;
       try {
+        /* #201: inside the try - a routeReady or siteScript rejection
+           must settle the heartbeat instead of escaping with it
+           armed. */
+        await deps!.routeReady();
+        const init = initScript(base, deps!.fpScript() ?? (await deps!.siteScript(base)));
+        const emit = (out: string) => {
+          if (out) controller.enqueue(encoder.encode(out));
+        };
+        const reader = body instanceof ReadableStream ? body.getReader() : body;
+        upstream = reader;
         // Rewriter init and construction live inside the try: an init failure
         // (e.g. a wasm 404) used to reject outside the try and kill every fresh
         // HTML response with no diag event and no console error.
@@ -265,16 +290,32 @@ export function rewriteStream(
           else if (head.length > 2048) splice(0);
         }
       } catch (e) {
-        DIAG.emit({
-          category: "REWRITE",
-          severity: "error",
-          message: "html rewrite stream failed",
-          technicalReason: String(e),
-          url: base,
-        });
-        controller.error(e);
+        /* #201: a cancel race lands here through enqueue/close on the
+           cancelled controller; that is teardown, not failure. */
+        if (!cancelled) {
+          DIAG.emit({
+            category: "REWRITE",
+            severity: "error",
+            message: "html rewrite stream failed",
+            technicalReason: String(e),
+            url: base,
+          });
+          controller.error(e);
+        }
       } finally {
         streamDone(); // #99: every exit path settles the stream
+      }
+    },
+    async cancel() {
+      /* #201: the page went away mid-document: stop the upstream
+         read and free the transport buffer. The reader may not exist
+         yet (the pre-pump awaits are still running); an unlocked body
+         cancels directly, a locked one through its reader. */
+      cancelled = true;
+      try {
+        await (upstream ?? body).cancel();
+      } catch {
+        /* already gone */
       }
     },
   });
@@ -298,6 +339,9 @@ export function cssRewriteStream(
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const modP = rewriter();
+  /* #201: hoisted so cancel() can reach the locked body. */
+  let upstream: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let cancelled = false;
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       streamAlive(); // #99: the pump below dispatches no events; keep the worker alive
@@ -305,6 +349,7 @@ export function cssRewriteStream(
         const mod = await modP;
         const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
         const reader = body.getReader();
+        upstream = reader;
         const emit = (out: string) => {
           if (out) controller.enqueue(encoder.encode(out));
         };
@@ -344,16 +389,28 @@ export function cssRewriteStream(
           held = [];
         }
       } catch (e) {
-        DIAG.emit({
-          category: "REWRITE",
-          severity: "error",
-          message: "css rewrite stream failed",
-          technicalReason: String(e),
-          url: base,
-        });
-        controller.error(e);
+        /* #201: a cancel race is teardown, not failure. */
+        if (!cancelled) {
+          DIAG.emit({
+            category: "REWRITE",
+            severity: "error",
+            message: "css rewrite stream failed",
+            technicalReason: String(e),
+            url: base,
+          });
+          controller.error(e);
+        }
       } finally {
         streamDone(); // #99: every exit path settles the stream
+      }
+    },
+    async cancel() {
+      /* #201: stop the upstream read when the consumer goes away. */
+      cancelled = true;
+      try {
+        await (upstream ?? body).cancel();
+      } catch {
+        /* already gone */
       }
     },
   });

@@ -55,3 +55,36 @@ describe("withBodyStallDeadline (#140)", () => {
     expect(wrapped.rawHeaders).toEqual([["set-cookie", "a=b; Path=/"]]);
   });
 });
+
+/* #200/#201: document bodies get the same idle bound as
+   subresources, and a cancelled consumer cancels the upstream
+   reader instead of leaving it buffered. */
+describe("document stall bound and consumer cancel (#200/#201)", () => {
+  it("applies the idle bound to document bodies too (#200)", async () => {
+    const resp = new Response(stalledBody(), { status: 200, headers: { "content-type": "text/html" } });
+    const wrapped = withBodyStallDeadline(resp, 60, "t6", "https://x.example/doc.html");
+    const reader = wrapped.body!.getReader();
+    expect((await reader.read()).done).toBe(false);
+    await expect(reader.read()).rejects.toThrow(/body stall/);
+  });
+
+  it("cancels the upstream reader when the consumer cancels (#201)", async () => {
+    let cancelled = false;
+    const src = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new Uint8Array([1]));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const resp = new Response(src, { status: 200, headers: { "content-type": "image/png" } });
+    const wrapped = withBodyStallDeadline(resp, 500, "t7", "https://x.example/i.png");
+    const reader = wrapped.body!.getReader();
+    expect((await reader.read()).done).toBe(false);
+    await reader.cancel();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(cancelled).toBe(true);
+  });
+});
+
