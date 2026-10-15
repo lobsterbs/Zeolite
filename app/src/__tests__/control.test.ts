@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../transport", () => ({
   currentEngine: () => "libcurl",
   wispTransport: { ready: async () => {} },
+  altRegister: () => {},
 }));
 
 import {
@@ -265,5 +266,42 @@ describe("zl:loadState dispatch (loading indicator)", () => {
     const { ev, posted } = mkEvent("https://w.example.org/j/abc", { type: "zl:loadState" });
     await handleControlEvent(ev, deps);
     expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
+  });
+});
+
+describe("zl:wispRegister persists the route shape (#168 idle-kill)", () => {
+  it("registers the endpoint and persists the current route", async () => {
+    const { replies, reply } = mkReplies();
+    const persist = vi.fn();
+    await dispatchCore({ type: "zl:wispRegister", url: "wss://public.example/" } as unknown as ControlMessage, {
+      e: {} as ExtendableMessageEvent,
+      reply,
+      port: {},
+      persistRoute: persist,
+    });
+    expect(replies).toEqual([{ ok: true }]);
+    expect(persist).toHaveBeenCalledWith("/j/");
+  });
+
+  it("a withdraw persists too; a bad url neither registers nor persists", async () => {
+    const persist = vi.fn();
+    const { replies, reply } = mkReplies();
+    await dispatchCore({ type: "zl:wispRegister", url: "" } as unknown as ControlMessage, {
+      e: {} as ExtendableMessageEvent,
+      reply,
+      port: {},
+      persistRoute: persist,
+    });
+    expect(replies).toEqual([{ ok: true }]);
+    expect(persist).toHaveBeenCalledTimes(1);
+    const bad = mkReplies();
+    await dispatchCore({ type: "zl:wispRegister", url: "https://nope.example/" } as unknown as ControlMessage, {
+      e: {} as ExtendableMessageEvent,
+      reply: bad.reply,
+      port: {},
+      persistRoute: persist,
+    });
+    expect(bad.replies).toEqual([{ ok: false, error: "wisp registration needs a ws(s):// url or an empty string" }]);
+    expect(persist).toHaveBeenCalledTimes(1);
   });
 });

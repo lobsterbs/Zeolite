@@ -259,6 +259,11 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          gate; an empty string withdraws the endpoint. */
       if (typeof msg.url === "string" && (msg.url === "" || msg.url.startsWith("ws://") || msg.url.startsWith("wss://"))) {
         altRegister(msg.url);
+        /* 2026-10-15: persist with the route shape so an idle-killed
+           worker instance restores the endpoint without waiting for a
+           re-announce that never comes (controllerchange does not
+           fire on an instance restart). */
+        void persistRoute(currentPrefix());
         reply({ ok: true });
       } else {
         reply({ ok: false, error: "wisp registration needs a ws(s):// url or an empty string" });

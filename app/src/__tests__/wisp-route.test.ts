@@ -4,9 +4,10 @@
    here the no-endpoint and no-bundle failures are asserted honestly
    (the same MISSING error the primary client reports). */
 
-import { beforeEach, describe, expect, it } from "vitest";
-import { altConfigured, altFetch, altRegister, altReset } from "../libcurl-transport-vendored";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { altConfigured, altEndpoint, altFetch, altRegister, altReset, altStateForTests } from "../libcurl-transport-vendored";
 import { transitResetForTests, transitStats, wispRecord } from "../transit";
+import { persistRoute } from "../request";
 
 describe("wisp route secondary client (#168)", () => {
   beforeEach(() => {
@@ -50,5 +51,62 @@ describe("wisp route secondary client (#168)", () => {
     expect(transitStats().wisp).toBe(2);
     transitResetForTests();
     expect(transitStats().wisp).toBe(0);
+  });
+  it("altEndpoint exposes the normalized endpoint for the persistence seam", () => {
+    expect(altEndpoint()).toBeNull();
+    altRegister("wss://public.example");
+    expect(altEndpoint()).toBe("wss://public.example/");
+    altRegister("");
+    expect(altEndpoint()).toBeNull();
+  });
+
+  it("altReset busts the transport cache generation (#133 parity)", () => {
+    altRegister("wss://public.example/");
+    const g0 = altStateForTests().generation;
+    altReset();
+    expect(altStateForTests().generation).toBe(g0 + 1);
+    /* The announced endpoint survives the reset: the next wisp-routed
+       fetch re-initializes toward the same url on a fresh socket. */
+    expect(altStateForTests().url).toBe("wss://public.example/");
+  });
+
+  it("a withdraw then re-register never reuses the old generation", () => {
+    altRegister("wss://public.example/");
+    const g0 = altStateForTests().generation;
+    altRegister("");
+    expect(altStateForTests().generation).toBe(g0 + 1);
+    expect(altEndpoint()).toBeNull();
+    altRegister("wss://public.example/");
+    expect(altStateForTests().generation).toBe(g0 + 2);
+    expect(altEndpoint()).toBe("wss://public.example/");
+  });
+
+  it("persistRoute carries the announced endpoint in the route shape", async () => {
+    /* An idle-killed worker instance restores the endpoint from this
+       blob (request.ts routeReady reads it back); the shape must
+       contain the endpoint while configured and omit it after a
+       withdraw. */
+    const puts: { url: string; body: string }[] = [];
+    vi.stubGlobal("self", { registration: { scope: "https://engine.test/" } });
+    vi.stubGlobal("caches", {
+      open: async () => ({
+        put: async (url: string, res: Response) => {
+          puts.push({ url, body: await res.text() });
+        },
+      }),
+    });
+    try {
+      altRegister("wss://public.example");
+      await persistRoute("/j/");
+      expect(puts.length).toBe(1);
+      expect(puts[0].url).toBe("https://engine.test/route-config.kdl");
+      expect(puts[0].body).toContain('wisp-endpoint "wss://public.example/"');
+      altRegister("");
+      await persistRoute("/j/");
+      expect(puts.length).toBe(2);
+      expect(puts[1].body).not.toContain("wisp-endpoint");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
