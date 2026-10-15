@@ -350,7 +350,9 @@ impl Rewriter {
                     }
                 }
                 St::Comment => {
-                    if !eat_marker(&mut self.buf, &mut out, "-->") {
+                    // #174: HTML ends comments at "--!>" too;
+                    // whichever marker arrives first closes them.
+                    if !eat_comment(&mut self.buf, &mut out) {
                         break;
                     }
                     self.st = St::Text;
@@ -370,10 +372,20 @@ impl Rewriter {
                     let matched = self.try_rewrite_tag(&buf);
                     match matched {
                         Some((end, rewritten)) => {
+                            // #187: the element name comes from the
+                            // COMPLETED tag, not whatever partial text
+                            // classify_open saw when the tag split
+                            // across chunks ("<scr" + "ipt>").
+                            let open = !buf.starts_with("</");
+                            if open {
+                                self.cur_tag = elem_name(&buf[..end]);
+                            } else {
+                                self.cur_tag.clear();
+                            }
                             out.push_str(&rewritten);
                             buf.drain(..end);
                             self.buf = buf;
-                            let raw = is_raw_tag(&self.cur_tag);
+                            let raw = open && is_raw_tag(&self.cur_tag);
                             // Inject bootstrap + per-site hooks right after
                             // the opening <head> (fallback: <html>) so they
                             // precede all page scripts.
@@ -398,7 +410,11 @@ impl Rewriter {
                 }
                 St::Raw => {
                     let close = format!("</{}", self.cur_tag);
-                    let Some(ci) = find_ci(&self.buf, &close) else {
+                    // #188: the match requires a TERMINATED close tag
+                    // (whitespace, '/' or '>' after the name): the
+                    // string "</scripts" inside a script body never
+                    // ends the block.
+                    let Some(ci) = find_ci_terminated(&self.buf, &close) else {
                         break;
                     };
                     // The close tag's '>' (or a partial close: keep it).
@@ -454,7 +470,12 @@ impl Rewriter {
         if i < bytes.len() && bytes[i] == b'/' {
             i += 1;
         }
+        // #175: a quote opens a quoted VALUE only immediately after
+        // '='; anywhere else it is an ordinary character. Tracking
+        // quotes anywhere made '<p class=it\'s>' swallow the rest of
+        // the document hunting a closing quote.
         let mut quote: Option<u8> = None;
+        let mut prev = b'x'; // any non-'=' starter
         while i < bytes.len() {
             let b = bytes[i];
             match quote {
@@ -464,13 +485,14 @@ impl Rewriter {
                     }
                 }
                 None => {
-                    if b == b'"' || b == b'\'' {
+                    if (b == b'"' || b == b'\'') && prev == b'=' {
                         quote = Some(b);
                     } else if b == b'>' {
                         break;
                     }
                 }
             }
+            prev = b;
             i += 1;
         }
         if i >= bytes.len() {
@@ -710,6 +732,12 @@ fn classify_open(buf: &str) -> Option<(St, String)> {
         if buf.starts_with("<!--") {
             return Some((St::Comment, String::new()));
         }
+        // #190: a partial "<!" or "<!-" can still become "<!--";
+        // wait for more input instead of classifying the comment open
+        // as a doctype and losing the rest of the document.
+        if buf.len() < 4 && "<!--".starts_with(buf) {
+            return None;
+        }
         return Some((St::Doctype, String::new()));
     }
     if b[1] == b'/' {
@@ -726,22 +754,52 @@ fn classify_open(buf: &str) -> Option<(St, String)> {
     None
 }
 
+/// The element name of a complete tag, lowercased, ignoring the
+/// leading '/' of close tags. #187: cur_tag must be derived from
+/// the COMPLETED tag, not the partial text classify_open saw when
+/// the tag split across chunks ("<scr" + "ipt>").
+fn elem_name(tag: &str) -> String {
+    let t = tag.strip_prefix('<').unwrap_or(tag);
+    let t = t.strip_prefix('/').unwrap_or(t);
+    t.chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
 fn is_raw_tag(tag: &str) -> bool {
-    matches!(tag, "script" | "style")
+    // #207: RCDATA (title, textarea) and RAWTEXT (iframe, noembed,
+    // xmp) content is visible text, never markup - the browser never
+    // parses tags inside them, so rewriting it corrupts what the user
+    // sees. Raw state emits their content verbatim.
+    matches!(
+        tag,
+        "script" | "style" | "title" | "textarea" | "iframe" | "noembed" | "xmp"
+    )
 }
 
 fn is_event_attr(attr: &str) -> bool {
     attr.starts_with("on") && attr.len() > 2
 }
 
-/// Case-insensitive find, ASCII only.
-fn find_ci(hay: &str, needle: &str) -> Option<usize> {
+/// Case-insensitive find of a TERMINATED raw-close tag, ASCII only
+/// (#188): the byte after the match must be whitespace, '/' or '>',
+/// per HTML's raw-text end-tag rules. A match at the very end of the
+/// input returns None: the terminator may still arrive in a later
+/// chunk, so the caller waits instead of cutting.
+fn find_ci_terminated(hay: &str, needle: &str) -> Option<usize> {
     let h = hay.as_bytes();
     let n = needle.as_bytes();
     if n.is_empty() || h.len() < n.len() {
         return None;
     }
-    (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
+    (0..=h.len() - n.len()).find(|&i| {
+        h[i..i + n.len()].eq_ignore_ascii_case(n)
+            && match h.get(i + n.len()) {
+                Some(&b) => matches!(b, b' ' | b'\t' | b'\n' | b'\x0c' | b'\r' | b'/' | b'>'),
+                None => false,
+            }
+    })
 }
 
 /// If buf contains marker: emit up to and including it, return true.
@@ -759,6 +817,31 @@ fn eat_marker(buf: &mut String, out: &mut String, marker: &str) -> bool {
         buf.drain(..cut);
         false
     }
+}
+
+/// Comment variant: the block ends at whichever of "-->" or "--!>"
+/// arrives first (#174), and the retained tail cuts only on a char
+/// boundary (#177: a slice inside a multibyte character panics the
+/// wasm call and fails the whole page).
+fn eat_comment(buf: &mut String, out: &mut String) -> bool {
+    let end = ["-->", "--!>"]
+        .iter()
+        .filter_map(|m| buf.find(*m).map(|i| i + m.len()))
+        .min();
+    if let Some(end) = end {
+        out.push_str(&buf[..end]);
+        buf.drain(..end);
+        return true;
+    }
+    // No full marker yet: keep a tail that could still become one.
+    let keep = 3; // longest partial marker: "--!" (for "--!>")
+    let mut cut = buf.len().saturating_sub(keep);
+    while cut > 0 && !buf.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    out.push_str(&buf[..cut]);
+    buf.drain(..cut);
+    false
 }
 
 /// One parsed attribute: the bytes it consumed, the whitespace that
@@ -780,6 +863,11 @@ fn next_attr(s: &str) -> Option<Attr> {
     if trimmed.is_empty() || trimmed.starts_with('>') || trimmed.starts_with("/>") {
         return None;
     }
+    // #173: a lone '/' between attributes is a separator (HTML5
+    // parity); it never joins the name, so '<img/src=...>' rewrites
+    // like any src. "/>" already ended the attribute list above.
+    let sep = usize::from(trimmed.starts_with('/'));
+    let trimmed = &trimmed[sep..];
     // Name runs to '=', whitespace, or '>'.
     let name_end = trimmed
         .find(|c: char| c == '=' || c.is_ascii_whitespace() || c == '>')
@@ -803,7 +891,7 @@ fn next_attr(s: &str) -> Option<Attr> {
                 .unwrap_or(vstart.len());
             (vstart[..end].to_string(), ws + end, None)
         };
-        let consumed = lead_ws.len() + eq + consumed_v;
+        let consumed = lead_ws.len() + sep + eq + consumed_v;
         return Some(Attr {
             consumed,
             lead_ws,
@@ -813,7 +901,7 @@ fn next_attr(s: &str) -> Option<Attr> {
         });
     }
     // Boolean attribute (no value).
-    let consumed = lead_ws.len() + name_end;
+    let consumed = lead_ws.len() + sep + name_end;
     Some(Attr {
         consumed,
         lead_ws,
@@ -916,6 +1004,7 @@ const NAMED_ENTITIES: &[(&str, char)] = &[
     ("&chi;", '\u{3c7}'),
     ("&circ;", '\u{2c6}'),
     ("&clubs;", '\u{2663}'),
+    ("&colon;", ':'),
     ("&cong;", '\u{2245}'),
     ("&copy;", '\u{a9}'),
     ("&crarr;", '\u{21b5}'),
@@ -997,6 +1086,7 @@ const NAMED_ENTITIES: &[(&str, char)] = &[
     ("&nsub;", '\u{2284}'),
     ("&ntilde;", '\u{f1}'),
     ("&nu;", '\u{3bd}'),
+    ("&num;", '#'),
     ("&oacute;", '\u{f3}'),
     ("&ocirc;", '\u{f4}'),
     ("&oelig;", '\u{153}'),
@@ -1048,6 +1138,7 @@ const NAMED_ENTITIES: &[(&str, char)] = &[
     ("&sigma;", '\u{3c3}'),
     ("&sigmaf;", '\u{3c2}'),
     ("&sim;", '\u{223c}'),
+    ("&sol;", '/'),
     ("&spades;", '\u{2660}'),
     ("&sub;", '\u{2282}'),
     ("&sube;", '\u{2286}'),
@@ -1156,24 +1247,37 @@ fn decode_entities(s: &str) -> String {
 /// output stays byte-close to the input.
 fn format_attr(name: &str, value: &str, quote: Option<char>) -> String {
     let name = name.trim_end();
-    // Entity decoding can put whitespace or quotes into a value the
-    // source emitted unquoted; quote those or the attribute would
-    // swallow the rest of the tag.
+    // #172: entity decoding can put tag-shaping characters into a
+    // value the source emitted unquoted; quoting only on whitespace
+    // or '"' let a decoded '>' re-open markup (XSS on the engine
+    // origin). Quote on any character that can break the tag open,
+    // and escape angle brackets on emit.
+    let needs_quote = value.chars().any(|c| {
+        c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | '=')
+    });
     let quote = match quote {
         Some(q) => Some(q),
-        None if value.chars().any(|c| c.is_ascii_whitespace() || c == '"') => Some('"'),
+        None if needs_quote => Some('"'),
         None => None,
     };
     match quote {
         Some('"') => format!(
             "{}=\"{}\"",
             name,
-            value.replace('&', "&amp;").replace('"', "&quot;")
+            value
+                .replace('&', "&amp;")
+                .replace('"', "&quot;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
         ),
         Some('\'') => format!(
             "{}='{}'",
             name,
-            value.replace('&', "&amp;").replace('\'', "&#39;")
+            value
+                .replace('&', "&amp;")
+                .replace('\'', "&#39;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
         ),
         _ => format!("{}={}", name, value),
     }
@@ -2412,5 +2516,210 @@ mod tests {
             "img src gains no fragment: {}",
             out
         );
+    }
+
+    /// #172: values that entity-decode to tag-shaping characters
+    /// are re-emitted quoted and escaped, never in a shape where a
+    /// decoded '>' opens real markup.
+    #[test]
+    fn format_attr_quotes_values_that_need_it() {
+        assert_eq!(format_attr("title", "plain", None), "title=plain");
+        assert_eq!(format_attr("title", "a=b", None), "title=\"a=b\"");
+        assert_eq!(format_attr("title", "a`b", None), "title=\"a`b\"");
+        assert_eq!(format_attr("title", "a<b", None), "title=\"a&lt;b\"");
+        // An explicit quote style is preserved.
+        assert_eq!(format_attr("title", "a<b", Some('\'')), "title='a&lt;b'");
+    }
+
+    #[test]
+    fn entity_decoded_gt_cannot_break_out_of_attrs() {
+        // #172: the browser reads 'title=x&gt;<img...' as one span
+        // whose title decodes to "x><img..."; the rewrite must keep
+        // it one tag instead of re-emitting a raw '>' that opens the
+        // img as real, script-bearing markup.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}",
+            r.process("<span title=x&gt;<img src=x onerror=alert(1)>>hi</span>"),
+            r.finish()
+        );
+        assert!(out.contains("title=\"x>&lt;img\""), "quoted and escaped: {}", out);
+        assert!(!out.contains("title=x"), "unquoted again: {}", out);
+        assert!(!out.contains("<img src=x"), "breakout: {}", out);
+    }
+
+    #[test]
+    fn apostrophe_in_unquoted_attr_does_not_eat_document() {
+        // #175: a quote opens a value only right after '='; the
+        // apostrophe in an unquoted value must not start a quote hunt
+        // that swallows the rest of the document.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}",
+            r.process("<p class=it's>hi</p><img src=\"https://t.example/i.png\">"),
+            r.finish()
+        );
+        assert!(out.contains("class=\"it's\""), "quoted re-emit: {}", out);
+        assert!(out.contains("hi</p>"), "closed at '>': {}", out);
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/i.png")),
+            "later markup rewritten: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn slash_separated_attributes_still_rewrite() {
+        // #173: a lone '/' between attributes is a separator, not
+        // part of the name.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}{}",
+            r.process("<img/src=\"https://t.example/x.gif\">"),
+            r.process("<a/href=\"https://t.example/p\">x</a>"),
+            r.finish()
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/x.gif")),
+            "img src rewritten: {}",
+            out
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/p")),
+            "a href rewritten: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn comment_ends_at_incorrect_close_form() {
+        // #174: HTML ends comments at "--!>" as well; the rewriter
+        // must not sleep until the next "-->".
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}",
+            r.process("<!-- x --!><img src=\"https://t.example/p.gif\"><!-- y -->"),
+            r.finish()
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/p.gif")),
+            "img after --!> rewritten: {}",
+            out
+        );
+        assert!(out.contains("--!>"), "marker kept: {}", out);
+    }
+
+    #[test]
+    fn multibyte_comment_tail_does_not_panic() {
+        // #177: the retained comment tail must cut on a char
+        // boundary; a multibyte character straddling the cut used to
+        // panic the wasm call.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let a = r.process("<!-- €");
+        let b = r.process(" mid");
+        let c = r.process("dle --> tail");
+        let out = format!("{}{}{}", a, b, c);
+        assert_eq!(out, "<!--€ middle --> tail");
+    }
+
+    #[test]
+    fn split_script_tag_still_rewrites_body() {
+        // #187: the element name comes from the completed tag, so a
+        // tag split across chunks still classifies as script.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let a = r.process("<scr");
+        let b = r.process("ipt>var u='https://t.example/x';</script>");
+        let out = format!("{}{}", a, b);
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/x")),
+            "script body literal rewritten: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn split_head_tag_injects_bootstrap_before_scripts() {
+        // #187: "<he" + "ad>" recognizes the completed head; the
+        // bootstrap lands right after it, not at finish() after the
+        // page's scripts.
+        let mut r = Rewriter::new(RewriteConfig::default());
+        r.set_base("https://example.com/");
+        let a = r.process("<he");
+        let b = r.process("ad><script>var s=1;</script>");
+        let out = format!("{}{}", a, b);
+        let bi = out.find("bootstrap.js").unwrap();
+        let si = out.find("var s=1").unwrap();
+        assert!(bi < si, "bootstrap before page scripts: {}", out);
+    }
+
+    #[test]
+    fn close_tag_prefix_in_string_does_not_end_script() {
+        // #188: the raw block ends at a TERMINATED close tag; the
+        // string "</scripts" inside a script body never ends it.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}",
+            r.process("<script>var s=\"</scripts\";var u='https://t.example/x';</script>"),
+            r.finish()
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/x")),
+            "literal after the string rewritten: {}",
+            out
+        );
+        assert!(out.contains("</scripts"), "string intact: {}", out);
+    }
+
+    #[test]
+    fn partial_comment_open_waits_for_more_input() {
+        // #190: a partial "<!" / "<!-" waits for input instead of
+        // being classified as a doctype, which would leave the rest
+        // of the comment unrewritten.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let a = r.process("<!");
+        let b = r.process("-- a > <script> never closed -->");
+        let c = r.process("<img src=\"https://t.example/z.gif\">");
+        let out = format!("{}{}{}", a, b, c);
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/z.gif")),
+            "img after the comment rewritten: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn rcdata_rawtext_content_not_rewritten_as_markup() {
+        // #207: RCDATA (textarea, title) and RAWTEXT (noembed, xmp,
+        // iframe) content is visible text; rewriting it corrupts
+        // what the user sees.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let html = r#"<textarea><a href="https://t.example/p">x</a></textarea><noembed><a href="https://t.example/n">z</a></noembed><xmp><a href="https://t.example/x">w</a></xmp>"#;
+        let out = format!("{}{}", r.process(html), r.finish());
+        assert_eq!(out, html, "raw text verbatim");
+    }
+
+    #[test]
+    fn html5_colon_entity_decodes_in_urls() {
+        // #205: HTML5-only named entities decode in attribute values
+        // (&colon;, &num;, &sol;): the browser hands the DOM the
+        // decoded text, so matching and encoding must agree.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/dir/page.html");
+        let a = format!("{}{}", r.process("<a href=\"https&colon;//t.example/a\">c</a>"), r.finish());
+        assert_eq!(decoded_attr(&a, "href"), "https://t.example/a", "{}", a);
+        let b = format!("{}{}", r.process("<a href=\"/x&num;frag\">n</a>"), r.finish());
+        assert!(b.contains("#frag"), "fragment client-side: {}", b);
+        assert!(b.contains(&cfg().encode_url("https://example.com/x")), "{}", b);
+        let c = format!("{}{}", r.process("<a href=\"/y&sol;z\">s</a>"), r.finish());
+        assert!(c.contains(&cfg().encode_url("https://example.com/y/z")), "{}", c);
     }
 }

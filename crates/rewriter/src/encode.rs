@@ -252,7 +252,13 @@ fn split_authority(s: &str) -> (String, String, &str) {
 /// caller keeps them client-side (issue #12) instead of encoding a
 /// route for the base document.
 pub fn resolve(url: &str, base: &str) -> String {
-    let url = url.trim();
+    // WHATWG normalization (#205): remove all ASCII tabs and
+    // newlines, then trim C0 controls and spaces from both ends.
+    // The browser's URL parser does this before anything else;
+    // skipping it meant rules and block lists matched a different
+    // string than the one the fetch actually reaches.
+    let url: String = url.chars().filter(|c| !matches!(*c, '\t' | '\n' | '\r')).collect();
+    let url = url.trim_matches(|c: char| c <= '\u{20}');
     if url.is_empty() || url.starts_with('#') {
         return url.to_string();
     }
@@ -618,5 +624,24 @@ mod tests {
         assert_eq!(siphash24(&key, &[]), 0x726fdb47dd0e0e31);
         assert_eq!(siphash24(&key, &[0x00]), 0x74f839c593dc67fd);
         assert_eq!(siphash24(&key, &[0x00, 0x01]), 0x0d6c8009d9a94f5a);
+    }
+
+    /// #205: WHATWG normalization happens before anything else: all
+    /// ASCII tabs and newlines are removed, C0 controls and spaces
+    /// trimmed from the ends - the fetch and the rule match must
+    /// see the same host.
+    #[test]
+    fn whatwg_normalization_strips_tabs_and_newlines() {
+        let b = "https://example.com/a/b/c.html";
+        assert_eq!(resolve("https://ex\nample.com/p", b), "https://example.com/p");
+        assert_eq!(
+            resolve("https://ex\tample.com/p.png", b),
+            "https://example.com/p.png"
+        );
+        assert_eq!(resolve(" https://example.com/x ", b), "https://example.com/x");
+        assert_eq!(
+            resolve("\u{0}\u{1}https://example.com/y", b),
+            "https://example.com/y"
+        );
     }
 }

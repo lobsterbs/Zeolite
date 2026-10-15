@@ -103,7 +103,21 @@ fn css_enc(cfg: RewriteConfig, base: String) -> Box<dyn Fn(&str) -> String> {
             }
         }
         let abs = crate::encode::resolve(u, &base);
-        cfg.encode_url(&abs)
+        // #199: fragments are client-side only (SVG sprite symbol
+        // selection, in-page anchors): they must never become part of
+        // the encoded target - every "#symbol" variant of one sprite
+        // is the same network resource. Same invariant as
+        // Rewriter::enc_route, which the HTML path already keeps.
+        if abs.is_empty() || abs.starts_with('#') {
+            return abs;
+        }
+        let (bare, frag) = match abs.split_once('#') {
+            Some((b, f)) => (b.to_string(), format!("#{}", f)),
+            None => (abs, String::new()),
+        };
+        let mut out = cfg.encode_url(&bare);
+        out.push_str(&frag);
+        out
     })
 }
 
@@ -189,5 +203,39 @@ impl JsCssRewriter {
     /// End of stream: flush retained bytes.
     pub fn finish(&mut self) -> String {
         self.inner.finish()
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #199: a css url() with a fragment keeps the fragment
+    /// client-side: the encoded token never contains it, so every
+    /// "#symbol" variant of one sprite stays one network identity.
+    #[test]
+    fn css_url_fragments_stay_client_side() {
+        let cfg = RewriteConfig {
+            origin: "https://engine.example.org".into(),
+            codec: Codec::Base64Url {
+                prefix: "/j/".into(),
+            },
+            ..Default::default()
+        };
+        let enc = css_enc(cfg.clone(), "https://site.example/page.html".into());
+        let out = enc("sprite.svg#icon");
+        let bare = cfg.encode_url("https://site.example/sprite.svg");
+        assert_eq!(out, format!("{}#icon", bare));
+        // The token never carries the fragment.
+        let tok = out.split('#').next().unwrap_or("");
+        let tail = tok.rsplit('/').next().unwrap_or("");
+        let decoded = crate::encode::b64u_decode(tail)
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default();
+        assert_eq!(decoded, "https://site.example/sprite.svg");
+        // Empty and fragment-only values pass through untouched.
+        assert_eq!(enc(""), "");
+        assert_eq!(enc("#frag"), "#frag");
     }
 }

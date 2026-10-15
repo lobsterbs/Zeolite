@@ -75,7 +75,17 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
         let is_quote = c == b'"' || c == b'\'' || (allow_template && c == 96u8);
         if is_quote {
             let q = c as char;
-            if let Some(close) = find_literal_end(&js[i + 1..], q) {
+            // #176: a template literal is ONE token, substitutions
+            // included: its text is never code, so a '//' or quote in
+            // template text must not restart the scanner and
+            // suppress rewriting for the rest of the line. The old
+            // scanner bailed on '${', which did exactly that.
+            let close = if q == '\u{60}' {
+                find_template_end(&js[i + 1..])
+            } else {
+                find_literal_end(&js[i + 1..], q)
+            };
+            if let Some(close) = close {
                 let inner = &js[i + 1..i + 1 + close];
                 // #75: JSON-embedded URLs spell the slashes escaped
                 // (backslash-slash), e.g. google image tiles and
@@ -84,7 +94,11 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
                 // (conservative default).
                 let unesc = json_unescape(inner);
                 let probe = unesc.as_deref().unwrap_or(inner);
-                if looks_like_url(probe) {
+                // A template with substitutions is dynamic: encoding
+                // its text would freeze '${...}' into a static
+                // route.
+                let dyn_tmpl = q == '\u{60}' && inner.contains("${");
+                if !dyn_tmpl && looks_like_url(probe) {
                     out.push(q);
                     if let Some(u) = unesc {
                         out.push_str(&enc(u.trim()));
@@ -92,7 +106,7 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
                         out.push_str(&rewrite_quoted_body(inner, enc));
                     }
                     out.push(q);
-                } else if unesc.is_none() && looks_like_rel_asset(inner) {
+                } else if !dyn_tmpl && unesc.is_none() && looks_like_rel_asset(inner) {
                     // #131: never route escaped literals (the same
                     // rule as rewrite_quoted_body - broken JS is
                     // worse than a missed rewrite the runtime paths
@@ -155,6 +169,10 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
         i += ch_len;
         match c {
             b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {} // keep last_sig
+            // #206: postfix ++/-- ENDS an expression, so the '/'
+            // after it is division, never a regex start.
+            b'+' if last_sig == b'+' => last_sig = b'x',
+            b'-' if last_sig == b'-' => last_sig = b'x',
             _ => {
                 last_sig = c;
                 wlen = 0;
@@ -378,7 +396,474 @@ fn find_literal_end(s: &str, q: char) -> Option<usize> {
             c if c == q as u8 => return Some(i),
             // Template literals: a dollar-brace substitution may
             // contain nested quotes; bail to stay conservative.
-            b'$' if q == 96u8 as char && i + 1 < b.len() && b[i + 1] == b'{' => return None,
+            b'
+
+fn utf8_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else {
+        4
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn w3_namespace_uris_are_identity_not_urls() {
+        // #153: namespace constants must survive verbatim or
+        // createElementNS builds a plain Element and the app dies.
+        let js = r#"var ns="http://www.w3.org/2000/svg";var xl='http://www.w3.org/1999/xlink';var m="http://www.w3.org/1998/Math/MathML";document.createElementNS(ns,"svg");fetch("https://api.example.com/x");"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""http://www.w3.org/2000/svg""#), "{}", out);
+        assert!(out.contains(r#"'http://www.w3.org/1999/xlink'"#), "{}", out);
+        assert!(
+            out.contains(r#""http://www.w3.org/1998/Math/MathML""#),
+            "{}",
+            out
+        );
+        assert!(out.contains(r#""[https://api.example.com/x]""#), "{}", out);
+    }
+
+    #[test]
+    fn rewrites_url_literals_only() {
+        let js =
+            r#"var a = "https://example.com/x"; var b = 'hello'; fetch("//cdn.example.net/y");"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://example.com/x]""#), "{}", out);
+        assert!(out.contains("'hello'"));
+        // Protocol-relative literals are rewritten as-is: absolutizing
+        // them is the enc callback's job (it knows the page scheme).
+        assert!(out.contains(r#""[//cdn.example.net/y]""#), "{}", out);
+    }
+
+    #[test]
+    fn ignores_comments_and_nonurls() {
+        let js = "// 'https://keep.example/'\nvar s = 'not a url with spaces';";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("https://keep.example/"));
+        assert!(out.contains("not a url with spaces"));
+    }
+
+    #[test]
+    fn regex_bodies_are_verbatim() {
+        // #122: a regex matching a Firefox error message embeds a
+        // quoted URL (YouTube base.js). The quote inside the regex is
+        // a pattern character; rewriting the URL injected '/' from the
+        // engine route, terminated the pattern early, and broke the
+        // whole script's parse.
+        let js = r#"{messageRegExp:/Blocked a frame with origin "https://www.youtube.com" from accessing a cross-origin frame.*/,weight:500}"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn regexes_do_not_shadow_string_rewrites() {
+        let js = r#"var re = /"https:\/\/keep\.example\/"/; fetch("https://rewrite.example/x");"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://rewrite.example/x]""#), "{}", out);
+        assert!(out.contains(r#"/"https:\/\/keep\.example\/"/"#), "{}", out);
+    }
+
+    #[test]
+    fn regex_after_punct_and_keywords() {
+        let js = "a = (/x/.test(s)); b = typeof /y/;";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn division_stays_division() {
+        let js = "var x = a / b / c; var y = (p + q) / 2;";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn regex_char_class_slash_and_escapes() {
+        let js = "var re = /a[/]b\\/c/g; var s = 'https://after.example/ok';";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("/a[/]b\\/c/g"), "{}", out);
+        assert!(out.contains(r#"'[https://after.example/ok]'"#), "{}", out);
+    }
+
+    #[test]
+    fn unterminated_pseudo_regex_recovers_next_line() {
+        // '++' puts the scanner in regex-allowed state, but no '/'
+        // closes on that line: the probe must bail at the newline and
+        // keep rewriting literals on the next line.
+        let js = "var x = a++ / b\nvar s = \"https://next.example/y\";";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://next.example/y]""#), "{}", out);
+        assert!(out.contains("a++ / b"), "{}", out);
+    }
+
+    #[test]
+    fn json_escaped_url_literals_rewrite() {
+        // #75: the JSON escaped-slash form is how JSON-embedded URLs
+        // spell slashes; the escaped form is now rewritten, not
+        // skipped.
+        let js = r#"var a = "https:\/\/escaped.example/x";"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://escaped.example/x]""#), "{}", out);
+    }
+
+    #[test]
+    fn other_escapes_still_untouched() {
+        // Any escape other than the JSON escaped-slash form
+        // disqualifies the literal: broken JS is worse than an
+        // un-rewritten URL.
+        let js = "var a = \"https:\\\\nother.example/x\";";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("https:\\\\nother.example/x"), "{}", out);
+    }
+
+    #[test]
+    fn new_url_constructor_literal_rewrites() {
+        // #75: new URL(...) first-argument literals are ordinary
+        // quoted literals; the pass already covers them. Pinned
+        // here so the coverage claim is tested, not remembered.
+        let js = r#"const u = new URL("https://dyn.example/p?x=1");"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://dyn.example/p?x=1]""#), "{}", out);
+    }
+
+    #[test]
+    fn module_specifiers_route() {
+        // #126: static, dynamic and export-from specifiers route when
+        // they are not bare package names; the closing quote is
+        // consumed so the literal pass never double-processes them.
+        let js = r#"import './a.js'; import b from "../b.js"; import("/root.js"); export {x} from 'https://cdn.example.com/m.js';"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r"'[./a.js]'"), "{}", out);
+        assert!(out.contains(r#""[../b.js]""#), "{}", out);
+        assert!(out.contains(r#""[/root.js]""#), "{}", out);
+        assert!(out.contains(r"'[https://cdn.example.com/m.js]'"), "{}", out);
+    }
+
+    #[test]
+    fn bare_specifiers_stay_bare() {
+        // Bare package names belong to the runtime import map; the
+        // rewriter must not touch them (routeModuleSpecifier parity).
+        let js = r#"import 'lodash'; import x from "react-dom/client"; import('some-pkg/x');"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn import_meta_and_property_access_untouched() {
+        // import.meta: no string follows the token. x.from(...) and
+        // cfg.import(...): the '.' guard excludes property access.
+        let js = "import.meta.url; const u = x.from('./keep'); cfg.import('pkg/x');";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn twitch_concat_shape_stays_verbatim() {
+        // #124 regression shape: the tokens around a string-concat
+        // chain must not be bridged by the specifier pass either.
+        let js = r#"x="No matches from ".concat(w," payloads"); import 'https://x.example/a.js';"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("No matches from "), "{}", out);
+        assert!(out.contains(".concat(w,"), "{}", out);
+        assert!(out.contains(r"'[https://x.example/a.js]'"), "{}", out);
+    }
+
+    #[test]
+    fn rel_asset_literals_route() {
+        // #131: bundler dependency maps carry dot-relative asset
+        // paths as plain strings (Vite __vite__mapDeps); they must
+        // route at serve time exactly like absolute URL literals.
+        let js = r#"m.f||(m.f=["../nodes/0.A.js","./a.css","../b/x.mjs"]);"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[../nodes/0.A.js]""#), "{}", out);
+        assert!(out.contains(r#""[./a.css]""#), "{}", out);
+        assert!(out.contains(r#""[../b/x.mjs]""#), "{}", out);
+    }
+
+    #[test]
+    fn rel_asset_gates_stay_conservative() {
+        // No dot prefix, no web-asset extension, whitespace, escapes:
+        // every one of those stays verbatim (the runtime referrer
+        // recovery still handles genuine fetch-time relatives).
+        let js = r#"var a="x.js",b="../api/data",c="./y\n.js",d="../z.txt",e=" ./q.js";"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+}
+ if q == 96u8 as char && i + 1 < b.len() && b[i + 1] == b'{' => return None,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// #176: scan a template literal (past its opening backtick) to the
+/// closing backtick. Template TEXT is never code: quotes and
+/// comment-looking slashes inside it stay text. '${' opens a
+/// substitution, which is code and is scanned for braces, strings
+/// and nested templates. None when unterminated.
+fn find_template_end(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'`' => return Some(i),
+            b'
+
+fn utf8_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else {
+        4
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn w3_namespace_uris_are_identity_not_urls() {
+        // #153: namespace constants must survive verbatim or
+        // createElementNS builds a plain Element and the app dies.
+        let js = r#"var ns="http://www.w3.org/2000/svg";var xl='http://www.w3.org/1999/xlink';var m="http://www.w3.org/1998/Math/MathML";document.createElementNS(ns,"svg");fetch("https://api.example.com/x");"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""http://www.w3.org/2000/svg""#), "{}", out);
+        assert!(out.contains(r#"'http://www.w3.org/1999/xlink'"#), "{}", out);
+        assert!(
+            out.contains(r#""http://www.w3.org/1998/Math/MathML""#),
+            "{}",
+            out
+        );
+        assert!(out.contains(r#""[https://api.example.com/x]""#), "{}", out);
+    }
+
+    #[test]
+    fn rewrites_url_literals_only() {
+        let js =
+            r#"var a = "https://example.com/x"; var b = 'hello'; fetch("//cdn.example.net/y");"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://example.com/x]""#), "{}", out);
+        assert!(out.contains("'hello'"));
+        // Protocol-relative literals are rewritten as-is: absolutizing
+        // them is the enc callback's job (it knows the page scheme).
+        assert!(out.contains(r#""[//cdn.example.net/y]""#), "{}", out);
+    }
+
+    #[test]
+    fn ignores_comments_and_nonurls() {
+        let js = "// 'https://keep.example/'\nvar s = 'not a url with spaces';";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("https://keep.example/"));
+        assert!(out.contains("not a url with spaces"));
+    }
+
+    #[test]
+    fn regex_bodies_are_verbatim() {
+        // #122: a regex matching a Firefox error message embeds a
+        // quoted URL (YouTube base.js). The quote inside the regex is
+        // a pattern character; rewriting the URL injected '/' from the
+        // engine route, terminated the pattern early, and broke the
+        // whole script's parse.
+        let js = r#"{messageRegExp:/Blocked a frame with origin "https://www.youtube.com" from accessing a cross-origin frame.*/,weight:500}"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn regexes_do_not_shadow_string_rewrites() {
+        let js = r#"var re = /"https:\/\/keep\.example\/"/; fetch("https://rewrite.example/x");"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://rewrite.example/x]""#), "{}", out);
+        assert!(out.contains(r#"/"https:\/\/keep\.example\/"/"#), "{}", out);
+    }
+
+    #[test]
+    fn regex_after_punct_and_keywords() {
+        let js = "a = (/x/.test(s)); b = typeof /y/;";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn division_stays_division() {
+        let js = "var x = a / b / c; var y = (p + q) / 2;";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn regex_char_class_slash_and_escapes() {
+        let js = "var re = /a[/]b\\/c/g; var s = 'https://after.example/ok';";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("/a[/]b\\/c/g"), "{}", out);
+        assert!(out.contains(r#"'[https://after.example/ok]'"#), "{}", out);
+    }
+
+    #[test]
+    fn unterminated_pseudo_regex_recovers_next_line() {
+        // '++' puts the scanner in regex-allowed state, but no '/'
+        // closes on that line: the probe must bail at the newline and
+        // keep rewriting literals on the next line.
+        let js = "var x = a++ / b\nvar s = \"https://next.example/y\";";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://next.example/y]""#), "{}", out);
+        assert!(out.contains("a++ / b"), "{}", out);
+    }
+
+    #[test]
+    fn json_escaped_url_literals_rewrite() {
+        // #75: the JSON escaped-slash form is how JSON-embedded URLs
+        // spell slashes; the escaped form is now rewritten, not
+        // skipped.
+        let js = r#"var a = "https:\/\/escaped.example/x";"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://escaped.example/x]""#), "{}", out);
+    }
+
+    #[test]
+    fn other_escapes_still_untouched() {
+        // Any escape other than the JSON escaped-slash form
+        // disqualifies the literal: broken JS is worse than an
+        // un-rewritten URL.
+        let js = "var a = \"https:\\\\nother.example/x\";";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("https:\\\\nother.example/x"), "{}", out);
+    }
+
+    #[test]
+    fn new_url_constructor_literal_rewrites() {
+        // #75: new URL(...) first-argument literals are ordinary
+        // quoted literals; the pass already covers them. Pinned
+        // here so the coverage claim is tested, not remembered.
+        let js = r#"const u = new URL("https://dyn.example/p?x=1");"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://dyn.example/p?x=1]""#), "{}", out);
+    }
+
+    #[test]
+    fn module_specifiers_route() {
+        // #126: static, dynamic and export-from specifiers route when
+        // they are not bare package names; the closing quote is
+        // consumed so the literal pass never double-processes them.
+        let js = r#"import './a.js'; import b from "../b.js"; import("/root.js"); export {x} from 'https://cdn.example.com/m.js';"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r"'[./a.js]'"), "{}", out);
+        assert!(out.contains(r#""[../b.js]""#), "{}", out);
+        assert!(out.contains(r#""[/root.js]""#), "{}", out);
+        assert!(out.contains(r"'[https://cdn.example.com/m.js]'"), "{}", out);
+    }
+
+    #[test]
+    fn bare_specifiers_stay_bare() {
+        // Bare package names belong to the runtime import map; the
+        // rewriter must not touch them (routeModuleSpecifier parity).
+        let js = r#"import 'lodash'; import x from "react-dom/client"; import('some-pkg/x');"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn import_meta_and_property_access_untouched() {
+        // import.meta: no string follows the token. x.from(...) and
+        // cfg.import(...): the '.' guard excludes property access.
+        let js = "import.meta.url; const u = x.from('./keep'); cfg.import('pkg/x');";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn twitch_concat_shape_stays_verbatim() {
+        // #124 regression shape: the tokens around a string-concat
+        // chain must not be bridged by the specifier pass either.
+        let js = r#"x="No matches from ".concat(w," payloads"); import 'https://x.example/a.js';"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("No matches from "), "{}", out);
+        assert!(out.contains(".concat(w,"), "{}", out);
+        assert!(out.contains(r"'[https://x.example/a.js]'"), "{}", out);
+    }
+
+    #[test]
+    fn rel_asset_literals_route() {
+        // #131: bundler dependency maps carry dot-relative asset
+        // paths as plain strings (Vite __vite__mapDeps); they must
+        // route at serve time exactly like absolute URL literals.
+        let js = r#"m.f||(m.f=["../nodes/0.A.js","./a.css","../b/x.mjs"]);"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[../nodes/0.A.js]""#), "{}", out);
+        assert!(out.contains(r#""[./a.css]""#), "{}", out);
+        assert!(out.contains(r#""[../b/x.mjs]""#), "{}", out);
+    }
+
+    #[test]
+    fn rel_asset_gates_stay_conservative() {
+        // No dot prefix, no web-asset extension, whitespace, escapes:
+        // every one of those stays verbatim (the runtime referrer
+        // recovery still handles genuine fetch-time relatives).
+        let js = r#"var a="x.js",b="../api/data",c="./y\n.js",d="../z.txt",e=" ./q.js";"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+}
+ if i + 1 < b.len() && b[i + 1] == b'{' => {
+                i = find_substitution_end(s, i + 2)?;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Offset just past the '}' that closes a '${' substitution opened
+/// before s[start..]. Brace depth, string literals and nested
+/// templates are all tracked; None when unterminated.
+fn find_substitution_end(s: &str, start: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut i = start;
+    let mut depth = 1usize;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            b'\'' | b'"' => {
+                let q = b[i];
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\\' {
+                        i += 2;
+                    } else if b[i] == q {
+                        i += 1;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'`' => {
+                i += find_template_end(&s[i + 1..])? + 2;
+            }
             _ => i += 1,
         }
     }
@@ -582,5 +1067,40 @@ mod tests {
         let js = r#"var a="x.js",b="../api/data",c="./y\n.js",d="../z.txt",e=" ./q.js";"#;
         let out = rewrite_script(js, &|u| format!("[{}]", u));
         assert_eq!(out, js);
+    }
+
+    /// #176: template text is never code: the '//' inside the
+    /// template must not start a comment that suppresses rewriting
+    /// for the rest of the line.
+    #[test]
+    fn template_literal_text_is_never_code() {
+        let js = "var a=`${p}//${h}`;var u=\"https://t.example/x\";";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://t.example/x]""#), "{}", out);
+        assert!(out.contains("//"), "template text intact: {}", out);
+    }
+
+    /// #176: a substitution-free URL template rewrites like a quoted
+    /// literal; a template WITH substitutions stays verbatim (its
+    /// text is dynamic).
+    #[test]
+    fn template_literal_url_text_rewrites() {
+        let js = "var a=`https://t.example/t`;";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("`[https://t.example/t]`"), "{}", out);
+        let js = "var b=`https://${h}/x`;";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    /// #206: postfix ++/-- ends the expression, so the '/' after it
+    /// is division; the regex misparse used to swallow the rest of
+    /// the line and suppress literal rewriting.
+    #[test]
+    fn postfix_increment_slash_is_division() {
+        let js = "a++ / b; var u=\"https://t.example/x\"; c / d;";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""[https://t.example/x]""#), "{}", out);
+        assert!(out.contains("a++ / b"), "{}", out);
     }
 }
