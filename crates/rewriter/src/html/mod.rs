@@ -2817,6 +2817,20 @@ mod tests {
     }
 
     #[test]
+    fn partial_comment_open_every_split_matches_one_shot() {
+        // #190: "<!" can still become "<!--" at any split; the comment
+        // body must never be classified as a doctype.
+        let out = assert_split_invariant(
+            "<!-- a > <script> never closed --><img src=\"https://t.example/z.gif\">",
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/z.gif")),
+            "{}",
+            out
+        );
+    }
+
+    #[test]
     fn multibyte_comment_every_split_matches_one_shot() {
         // #177: the retained comment tail cuts on a char boundary
         // wherever the chunk ends; no split may panic or change bytes.
