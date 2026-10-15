@@ -515,6 +515,10 @@ impl Rewriter {
         out.push('<');
         out.push_str(&raw[1..name_end]);
         let mut rest = &raw[name_end..];
+        // The close-tag slash is tag syntax, not an attribute
+        // separator: never fold it in next_attr (#173 regression
+        // let </head> come out as <head>).
+        let close_tag = raw.starts_with("</");
         // <meta http-equiv=refresh> carries its navigation target in
         // the content attribute (issue #36): "5; url=/next". The
         // http-equiv attribute can appear before or after content,
@@ -530,7 +534,7 @@ impl Rewriter {
         let mut is_refresh = false;
         if name == "meta" {
             let mut scan = rest;
-            while let Some(a) = next_attr(scan) {
+            while let Some(a) = next_attr(scan, true) {
                 if a.name.eq_ignore_ascii_case("http-equiv") {
                     if let Some(val) = a.value.as_deref() {
                         let v = val.trim().to_ascii_lowercase();
@@ -551,7 +555,7 @@ impl Rewriter {
         }
         let mut first_url: Option<String> = None;
         let mut has_loading = false;
-        while let Some(attr) = next_attr(rest) {
+        while let Some(attr) = next_attr(rest, !close_tag) {
             let Attr {
                 consumed,
                 lead_ws,
@@ -857,7 +861,7 @@ struct Attr {
 
 /// Pull one attribute (name, optional =value) off the front of s.
 /// Returns None when the remaining text is not an attribute (tag end).
-fn next_attr(s: &str) -> Option<Attr> {
+fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
     let trimmed = s.trim_start();
     let lead_ws = s[..s.len() - trimmed.len()].to_string();
     if trimmed.is_empty() || trimmed.starts_with('>') || trimmed.starts_with("/>") {
@@ -866,7 +870,10 @@ fn next_attr(s: &str) -> Option<Attr> {
     // #173: a lone '/' between attributes is a separator (HTML5
     // parity); it never joins the name, so '<img/src=...>' rewrites
     // like any src. "/>" already ended the attribute list above.
-    let sep = usize::from(trimmed.starts_with('/'));
+    // On a CLOSE tag the leading '/' is tag syntax, not a separator
+    // (folding it turned </head> into <head>), so the caller passes
+    // fold_slash = false for close tags.
+    let sep = usize::from(fold_slash && trimmed.starts_with('/'));
     let trimmed = &trimmed[sep..];
     // Name runs to '=', whitespace, or '>'.
     let name_end = trimmed
@@ -2545,8 +2552,8 @@ mod tests {
             r.finish()
         );
         assert!(
-            out.contains("title=\"x>&lt;img\""),
-            "quoted and escaped: {}",
+            out.contains("title=\"x&gt;&lt;img\""),
+            "quoted and escaped: {},"
             out
         );
         assert!(!out.contains("title=x"), "unquoted again: {}", out);
@@ -2628,7 +2635,7 @@ mod tests {
         let b = r.process(" mid");
         let c = r.process("dle --> tail");
         let out = format!("{}{}{}", a, b, c);
-        assert_eq!(out, "<!--€ middle --> tail");
+        assert_eq!(out, "<!-- € middle --> tail");
     }
 
     #[test]
