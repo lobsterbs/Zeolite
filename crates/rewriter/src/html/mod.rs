@@ -2553,7 +2553,7 @@ mod tests {
         );
         assert!(
             out.contains("title=\"x&gt;&lt;img\""),
-            "quoted and escaped: {},"
+            "quoted and escaped: {}",
             out
         );
         assert!(!out.contains("title=x"), "unquoted again: {}", out);
