@@ -45,7 +45,7 @@ import { adoptResponse } from "./downloads";
 import { flatRed, netLogPush, type NetDetail } from "./netlog";
 import { traceDecision } from "./tracing";
 
-import { altConfigured, altWispFetch, wispTransport } from "./transport";
+import { altConfigured, altEndpoint, altRegister, altWispFetch, wispTransport } from "./transport";
 
 
 
@@ -781,6 +781,13 @@ export const routeReady: Promise<void> = (async () => {
         setScheme(typeof node.props.prefix === "string" ? node.props.prefix : "/j/");
         if (typeof node.props["https-upgrade"] === "boolean") setHttpsUpgrade(node.props["https-upgrade"]);
         if (typeof node.props["nav-handles"] === "boolean") setNavHandles(node.props["nav-handles"]);
+        /* 2026-10-15: the announced public wisp endpoint persists with
+           the route shape so an idle-killed worker instance restores
+           it on restart - the embedder re-announces only on
+           controllerchange, which never fires for an instance
+           restart; without this the wisp route vanished after the
+           first ~30s idle kill. */
+        if (typeof node.props["wisp-endpoint"] === "string") altRegister(node.props["wisp-endpoint"]);
       }
     } else {
       const legacy = await cache.match(routeKeyUrlLegacy());
@@ -826,7 +833,8 @@ export async function persistRoute(prefix: string): Promise<void> {
           " https-upgrade " +
           (isHttpsUpgrade() ? "#true" : "#false") +
           " nav-handles " +
-          (navHandlesEnabled() ? "#true" : "#false"),
+          (navHandlesEnabled() ? "#true" : "#false") +
+          (altEndpoint() ? " wisp-endpoint " + JSON.stringify(altEndpoint()) : ""),
       ),
     );
   } catch {
