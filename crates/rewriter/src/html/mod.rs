@@ -2802,6 +2802,21 @@ mod tests {
     }
 
     #[test]
+    fn raw_close_lookalike_every_split_matches_one_shot() {
+        // #188: "</scripts" inside a script string never ends the
+        // block, and the literal after it is rewritten at every split.
+        let out = assert_split_invariant(
+            "<script>var s=\"</scripts\";var u='https://t.example/x';</script>",
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/x")),
+            "{}",
+            out
+        );
+        assert!(out.contains("</scripts\""), "string intact: {}", out);
+    }
+
+    #[test]
     fn multibyte_comment_every_split_matches_one_shot() {
         // #177: the retained comment tail cuts on a char boundary
         // wherever the chunk ends; no split may panic or change bytes.
