@@ -863,7 +863,7 @@ struct Attr {
 /// Returns None when the remaining text is not an attribute (tag end).
 fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
     let trimmed = s.trim_start();
-    let lead_ws = s[..s.len() - trimmed.len()].to_string();
+    let mut lead_ws = s[..s.len() - trimmed.len()].to_string();
     if trimmed.is_empty() || trimmed.starts_with('>') || trimmed.starts_with("/>") {
         return None;
     }
@@ -872,9 +872,19 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
     // like any src. "/>" already ended the attribute list above.
     // On a CLOSE tag the leading '/' is tag syntax, not a separator
     // (folding it turned </head> into <head>), so the caller passes
-    // fold_slash = false for close tags.
+    // fold_slash = false for close tags. The separator rides in
+    // lead_ws so it is re-emitted: dropping it fused the tag name
+    // into the attribute ("<img/src=" came out as "<imgsrc=").
     let sep = usize::from(fold_slash && trimmed.starts_with('/'));
-    let trimmed = &trimmed[sep..];
+    let mut trimmed = &trimmed[sep..];
+    if sep == 1 {
+        // Whitespace after the separator is still between attributes
+        // ("<img/ src=..>" is "<img src=..>" to the browser).
+        let next = trimmed.trim_start();
+        lead_ws.push('/');
+        lead_ws.push_str(&trimmed[..trimmed.len() - next.len()]);
+        trimmed = next;
+    }
     // Name runs to '=', whitespace, or '>'.
     let name_end = trimmed
         .find(|c: char| c == '=' || c.is_ascii_whitespace() || c == '>')
@@ -898,7 +908,7 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
                 .unwrap_or(vstart.len());
             (vstart[..end].to_string(), ws + end, None)
         };
-        let consumed = lead_ws.len() + sep + eq + consumed_v;
+        let consumed = lead_ws.len() + eq + consumed_v;
         return Some(Attr {
             consumed,
             lead_ws,
@@ -908,7 +918,7 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
         });
     }
     // Boolean attribute (no value).
-    let consumed = lead_ws.len() + sep + name_end;
+    let consumed = lead_ws.len() + name_end;
     Some(Attr {
         consumed,
         lead_ws,
@@ -2584,25 +2594,28 @@ mod tests {
     #[test]
     fn slash_separated_attributes_still_rewrite() {
         // #173: a lone '/' between attributes is a separator, not
-        // part of the name.
-        let mut r = Rewriter::new(cfg());
+        // part of the name. The separator is re-emitted so the tag
+        // name stays intact ("<imgsrc=" would be a different tag),
+        // and the attribute is rewritten or blocked as usual.
+        let c = RewriteConfig {
+            block_hosts: vec!["ads.example.net".into()],
+            ..cfg()
+        };
+        let mut r = Rewriter::new(c.clone());
         r.set_base("https://example.com/");
-        let out = format!(
-            "{}{}{}",
-            r.process("<img/src=\"https://t.example/x.gif\">"),
-            r.process("<a/href=\"https://t.example/p\">x</a>"),
-            r.finish()
-        );
-        assert!(
-            out.contains(&cfg().encode_url("https://t.example/x.gif")),
-            "img src rewritten: {}",
-            out
-        );
-        assert!(
-            out.contains(&cfg().encode_url("https://t.example/p")),
-            "a href rewritten: {}",
-            out
-        );
+        let mut out = r.process("<img/src=\"https://t.example/x.gif\">");
+        out.push_str(&r.process("<a/href=\"https://t.example/p\">x</a>"));
+        out.push_str(&r.process("<img/ src=\"https://t.example/y.gif\">"));
+        out.push_str(&r.process("<img/src=\"https://ads.example.net/pixel.gif\">"));
+        out.push_str(&r.finish());
+        let x = c.encode_url("https://t.example/x.gif");
+        let p = c.encode_url("https://t.example/p");
+        let y = c.encode_url("https://t.example/y.gif");
+        assert!(out.contains(&format!("<img/src=\"{}\"", x)), "{}", out);
+        assert!(out.contains(&format!("<a/href=\"{}\"", p)), "{}", out);
+        assert!(out.contains(&format!("<img/ src=\"{}\"", y)), "{}", out);
+        assert!(!out.contains("<imgsrc"), "tag name fused: {}", out);
+        assert!(!out.contains("pixel.gif"), "blocked img dropped: {}", out);
     }
 
     #[test]
