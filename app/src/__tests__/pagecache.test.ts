@@ -282,3 +282,54 @@ describe("pageCacheMatch stale serving", () => {
     expect(await pageCacheMatch(new Request("https://e.example/p"))).toBeNull();
   });
 });
+
+/* #204: a Range request must never slice a rewritable entry - the
+   stored document/stylesheet copy is the raw upstream body, so the
+   origin owns range semantics for it. Non-rewritable types keep the
+   206 slice. */
+describe("pageCacheMatch Range on rewritable types (#204)", () => {
+  afterEach(() => {
+    delete (globalThis as { caches?: unknown }).caches;
+    delete (globalThis as { self?: unknown }).self;
+    transport.handler = async () => {
+      await gate.promise;
+      return new Response("fresh");
+    };
+  });
+
+  const fakeCache = (entry: Response) => ({
+    match: async () => entry,
+    delete: async () => true,
+    put: async () => {},
+    keys: async () => [] as Request[],
+  });
+  const fresh = (type: string) =>
+    new Response("0123456789abcdef", {
+      headers: {
+        "content-type": type,
+        "cache-control": "max-age=60",
+        "x-zl-cached-at": String(Date.now()),
+      },
+    });
+
+  it("bypasses a cached HTML document on a Range request", async () => {
+    (globalThis as { caches?: unknown }).caches = { open: async () => fakeCache(fresh("text/html")) };
+    (globalThis as { self?: unknown }).self = { location: { origin: "https://zl.test" } };
+    expect(
+      await pageCacheMatch(new Request("https://e.example/p", { headers: { range: "bytes=0-1" } })),
+    ).toBeNull();
+  });
+
+  it("still slices a cached media entry on a Range request", async () => {
+    (globalThis as { caches?: unknown }).caches = { open: async () => fakeCache(fresh("video/mp4")) };
+    (globalThis as { self?: unknown }).self = { location: { origin: "https://zl.test" } };
+    const hit = await pageCacheMatch(
+      new Request("https://e.example/v", { headers: { range: "bytes=0-1" } }),
+    );
+    if (!hit) throw new Error("expected a 206 slice");
+    expect(hit.status).toBe(206);
+    expect(hit.headers.get("content-range")).toBe("bytes 0-1/16");
+    expect(await hit.text()).toBe("01");
+  });
+});
+

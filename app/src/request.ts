@@ -321,7 +321,14 @@ export async function pageCacheMatch(
      serve (plain body under the size cap). Everything else bypasses the
      cache so the origin owns range semantics; forwardedHeaders passes
      the header to the wisp path. */
-  if (rangeHeader) return await rangeFromEntry(hit, rangeHeader);
+  /* #204: a rewritable entry (HTML, CSS, JS) is never sliced: the
+     stored copy is the raw upstream body for document and stylesheet
+     hits (the serve-time rewrite owns those), so a 206 slice hands
+     the page unrewritten bytes. The origin owns range semantics. */
+  if (rangeHeader) {
+    if (isHtml(hit) || isCss(hit) || isJs(hit)) return null;
+    return await rangeFromEntry(hit, rangeHeader);
+  }
   return hit;
 }
 

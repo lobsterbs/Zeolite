@@ -332,3 +332,43 @@ describe("parent-relative route resolution (#101/#157)", () => {
   });
 });
 
+
+/* #202: the tail after a handle token never escapes the minted
+   origin. Separator-led and absolute tails are the honest null; a
+   "//" pathname survives only through builder-side percent
+   escaping. */
+describe("NAVH tail origin binding (#202)", () => {
+  it("rejects separator-led and absolute tails off the minted origin", () => {
+    setRouteKey(KEY_A);
+    const token = encodeNavHandle("https://site.example/")!;
+    expect(decodeNavHandlePath(token + "//evil.example/steal")).toBeNull();
+    expect(decodeNavHandlePath(token + "///evil.example/steal")).toBeNull();
+    expect(decodeNavHandlePath(token + "/\\evil.example/x")).toBeNull();
+    expect(decodeNavHandlePath(token + "/https://evil.example/x")).toBeNull();
+    expect(decodeNavHandlePath(token + "https://evil.example/x")).toBeNull();
+  });
+
+  it("round-trips a double-slash pathname via builder-side escaping", () => {
+    setRouteKey(KEY_A);
+    const url = buildNavHandleUrl("https://site.example//evil.example/x")!;
+    expect(url).not.toContain("//evil");
+    expect(decodeClientUrl(new URL("http://engine.example" + url))).toBe(
+      "https://site.example//evil.example/x",
+    );
+  });
+
+  it("keeps ordinary tails and documents the %2F trade", () => {
+    setRouteKey(KEY_A);
+    const token = encodeNavHandle("https://site.example/")!;
+    expect(decodeNavHandlePath(token + "/dir/page.html")).toBe(
+      "https://site.example/dir/page.html",
+    );
+    /* ponytail: a genuine "%2F"-initial path decodes to the "//"
+       form; the double-slash pathname is the real-world case. */
+    const url = buildNavHandleUrl("https://example.com/%2Ffoo")!;
+    expect(decodeClientUrl(new URL("http://engine.example" + url))).toBe(
+      "https://example.com//foo",
+    );
+  });
+});
+

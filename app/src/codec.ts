@@ -385,8 +385,22 @@ export function decodeNavHandlePath(tail: string): string | null {
   const dest = decodeNavHandle(token);
   if (dest === null) return null;
   if (rest === "") return dest;
+  /* #202: exactly one separator after the token. A "//" (or "\/")
+     tail reads protocol-relative under URL resolution and would
+     escape the minted origin. */
+  if (rest.startsWith("/") || rest.startsWith("\\")) return null;
   try {
-    return new URL(rest, dest.endsWith("/") ? dest : dest + "/").href;
+    const u = new URL(rest, dest.endsWith("/") ? dest : dest + "/");
+    /* #202: the handle binds to the minted origin; a tail resolving
+       anywhere else is the honest-null strand, never a guess. */
+    if (u.origin !== new URL(dest).origin) return null;
+    /* #202: builder-escaped surplus leading slashes (a "%2F" run
+       opening the path) restore to the real "//" pathname. */
+    u.pathname = u.pathname.replace(
+      /^\/((?:%2F)+)/,
+      (_all: string, run: string) => "/" + "/".repeat(run.length / 3),
+    );
+    return u.href;
   } catch {
     return null;
   }
@@ -426,7 +440,19 @@ export function buildNavHandleUrl(dest: string, ttlMs: number = NAVH_TTL_MS): st
   } catch {
     return null;
   }
-  return NAVH + "/" + token + (u.pathname === "/" ? "" : u.pathname) + u.search;
+  /* #202: surplus leading slashes are percent-escaped in the visible
+     path (decode restores them); a raw "//" after the token reads
+     protocol-relative on the decode side. ponytail: a genuine
+     "%2F"-initial path then round-trips to "//" - the double-slash
+     pathname is the real-world case, the %2F one pathological. */
+  const path =
+    u.pathname === "/"
+      ? ""
+      : u.pathname.replace(
+          /^(\/)(\/+)/,
+          (_s: string, one: string, rest: string) => one + "%2F".repeat(rest.length),
+        );
+  return NAVH + "/" + token + path + u.search;
 }
 
 /** Keyed per-origin site identity (#32 hardening on #55's key): a
