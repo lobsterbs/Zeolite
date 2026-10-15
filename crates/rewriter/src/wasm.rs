@@ -206,7 +206,6 @@ impl JsCssRewriter {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

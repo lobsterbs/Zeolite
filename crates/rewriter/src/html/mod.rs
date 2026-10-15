@@ -1252,9 +1252,9 @@ fn format_attr(name: &str, value: &str, quote: Option<char>) -> String {
     // or '"' let a decoded '>' re-open markup (XSS on the engine
     // origin). Quote on any character that can break the tag open,
     // and escape angle brackets on emit.
-    let needs_quote = value.chars().any(|c| {
-        c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | '=')
-    });
+    let needs_quote = value
+        .chars()
+        .any(|c| c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | '='));
     let quote = match quote {
         Some(q) => Some(q),
         None if needs_quote => Some('"'),
@@ -2544,7 +2544,11 @@ mod tests {
             r.process("<span title=x&gt;<img src=x onerror=alert(1)>>hi</span>"),
             r.finish()
         );
-        assert!(out.contains("title=\"x>&lt;img\""), "quoted and escaped: {}", out);
+        assert!(
+            out.contains("title=\"x>&lt;img\""),
+            "quoted and escaped: {},"
+            out
+        );
         assert!(!out.contains("title=x"), "unquoted again: {}", out);
         assert!(!out.contains("<img src=x"), "breakout: {}", out);
     }
@@ -2714,12 +2718,28 @@ mod tests {
         // decoded text, so matching and encoding must agree.
         let mut r = Rewriter::new(cfg());
         r.set_base("https://example.com/dir/page.html");
-        let a = format!("{}{}", r.process("<a href=\"https&colon;//t.example/a\">c</a>"), r.finish());
+        let a = format!(
+            "{}{}",
+            r.process("<a href=\"https&colon;//t.example/a\">c</a>"),
+            r.finish()
+        );
         assert_eq!(decoded_attr(&a, "href"), "https://t.example/a", "{}", a);
-        let b = format!("{}{}", r.process("<a href=\"/x&num;frag\">n</a>"), r.finish());
+        let b = format!(
+            "{}{}",
+            r.process("<a href=\"/x&num;frag\">n</a>"),
+            r.finish()
+        );
         assert!(b.contains("#frag"), "fragment client-side: {}", b);
-        assert!(b.contains(&cfg().encode_url("https://example.com/x")), "{}", b);
+        assert!(
+            b.contains(&cfg().encode_url("https://example.com/x")),
+            "{}",
+            b
+        );
         let c = format!("{}{}", r.process("<a href=\"/y&sol;z\">s</a>"), r.finish());
-        assert!(c.contains(&cfg().encode_url("https://example.com/y/z")), "{}", c);
+        assert!(
+            c.contains(&cfg().encode_url("https://example.com/y/z")),
+            "{}",
+            c
+        );
     }
 }

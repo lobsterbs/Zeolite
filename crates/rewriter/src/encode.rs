@@ -257,7 +257,10 @@ pub fn resolve(url: &str, base: &str) -> String {
     // The browser's URL parser does this before anything else;
     // skipping it meant rules and block lists matched a different
     // string than the one the fetch actually reaches.
-    let url: String = url.chars().filter(|c| !matches!(*c, '\t' | '\n' | '\r')).collect();
+    let url: String = url
+        .chars()
+        .filter(|c| !matches!(*c, '\t' | '\n' | '\r'))
+        .collect();
     let url = url.trim_matches(|c: char| c <= '\u{20}');
     if url.is_empty() || url.starts_with('#') {
         return url.to_string();
@@ -633,12 +636,18 @@ mod tests {
     #[test]
     fn whatwg_normalization_strips_tabs_and_newlines() {
         let b = "https://example.com/a/b/c.html";
-        assert_eq!(resolve("https://ex\nample.com/p", b), "https://example.com/p");
+        assert_eq!(
+            resolve("https://ex\nample.com/p", b),
+            "https://example.com/p"
+        );
         assert_eq!(
             resolve("https://ex\tample.com/p.png", b),
             "https://example.com/p.png"
         );
-        assert_eq!(resolve(" https://example.com/x ", b), "https://example.com/x");
+        assert_eq!(
+            resolve(" https://example.com/x ", b),
+            "https://example.com/x"
+        );
         assert_eq!(
             resolve("\u{0}\u{1}https://example.com/y", b),
             "https://example.com/y"

@@ -162,9 +162,8 @@ fn scan_sink(bytes: &[u8], i: &mut usize, out: &mut String, tlen: usize) {
     while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r') {
         j += 1;
     }
-    let is_write = j < bytes.len()
-        && bytes[j] == b'='
-        && (j + 1 >= bytes.len() || bytes[j + 1] != b'=');
+    let is_write =
+        j < bytes.len() && bytes[j] == b'=' && (j + 1 >= bytes.len() || bytes[j + 1] != b'=');
     if is_write {
         out.push_str("self.zl_antiframe");
         *i += tlen;
@@ -175,10 +174,7 @@ fn scan_sink(bytes: &[u8], i: &mut usize, out: &mut String, tlen: usize) {
         while k < bytes.len() && matches!(bytes[k], b' ' | b'\t' | b'\n' | b'\r') {
             k += 1;
         }
-        if k < bytes.len()
-            && bytes[k] == b'='
-            && (k + 1 >= bytes.len() || bytes[k + 1] != b'=')
-        {
+        if k < bytes.len() && bytes[k] == b'=' && (k + 1 >= bytes.len() || bytes[k + 1] != b'=') {
             out.push_str("self.zl_antiframe");
             *i += tlen + 5;
             return;
