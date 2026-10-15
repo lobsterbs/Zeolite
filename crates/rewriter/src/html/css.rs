@@ -118,7 +118,9 @@ fn scan(data: &str, enc: &dyn Fn(&str) -> String, final_scan: bool) -> (String, 
             {
                 return (out, Some(i));
             }
-            if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case("url(") {
+            // #178: compare BYTES - slicing &str at a fixed offset
+            // panics when a multibyte char straddles the cut.
+            if rest.len() >= 4 && rest.as_bytes()[..4].eq_ignore_ascii_case(b"url(") {
                 match scan_url(rest) {
                     UrlTok::Complete { inner, end } => {
                         push_url(&mut out, &data[i..i + end], inner, enc);
@@ -142,7 +144,7 @@ fn scan(data: &str, enc: &dyn Fn(&str) -> String, final_scan: bool) -> (String, 
             {
                 return (out, Some(i));
             }
-            if rest.len() >= 7 && rest[..7].eq_ignore_ascii_case("@import") {
+            if rest.len() >= 7 && rest.as_bytes()[..7].eq_ignore_ascii_case(b"@import") {
                 match scan_import(rest) {
                     ImportTok::Str { body, quote, end } => {
                         push_import(&mut out, body, quote, &rest[..end], enc);
@@ -655,5 +657,18 @@ mod tests {
         assert_eq!(out, css);
         // One-shot parity: the same complete input passes through too.
         assert_eq!(rewrite_stylesheet(css, &enc), css);
+    }
+
+    #[test]
+    fn multibyte_after_token_start_does_not_panic() {
+        // #178: the url(/@import prefix checks sliced &str at fixed
+        // byte offsets; a multibyte character straddling the cut
+        // panicked the wasm call. They must compare bytes.
+        let css = "a{u\u{1f600}rl(}b{@impo\u{1f600}rt}";
+        assert_eq!(rewrite_stylesheet(css, &enc), css);
+        let mut r = CssRewriter::new(Box::new(enc));
+        let mut out = r.process(css);
+        out.push_str(&r.finish());
+        assert_eq!(out, css);
     }
 }
