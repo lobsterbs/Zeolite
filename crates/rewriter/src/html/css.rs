@@ -118,7 +118,13 @@ fn scan(data: &str, enc: &dyn Fn(&str) -> String, final_scan: bool) -> (String, 
             {
                 return (out, Some(i));
             }
-            if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case("url(") {
+            // Compare bytes: slicing `str` panics when byte 4 falls inside
+            // a multibyte character (e.g. "u\u{e9}\u{e9}").
+            if rest
+                .as_bytes()
+                .get(..4)
+                .is_some_and(|p| p.eq_ignore_ascii_case(b"url("))
+            {
                 match scan_url(rest) {
                     UrlTok::Complete { inner, end } => {
                         push_url(&mut out, &data[i..i + end], inner, enc);
@@ -142,7 +148,11 @@ fn scan(data: &str, enc: &dyn Fn(&str) -> String, final_scan: bool) -> (String, 
             {
                 return (out, Some(i));
             }
-            if rest.len() >= 7 && rest[..7].eq_ignore_ascii_case("@import") {
+            if rest
+                .as_bytes()
+                .get(..7)
+                .is_some_and(|p| p.eq_ignore_ascii_case(b"@import"))
+            {
                 match scan_import(rest) {
                     ImportTok::Str { body, quote, end } => {
                         push_import(&mut out, body, quote, &rest[..end], enc);
@@ -527,6 +537,31 @@ mod tests {
     fn passthrough_no_url() {
         let out = rewrite_stylesheet("a{color:red}", &enc);
         assert_eq!(out, "a{color:red}");
+    }
+
+    /// Multibyte text where a fixed-width `str` slice (`rest[..4]`,
+    /// `rest[..7]`) would land inside a code point. Must not panic, and
+    /// must pass through unchanged (no url( or @import token).
+    #[test]
+    fn multibyte_at_token_prefix_does_not_panic() {
+        for css in [
+            "u\u{e9}\u{e9}{}",
+            "@impor\u{e9}{}",
+            "\u{e9}\u{e9}\u{e9}{color:red}",
+        ] {
+            assert_eq!(rewrite_stylesheet(css, &enc), css);
+            chunked_eq(css, &all_splits(css));
+        }
+    }
+
+    #[test]
+    fn url_after_multibyte_still_rewrites() {
+        let css = "\u{e9}{background:url(x.png)}";
+        assert_eq!(
+            rewrite_stylesheet(css, &enc),
+            "\u{e9}{background:url('[x.png]')}"
+        );
+        chunked_eq(css, &all_splits(css));
     }
 
     #[test]
