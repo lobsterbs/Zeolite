@@ -24,10 +24,13 @@ crates/zeolite-server/src/policy.rs is the single place that answers
   (including 169.254.169.254), unspecified, broadcast; IPv6 loopback,
   unique-local fc00::/7, link-local fe80::/10.
 
-Test escape hatch: `ZL_TEST_ALLOW_PRIVATE_DESTS=1` disables the
+Test escape hatch (#213): setting BOTH
+`ZL_TEST_ALLOW_PRIVATE_DESTS=1` and `ZL_TEST_EGRESS=1` disables the
 private-IP block so the nightly fixture origin (127.0.0.1) can be
-proxied. It is read only in the policy Default impl, exists solely
-for the compat suite, and must never be set in a production process.
+proxied. One variable alone changes nothing, so a single stray env
+var in a deployment can never open the relay into a private network.
+It is read only in the policy Default impl, exists solely for the
+compat suite, and must never be set in a production process.
 Local-name blocking stays on even with the hatch open.
 
 Re-audited at 3.0: unchanged, still the only gate. The engine has
@@ -428,7 +431,7 @@ that legacy-decodes to http(s); the list above is what it pins.
   restore the proxied page's own confinement headers and still
   function.
 - The compat-suite policy hatch exists; deployments must verify they
-  never export ZL_TEST_ALLOW_PRIVATE_DESTS.
+  never export ZL_TEST_ALLOW_PRIVATE_DESTS (or ZL_TEST_EGRESS).
 - Fingerprinting resistance is spoofing, not anonymity: timing,
   font and other unprofiled surfaces remain measurable.
 - The vendored transport's craigslist behavior (issue #11) is not a

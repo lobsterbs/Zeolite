@@ -64,8 +64,9 @@ server bound the 6002 default and died on bind with AddrInUse
 against the base server; three CI runs blamed the runner for
 squatting fixed ports before the flag was checked:
 
-- ssrf-private-blocked: started WITHOUT
-  ZL_TEST_ALLOW_PRIVATE_DESTS, a loopback CONNECT must be refused with
+- ssrf-private-blocked: started WITHOUT the hatch
+  (ZL_TEST_ALLOW_PRIVATE_DESTS + ZL_TEST_EGRESS), a loopback CONNECT
+  must be refused with
   close reason 0x48 (BLOCKED) and no relayed bytes (policy.rs resolves
   DNS first and validates every address before connecting).
 - auth-required-refusal: started with
@@ -103,6 +104,9 @@ zl:recordStop.
 
 The fixture origin is loopback, which the server's SSRF policy blocks
 by default. The compat job starts the main server with
-ZL_TEST_ALLOW_PRIVATE_DESTS=1 (crates/zeolite-server/src/policy.rs).
-This is a test escape hatch only; the production default stays fully
-locked down, and the ssrf-private-blocked row proves it on every run.
+ZL_TEST_ALLOW_PRIVATE_DESTS=1 and ZL_TEST_EGRESS=1
+(crates/zeolite-server/src/policy.rs). Both keys must be set for the
+hatch to open (#213), so one stray env var in a deployment disables
+nothing. This is a test escape hatch only; the production default
+stays fully locked down, and the ssrf-private-blocked row proves it
+on every run.

@@ -20,8 +20,9 @@
    escape gate, independent of CDP semantics.
 
    The engine's SSRF policy blocks loopback by default; the harness
-   starts zeolite-server with ZL_TEST_ALLOW_PRIVATE_DESTS=1 (the same
-   test-only hatch the compat job uses). */
+   starts zeolite-server with ZL_TEST_ALLOW_PRIVATE_DESTS=1 +
+   ZL_TEST_EGRESS=1 (the same two-key test-only hatch the compat job
+   uses). */
 
 import { createServer } from "node:http";
 import { gzipSync } from "node:zlib";

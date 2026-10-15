@@ -11,8 +11,8 @@
    - byte-exact relay of requests and responses (both directions),
    - upstream status preservation (301/302/307, 404, 500, cookies),
    - the SSRF policy: a second server started WITHOUT the
-     ZL_TEST_ALLOW_PRIVATE_DESTS escape hatch must refuse a loopback
-     CONNECT with close reason 0x48,
+     ZL_TEST_ALLOW_PRIVATE_DESTS + ZL_TEST_EGRESS escape hatch must
+     refuse a loopback CONNECT with close reason 0x48,
    - auth enforcement: a third server with ZL_WISP_USER /
      ZL_WISP_PASSWORD set must refuse a keyless client with 0xc2.
    Rewriting capabilities (html/css/js/url rewriting, opaque URLs,
@@ -25,8 +25,9 @@
    facts, never invented percentages.
 
    Usage: node suite/capabilities.mjs --base http://localhost:6002
-   (the base server must run with ZL_TEST_ALLOW_PRIVATE_DESTS=1 so it
-   may reach the loopback fixture; the two extra servers it spawns
+   (the base server must run with ZL_TEST_ALLOW_PRIVATE_DESTS=1 and
+   ZL_TEST_EGRESS=1 so it may reach the loopback fixture; the two
+   extra servers it spawns
    verify the opposite, production-default behaviors).
    Writes suite/capabilities.json and suite/capabilities.md. */
 
@@ -58,6 +59,7 @@ const LISTENING_RE = /listening on (\d+\.\d+\.\d+\.\d+):(\d+)/;
 const bareEnv = () => {
   const env = { ...process.env };
   delete env.ZL_TEST_ALLOW_PRIVATE_DESTS;
+  delete env.ZL_TEST_EGRESS;
   return env;
 };
 

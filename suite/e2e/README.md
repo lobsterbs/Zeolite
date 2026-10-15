@@ -9,7 +9,8 @@ browser-only failures survived CI.
 
 Launches a controlled Chromium (Playwright), starts zeolite-server
 serving `app/dist` on 127.0.0.1:6002 (with the test-only
-`ZL_TEST_ALLOW_PRIVATE_DESTS=1` SSRF hatch, same as the compat job) and
+`ZL_TEST_ALLOW_PRIVATE_DESTS=1` + `ZL_TEST_EGRESS=1` SSRF hatch
+(#213), same as the compat job) and
 two deterministic fixture origins on 127.0.0.1:7101/7102, then loads
 fixture pages through `/?url=<target>` and asserts:
 

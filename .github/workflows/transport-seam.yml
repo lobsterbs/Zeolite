@@ -168,7 +168,7 @@ jobs:
       - name: Epoxy diag leg (real full bundle against a live server)
         run: |
           cargo build -p zeolite-server --release
-          ZL_TEST_ALLOW_PRIVATE_DESTS=1 PORT=6002 ./target/release/zeolite-server > server.log 2>&1 &
+          ZL_TEST_ALLOW_PRIVATE_DESTS=1 ZL_TEST_EGRESS=1 PORT=6002 ./target/release/zeolite-server > server.log 2>&1 &
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6002/)
             if [ "$code" != "000" ]; then echo "server up (http $code) after ${i}s"; break; fi

@@ -314,6 +314,10 @@ pub struct Config {
     pub password: Option<(String, String)>,
     /// Hex-encoded Ed25519 verifying key for wisp key auth (0x03).
     pub key_hex: Option<String>,
+    /// Identity a key-auth client must send with its signature
+    /// (#211). Configurable (ZL_WISP_KEY_USER / kdl `key_user`),
+    /// default "user" so existing clients keep working.
+    pub key_user: String,
     /// Origins allowed to open the wisp WebSocket (cross-site
     /// hijacking guard). Empty = default policy: requests without an
     /// Origin header (non-browser clients) pass, and a browser Origin
@@ -346,6 +350,7 @@ impl Default for Config {
             motd: None,
             password: None,
             key_hex: None,
+            key_user: "user".into(),
             allowed_origins: Vec::new(),
             frame_ancestors: None,
         }
@@ -391,9 +396,12 @@ fn auth_config(
         }
     };
     if let Some(k) = &key_hex {
-        if k.len() != 64 || hex_decode(k).is_none() {
+        // Decode AND curve-validate here (#212): from_bytes used to run
+        // once per session, so an invalid public point made every
+        // session fail closed silently instead of stopping the server.
+        if k.len() != 64 || key_from_hex(k).is_none() {
             return Err(format!(
-                "ZL_WISP_ED25519_HEX must be 64 hex characters (got {}); refusing to start",
+                "ZL_WISP_ED25519_HEX must be 64 hex characters decoding to a valid Ed25519 verifying key (got {}); refusing to start",
                 k.len()
             ));
         }
@@ -471,6 +479,11 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| cfg.key_hex.clone());
+        if let Ok(v) = std::env::var("ZL_WISP_KEY_USER") {
+            if !v.is_empty() {
+                cfg.key_user = v;
+            }
+        }
         let (password, key_hex) = auth_config(user, pass, key)?;
         cfg.password = password;
         cfg.key_hex = key_hex;
@@ -492,6 +505,7 @@ impl Config {
         let mut cfg = Self::default();
         let mut password = None;
         let mut key_hex = None;
+        let mut key_user = None;
         for node in doc.nodes() {
             match node.name().value() {
                 "bind" => cfg.bind = kdl_string(node, "bind")?,
@@ -527,6 +541,7 @@ impl Config {
                     let user = kdl_auth_field(node, "user");
                     let pass = kdl_auth_field(node, "password");
                     let key = kdl_auth_field(node, "key_hex");
+                    key_user = kdl_auth_field(node, "key_user");
                     let (pw, k) = auth_config(user, pass, key)?;
                     password = pw;
                     key_hex = k;
@@ -536,6 +551,9 @@ impl Config {
         }
         cfg.password = password;
         cfg.key_hex = key_hex;
+        if let Some(ku) = key_user {
+            cfg.key_user = ku;
+        }
         Ok(cfg)
     }
 }
@@ -956,12 +974,15 @@ fn key_from_hex(hex: &str) -> Option<ed25519_dalek::VerifyingKey> {
 }
 
 fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
+    let b = hex.as_bytes();
+    if !b.len().is_multiple_of(2) {
         return None;
     }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+    // Byte-sliced chunks, never str slicing: `&hex[i..i + 2]` panicked
+    // on a non-ASCII value that split a UTF-8 sequence (#212). A
+    // chunk that is not valid UTF-8, or not hex, is simply None.
+    b.chunks(2)
+        .map(|c| u8::from_str_radix(std::str::from_utf8(c).ok()?, 16).ok())
         .collect()
 }
 
@@ -1068,7 +1089,7 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
         .key_hex
         .as_deref()
         .and_then(key_from_hex)
-        .map(|vk| KeyAuth::new(true, vec![("user".into(), vk)]));
+        .map(|vk| KeyAuth::new(true, vec![(shared.cfg.key_user.clone(), vk)]));
     let mut server_exts: Vec<(ExtensionId, Vec<u8>)> = vec![(ExtensionId::Udp, Vec::new())];
     if let Some(m) = &shared.cfg.motd {
         server_exts.push((ExtensionId::Motd, motd_server(m)));
@@ -1647,6 +1668,90 @@ async fn spawn_tcp_relay(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+// ponytail: a params struct buys nothing here; the task closure owned these ten values before the extraction
+/// One UDP relay stream: pump datagrams between the connected socket
+/// and the wisp session. Extracted from the spawn task (#209/#210) so
+/// the error and budget semantics are unit-testable.
+async fn udp_relay_loop(
+    sock: UdpSocket,
+    ws_tx: mpsc::Sender<Message>,
+    mut input_rx: mpsc::Receiver<Vec<u8>>,
+    stream_id: u32,
+    bytes_ctr: Arc<AtomicU64>,
+    pkt_ctr: Arc<AtomicU64>,
+    la: Arc<Mutex<Instant>>,
+    max_dgram: usize,
+    max_bytes: u64,
+    max_packets: u64,
+) {
+    let mut buf = vec![0u8; max_dgram];
+    loop {
+        tokio::select! {
+            r = sock.recv(&mut buf) => match r {
+                // Bug-scout fix: a zero-length datagram is legal
+                // UDP and tokio surfaces it as Ok(0); it must not
+                // end the stream.
+                Ok(0) => continue,
+                // #209: a connected UDP socket reports ECONNREFUSED
+                // on Linux when an ICMP port-unreachable arrives; the
+                // datagram is lost, the destination is not dead.
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => continue,
+                Err(_) => break,
+                Ok(n) => {
+                    // #210: enforce the budget per datagram, not
+                    // only in the 5 s sweep; over-budget datagrams
+                    // are dropped and the stream stays open.
+                    if bytes_ctr.load(Ordering::Relaxed) > max_bytes
+                        || pkt_ctr.load(Ordering::Relaxed) > max_packets
+                    {
+                        continue;
+                    }
+                    // 1 wisp DATA payload = 1 UDP datagram, always.
+                    // No CONTINUE is ever sent for UDP streams.
+                    let data = Packet::Data {
+                        stream_id,
+                        payload: buf[..n].to_vec(),
+                    };
+                    if send_packet(&ws_tx, &data).await.is_err() {
+                        break;
+                    }
+                    bytes_ctr.fetch_add(n as u64, Ordering::Relaxed);
+                    pkt_ctr.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut t) = la.lock() {
+                        *t = Instant::now();
+                    }
+                }
+            },
+            m = input_rx.recv() => match m {
+                Some(dgram) => {
+                    if dgram.len() > max_dgram
+                        || bytes_ctr.load(Ordering::Relaxed) > max_bytes
+                        || pkt_ctr.load(Ordering::Relaxed) > max_packets
+                    {
+                        continue;
+                    }
+                    // #209: ECONNREFUSED here is datagram loss too
+                    // (a pending ICMP error can surface on send).
+                    match sock.send(&dgram).await {
+                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                            continue;
+                        }
+                        Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    bytes_ctr.fetch_add(dgram.len() as u64, Ordering::Relaxed);
+                    pkt_ctr.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut t) = la.lock() {
+                        *t = Instant::now();
+                    }
+                }
+                None => break,
+            },
+        }
+    }
+}
+
 async fn spawn_udp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname: String) {
     let shared = sess.shared.clone();
     let ws_tx = sess.ws_tx.clone();
@@ -1721,54 +1826,19 @@ async fn spawn_udp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname
             return;
         }
         tracing::info!(stream_id, host, port, "udp stream opened");
-        let mut input_rx = input_rx;
-        let mut buf = vec![0u8; max_dgram];
-        loop {
-            tokio::select! {
-                r = sock.recv(&mut buf) => match r {
-                    // Bug-scout fix: a zero-length datagram is legal
-                    // UDP and tokio surfaces it as Ok(0); it must not
-                    // end the stream.
-                    Ok(0) => continue,
-                    Err(_) => break,
-                    Ok(n) => {
-                        // 1 wisp DATA payload = 1 UDP datagram, always.
-                        // No CONTINUE is ever sent for UDP streams.
-                        let data = Packet::Data {
-                            stream_id,
-                            payload: buf[..n].to_vec(),
-                        };
-                        if send_packet(&ws_tx, &data).await.is_err() {
-                            break;
-                        }
-                        bytes_ctr.fetch_add(n as u64, Ordering::Relaxed);
-                        pkt_ctr.fetch_add(1, Ordering::Relaxed);
-                        if let Ok(mut t) = la.lock() {
-                            *t = Instant::now();
-                        }
-                    }
-                },
-                m = input_rx.recv() => match m {
-                    Some(dgram) => {
-                        if dgram.len() > max_dgram
-                            || bytes_ctr.load(Ordering::Relaxed) > max_bytes
-                            || pkt_ctr.load(Ordering::Relaxed) > max_packets
-                        {
-                            continue;
-                        }
-                        if sock.send(&dgram).await.is_err() {
-                            break;
-                        }
-                        bytes_ctr.fetch_add(dgram.len() as u64, Ordering::Relaxed);
-                        pkt_ctr.fetch_add(1, Ordering::Relaxed);
-                        if let Ok(mut t) = la.lock() {
-                            *t = Instant::now();
-                        }
-                    }
-                    None => break,
-                },
-            }
-        }
+        udp_relay_loop(
+            sock,
+            ws_tx.clone(),
+            input_rx,
+            stream_id,
+            bytes_ctr,
+            pkt_ctr,
+            la,
+            max_dgram,
+            max_bytes,
+            max_packets,
+        )
+        .await;
         let _ = send_packet(
             &ws_tx,
             &Packet::Close {
@@ -1854,12 +1924,64 @@ mod tests {
         assert_eq!(percent_decode("/plain"), "/plain");
     }
 
+    /// #211: the key-auth identity follows cfg.key_user, and a client
+    /// sending any other username is refused even with a valid key.
+    #[test]
+    fn keyauth_identity_is_configurable() {
+        use ed25519_dalek::{Signature, Signer, SigningKey};
+        let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+        let vk = ed25519_dalek::VerifyingKey::from(&sk);
+        let cfg = Config {
+            key_user: "ada".into(),
+            key_hex: Some(vk.as_bytes().iter().map(|b| format!("{b:02x}")).collect()),
+            ..Default::default()
+        };
+        let sh = Shared::new(cfg);
+        let ka = KeyAuth::new(true, vec![(sh.cfg.key_user.clone(), vk)]);
+        let mut chal = ka.info_metadata();
+        let challenge = chal.split_off(2); // [required][algorithms][challenge]
+        let sig: Signature = sk.sign(&challenge);
+        let mut h = sha2::Sha256::new();
+        sha2::Digest::update(&mut h, vk.as_bytes());
+        let key_hash = sha2::Digest::finalize(h);
+        let payload_for = |user: &str| {
+            let mut p = Vec::new();
+            p.push(user.len() as u8);
+            p.extend_from_slice(user.as_bytes());
+            p.push(0b0000_0001); // ED25519
+            p.extend_from_slice(&key_hash);
+            p.extend_from_slice(&sig.to_bytes());
+            p
+        };
+        assert!(matches!(
+            check_auth(
+                &sh,
+                Some(&ka),
+                &[(ExtensionId::KeyAuth, payload_for("ada"))]
+            ),
+            AuthState::Ok
+        ));
+        // The old hard-coded identity no longer satisfies the policy.
+        assert!(matches!(
+            check_auth(
+                &sh,
+                Some(&ka),
+                &[(ExtensionId::KeyAuth, payload_for("user"))]
+            ),
+            AuthState::Reject(CloseReason::AuthBadSignature)
+        ));
+    }
+
     #[test]
     fn hex_decode_basics() {
         assert_eq!(hex_decode("00ff").unwrap(), vec![0u8, 255u8]);
         assert_eq!(hex_decode("0f").unwrap(), vec![15u8]);
         assert!(hex_decode("f").is_none()); // odd length
         assert!(hex_decode("zz").is_none());
+        // Non-ASCII input must parse to None, never panic (#212): the
+        // old str-sliced version panicked on a split UTF-8 sequence.
+        assert!(hex_decode("££").is_none());
+        assert!(hex_decode("🦀").is_none());
     }
 
     #[test]
@@ -2304,38 +2426,22 @@ mod tests {
         let la = Arc::new(Mutex::new(Instant::now()));
         let bc = bytes_ctr.clone();
         let pc = pkt_ctr.clone();
-        let lam = la.clone();
-        let max_dgram = 4096usize;
         let relay = tokio::spawn(async move {
-            let mut input_rx = input_rx;
-            let mut buf = vec![0u8; max_dgram];
-            loop {
-                tokio::select! {
-                    r = sock.recv(&mut buf) => match r {
-                        Ok(0) => continue,
-                        Err(_) => break,
-                        Ok(n) => {
-                            let data = Packet::Data { stream_id, payload: buf[..n].to_vec() };
-                            if send_packet(&ws_tx, &data).await.is_err() {
-                                break;
-                            }
-                            bc.fetch_add(n as u64, Ordering::Relaxed);
-                            pc.fetch_add(1, Ordering::Relaxed);
-                            if let Ok(mut t) = lam.lock() { *t = Instant::now(); }
-                        }
-                    },
-                    m = input_rx.recv() => match m {
-                        Some(dgram) => {
-                            if dgram.len() > max_dgram { continue; }
-                            if sock.send(&dgram).await.is_err() { break; }
-                            bc.fetch_add(dgram.len() as u64, Ordering::Relaxed);
-                            pc.fetch_add(1, Ordering::Relaxed);
-                            if let Ok(mut t) = lam.lock() { *t = Instant::now(); }
-                        }
-                        None => break,
-                    },
-                }
-            }
+            // The real loop, not a copy: the #209/#210 semantics live
+            // in udp_relay_loop and must stay under test.
+            udp_relay_loop(
+                sock,
+                ws_tx,
+                input_rx,
+                stream_id,
+                bc,
+                pc,
+                la,
+                4096,
+                16 * 1024 * 1024,
+                50_000,
+            )
+            .await
         });
 
         // Two datagrams in, two datagrams out; boundaries preserved.
@@ -2366,6 +2472,114 @@ mod tests {
         // The counter is bidirectional: 3 client->upstream datagrams
         // (one of them zero-length) plus the 2 echoed back.
         assert_eq!(pkt_ctr.load(Ordering::Relaxed), 5);
+        relay.abort();
+        echo_task.abort();
+    }
+
+    /// #209: an ICMP port-unreachable (ECONNREFUSED on the connected
+    /// socket) is datagram loss, not stream death.
+    #[tokio::test]
+    async fn udp_relay_survives_econnrefused() {
+        // A loopback port that is closed right now.
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let closed = probe.local_addr().unwrap();
+        drop(probe);
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.connect(closed).await.unwrap();
+        let (ws_tx, mut ws_rx) = mpsc::channel::<Message>(16);
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(8);
+        let relay = tokio::spawn(async move {
+            udp_relay_loop(
+                sock,
+                ws_tx,
+                input_rx,
+                7,
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(Mutex::new(Instant::now())),
+                4096,
+                16 * 1024 * 1024,
+                50_000,
+            )
+            .await
+        });
+        // Nobody listens on that port, so the ICMP error lands on the
+        // next recv; the relay must drop it and stay alive.
+        input_tx.send(vec![1, 2, 3]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !relay.is_finished(),
+            "ECONNREFUSED must be datagram loss, not stream death (#209)"
+        );
+        assert!(ws_rx.try_recv().is_err(), "nothing was echoed");
+        relay.abort();
+    }
+
+    /// #210: the budget is enforced in the recv arm, not only in the
+    /// 5 s sweep. A double echo over the packet budget yields exactly
+    /// one forwarded DATA; the second reply is dropped, stream alive.
+    #[tokio::test]
+    async fn udp_relay_enforces_budget_in_recv_arm() {
+        // Echoes every datagram twice.
+        let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let eaddr = echo.local_addr().unwrap();
+        let echo_task = tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let (n, from) = match echo.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                if echo.send_to(&buf[..n], from).await.is_err() {
+                    break;
+                }
+                if echo.send_to(&buf[..n], from).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.connect(eaddr).await.unwrap();
+        let (ws_tx, mut ws_rx) = mpsc::channel::<Message>(16);
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(8);
+        let relay = tokio::spawn(async move {
+            udp_relay_loop(
+                sock,
+                ws_tx,
+                input_rx,
+                9,
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(AtomicU64::new(0)),
+                Arc::new(Mutex::new(Instant::now())),
+                4096,
+                16 * 1024 * 1024,
+                1, // one relayed datagram, then over budget
+            )
+            .await
+        });
+        input_tx.send(vec![7]).await.unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("closed");
+        let bin = match msg {
+            Message::Binary(b) => b,
+            other => panic!("expected binary, got {other:?}"),
+        };
+        let mut buf = BytesMut::from(&bin[..]);
+        let frame = Frame::decode(&mut buf).unwrap().unwrap();
+        match frame.parse_packet().unwrap() {
+            Packet::Data { payload, .. } => assert_eq!(payload, vec![7]),
+            other => panic!("expected DATA, got {other:?}"),
+        }
+        // The doubled reply: the first rides within the budget, the
+        // second is over it and must be dropped in the recv arm.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            ws_rx.try_recv().is_err(),
+            "over-budget datagram must be dropped, not relayed (#210)"
+        );
+        assert!(!relay.is_finished(), "a drop is not stream death");
         relay.abort();
         echo_task.abort();
     }
@@ -2704,6 +2918,14 @@ mod tests {
         // A malformed key is a hard error, whatever its length.
         assert!(auth_config(None, None, Some("zz".into())).is_err());
         assert!(auth_config(None, None, Some("g".repeat(64))).is_err());
+        // 64 valid hex chars that are not a curve point are a hard
+        // error too: from_bytes must run at startup (#212).
+        let mut bad = [0xffu8; 32];
+        while ed25519_dalek::VerifyingKey::from_bytes(&bad).is_ok() {
+            bad[0] = bad[0].wrapping_add(1);
+        }
+        let bad_hex: String = bad.iter().map(|b| format!("{b:02x}")).collect();
+        assert!(auth_config(None, None, Some(bad_hex)).is_err());
         // Valid shapes.
         let (pw, key) = auth_config(
             Some("ada".into()),
@@ -2736,7 +2958,7 @@ mod tests {
              motd \"hi\"\n\
              allowed_origins \"https://a.example\" \"https://b.example\"\n\
              frame_ancestors \"https://host.example\"\n\
-             auth user=\"ada\" password=\"pw\" key_hex=\"{key}\"\n",
+             auth user=\"ada\" password=\"pw\" key_hex=\"{key}\" key_user=\"ada\"\n",
             key = "00".repeat(32)
         );
         let cfg = Config::from_kdl(&text).unwrap();
@@ -2761,6 +2983,7 @@ mod tests {
         assert_eq!(cfg.frame_ancestors.as_deref(), Some("https://host.example"));
         assert_eq!(cfg.password.unwrap().0, "ada");
         assert_eq!(cfg.key_hex, Some("00".repeat(32)));
+        assert_eq!(cfg.key_user, "ada");
     }
 
     #[test]

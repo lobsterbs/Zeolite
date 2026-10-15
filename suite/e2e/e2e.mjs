@@ -192,8 +192,10 @@ async function startEngine() {
     env: {
       ...process.env,
       /* Test-only SSRF hatch: the engine may reach the loopback
-         fixture origins. Same escape the compat job uses. */
+         fixture origins. Same two-key escape the compat job uses
+         (#213: one variable alone must never disable the policy). */
       ZL_TEST_ALLOW_PRIVATE_DESTS: "1",
+      ZL_TEST_EGRESS: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

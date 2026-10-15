@@ -37,13 +37,14 @@ jobs:
       - name: Build zeolite-server
         run: cargo build -p zeolite-server --release
       - name: Start zeolite-server
-        # ZL_TEST_ALLOW_PRIVATE_DESTS=1: the test-only policy escape
-        # hatch (crates/zeolite-server/src/policy.rs), same as the
+        # ZL_TEST_ALLOW_PRIVATE_DESTS=1 + ZL_TEST_EGRESS=1: the
+        # two-key test-only policy escape hatch
+        # (crates/zeolite-server/src/policy.rs, #213), same as the
         # nightly compat suite. The epoxy leg fixtures live on
         # loopback, so the wisp relay must reach 127.0.0.1 during the
         # gate run only.
         run: |
-          ZL_TEST_ALLOW_PRIVATE_DESTS=1 PORT=6002 ./target/release/zeolite-server > server.log 2>&1 &
+          ZL_TEST_ALLOW_PRIVATE_DESTS=1 ZL_TEST_EGRESS=1 PORT=6002 ./target/release/zeolite-server > server.log 2>&1 &
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6002/)
             if [ "$code" != "000" ]; then

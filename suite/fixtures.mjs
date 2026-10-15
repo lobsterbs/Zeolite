@@ -12,8 +12,9 @@
 
    The engine's SSRF policy blocks loopback destinations by default;
    the nightly compat job starts zeolite-server with
-   ZL_TEST_ALLOW_PRIVATE_DESTS=1 (a test-only escape hatch in
-   crates/zeolite-server/src/policy.rs) so these fixtures can be
+   ZL_TEST_ALLOW_PRIVATE_DESTS=1 + ZL_TEST_EGRESS=1 (a two-key
+   test-only escape hatch in crates/zeolite-server/src/policy.rs)
+   so these fixtures can be
    proxied. Production default stays strict. */
 
 import { createServer } from "node:http";

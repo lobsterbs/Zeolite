@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import {
+  b64uDecode,
   b64uEncode,
   encodeDest,
   encodeDestLegacy,
@@ -196,6 +197,19 @@ describe("keyed opaque routes (issue #55)", () => {
     // A key that is not 16 bytes degrades to legacy, never half-keyed.
     setRouteKey(b64uEncode(new Uint8Array(8)));
     expect(encodeDest(DEST)).toBe(encodeDestLegacy(DEST));
+  });
+
+  it("still rejects a token whose last MAC byte differs (#203 fold, not early exit)", () => {
+    /* The MAC check now folds all 16 bytes before deciding (#203);
+       the rejection behavior must be identical, including for a
+       single-byte mismatch at the very last IV position. */
+    setRouteKey(KEY);
+    const raw = b64uDecode(PINNED.slice(3));
+    expect(raw).not.toBeNull();
+    raw![16] ^= 1; // the 16th and last IV byte
+    const tampered = "/j/" + b64uEncode(raw!);
+    expect(tampered).not.toBe(PINNED);
+    expect(decodePath(tampered)).toBeNull();
   });
 
   it("legacy tails always decode, keyed or not (dual decode)", () => {

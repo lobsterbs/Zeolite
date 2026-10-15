@@ -393,10 +393,11 @@ jobs:
         # not a bare checkout - the first ever compat run died there).
         run: |
           cargo build -p zeolite-server --release
-          # ZL_TEST_ALLOW_PRIVATE_DESTS=1: test-only policy escape hatch
-          # so the engine may reach the local fixture origin. The
-          # default policy stays fully locked down.
-          ZL_TEST_ALLOW_PRIVATE_DESTS=1 ./target/release/zeolite-server --port 6002 &
+          # ZL_TEST_ALLOW_PRIVATE_DESTS=1 + ZL_TEST_EGRESS=1: the
+          # two-key test-only policy escape hatch (#213) so the engine
+          # may reach the local fixture origin. One stray variable
+          # alone disables nothing; the default stays locked down.
+          ZL_TEST_ALLOW_PRIVATE_DESTS=1 ZL_TEST_EGRESS=1 ./target/release/zeolite-server --port 6002 &
           sleep 2
           node suite/probe.mjs --base http://localhost:6002
           node suite/capabilities.mjs --base http://localhost:6002

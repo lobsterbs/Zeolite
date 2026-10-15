@@ -12,7 +12,8 @@
 //! address), 192.0.0.0/24 (Oracle metadata lives there), the TEST-NET
 //! blocks, benchmarking 198.18.0.0/15, reserved 240.0.0.0/4, IPv6
 //! unique-local fc00::/7, link-local fe80::/10, site-local fec0::/10,
-//! multicast ff00::/8, documentation 2001:db8::/32, Teredo 2001::/32
+//! multicast ff00::/8, documentation 2001:db8::/32, Teredo 2001::/32,
+//! local-use NAT64 64:ff9b:1::/48 (issue #197)
 //! and, critically, every IPv4 address embedded in an IPv6 form
 //! (mapped ::ffff:0:0/96, compatible ::/96, NAT64 64:ff9b::/96, 6to4
 //! 2002::/16): a dual-stack socket routes those to the embedded IPv4,
@@ -38,12 +39,19 @@ pub struct DestinationPolicy {
 
 impl Default for DestinationPolicy {
     fn default() -> Self {
-        // Test escape hatch ONLY: the nightly compat suite runs the
-        // engine against a fixture origin on 127.0.0.1. Production
-        // must never set this; the default stays fully locked down.
+        // Test escape hatch ONLY, and it takes BOTH variables (#213):
+        // the in-repo harnesses (compat/e2e/diag jobs) set
+        // ZL_TEST_ALLOW_PRIVATE_DESTS=1 together with ZL_TEST_EGRESS=1
+        // so the engine may reach fixture origins on 127.0.0.1.
+        // Requiring the second key means one stray env var in a
+        // deployment disables nothing; the default stays fully locked
+        // down.
         let test_private = std::env::var("ZL_TEST_ALLOW_PRIVATE_DESTS")
             .map(|v| v == "1")
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && std::env::var("ZL_TEST_EGRESS")
+                .map(|v| v == "1")
+                .unwrap_or(false);
         Self {
             block_local_names: true,
             block_private_ips: !test_private,
@@ -132,6 +140,10 @@ fn v6_blocked(v6: &Ipv6Addr) -> bool {
         || (s[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
         || (s[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
         || (s[0] & 0xffc0) == 0xfec0 // site-local fec0::/10
+        // RFC 8215 local-use NAT64 64:ff9b:1::/48 (#197): unlike the
+        // well-known 64:ff9b::/96 there is no embedded-v4 decode for
+        // it here, so it is blocked outright.
+        || (s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0x0001)
         || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation 2001:db8::/32
         || (s[0] == 0x2001 && s[1] == 0x0000) // Teredo 2001::/32
 }
@@ -230,6 +242,9 @@ mod tests {
             "::0.0.0.2",              // compatible form, 0.0.0.0/8
             "64:ff9b::7f00:1",        // NAT64 embedding 127.0.0.1
             "64:ff9b::a00:1",         // NAT64 embedding 10.0.0.1
+            "64:ff9b:1::7f00:1",      // RFC 8215 local-use NAT64 (#197)
+            "64:ff9b:1::808:808",     // RFC 6052 layout would embed 8.8.8.8: blocked outright
+            "64:ff9b:1::",            // the prefix itself
             "2002:7f00:1::",          // 6to4 embedding 127.0.0.1
             "2002:a00:1::",           // 6to4 embedding 10.0.0.1
             "ff02::1",                // multicast

@@ -143,6 +143,7 @@ async function startEngine() {
     env: {
       ...process.env,
       ZL_TEST_ALLOW_PRIVATE_DESTS: "1",
+      ZL_TEST_EGRESS: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

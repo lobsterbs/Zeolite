@@ -36,7 +36,7 @@
    is replaced by the live fixture's loopback host:port (started on a
    random loopback port), so the checked-in session stays
    port-independent. Requires the engine to allow loopback upstreams
-   (ZL_TEST_ALLOW_PRIVATE_DESTS=1, compat job only). */
+   (ZL_TEST_ALLOW_PRIVATE_DESTS=1 + ZL_TEST_EGRESS=1, compat job only). */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { Buffer } from "node:buffer";

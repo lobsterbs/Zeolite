@@ -217,6 +217,15 @@ function destMac(key: Uint8Array, dest: Uint8Array, dom: number): Uint8Array {
   return u64le(siphash24(key, concatBytes(dest, new Uint8Array([dom]))));
 }
 
+/** Constant-time MAC check (#203): fold all 16 bytes into one diff
+    instead of early-exiting on the first mismatched byte. */
+function macEquals(key: Uint8Array, data: Uint8Array, iv: Uint8Array): boolean {
+  const mac = concatBytes(destMac(key, data, 1), destMac(key, data, 2));
+  let diff = 0;
+  for (let i = 0; i < 16; i++) diff |= mac[i] ^ iv[i];
+  return diff === 0;
+}
+
 /** Mint a v1 keyed token: 0x01 || IV(16) || dest XOR keystream. */
 function keyedToken(key: Uint8Array, dest: string): Uint8Array {
   const d = ENC.encode(dest);
@@ -257,7 +266,7 @@ function keyedPayload(key: Uint8Array | null, bytes: Uint8Array): string | null 
   } catch {
     return null;
   }
-  if (concatBytes(destMac(key, d, 1), destMac(key, d, 2)).some((b, i) => b !== iv[i])) {
+  if (!macEquals(key, d, iv)) {
     return null;
   }
   return payload;
@@ -542,9 +551,7 @@ export function recoverPath(path: string): string | null {
     for (let L = 23; L <= maxL; L++) {
       if (L % 4 === 1) continue; // never a full b64u token boundary
       const cand = d.slice(0, ((3 * L) >> 2) - 17);
-      if (
-        concatBytes(destMac(key, cand, 1), destMac(key, cand, 2)).some((b, j) => b !== iv[j])
-      ) {
+      if (!macEquals(key, cand, iv)) {
         continue;
       }
       let dest: string;

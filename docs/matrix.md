@@ -47,7 +47,7 @@ the test suite, not what would be nice to have. Statuses:
 | Opt-in rewrite tracing | supported | 512-decision ring, zero allocation while off. Token-level wasm decisions untraced. |
 | Network inspector | supported | 256-entry ring with delta polling. fetch() and XHR are not distinguishable without initiator info; both reported as FETCH. |
 | Diagnostics | supported | 512 events, 256 trace references, one trace ID per request, secrets redacted on entry. |
-| SSRF/destination protection | supported | One policy: local names blocked pre-DNS, every resolved IP re-checked pre-connect (rebinding-safe); loopback/private/link-local/metadata/unspecified/broadcast and IPv6 ULA/link-local blocked. Test-only ZL_TEST_ALLOW_PRIVATE_DESTS=1 escape hatch must never be set in production. |
+| SSRF/destination protection | supported | One policy: local names blocked pre-DNS, every resolved IP re-checked pre-connect (rebinding-safe); loopback/private/link-local/metadata/unspecified/broadcast and IPv6 ULA/link-local blocked. Test-only two-key escape hatch (ZL_TEST_ALLOW_PRIVATE_DESTS=1 + ZL_TEST_EGRESS=1, #213) must never be set in production. |
 | WebExtension compatibility | partial | Real runtime for content scripts, storage, tabs, messaging, alarms, permissions, webNavigation, webRequest, management. Some APIs, true isolated worlds and true extension service workers remain partial (see README limitations). |
 | SPA routing | supported | Client-runtime; covered by app unit tests, honestly not probeable by the HTTP compat suite (marked client-runtime in the scoreboard). |
 

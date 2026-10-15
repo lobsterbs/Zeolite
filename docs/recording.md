@@ -82,7 +82,8 @@ With `--fixture`, the token `%FIXTURE%` in recorded destination URLs is
 replaced by a live deterministic fixture origin (started on a random
 loopback port), so the checked-in session stays port-independent.
 Reaching a loopback upstream requires starting zeolite-server with
-`ZL_TEST_ALLOW_PRIVATE_DESTS=1`, a test-only escape hatch in
+`ZL_TEST_ALLOW_PRIVATE_DESTS=1` and `ZL_TEST_EGRESS=1`, a test-only
+escape hatch in
 `crates/zeolite-server/src/policy.rs`. The default SSRF policy blocks
 loopback and private destinations and must stay that way in
 production.
