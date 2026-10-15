@@ -2762,4 +2762,37 @@ mod tests {
             c
         );
     }
+
+    /// Streaming invariant: splitting the input at any char boundary
+    /// must rewrite to the same bytes as one chunk. Returns the
+    /// one-shot output for further assertions.
+    fn assert_split_invariant(input: &str) -> String {
+        let mut whole = Rewriter::new(cfg());
+        whole.set_base("https://example.com/");
+        let mut one = whole.process(input);
+        one.push_str(&whole.finish());
+        for i in (0..=input.len()).filter(|&i| input.is_char_boundary(i)) {
+            let mut r = Rewriter::new(cfg());
+            r.set_base("https://example.com/");
+            let mut out = r.process(&input[..i]);
+            out.push_str(&r.process(&input[i..]));
+            out.push_str(&r.finish());
+            assert_eq!(out, one, "split at byte {}", i);
+        }
+        one
+    }
+
+    #[test]
+    fn multibyte_comment_every_split_matches_one_shot() {
+        // #177: the retained comment tail cuts on a char boundary
+        // wherever the chunk ends; no split may panic or change bytes.
+        let out = assert_split_invariant(
+            "<!-- \u{20ac} middle --> tail<img src=\"https://t.example/p.gif\">",
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/p.gif")),
+            "{}",
+            out
+        );
+    }
 }
