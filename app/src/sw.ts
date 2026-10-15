@@ -20,6 +20,7 @@
      zl:downloadState id status | zl:listMenus extId
      zl:loadState host (loading indicator poll)
      zl:relayRegister port (embedder fetch relay, #137)
+     zl:wispRegister url (public wisp endpoint for route "wisp", #168)
 
    Host-only gate (#41): proxied pages are SW clients too, so
    control messages are host-only; a proxied document may send only

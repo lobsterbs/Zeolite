@@ -48,6 +48,13 @@ describe("compilePolicy", () => {
     expect(p.rules[0]).toMatchObject({ id: "r", priority: 2, route: "relay" });
   });
 
+  /* #168: route "wisp" rides the engine's own wisp transport through
+     the public endpoint the embedder announces. */
+  it("parses route wisp", () => {
+    const p = compilePolicy('rule "r" priority=2 { route "wisp" }');
+    expect(p.rules[0]).toMatchObject({ id: "r", priority: 2, route: "wisp" });
+  });
+
   it("rejects duplicate ids", () => {
     expect(() =>
       compilePolicy(`rule "r" { route "rewrite" }
@@ -181,6 +188,14 @@ describe("shipped policy.kdl", () => {
     ]) {
       expect(policyMatch(p, "https://" + host + "/", "document"), host).toMatchObject({ route: "relay" });
     }
+  });
+
+  /* #168: brave search's bot wall refuses the relay transport class
+     and accepts the engine's wasm wisp ClientHello, so the shipped
+     file routes it wisp - the inverse of the #149 set above. */
+  it("routes brave search wisp (the #168 inverse set)", () => {
+    expect(policyMatch(p, "https://search.brave.com/search?q=x", "document")).toMatchObject({ id: "brave-wisp", route: "wisp" });
+    expect(policyMatch(p, "https://search.brave.com/api/suggest?q=x", "fetch")).toMatchObject({ id: "brave-wisp", route: "wisp" });
   });
 
   /* Wave 17: the shipped file carries a match-less catch-all

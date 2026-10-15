@@ -42,7 +42,9 @@ Fields:
 - route: required. "rewrite" upgrades matching requests onto the
   rewrite path; "native" (#138) demotes the JS literal pass for
   proven hosts; "relay" (#137) moves the fetch onto the embedder's
-  network stack for TLS-fingerprint-blocked hosts.
+  network stack for TLS-fingerprint-blocked hosts; "wisp" (#168)
+  rides the engine's own wisp transport through the public wisp
+  endpoint the embedder announces.
 - reason: optional short operator explanation.
 
 ## What a rule can and cannot do
@@ -66,8 +68,22 @@ handshake. The embedder must have registered a relay channel
 TRANSPORT warning, and the decision is recorded (result "relay")
 so diagnostics keep the share honest.
 
+route "wisp" (#168) rides the engine's own wisp transport (the
+libcurl-wasm ClientHello) through a PUBLIC unauthenticated wisp
+endpoint the embedder announces (zl:wispRegister). The
+brave-search class refuses the relay transport but accepts the
+wasm ClientHello - the inverse of the #149 Akamai set, and no
+single transport satisfies both sets. Without an announced
+endpoint the fetch rides the default path with a TRANSPORT
+warning. Honest limits: the route is only as good as the public
+endpoint's egress (LB shares that endpoint with the ScramJet
+engine option), only the libcurl engine carries it, and there is
+no proactive reconnect watcher for the secondary socket (a failed
+fetch resets the secondary client, retries once, then falls back
+to the default path).
+
 Documents, stylesheets and transformed scripts REQUIRE rewriting,
-so no route demotes those passes; a route value outside the three
+so no route demotes those passes; a route value outside the four
 above is rejected with a clear error and the engine keeps the
 defaults.
 

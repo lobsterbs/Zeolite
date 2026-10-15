@@ -26,7 +26,7 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
+import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
 import { loadPolicy, policyMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
@@ -45,7 +45,7 @@ import { adoptResponse } from "./downloads";
 import { flatRed, netLogPush, type NetDetail } from "./netlog";
 import { traceDecision } from "./tracing";
 
-import { wispTransport } from "./transport";
+import { altConfigured, altWispFetch, wispTransport } from "./transport";
 
 
 
@@ -547,7 +547,12 @@ async function upstreamFetch(
      registered channel, or an announced body the single retry can
      replay); otherwise it streams one-shot. */
   const relayPossible = !!rule && rule.route === "relay" && relayAvailable();
-  init = await replayableInit(init, { relayPossible });
+  /* #168: a wisp rule rides the secondary wasm client when the
+     embedder announced a public endpoint; its bodies are
+     strings/ArrayBuffers too, so the same replay buffering gate
+     applies. */
+  const wispPossible = !!rule && rule.route === "wisp" && altConfigured();
+  init = await replayableInit(init, { relayPossible: relayPossible || wispPossible });
   if (rule && rule.route === "relay") {
     const rr = await relayFetch(dest, init, traceId);
     if (rr) {
@@ -565,6 +570,44 @@ async function upstreamFetch(
       message: 'policy route "relay" without an embedder channel: fetch falls back to the wisp transport',
       url: dest,
     });
+  }
+  /* #168: hosts the operator routed "wisp" ride the secondary wasm
+     client through the announced public endpoint (the brave-search
+     class: the relay transport is refused, the wasm ClientHello is
+     accepted). No endpoint announced, or a failed wisp-route fetch:
+     fall through to the default path, never a silent gap. */
+  if (rule && rule.route === "wisp") {
+    if (!wispPossible) {
+      DIAG.emit({
+        traceId,
+        requestId: traceId,
+        category: "TRANSPORT",
+        cause: "proxy",
+        severity: "warning",
+        stage: "UPSTREAM_REQUEST",
+        message: 'policy route "wisp" without an announced public endpoint: fetch falls back to the default transport',
+        url: dest,
+      });
+    } else {
+      try {
+        const wr = await altWispFetch(dest, init);
+        traceDecision({ subsystem: "policy", rule: rule.id, original: dest, result: "wisp", resource: rtype, traceId });
+        wispRecord();
+        return wr;
+      } catch (err) {
+        DIAG.emit({
+          traceId,
+          requestId: traceId,
+          category: "TRANSPORT",
+          cause: "proxy",
+          severity: "warning",
+          stage: "UPSTREAM_REQUEST",
+          message: 'policy route "wisp" fetch failed: falling back to the default transport',
+          technicalReason: String(err),
+          url: dest,
+        });
+      }
+    }
   }
   return wispTransport.fetch(dest, init);
 }

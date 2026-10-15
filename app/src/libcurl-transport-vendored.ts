@@ -783,6 +783,115 @@ export function reset(): void {
   epoxyInitPromise = null;
 }
 
+/* ---- #168: secondary wisp client (policy route "wisp") -----------
+   Hosts a policy rule routes "wisp" ride the engine's own wasm
+   transport through a PUBLIC endpoint the embedder announces
+   (zl:wispRegister): the deployment's own /wisp/ endpoint keeps
+   password auth the wasm client cannot pass, and the brave-search
+   class refuses the embedder relay while accepting this ClientHello,
+   so wisp-routed hosts need a second LibcurlClient on the announced
+   endpoint. The bundle's module-level connection cache keys by URL,
+   so the secondary transport is separate from the primary's. Honest
+   limits: libcurl engine only (an epoxy secondary would double the
+   wasm payload for an engine nobody selected), and no proactive
+   socket watcher - the #74 watcher observes the primary endpoint
+   only. The caller (transport.ts altWispFetch) owns the deadline
+   and the single connect-class retry. */
+
+let altClient: LibcurlClientLike | null = null;
+let altInitPromise: Promise<void> | null = null;
+let altUrl: string | null = null;
+
+/** #168: the embedder announces (or, with "", withdraws) the public
+    wisp endpoint. A change drops the live secondary client so the
+    next wisp-routed fetch re-initializes. Non-ws(s) urls are ignored
+    honestly. Never throws. */
+export function altRegister(url: string): void {
+  if (typeof url !== "string") return;
+  if (url !== "" && !url.startsWith("ws://") && !url.startsWith("wss://")) return;
+  const next = url === "" ? null : url.endsWith("/") ? url : url + "/";
+  if (next === altUrl) return;
+  altUrl = next;
+  altClient = null;
+  altInitPromise = null;
+}
+
+/** #168: whether a public wisp endpoint is announced. */
+export function altConfigured(): boolean {
+  return altUrl !== null;
+}
+
+/** Drop the secondary client so the next wisp-routed fetch
+    re-initializes (connect-class failure, tests). Never throws. */
+export function altReset(): void {
+  altClient = null;
+  altInitPromise = null;
+}
+
+async function ensureAlt(): Promise<LibcurlClientLike> {
+  if (altClient && altClient.ready) return altClient;
+  const url = altUrl;
+  if (!url) throw new Error("zeolite: wisp route without an announced public endpoint (zl:wispRegister)");
+  if (!altInitPromise) {
+    altInitPromise = (async () => {
+      let mod: { LibcurlClient?: unknown; default?: unknown };
+      try {
+        mod = await loadBundle(moduleUrl());
+      } catch {
+        altInitPromise = null;
+        throw new Error(MISSING);
+      }
+      const Ctor = (mod.LibcurlClient ?? mod.default) as
+        | (new (o: { wisp: string; websocket?: string }) => LibcurlClientLike)
+        | undefined;
+      if (typeof Ctor !== "function") {
+        altInitPromise = null;
+        throw new Error("zeolite: vendored libcurl bundle exports no LibcurlClient");
+      }
+      const c = new Ctor({ wisp: url, websocket: url });
+      await c.init();
+      const session = (c as LibcurlClientLike & { session?: unknown }).session;
+      if (!session || !applyTransportEOF(session)) {
+        altInitPromise = null;
+        throw new Error(
+          "zeolite: transport seam missing (CurlSession.stream_response not found; libcurl.js layout changed)",
+        );
+      }
+      altClient = c;
+    })();
+  }
+  await altInitPromise;
+  if (!altClient) throw new Error(MISSING);
+  return altClient;
+}
+
+/** #168: one fetch through the secondary client, same response shape
+    as the primary libcurl path (rawHeaders survive for the cookie
+    jar, null-body statuses normalized). No retry here: the caller
+    owns the deadline and the single connect-class reset+retry. */
+export async function altFetch(url: string, init?: RequestInit): Promise<Response> {
+  const c = await ensureAlt();
+  const method = (init?.method ?? "GET").toUpperCase();
+  const headers: RawHeaders = [];
+  if (init?.headers) {
+    const h = new Headers(init.headers as HeadersInit);
+    h.forEach((value, key) => {
+      headers.push([key, value]);
+    });
+  }
+  const res = await c.request(new URL(url), method, init?.body ?? null, headers, init?.signal ?? undefined);
+  const h2 = new Headers();
+  for (const [k, v] of res.headers) h2.append(k, v);
+  const nullBody = res.status === 204 || res.status === 304;
+  const resp = new Response(nullBody ? null : (res.body as BodyInit | null), {
+    status: res.status,
+    statusText: res.statusText,
+    headers: h2,
+  });
+  (resp as Response & { rawHeaders?: RawHeaders }).rawHeaders = res.headers;
+  return resp;
+}
+
 /* ---- Wisp socket lifecycle watcher (#74 follow-up) ------------------
    The wasm transports create the browser WebSocket to the wisp endpoint
    and never surface its lifecycle. We cannot change the wasm - but the

@@ -5,7 +5,7 @@
 //   rule "short-id" priority=10 {
 //     match host="cdn.example.com" path="/assets/"  // both optional
 //     types "script" "fetch"                        // optional
-//     route "rewrite"                               // or "native" or "relay"
+//     route "rewrite"                               // or "native", "relay" or "wisp"
 //     reason "short operator explanation"           // optional
 //   }
 //
@@ -14,6 +14,8 @@
 // raw script bodies work through the patched runtime seams.
 // route "relay" (#137) moves the fetch onto the embedder's network
 // stack for hosts that block the wasm TLS ClientHello shapes.
+// route "wisp" (#168) rides the engine's own wasm wisp transport
+// through the PUBLIC wisp endpoint the embedder announces.
 // Highest priority wins; on equal priority the later rule wins. A
 // rejected file keeps the defaults active (diagnostics carry the
 // error).
@@ -31,6 +33,21 @@
 rule "default-relay" {
   route "relay"
   reason "deployment wisp auth rejects the wasm client: relay all fetches"
+}
+
+// #168: brave search's bot wall is the inverse of the #149 set: it
+// refuses the embedder relay transport class (the PoW interstitial
+// never completes) and accepts the engine's own wasm wisp ClientHello
+// through the PUBLIC wisp endpoint the embedder announces (the
+// ScramJet wisp-js backend, zl:wispRegister; LB serves it as
+// /build sjWisp). The route carries only when the embedder announced
+// that endpoint; without it the fetch rides the default path and a
+// TRANSPORT warning names the gap. Honest ceiling: the public
+// endpoint's egress is shared with the ScramJet engine option.
+rule "brave-wisp" {
+  match host="search.brave.com"
+  route "wisp"
+  reason "#168: relay transport class refused, wasm wisp ClientHello accepted"
 }
 
 // #137: duckduckgo.com rejects the wasm TLS client shapes at the

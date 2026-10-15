@@ -24,7 +24,7 @@ import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade,
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
 import { relayRegister } from "./relayfetch";
-import { currentEngine, wispTransport } from "./transport";
+import { altRegister, currentEngine, wispTransport } from "./transport";
 import { loadInflight } from "./loadstate";
 import { activeStreams } from "./streams-alive";
 import { contextOf } from "./vctx";
@@ -81,6 +81,7 @@ export interface ControlMessage {
     | "zl:importSession"
     | "zl:sameSite"
     | "zl:relayRegister"
+    | "zl:wispRegister"
     | "zl:fingerprint"
     | "zl:recordStart"
     | "zl:recordStop"
@@ -248,6 +249,19 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         reply({ ok: true });
       } else {
         reply({ ok: false, error: "relay registration needs a port" });
+      }
+      break;
+    }
+    case "zl:wispRegister": {
+      /* #168: the embedder announces the PUBLIC wisp endpoint for
+         policy route "wisp" hosts (LB serves it as /build sjWisp;
+         its own /wisp/ keeps password auth). Host-only by the #41
+         gate; an empty string withdraws the endpoint. */
+      if (typeof msg.url === "string" && (msg.url === "" || msg.url.startsWith("ws://") || msg.url.startsWith("wss://"))) {
+        altRegister(msg.url);
+        reply({ ok: true });
+      } else {
+        reply({ ok: false, error: "wisp registration needs a ws(s):// url or an empty string" });
       }
       break;
     }
@@ -880,6 +894,6 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister",
+  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister", "zl:wispRegister",
 ]);
 

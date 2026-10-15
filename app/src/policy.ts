@@ -2,8 +2,9 @@
    that let an operator override the default NativeTransit decision
    for narrowly scoped compatibility cases: a matching rule upgrades
    a request the default would transport natively onto the rewrite
-   path. "rewrite" is the only settable route on purpose: native is
-   already the default, and required rewrites (documents,
+   path. The route vocabulary is small on purpose ("rewrite",
+   "native" (#138), "relay" (#137), "wisp" (#168)); required
+   rewrites (documents,
    stylesheets, transformed scripts) cannot be demoted without
    breaking the page. KDL stays a small typed vocabulary here, not
    a scripting language.
@@ -12,7 +13,7 @@
      rule "short-id" priority=10 {
        match host="cdn.example.com" path="/assets/"  // both optional
        types "script" "fetch"                        // optional
-       route "rewrite"                               // the only route
+       route "rewrite"                               // or "native" (#138), "relay" (#137), "wisp" (#168)
        reason "short operator explanation"           // optional
      }
 
@@ -42,8 +43,11 @@ export interface PolicyRule {
   /** #138: "rewrite" upgrades native onto the rewrite path;
       "native" demotes the JS literal pass for proven hosts.
       #137: "relay" moves the fetch onto the embedder's network
-      stack for TLS-fingerprint-blocked hosts. */
-  route: "rewrite" | "native" | "relay";
+      stack for TLS-fingerprint-blocked hosts.
+      #168: "wisp" rides the engine's own wisp transport through
+      the PUBLIC wisp endpoint the embedder announces
+      (zl:wispRegister) for hosts that refuse the relay class. */
+  route: "rewrite" | "native" | "relay" | "wisp";
 }
 
 export interface CompiledPolicy {
@@ -134,9 +138,9 @@ export function compilePolicy(source: string): CompiledPolicy {
       if (types.size === 0) types = null;
     }
     const rv = child(node, "route")?.args[0];
-    if (rv !== "rewrite" && rv !== "native" && rv !== "relay") {
+    if (rv !== "rewrite" && rv !== "native" && rv !== "relay" && rv !== "wisp") {
       throw new Error(
-        'policy: rule "' + id + '": route must be "rewrite", "native" or "relay"',
+        'policy: rule "' + id + '": route must be "rewrite", "native", "relay" or "wisp"',
       );
     }
     let reason: string | null = null;

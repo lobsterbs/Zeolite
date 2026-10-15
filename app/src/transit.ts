@@ -222,6 +222,7 @@ const FALLBACK_LIMIT = 64;
 let nativeCount = 0;
 let fallbackCount = 0;
 let relayCount = 0;
+let wispCount = 0;
 const fallbacks: FallbackEvent[] = [];
 
 /** Record one COMPLETED request's final transport decision (blocked
@@ -255,15 +256,23 @@ export function relayRecord(): void {
   relayCount++;
 }
 
+/** #168: one completed fetch that rode the engine's own wisp transport
+    through the announced public endpoint (policy route "wisp").
+    Counter-only like relay. */
+export function wispRecord(): void {
+  wispCount++;
+}
+
 /** Counters + recent fallbacks for zl:getNetLog consumers. */
 export function transitStats(): {
   native: number;
   fallback: number;
   relay: number;
+  wisp: number;
   fallbacks: FallbackEvent[];
   epoch: number;
 } {
-  return { native: nativeCount, fallback: fallbackCount, relay: relayCount, fallbacks: [...fallbacks], epoch };
+  return { native: nativeCount, fallback: fallbackCount, relay: relayCount, wisp: wispCount, fallbacks: [...fallbacks], epoch };
 }
 
 /** Tests only: reset counters and ring. */
@@ -271,5 +280,6 @@ export function transitResetForTests(): void {
   nativeCount = 0;
   fallbackCount = 0;
   relayCount = 0;
+  wispCount = 0;
   fallbacks.length = 0;
 }

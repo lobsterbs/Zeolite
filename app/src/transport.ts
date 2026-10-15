@@ -19,11 +19,15 @@ import {
   setEngine,
   currentEngine,
   openWebSocket,
+  altFetch as zlAltFetch,
+  altRegister,
+  altConfigured,
+  altReset as zlAltReset,
   type TransportEngine,
 } from "./libcurl-transport-vendored";
 import { relayAvailable, relayFetch } from "./relayfetch";
 
-export { currentEngine, openWebSocket, type TransportEngine };
+export { currentEngine, openWebSocket, altRegister, altConfigured, type TransportEngine };
 
 /** Internal upstream transport contract (issue #84). */
 export interface Transport {
@@ -246,3 +250,33 @@ export const wispTransport: Transport = {
     curlReady = null; // force re-init inside the next ensureCurl()
   },
 };
+
+/* #168: policy route "wisp". Mirrors the primary wispFetch contract:
+   first-byte deadline, connect-class reset + single retry, loading
+   accounting. Deliberately no stall-storm cooldown (that state
+   tracks the primary endpoint's health) and no lifecycle machine
+   (transport-lifecycle owns the primary only). */
+export async function altWispFetch(dest: string, init?: RequestInit): Promise<Response> {
+  loadEnter(dest);
+  try {
+    try {
+      return await withDeadline(zlAltFetch(dest, init), WISP_TTFB_DEADLINE_MS);
+    } catch (err) {
+      if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw err;
+      DIAG.emit({
+        category: "TRANSPORT",
+        severity: "error",
+        message:
+          err instanceof WispStallError
+            ? "wisp-route transport stall: no first byte within " + WISP_TTFB_DEADLINE_MS + "ms; reset, retrying once"
+            : "wisp-route transport failure; reset, retrying once on a fresh connection",
+        technicalReason: String(err),
+        url: dest,
+      });
+      zlAltReset();
+      return withDeadline(zlAltFetch(dest, init), WISP_TTFB_DEADLINE_MS);
+    }
+  } finally {
+    loadLeave(dest);
+  }
+}
