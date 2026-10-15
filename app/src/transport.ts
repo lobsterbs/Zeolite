@@ -22,12 +22,13 @@ import {
   altFetch as zlAltFetch,
   altRegister,
   altConfigured,
+  altEndpoint,
   altReset as zlAltReset,
   type TransportEngine,
 } from "./libcurl-transport-vendored";
 import { relayAvailable, relayFetch } from "./relayfetch";
 
-export { currentEngine, openWebSocket, altRegister, altConfigured, type TransportEngine };
+export { currentEngine, openWebSocket, altRegister, altConfigured, altEndpoint, type TransportEngine };
 
 /** Internal upstream transport contract (issue #84). */
 export interface Transport {

@@ -801,6 +801,16 @@ export function reset(): void {
 let altClient: LibcurlClientLike | null = null;
 let altInitPromise: Promise<void> | null = null;
 let altUrl: string | null = null;
+/* 2026-10-15 live brave PoW probes (#168 follow-up): the #133 cache
+   wedge applies to the secondary client too. The bundle's
+   module-level connection cache keys by wisp URL, so a reinit with
+   the SAME url silently reuses the wedged WispTransport and its dead
+   socket - the single connect-class retry rode the same dead pool
+   and never reached the server (live-verified: no new wisp
+   connection, no new TCP stream after the retry). altGeneration busts
+   the cache key exactly like wispGeneration does for the primary;
+   altReset and every accepted endpoint change bump it. */
+let altGeneration = 0;
 
 /** #168: the embedder announces (or, with "", withdraws) the public
     wisp endpoint. A change drops the live secondary client so the
@@ -812,6 +822,9 @@ export function altRegister(url: string): void {
   const next = url === "" ? null : url.endsWith("/") ? url : url + "/";
   if (next === altUrl) return;
   altUrl = next;
+  /* #133 parity: a withdraw/re-register or endpoint swap must not
+     reuse a cached transport keyed to the (possibly same) URL. */
+  altGeneration++;
   altClient = null;
   altInitPromise = null;
 }
@@ -821,9 +834,26 @@ export function altConfigured(): boolean {
   return altUrl !== null;
 }
 
+/** The normalized announced endpoint, or null: the persistence seam
+    (route-config restore) reads it; a withdrawal reads null. */
+export function altEndpoint(): string | null {
+  return altUrl;
+}
+
+/** Test hook: the live secondary-client state (normalized url,
+    cache-bust generation). Generation parity with the primary's
+    wispGeneration is the seam the #133 fix's tests pin. */
+export function altStateForTests(): { url: string | null; generation: number } {
+  return { url: altUrl, generation: altGeneration };
+}
+
 /** Drop the secondary client so the next wisp-routed fetch
     re-initializes (connect-class failure, tests). Never throws. */
 export function altReset(): void {
+  /* #133 parity: bust the bundle's connection-cache key so the next
+     init rides a fresh WispTransport and a new WebSocket, never the
+     wedged cached one. */
+  altGeneration++;
   altClient = null;
   altInitPromise = null;
 }
@@ -848,7 +878,11 @@ async function ensureAlt(): Promise<LibcurlClientLike> {
         altInitPromise = null;
         throw new Error("zeolite: vendored libcurl bundle exports no LibcurlClient");
       }
-      const c = new Ctor({ wisp: url, websocket: url });
+      /* #133 parity: bust the bundle's connection-cache key so the
+         reinit after a reset rides a fresh WispTransport and a new
+         WebSocket, never the wedged cached one. */
+      const wispUrl = bustWispUrl(url, altGeneration);
+      const c = new Ctor({ wisp: wispUrl, websocket: wispUrl });
       await c.init();
       const session = (c as LibcurlClientLike & { session?: unknown }).session;
       if (!session || !applyTransportEOF(session)) {
