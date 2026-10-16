@@ -2064,6 +2064,42 @@ export function handleFetch(e: FetchEvent): void {
             else reqSignal.addEventListener("abort", () => navAbort!.abort(reqSignal!.reason), { once: true });
           }
           const hopSignal = navAbort ? navAbort.signal : reqSignal;
+          /* #186: a redirect hop is a new request, so the blocking gates the
+             original target passed run on it before its upstream fetch: the
+             site-disable switch, webRequest.onBeforeRequest, the rules block
+             list and the interception block verdict. Rewrites and header
+             changes stay with the original target (they shape the first
+             request). Returns the verdict, or null to let the hop proceed. */
+          const hopGate = (
+            hopTarget: string,
+            method: string,
+          ): { verdict: string; reason: string; decision?: TransitDecision } | null => {
+            if (siteDisabled(hopTarget))
+              return { verdict: "blocked:site", reason: "site disabled for this engine" };
+            if (WEBREQ.beforeRequest({ ...wrDetails, url: hopTarget, method, timeStamp: Date.now() }))
+              return {
+                verdict: "blocked",
+                reason: "request cancelled by extension webRequest",
+                decision: { mode: "Blocked", reason: "BLOCKED_WEBREQUEST" },
+              };
+            const hopRule = applyRules(engineRules, hopTarget, rtype);
+            if (hopRule.action === "block")
+              return {
+                verdict: "blocked:rules",
+                reason: "rules (" + (hopRule.matched ?? "") + ")",
+                decision: { mode: "Blocked", reason: "BLOCKED_RULES" },
+              };
+            const hopHeaders: Record<string, string> = {};
+            sendHeaders.forEach((v, k) => (hopHeaders[k] = v));
+            const hopIc = runRequestInterception(kinds, { url: hopTarget, method, rtype, headers: hopHeaders });
+            if (hopIc.block)
+              return {
+                verdict: "blocked:intercept",
+                reason: "intercept handler",
+                decision: { mode: "Blocked", reason: "BLOCKED_INTERCEPT" },
+              };
+            return null;
+          };
           let resp = await withDeadline(
             upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
             reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
@@ -2108,6 +2144,38 @@ export function handleFetch(e: FetchEvent): void {
             }
             /* The jar is per-origin: cookies for the hop target, not the
                original one. */
+            /* #186: the hop's gates run before any cookie or fetch for it. */
+            const blockedHop = hopGate(next, hopMethod);
+            if (blockedHop) {
+              if (resp.body) void Promise.resolve(resp.body.cancel()).catch(() => {});
+              DIAG.emit({
+                traceId,
+                requestId: traceId,
+                category: "BLOCKED",
+                cause: "blocked",
+                severity: "info",
+                stage: "REDIRECT_HOP",
+                message: "redirect hop blocked (" + blockedHop.reason + ")",
+                url: next,
+              });
+              /* Site-disable blocks leave no netLog row, as on the original
+                 target path; the other gates record the transit decision. */
+              if (blockedHop.decision)
+                netLogPush({
+                  method: e.request.method, traceId,
+                  path: internalUrl,
+                  dest: next,
+                  status: 403,
+                  rtype: rtype.toUpperCase(),
+                  ms: Date.now() - t0,
+                  bytes: -1,
+                  verdict: blockedHop.verdict,
+                  transport: blockedHop.decision.mode,
+                  fallbackReason: reasonOf(blockedHop.decision),
+                  detail: mkDetail(),
+                });
+              return navOutcome(e, url, 403, "blocked", "zeolite: redirect hop blocked");
+            }
             const hopCookie = cookieHeaderFor(next, reqCtx);
             if (hopCookie) sendHeaders.set("cookie", hopCookie);
             else sendHeaders.delete("cookie");

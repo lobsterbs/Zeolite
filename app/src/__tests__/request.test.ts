@@ -37,7 +37,9 @@ vi.mock("../transport", () => ({
 }));
 
 import { classifyRtype, forwardedHeaders, handleFetch, pageCacheMatch, reqDest, withDeadline } from "../request";
-import { setFingerprint } from "../swstate";
+import { setFingerprint, setSiteEnabled } from "../swstate";
+import { DIAG } from "../diag";
+import { intercept, resetInterceptorsForTests } from "../intercept";
 import { establishContext, resolveRelative } from "../vctx";
 import { VCTX } from "../swstate";
 import { encodeDestLegacy } from "../codec";
@@ -714,3 +716,80 @@ describe("redirected responses are not cached under the pre-redirect key (#184)"
   });
 });
 
+/* #186: redirect hops were followed without the gates the original target
+   passes (site-disable, webRequest, rules, interception), so a 302 could
+   reach a blocked host. Each hop now runs the same gates before its fetch. */
+describe("redirect hops pass the blocking gates (#186)", () => {
+  const ORIGIN = "https://w.example.org";
+
+  const mkEvent = (clientId: string) => {
+    const armed: Promise<Response>[] = [];
+    const ev = {
+      request: {
+        url: ORIGIN + encodeDestLegacy("https://site.example/start"),
+        method: "GET",
+        mode: "navigate",
+        destination: "document",
+        credentials: "same-origin",
+        referrer: "",
+        body: null,
+        headers: new Headers(),
+      },
+      clientId,
+      resultingClientId: clientId + "-new",
+      respondWith: (p: Promise<Response>) => void armed.push(p),
+      waitUntil: () => {},
+    } as unknown as FetchEvent;
+    return { ev, armed };
+  };
+
+  const blockedHopEvents = () =>
+    DIAG.snapshot(0).events.filter((x) => x.category === "BLOCKED" && x.message?.includes("redirect hop blocked"));
+
+  beforeEach(() => {
+    transportMock.calls = 0;
+    transportMock.gate = undefined;
+    transportMock.urls = [];
+    transportMock.queue = [];
+    transportMock.inits = [];
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN },
+      registration: { scope: ORIGIN + "/" },
+      clients: { get: async () => null },
+    });
+    vi.stubGlobal("caches", {
+      open: async () => {
+        throw new Error("no cache storage");
+      },
+    });
+  });
+
+  afterEach(() => {
+    setSiteEnabled("blocked.example", true);
+    resetInterceptorsForTests();
+    vi.unstubAllGlobals();
+  });
+
+  it("a 302 to a site-disabled host returns 403 and never fetches that host", async () => {
+    setSiteEnabled("blocked.example", false);
+    transportMock.queue = [new Response(null, { status: 302, headers: { location: "https://blocked.example/x" } })];
+    const { ev, armed } = mkEvent("hop-disabled");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(403);
+    expect(transportMock.urls).toEqual(["https://site.example/start"]);
+    expect(blockedHopEvents().some((x) => x.url === "https://blocked.example/x")).toBe(true);
+  });
+
+  it("a 302 to a host an interception handler blocks returns 403 and never fetches it", async () => {
+    resetInterceptorsForTests();
+    intercept("request", (ctx) => (ctx.url.startsWith("https://tracker.example/") ? { block: true } : undefined));
+    transportMock.queue = [new Response(null, { status: 302, headers: { location: "https://tracker.example/pixel" } })];
+    const { ev, armed } = mkEvent("hop-intercept");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(403);
+    expect(transportMock.urls).toEqual(["https://site.example/start"]);
+    expect(blockedHopEvents().some((x) => x.url === "https://tracker.example/pixel")).toBe(true);
+  });
+});
