@@ -1955,7 +1955,14 @@ export function handleFetch(e: FetchEvent): void {
              replace the outgoing header set (validated pairs only). */
           const replaced = WEBREQ.beforeSendHeaders(wrDetails, fwd);
           const sendHeaders = replaced ?? fwd;
+          /* #194: headers minted by rules, interception or plugins are
+             scoped to the target they were computed for; a
+             cross-origin redirect hop drops them (see
+             stripCrossOriginHopHeaders below). */
+          const prePlugin = new Set(sendHeaders.keys());
           await applyOnRequest(plugins, target, sendHeaders);
+          const injectedKeys = new Set(Object.keys(extraHeaders));
+          for (const k of sendHeaders.keys()) if (!prePlugin.has(k)) injectedKeys.add(k);
           for (const [k, v] of Object.entries(extraHeaders)) sendHeaders.set(k, v);
           /* Per-site rules (zl:rules): the UA override lands on the
              outgoing header set the SW itself builds for the wisp
@@ -2074,8 +2081,13 @@ export function handleFetch(e: FetchEvent): void {
             next = destUpgraded(next);
             /* Fetch spec: 307/308 replay the body but a cross-origin
                hop drops Authorization - the credential is never
-               forwarded to a second origin. */
-            if (new URL(next).origin !== new URL(hopUrl).origin) sendHeaders.delete("authorization");
+               forwarded to a second origin. #194: the Referer and the
+               headers injected for the previous host do not follow
+               the request to a second origin either. */
+            if (new URL(next).origin !== new URL(hopUrl).origin) {
+              sendHeaders.delete("authorization");
+              stripCrossOriginHopHeaders(sendHeaders, injectedKeys);
+            }
             const stillStream = hopBody != null && typeof (hopBody as ReadableStream).getReader === "function";
             if (resp.status === 307 || resp.status === 308) {
               if (stillStream) break; /* announced over the cap: one-shot stream */
@@ -2101,6 +2113,54 @@ export function handleFetch(e: FetchEvent): void {
                upstream reader and the vendored transport stop
                buffering a response nobody will consume. */
             if (resp.body) void Promise.resolve(resp.body.cancel()).catch(() => {});
+            /* #186: the gates that admitted the original target run
+               for every hop too - the engine-side chain must not
+               smuggle a rules-blocked, webRequest-cancelled,
+               intercepted or disabled host past the checks the first
+               URL already passed. */
+            const hopRule = applyRules(engineRules, hopUrl, rtype);
+            /* The reason names the gate that fired (netLog carries it). */
+            let hopBlockReason: "BLOCKED_RULES" | "BLOCKED_INTERCEPT" | "BLOCKED_WEBREQUEST" | null = null;
+            if (siteDisabled(hopUrl)) hopBlockReason = "BLOCKED_RULES";
+            else if (hopRule.action === "block") hopBlockReason = "BLOCKED_RULES";
+            else if (WEBREQ.beforeRequest({ ...wrDetails, url: hopUrl })) hopBlockReason = "BLOCKED_WEBREQUEST";
+            else if (runRequestInterception(kinds, { url: hopRule.url ?? hopUrl, method: hopMethod, rtype, headers: flatReq }).block) hopBlockReason = "BLOCKED_INTERCEPT";
+            if (hopBlockReason) {
+              DIAG.emit({
+                category: "BLOCKED",
+                cause: "blocked",
+                severity: "info",
+                stage: "REDIRECT_HOP",
+                message: "redirect hop blocked by request gates",
+                url: hopUrl,
+                traceId,
+                requestId: traceId,
+              });
+              const hopDecision: TransitDecision = { mode: "Blocked", reason: hopBlockReason };
+              netLogPush({
+                method: e.request.method,
+                traceId,
+                path: internalUrl,
+                dest: hopUrl,
+                status: 403,
+                rtype,
+                ms: Date.now() - t0,
+                bytes: -1,
+                verdict: "blocked",
+                transport: hopDecision.mode,
+                fallbackReason: reasonOf(hopDecision),
+                detail: mkDetail(),
+              });
+              return navOutcome(e, url, 403, "blocked", "zeolite: redirect hop blocked");
+            }
+            /* #186: per-host rule headers apply to the hop target and
+               carry its host scope into any further hop. */
+            if (hopRule.headers) {
+              for (const [k, v] of Object.entries(hopRule.headers)) {
+                sendHeaders.set(k, v);
+                injectedKeys.add(k);
+              }
+            }
             resp = await withDeadline(
               upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
               reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
@@ -3002,6 +3062,17 @@ export function recordMaskedScript(requested: string, referrer: string, route: s
 
 /** Per-request header surgery: drop hop-by-hop + engine-origin leaks,
     restore the real destination as Referer. */
+/* #194: a cross-origin redirect hop recomputes what may travel:
+   the page-minted Referer and every header injected for the previous
+   host by rules, interception or plugins stay behind. Deliberately
+   strict: the page's Referrer-Policy is not captured here, so the
+   Referer drops entirely instead of degrading to the origin - it
+   never leaks more than the strictest policy would. */
+export function stripCrossOriginHopHeaders(sendHeaders: Headers, injectedKeys: Iterable<string>): void {
+  sendHeaders.delete("referer");
+  for (const k of injectedKeys) sendHeaders.delete(k);
+}
+
 export function forwardedHeaders(req: Request, target: string, initiator?: string): Headers {
   const out = new Headers();
   /* Sec-Fetch headers are never copied: the SW-visible values

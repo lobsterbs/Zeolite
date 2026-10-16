@@ -36,8 +36,8 @@ vi.mock("../transport", () => ({
   },
 }));
 
-import { classifyRtype, forwardedHeaders, handleFetch, pageCacheMatch, reqDest, withDeadline } from "../request";
-import { setFingerprint } from "../swstate";
+import { classifyRtype, forwardedHeaders, handleFetch, pageCacheMatch, reqDest, stripCrossOriginHopHeaders, withDeadline } from "../request";
+import { setFingerprint, setSiteEnabled } from "../swstate";
 import { establishContext, resolveRelative } from "../vctx";
 import { VCTX } from "../swstate";
 import { encodeDestLegacy } from "../codec";
@@ -523,3 +523,120 @@ describe("Sec-Fetch-Storage-Access persona synthesis (Chrome 133+)", () => {
     ).toBe(null);
   });
 });
+
+/* #186: the engine-side hop chain runs the request gates for every
+   hop target, not only the first. #194: a cross-origin hop drops the
+   page-minted Referer and the headers injected for the previous
+   host. */
+describe("redirect hop gates and cross-origin header scoping (#186, #194)", () => {
+  const ORIGIN = "https://w.example.org";
+
+  const mkEvent = (routeUrl: string, clientId: string, referrer: string) => {
+    const armed: Promise<Response>[] = [];
+    const ev = {
+      request: {
+        url: routeUrl,
+        method: "GET",
+        mode: "navigate",
+        destination: "document",
+        credentials: "same-origin",
+        referrer,
+        body: null,
+        headers: new Headers(),
+      },
+      clientId,
+      resultingClientId: clientId + "-new",
+      respondWith: (p: Promise<Response>) => void armed.push(p),
+      waitUntil: () => {},
+    } as unknown as FetchEvent;
+    return { ev, armed };
+  };
+
+  beforeEach(() => {
+    transportMock.calls = 0;
+    transportMock.gate = undefined;
+    transportMock.urls = [];
+    transportMock.queue = [];
+    transportMock.inits = [];
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN },
+      registration: { scope: ORIGIN + "/" },
+      clients: { get: async () => null },
+    });
+    vi.stubGlobal("caches", {
+      open: async () => {
+        throw new Error("no cache storage");
+      },
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setSiteEnabled("blocked.example", true);
+  });
+
+  it("blocks a redirect hop to a disabled site (#186)", async () => {
+    setSiteEnabled("blocked.example", false);
+    transportMock.queue = [
+      new Response(null, { status: 302, headers: { location: "https://blocked.example/x" } }),
+      new Response("no", { headers: { "content-type": "text/plain" } }),
+    ];
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "hop-186", "");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(403);
+    expect(transportMock.calls).toBe(1);
+    expect(transportMock.urls).toEqual(["https://site.example/"]);
+  });
+
+  it("allows a same-origin hop to a disabled site of another host (#186 control)", async () => {
+    setSiteEnabled("blocked.example", false);
+    transportMock.queue = [
+      new Response(null, { status: 302, headers: { location: "https://site.example/next" } }),
+      new Response("ok", { headers: { "content-type": "text/plain" } }),
+    ];
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "hop-186b", "");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(transportMock.calls).toBe(2);
+  });
+
+  it("drops the Referer on a cross-origin hop, keeps it same-origin (#194)", async () => {
+    transportMock.queue = [
+      new Response(null, { status: 302, headers: { location: "https://other.example/x" } }),
+      new Response("ok", { headers: { "content-type": "text/plain" } }),
+    ];
+    const ref = ORIGIN + encodeDestLegacy("https://page.example/a");
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "hop-194", ref);
+    handleFetch(ev);
+    await armed[0]!;
+    expect(transportMock.inits[0]?.headers?.get("referer")).toBe("https://page.example/a");
+    expect(transportMock.inits[1]?.headers?.get("referer")).toBe(null);
+
+    transportMock.queue = [
+      new Response(null, { status: 302, headers: { location: "https://site.example/next" } }),
+      new Response("ok", { headers: { "content-type": "text/plain" } }),
+    ];
+    transportMock.inits = [];
+    const second = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "hop-194b", ref);
+    handleFetch(second.ev);
+    await second.armed[0]!;
+    expect(transportMock.inits[1]?.headers?.get("referer")).toBe("https://page.example/a");
+  });
+
+  it("strips referer and injected keys, keeps the rest (#194 unit)", () => {
+    const h = new Headers({
+      referer: "https://a.example/x",
+      "x-inject": "1",
+      "x-mine": "2",
+      authorization: "Bearer t",
+    });
+    stripCrossOriginHopHeaders(h, ["x-inject"]);
+    expect(h.get("referer")).toBe(null);
+    expect(h.get("x-inject")).toBe(null);
+    expect(h.get("x-mine")).toBe("2");
+    expect(h.get("authorization")).toBe("Bearer t");
+  });
+});
+
