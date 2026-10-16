@@ -91,13 +91,17 @@ impl JsRewriter {
 /// base and encodes to an engine route (issue #1 finding 4).
 fn css_enc(cfg: RewriteConfig, base: String) -> Box<dyn Fn(&str) -> String> {
     Box::new(move |u: &str| -> String {
-        if let Some(innermost) = cfg.unwrap_engine_route(u) {
+        // The fragment is client-side and is re-attached after the
+        // route, on both the engine-route unwrap branch and the
+        // ordinary branch below. Route decoding stops at '#', so the
+        // fragment is split from the route part only, never lost.
+        let (target, frag) = match u.split_once('#') {
+            Some((b, f)) => (b, format!("#{}", f)),
+            None => (u, String::new()),
+        };
+        if let Some(innermost) = cfg.unwrap_engine_route(target) {
             if innermost.starts_with("http://") || innermost.starts_with("https://") {
-                let (bare, frag) = match innermost.split_once('#') {
-                    Some((b, f)) => (b.to_string(), format!("#{}", f)),
-                    None => (innermost, String::new()),
-                };
-                let mut out = cfg.encode_url(&bare);
+                let mut out = cfg.encode_url(&innermost);
                 out.push_str(&frag);
                 return out;
             }
@@ -236,5 +240,39 @@ mod tests {
         // Empty and fragment-only values pass through untouched.
         assert_eq!(enc(""), "");
         assert_eq!(enc("#frag"), "#frag");
+    }
+
+    /// #199 regression: the streaming CSS path (JsCssRewriter's engine)
+    /// must keep fragments client-side at every chunk split, both for
+    /// a plain sprite reference and for an already-encoded engine route
+    /// carrying a fragment (the unwrap branch must re-attach it).
+    #[test]
+    fn css_url_fragments_hold_across_every_chunk_split() {
+        let cfg = RewriteConfig {
+            origin: "https://engine.example.org".into(),
+            codec: Codec::Base64Url {
+                prefix: "/j/".into(),
+            },
+            ..Default::default()
+        };
+        let route = cfg.encode_url("https://site.example/sprite.svg");
+        let css = format!(
+            "a{{fill:url(sprite.svg#icon)}}b{{fill:url( 'sprite.svg#other' )}}c{{fill:url({}#pre)}}",
+            route
+        );
+        let expect = format!(
+            "a{{fill:url('{route}#icon')}}b{{fill:url('{route}#other')}}c{{fill:url('{route}#pre')}}"
+        );
+        let enc_factory = || css_enc(cfg.clone(), "https://site.example/page.css".into());
+        let one_shot = crate::html::css::rewrite_stylesheet(&css, &*enc_factory());
+        assert_eq!(one_shot, expect, "one-shot pass");
+        for (i, _) in css.char_indices().filter(|&(i, _)| i > 0) {
+            let (a, b) = css.split_at(i);
+            let mut r = crate::html::css::CssRewriter::new(enc_factory());
+            let mut out = r.process(a);
+            out.push_str(&r.process(b));
+            out.push_str(&r.finish());
+            assert_eq!(out, expect, "split at {}", i);
+        }
     }
 }
