@@ -26,6 +26,8 @@ vi.mock("../libcurl-transport-vendored", () => ({
 
 import { transportResetForTests, wispCoolingForTests, wispTransport } from "../transport";
 import { relayRegister } from "../relayfetch";
+import { DIAG } from "../diag";
+
 
 beforeEach(() => {
   transportResetForTests(15);
@@ -118,5 +120,46 @@ describe("wisp stall-storm cooldown", () => {
     );
     expect(err.name).toBe("AbortError");
     expect(port.sent.some((m) => (m as { type: string }).type === "zl:relayCancel")).toBe(true);
+  });
+});
+
+describe("cooldown diagnostics and retry accounting (#226)", () => {
+  it("records the retry stall too, so two wedged requests arm the cooldown", async () => {
+    h.fetchImpl = () => new Promise<Response>(() => {});
+    /* each fetch contributes two stalls now: attempt + retry */
+    await Promise.allSettled([
+      wispTransport.fetch("https://a.example/1"),
+      wispTransport.fetch("https://a.example/2"),
+    ]);
+    expect(wispCoolingForTests()).toBe(true);
+  });
+
+  it("cooldown relay failures carry the request trace id", async () => {
+    h.fetchImpl = () => new Promise<Response>(() => {});
+    /* arm the cooldown first: without it the wisp path runs, not the relay */
+    await Promise.allSettled([
+      wispTransport.fetch("https://a.example/1"),
+      wispTransport.fetch("https://a.example/2"),
+    ]);
+    expect(wispCoolingForTests()).toBe(true);
+    class ErrorPort {
+      sent: unknown[] = [];
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      postMessage(m: unknown): void {
+        this.sent.push(m);
+        const rid = (m as { rid: number }).rid;
+        setTimeout(() => this.onmessage?.(new MessageEvent("message", { data: { type: "zl:relayError", rid, error: "nope" } })), 0);
+      }
+    }
+    relayRegister(new ErrorPort() as unknown as MessagePort);
+    const seen: Array<{ message?: string; traceId?: string }> = [];
+    const spy = vi.spyOn(DIAG, "emit").mockImplementation((e: { message?: string; traceId?: string }) => {
+      seen.push(e);
+    });
+    await wispTransport.fetch("https://a.example/traced", undefined, "zl-tr-cool").catch(() => {});
+    spy.mockRestore();
+    const ev = seen.find((e) => String(e.message ?? "").includes("embedder relay failed"));
+    expect(ev).toBeTruthy();
+    expect(ev?.traceId).toBe("zl-tr-cool");
   });
 });

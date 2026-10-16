@@ -208,3 +208,39 @@ describe("workerFingerprintScript (2.3 Selenide)", () => {
     expect(s).not.toContain("37445");
   });
 });
+
+describe("bug-scout 2026-10-16 (#223, #224, #225)", () => {
+  const UA = DEFAULT_PROFILE.userAgent;
+
+  it("timezoneName without utcOffsetMin patches Intl only, never forces a UTC Date surface (#223)", () => {
+    const p = resolveProfile({ userAgent: UA, timezoneName: "America/New_York" });
+    const doc = fingerprintScript(p);
+    expect(doc).toContain("America/New_York");
+    expect(doc).not.toContain("getTimezoneOffset");
+    const w = workerFingerprintScript(p);
+    expect(w).toContain("America/New_York");
+    expect(w).not.toContain("getTimezoneOffset");
+  });
+
+  it("utcOffsetMin without timezoneName patches the Date surface only (#223)", () => {
+    const p = resolveProfile({ userAgent: UA, utcOffsetMin: 120 });
+    const doc = fingerprintScript(p);
+    expect(doc).toContain("getTimezoneOffset");
+    expect(doc).not.toContain("Intl.DateTimeFormat");
+    const w = workerFingerprintScript(p);
+    expect(w).toContain("getTimezoneOffset");
+    expect(w).not.toContain("Intl.DateTimeFormat");
+  });
+
+  it("the toDataURL/toBlob copy path reads pristine pixels through a captured getImageData (#224)", () => {
+    const doc = fingerprintScript(DEFAULT_PROFILE);
+    expect(doc).toMatch(/zlOrigGID\.call\(ctx/);
+    const w = workerFingerprintScript(DEFAULT_PROFILE);
+    expect(w).toMatch(/zlOrigWGID \? zlOrigWGID\.call\(ctx/);
+  });
+
+  it("worker transferToImageBitmap clears the source canvas like the native method (#225)", () => {
+    const w = workerFingerprintScript(DEFAULT_PROFILE);
+    expect(w).toMatch(/transferToImageBitmap = function \(\) \{[\s\S]{0,220}this\.width = this\.width/);
+  });
+});

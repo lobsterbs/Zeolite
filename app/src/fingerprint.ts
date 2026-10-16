@@ -287,8 +287,13 @@ prop(Navigator.prototype, "languages", function () { return ${JSON.stringify(p.l
     }
   }
 
-  if (p.utcOffsetMin !== null || p.timezoneName !== null) {
-    const off = p.utcOffsetMin ?? 0;
+  /* #223: the Date patch belongs to utcOffsetMin only. A profile
+     that sets timezoneName without an offset patches Intl and leaves
+     the Date surface native; the old "?? 0" forced UTC and
+     contradicted the zone, violating the no-contradictory-values
+     rule. */
+  if (p.utcOffsetMin !== null) {
+    const off = p.utcOffsetMin;
     parts.push(`
 try {
   var zlOff = ${off};
@@ -303,8 +308,9 @@ try {
   var origYear = Date.prototype.getUTCFullYear;
   Date.prototype.getYear = function () { return origYear.call(new Date(this.getTime() + zlOff * 60000)) - 1900; };
 } catch (e) {}`);
-    if (p.timezoneName) {
-      parts.push(`
+  }
+  if (p.timezoneName) {
+    parts.push(`
 try {
   var zlZone = ${JSON.stringify(p.timezoneName)};
   var ZlDTF = Intl.DateTimeFormat;
@@ -318,7 +324,6 @@ try {
   Patched.supportedLocalesOf = ZlDTF.supportedLocalesOf;
   Intl.DateTimeFormat = Patched;
 } catch (e) {}`);
-    }
   }
 
   if (p.webglVendor && p.webglRenderer) {
@@ -371,10 +376,15 @@ try {
      consecutive reads are byte-identical - the old write-back made
      repeated reads drift, which is itself a one-line anti-fingerprint
      detector. */
+  /* #224: capture the pristine getImageData BEFORE this script
+     patches it; the copy path must read untouched pixels, not the
+     perturbed prototype result (the old prototype call
+     double-perturbed every toDataURL/toBlob read). */
+  var zlOrigGID = CanvasRenderingContext2D.prototype.getImageData;
   var zlPerturbedCopy = function (src) {
     var ctx = src.getContext("2d");
     if (!ctx || !src.width || !src.height) return null;
-    var img = ctx.getImageData(0, 0, src.width, src.height);
+    var img = zlOrigGID.call(ctx, 0, 0, src.width, src.height);
     zlPerturb(img.data);
     var copy = document.createElement("canvas");
     copy.width = src.width;
@@ -443,8 +453,10 @@ prop(zlNav, "languages", function () { return ${JSON.stringify(p.languages)}; })
     parts.push(`prop(zlNav, "deviceMemory", function () { return ${p.deviceMemoryGB}; });`);
   }
 
-  if (p.utcOffsetMin !== null || p.timezoneName !== null) {
-    const off = p.utcOffsetMin ?? 0;
+  /* #223: utcOffsetMin owns the Date patch; timezoneName alone
+     must not force a UTC offset onto the Date surface. */
+  if (p.utcOffsetMin !== null) {
+    const off = p.utcOffsetMin;
     parts.push(`\ntry {
   var zlOff = ${off};
   Date.prototype.getTimezoneOffset = function () { return -zlOff; };
@@ -458,8 +470,9 @@ prop(zlNav, "languages", function () { return ${JSON.stringify(p.languages)}; })
   var origYear = Date.prototype.getUTCFullYear;
   Date.prototype.getYear = function () { return origYear.call(new Date(this.getTime() + zlOff * 60000)) - 1900; };
 } catch (e) {}`);
-    if (p.timezoneName) {
-      parts.push(`\ntry {
+  }
+  if (p.timezoneName) {
+    parts.push(`\ntry {
   var zlZone = ${JSON.stringify(p.timezoneName)};
   var ZlDTF = Intl.DateTimeFormat;
   var Patched = class extends ZlDTF {
@@ -472,7 +485,6 @@ prop(zlNav, "languages", function () { return ${JSON.stringify(p.languages)}; })
   Patched.supportedLocalesOf = ZlDTF.supportedLocalesOf;
   Intl.DateTimeFormat = Patched;
 } catch (e) {}`);
-    }
   }
 
   if (p.webglVendor && p.webglRenderer) {
@@ -503,11 +515,14 @@ prop(zlNav, "languages", function () { return ${JSON.stringify(p.languages)}; })
   if (OOC && OOC.prototype) {
     /* #98: same read-time fix as documents - perturb a fresh
        OffscreenCanvas copy, never write back into the source. */
+    var zlOC2D = globalThis.OffscreenCanvasRenderingContext2D;
+    var zlOrigWGID = zlOC2D ? zlOC2D.prototype.getImageData : null;
     var zlPerturbCanvas = function (c) {
       try {
         var ctx = c.getContext("2d");
         if (!ctx || !c.width || !c.height) return null;
-        var img = ctx.getImageData(0, 0, c.width, c.height);
+        /* #224: pristine read, captured before the OC2D patch below. */
+        var img = zlOrigWGID ? zlOrigWGID.call(ctx, 0, 0, c.width, c.height) : ctx.getImageData(0, 0, c.width, c.height);
         zlPerturb(img.data);
         var copy = new OOC(c.width, c.height);
         copy.getContext("2d").putImageData(img, 0, 0);
@@ -519,10 +534,13 @@ prop(zlNav, "languages", function () { return ${JSON.stringify(p.languages)}; })
     var origBlob = OOC.prototype.convertToBlob;
     if (origBlob) OOC.prototype.convertToBlob = function () { var cp = zlPerturbCanvas(this); return origBlob.apply(cp || this, arguments); };
     var origTIB = OOC.prototype.transferToImageBitmap;
-    if (origTIB) OOC.prototype.transferToImageBitmap = function () { var cp = zlPerturbCanvas(this); return origTIB.apply(cp || this, arguments); };
-    var OC2D = globalThis.OffscreenCanvasRenderingContext2D;
+    /* #225: native transferToImageBitmap clears the source canvas;
+       transferring from the copy must still clear the source (a
+       width reassignment resets the bitmap on both context types). */
+    if (origTIB) OOC.prototype.transferToImageBitmap = function () { var cp = zlPerturbCanvas(this); var bm = origTIB.apply(cp || this, arguments); try { this.width = this.width; } catch (e) {} return bm; };
+    var OC2D = zlOC2D;
     if (OC2D) {
-      var origGID = OC2D.prototype.getImageData;
+      var origGID = zlOrigWGID;
       OC2D.prototype.getImageData = function () {
         var img = origGID.apply(this, arguments);
         zlPerturb(img.data);

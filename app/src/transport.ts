@@ -34,7 +34,9 @@ export { currentEngine, openWebSocket, altRegister, altConfigured, altEndpoint, 
 export interface Transport {
   /** Proxied fetch. Connect-class failures reset the client and
       retry at most once (issue #74 behavior, preserved verbatim). */
-  fetch(dest: string, init?: RequestInit): Promise<Response>;
+  fetch(dest: string, init?: RequestInit, traceId?: string): Promise<Response>;
+  /* #226: traceId is diagnostic correlation for cooldown relay
+     failures; absent means unattributed, never a crash. */
   /** Initialize the client (idempotent); rejects on init failure and
       allows a retry on the next call. */
   ready(): Promise<void>;
@@ -180,7 +182,7 @@ function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
+async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Promise<Response> {
   /* Loading-indicator accounting (zl:loadState): the transport seam
      is the one place every upstream request passes through, so the
      in-flight counter rides it; the finally covers every settle
@@ -197,7 +199,7 @@ async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
         body: init?.body as string | ArrayBuffer | null | undefined,
         signal: init?.signal ?? undefined,
       };
-      const rr = await relayFetch(dest, relayInit, "");
+      const rr = await relayFetch(dest, relayInit, traceId ?? "");
       if (rr) return rr;
       DIAG.emit({
         category: "TRANSPORT",
@@ -236,7 +238,15 @@ async function wispFetch(dest: string, init?: RequestInit): Promise<Response> {
       zlCurlReset();
       curlReady = null; // force re-init inside the next ensureCurl()
       await ensureCurl();
-      return withDeadline(zlCurlFetch(dest, init), WISP_TTFB_DEADLINE_MS);
+      try {
+        return await withDeadline(zlCurlFetch(dest, init), WISP_TTFB_DEADLINE_MS);
+      } catch (err2) {
+        /* #226: a stall on the fresh connection is the strongest
+           evidence the socket is wedged; count it before rethrowing
+           so the storm detector does not undercount. */
+        if (err2 instanceof WispStallError) recordStall();
+        throw err2;
+      }
     }
   } finally {
     loadLeave(dest);
