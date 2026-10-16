@@ -18,6 +18,7 @@ import { netLogCursor, netLogGeneration, netLogSince } from "./netlog";
 import { senderVirtualOrigin } from "./origin";
 import type { RecordingState } from "./recording";
 import { beginRecording, finishRecording } from "./recording";
+import { pageCacheClear } from "./request";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
 import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setSiteEnabled } from "./swstate";
@@ -379,6 +380,10 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          default on SW restart; the host re-sends on boot, on the
          incognito toggle, and on controllerchange. */
       reply(setJarProfile(msg.profile));
+      /* #179: the page cache spans jar profiles; a profile switch
+         drops it so one profile's cached pages never surface for
+         another. */
+      void pageCacheClear();
       break;
     case "zl:getJars":
       /* #41: jar enumeration for the host (the host settings UI
@@ -390,6 +395,9 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       /* #41: clear the active (or named) jar profile, or one origin
          inside it. Refuses malformed input instead of coercing. */
       const r = jarClearScope(msg.profile, msg.origin);
+      /* #179: a cleared jar means the cached pages may be another
+         session's; drop the page cache with it. */
+      if (r.ok) void pageCacheClear();
       reply(r.ok ? { ok: true, jars: r.jars, cookies: r.cookies } : { ok: false, error: r.error });
       break;
     }

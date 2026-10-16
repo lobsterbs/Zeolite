@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const { gate, transport } = vi.hoisted(() => {
   let release: () => void = () => {};
   const promise = new Promise<void>((r) => (release = r));
-  const handler = async (_headers?: Headers): Promise<Response> => {
+  const handler = async (_headers?: Headers, _dest?: string): Promise<Response> => {
     await promise;
     return new Response("fresh");
   };
@@ -23,12 +23,19 @@ vi.mock("../transport", () => ({
   currentEngine: () => "libcurl",
   wispTransport: {
     ready: async () => {},
-    fetch: async (_dest: string, init?: { method?: string; headers?: Headers }) =>
-      transport.handler(init?.headers),
+    fetch: async (dest: string, init?: { method?: string; headers?: Headers }) =>
+      transport.handler(init?.headers, dest),
   },
 }));
 
-import { cacheStorable, cacheTtl, pageCacheMatch } from "../request";
+import {
+  cacheRewriteBase,
+  cacheStorable,
+  cacheTtl,
+  pageCacheClear,
+  pageCacheMatch,
+  pageCacheStore,
+} from "../request";
 
 describe("cacheTtl / cacheStorable", () => {
   it("gives no-cache and no-store a zero TTL", () => {
@@ -330,6 +337,123 @@ describe("pageCacheMatch Range on rewritable types (#204)", () => {
     expect(hit.status).toBe(206);
     expect(hit.headers.get("content-range")).toBe("bytes 0-1/16");
     expect(await hit.text()).toBe("01");
+  });
+});
+
+describe("page cache scope, final URL and size cap (#179, #184, #195)", () => {
+  afterEach(() => {
+    delete (globalThis as { caches?: unknown }).caches;
+    delete (globalThis as { self?: unknown }).self;
+    transport.handler = async () => {
+      await gate.promise;
+      return new Response("fresh");
+    };
+  });
+
+  it("never stores private or Vary: Cookie responses (#179)", () => {
+    expect(cacheStorable(new Headers({ "cache-control": "private" }))).toBe(false);
+    expect(cacheStorable(new Headers({ "cache-control": "max-age=60, private" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "Cookie" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "Accept-Encoding" }))).toBe(true);
+  });
+
+  it("rewrites a redirected entry against its stored final URL (#184)", () => {
+    const hit = new Response("x", { headers: { "x-zl-final-url": "https://final.example/a" } });
+    expect(cacheRewriteBase(hit, "https://orig.example/a")).toBe("https://final.example/a");
+    expect(cacheRewriteBase(new Response("x"), "https://orig.example/a")).toBe(
+      "https://orig.example/a",
+    );
+  });
+
+  it("skips credential-bearing and oversized stores (#179, #195)", async () => {
+    const puts: Response[] = [];
+    (globalThis as { caches?: unknown }).caches = {
+      open: async () => ({
+        match: async () => null,
+        delete: async () => true,
+        put: async (_q: Request, r: Response) => void puts.push(r),
+        keys: async () => [] as Request[],
+      }),
+    };
+    (globalThis as { self?: unknown }).self = { location: { origin: "https://zl.test" } };
+    const mk = (extra: Record<string, string>) =>
+      new Response("body", {
+        headers: { "cache-control": "max-age=60", "content-type": "text/plain", ...extra },
+      });
+    const auth = new Request("https://e.example/p", { headers: { authorization: "Bearer x" } });
+    expect(await pageCacheStore(auth, mk({}))).toBeNull();
+    expect(
+      await pageCacheStore(new Request("https://e.example/p"), mk({ "content-length": String(5 * 1024 * 1024) })),
+    ).toBeNull();
+    expect(puts.length).toBe(0);
+    const stored = await pageCacheStore(
+      new Request("https://e.example/p"),
+      mk({}),
+      false,
+      "https://final.example/a",
+    );
+    expect(stored).not.toBeNull();
+    expect(puts[0].headers.get("x-zl-final-url")).toBe("https://final.example/a");
+  });
+
+  it("clears every entry on pageCacheClear (#179)", async () => {
+    const deleted: Request[] = [];
+    (globalThis as { caches?: unknown }).caches = {
+      open: async () => ({
+        match: async () => null,
+        delete: async (q: Request) => void deleted.push(q),
+        put: async () => {},
+        keys: async () => [new Request("https://a"), new Request("https://b")],
+      }),
+    };
+    await pageCacheClear();
+    expect(deleted.length).toBe(2);
+  });
+
+  it("refresh follows the stored final URL and redirect hops (#184)", async () => {
+    const dests: string[] = [];
+    let call = 0;
+    transport.handler = async (_headers?: Headers, dest?: string) => {
+      dests.push(dest ?? "?");
+      call += 1;
+      if (call === 1)
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://new-final.example/b" },
+        });
+      return new Response("fresh", {
+        headers: { "content-type": "text/plain", "cache-control": "max-age=60" },
+      });
+    };
+    const stored = new Response("stale", {
+      headers: {
+        "content-type": "text/plain",
+        "cache-control": "max-age=60",
+        "x-zl-cached-at": String(Date.now() - 60 * 60 * 1000),
+        "x-zl-final-url": "https://old-final.example/a",
+      },
+    });
+    const puts: Response[] = [];
+    (globalThis as { caches?: unknown }).caches = {
+      open: async () => ({
+        match: async () => stored,
+        delete: async () => true,
+        put: async (_q: Request, r: Response) => void puts.push(r),
+        keys: async () => [] as Request[],
+      }),
+    };
+    (globalThis as { self?: unknown }).self = { location: { origin: "https://zl.test" } };
+
+    const kept: Promise<unknown>[] = [];
+    const hit = await pageCacheMatch(new Request("https://e.example/p"), (p) => void kept.push(p));
+    if (!hit) throw new Error("expected the stale copy to be served");
+    expect(await hit.clone().text()).toBe("stale");
+    await kept[0];
+
+    expect(dests[0]).toBe("https://old-final.example/a");
+    expect(dests[1]).toBe("https://new-final.example/b");
+    expect(puts.length).toBe(1);
+    expect(puts[0].headers.get("x-zl-final-url")).toBe("https://new-final.example/b");
   });
 });
 

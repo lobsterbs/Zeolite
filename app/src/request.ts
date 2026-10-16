@@ -196,8 +196,13 @@ export function withDeadline<T>(
 
 const ZL_PAGES = "zeolite-pages-v1";
 const ZL_CACHED_AT = "x-zl-cached-at";
+/* #184: the final URL after redirect hops rides stored entries. */
+const ZL_FINAL_URL = "x-zl-final-url";
 const ZL_DEFAULT_TTL = 10 * 60 * 1000;
 const ZL_PAGE_LIMIT = 60;
+/* #195: bodies above this size never enter the page cache (the
+   clone() tee buffers them whole in memory). */
+const ZL_PAGE_STORE_MAX = 4 * 1024 * 1024;
 /* One in-flight stale refresh per cache key: concurrent stale hits
    coalesce into a single upstream fetch instead of one each. */
 const staleRefreshInFlight = new Map<string, Promise<void>>();
@@ -217,7 +222,14 @@ export function cacheTtl(headers: Headers): number {
     (zero TTL) and revalidated before every use; an entry without
     validators revalidates as an unconditional probe. */
 export function cacheStorable(headers: Headers): boolean {
-  return !/\bno-store\b/.test((headers.get("cache-control") ?? "").toLowerCase());
+  const cc = (headers.get("cache-control") ?? "").toLowerCase();
+  /* #179: private responses never enter the shared page cache (it
+     spans jar profiles and sessions), and neither do responses that
+     vary on Cookie. */
+  if (/\bno-store\b/.test(cc)) return false;
+  if (/\bprivate\b/.test(cc)) return false;
+  if (/\bcookie\b/.test((headers.get("vary") ?? "").toLowerCase())) return false;
+  return true;
 }
 
 /* #94 + #35: ONE copy of the JS-transform destination set - the
@@ -297,15 +309,21 @@ export async function pageCacheMatch(
             /* #115: the refresh carries the stored validators so the
                origin can answer 304; a 304 keeps the stored body and
                bumps the stored-at time instead of transferring a new
-               copy. */
-            const fresh = await wispFetchCacheBypass(req, {
-              etag: hit.headers.get("etag"),
-              lastModified: hit.headers.get("last-modified"),
-            });
+               copy. #184: a redirected entry refreshes against its
+               stored final URL and the fetch chases the hops, so the
+               entry can actually be updated. */
+            const { resp: fresh, finalUrl: freshUrl } = await wispFetchCacheBypass(
+              req,
+              {
+                etag: hit.headers.get("etag"),
+                lastModified: hit.headers.get("last-modified"),
+              },
+              hit.headers.get(ZL_FINAL_URL) ?? undefined,
+            );
             if (fresh.status === 304) {
               await bumpStoredEntry(req, fresh);
             } else if (fresh.ok) {
-              await pageCacheStore(req, fresh);
+              await pageCacheStore(req, fresh, false, freshUrl);
             }
           }
         } catch {
@@ -362,18 +380,48 @@ async function rangeFromEntry(hit: Response, rangeHeader: string): Promise<Respo
 let pageCacheTrimWarned = false;
 let pageCacheStoreWarned = false;
 
+/** #179: the page cache is shared across jar profiles and sessions, so
+    a request carrying credentials (an Authorization header or a jar
+    cookie for the target) bypasses it in both directions. */
+function requestHasCredentials(req: Request, dest: string): boolean {
+  if (req.headers.has("authorization")) return true;
+  return !!cookieHeaderFor(dest);
+}
+
+/** #184: a redirected entry rewrites against the final URL it was
+    served from, not the pre-redirect key it is cached under. */
+export function cacheRewriteBase(hit: Response, target: string): string {
+  return hit.headers.get(ZL_FINAL_URL) ?? target;
+}
+
 /** Store a 200 in the page cache. With keepView the caller also serves
     the returned surgered view to the page (the cache consumes a clone,
     both forks stream concurrently); without it the view's body is
     consumed by the cache and the return value must not be served. */
-async function pageCacheStore(
+export async function pageCacheStore(
   req: Request,
   resp: Response,
   keepView = false,
+  finalUrl?: string,
 ): Promise<Response | null> {
   /* #115: no-cache entries are stored too - cacheTtl gives them a zero
      TTL, so every use revalidates - and only no-store is never stored. */
   if (!cacheStorable(resp.headers) || resp.status !== 200) return null;
+  /* #179: credential-bearing requests never feed the shared page
+     cache (Authorization header or a jar cookie for the target). */
+  {
+    const su = new URL(req.url);
+    const sroute = decodePath(su.pathname);
+    if (requestHasCredentials(req, sroute ? sroute + su.search : su.href)) return null;
+  }
+  /* #195: big bodies never enter the page cache - the clone() tee
+     buffers them whole in memory while the cache write trails the page
+     read. The length header is authoritative when present; a missing
+     one is usually a chunked dynamic document, which stays cacheable.
+     ponytail: unknown-length streams stay stored; a counting wrapper
+     is the upgrade if a live site lands multi-MB chunked docs here. */
+  const clen = Number(resp.headers.get("content-length") ?? NaN);
+  if (clen > ZL_PAGE_STORE_MAX) return null;
   try {
     const cache = await caches.open(ZL_PAGES);
     /* Issue #2 + hostile-header hygiene: the cache must never store the
@@ -392,6 +440,10 @@ async function pageCacheStore(
     mapRefreshHeader(storedHeaders, croute ? croute + cu.search : cu.href);
     const stored = new Response(resp.body, { status: 200, headers: storedHeaders });
     stored.headers.set(ZL_CACHED_AT, String(Date.now()));
+    /* #184: the final URL after redirect hops rides the entry so a
+       cache hit rewrites against the base the document was actually
+       served from. */
+    if (finalUrl) stored.headers.set(ZL_FINAL_URL, finalUrl);
     await cache.put(req, keepView ? stored.clone() : stored);
     let keys = await cache.keys();
     while (keys.length > ZL_PAGE_LIMIT) {
@@ -623,26 +675,58 @@ async function upstreamFetch(
   return wispTransport.fetch(dest, init, traceId);
 }
 
+/** #179: the page cache spans jar profiles and sessions; clearing the
+    jar or switching profile drops it so one account's cached pages
+    never surface for another. */
+export async function pageCacheClear(): Promise<void> {
+  try {
+    const cache = await caches.open(ZL_PAGES);
+    for (const k of await cache.keys()) await cache.delete(k);
+  } catch {
+    /* no storage: nothing to clear */
+  }
+}
+
 async function wispFetchCacheBypass(
   req: Request,
   validators?: { etag?: string | null; lastModified?: string | null },
-): Promise<Response> {
+  destOverride?: string,
+): Promise<{ resp: Response; finalUrl: string }> {
   /* Issue #38: engine routes keep the query outside the encoded
      destination; a foreign (#34) cached entry is keyed by the full
      target URL, and its pathname is not a decodable route. Compose
      the destination per shape - the old form glued a null decode of
-     a foreign path onto its query. */
+     a foreign path onto its query. #184: a redirected entry carries
+     its final URL and refreshes there; the fetch follows hops so the
+     refresh can actually update the entry. */
   const u = new URL(req.url);
   const route = decodePath(u.pathname);
-  const dest = route ? route + u.search : u.href;
-  /* 1.4 Boride: cache refreshes carry the jar's Cookie header too. */
-  const headers = new Headers();
-  const jarCookie = cookieHeaderFor(dest);
-  if (jarCookie) headers.set("cookie", jarCookie);
-  /* #115: send the stored validators so the origin can answer 304. */
-  if (validators?.etag) headers.set("if-none-match", validators.etag);
-  if (validators?.lastModified) headers.set("if-modified-since", validators.lastModified);
-  return wispTransport.fetch(dest, { method: "GET", headers });
+  let dest = destOverride ?? (route ? route + u.search : u.href);
+  let finalUrl = dest;
+  /* ponytail: five hops, the same practical ceiling as the live hop
+     chain; the honest 3xx surfaces beyond it. */
+  for (let hop = 0; ; hop++) {
+    const headers = new Headers();
+    /* 1.4 Boride: cache refreshes carry the jar's Cookie header too. */
+    const jarCookie = cookieHeaderFor(dest);
+    if (jarCookie) headers.set("cookie", jarCookie);
+    /* #115: send the stored validators so the origin can answer 304
+       (they belong to the original destination only). */
+    if (hop === 0) {
+      if (validators?.etag) headers.set("if-none-match", validators.etag);
+      if (validators?.lastModified) headers.set("if-modified-since", validators.lastModified);
+    }
+    const resp = await wispTransport.fetch(dest, { method: "GET", headers });
+    const loc = resp.headers.get("location");
+    if (resp.status >= 300 && resp.status < 400 && loc && hop < 5) {
+      /* #201 hygiene: the redirect body is never read - cancel it. */
+      if (resp.body) void resp.body.cancel().catch(() => {});
+      finalUrl = new URL(loc, dest).href;
+      dest = finalUrl;
+      continue;
+    }
+    return { resp, finalUrl };
+  }
 }
 
 /** #115: a wire 304 answering a conditional fetch keeps the stored
@@ -679,15 +763,21 @@ async function bumpStoredEntry(req: Request, notModified: Response): Promise<voi
     is the upgrade path if a hot no-cache resource measurably hurts. */
 async function revalidateBeforeUse(req: Request, hit: Response): Promise<Response | null> {
   try {
-    const probe = await wispFetchCacheBypass(req, {
-      etag: hit.headers.get("etag"),
-      lastModified: hit.headers.get("last-modified"),
-    });
+    /* #184: a redirected entry revalidates against its stored final
+       URL, and the probe follows hops like the SWR refresh. */
+    const { resp: probe, finalUrl: probeUrl } = await wispFetchCacheBypass(
+      req,
+      {
+        etag: hit.headers.get("etag"),
+        lastModified: hit.headers.get("last-modified"),
+      },
+      hit.headers.get(ZL_FINAL_URL) ?? undefined,
+    );
     if (probe.status === 304) {
       await bumpStoredEntry(req, probe);
       return hit;
     }
-    if (probe.ok) return (await pageCacheStore(req, probe, true)) ?? null;
+    if (probe.ok) return (await pageCacheStore(req, probe, true, probeUrl)) ?? null;
     return null;
   } catch {
     return null;
@@ -1792,8 +1882,10 @@ export function handleFetch(e: FetchEvent): void {
         }
         if (ruleDec.url || ic.url) target = destUpgraded(ic.url ?? ruleDec.url ?? target);
 
-        /* Cache-first for proxied GETs. */
-        if (e.request.method === "GET") {
+        /* Cache-first for proxied GETs. #179: a credential-bearing
+           request (Authorization or a jar cookie for the target)
+           never serves from the shared page cache. */
+        if (e.request.method === "GET" && !requestHasCredentials(e.request, target)) {
           const hit = await pageCacheMatch(e.request, (p) => e.waitUntil(p));
           if (hit) {
             let dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
@@ -1880,7 +1972,7 @@ export function handleFetch(e: FetchEvent): void {
               /* Issue B: the served copy is re-encoded UTF-8. */
               hitHeaders.set("content-type", utf8ContentType(hitCt));
               return new Response(
-                rewriteStream(hit.body, target, chRule, csInject, hitCt, () => {
+                rewriteStream(hit.body, cacheRewriteBase(hit, target), chRule, csInject, hitCt, () => {
                   if (e.request.mode === "navigate") WEBNAV.completed(target);
                 }),
                 { status: hit.status, headers: hitHeaders },
@@ -1889,7 +1981,7 @@ export function handleFetch(e: FetchEvent): void {
             if (isCss(hit) && hit.body) {
               const hitCt = hit.headers.get("content-type") ?? "text/css";
               hitHeaders.set("content-type", utf8ContentType(hitCt));
-              return new Response(cssRewriteStream(hit.body, target, hitCt), {
+              return new Response(cssRewriteStream(hit.body, cacheRewriteBase(hit, target), hitCt), {
                 status: hit.status,
                 headers: hitHeaders,
               });
@@ -1917,9 +2009,14 @@ export function handleFetch(e: FetchEvent): void {
             ) {
               const jsCt = hit.headers.get("content-type") ?? "";
               const raw0 = decodeBody(await hit.arrayBuffer(), jsCt);
-              let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, raw0);
+              let src = rewriteModuleWorkerImports(
+                currentPrefix(),
+                cacheRewriteBase(hit, target),
+                self.location.origin,
+                raw0,
+              );
               try {
-                src = await rewriteJsBody(src, target);
+                src = await rewriteJsBody(src, cacheRewriteBase(hit, target));
               } catch (err) {
                 /* A wasm load failure must not break the hit: the
                    specifier output still serves (the fresh path's
@@ -2445,7 +2542,7 @@ export function handleFetch(e: FetchEvent): void {
             !scriptServe &&
             !(DOC_DESTS.has(dest) && respCt === "")
           ) {
-            void pageCacheStore(e.request, resp.clone());
+            void pageCacheStore(e.request, resp.clone(), false, finalDest);
           }
           /* #158/#159: script and worker destinations must never
              receive an HTML or CSS body: module scripts hard-fail the
@@ -2571,7 +2668,8 @@ export function handleFetch(e: FetchEvent): void {
                and the served header says so. */
             outHeaders.set("content-type", utf8ContentType(respCt));
             const out = new Response(head + src, { status: resp.status, headers: outHeaders });
-            if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());
+            if (e.request.method === "GET")
+              void pageCacheStore(e.request, out.clone(), false, finalDest);
             return out;
           }
           if (isWorkerDestination(e.request.destination) && resp.body) {
@@ -2625,7 +2723,8 @@ export function handleFetch(e: FetchEvent): void {
                keeps its streaming path while the cache consumes the
                other fork. */
             const out = new Response(body, { status: resp.status, headers: outHeaders });
-            if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());
+            if (e.request.method === "GET")
+              void pageCacheStore(e.request, out.clone(), false, finalDest);
             return out;
           }
           /* #35 (browser E2E): page <script type="module"> bodies. An
@@ -2668,7 +2767,8 @@ export function handleFetch(e: FetchEvent): void {
                the served header must say so. */
             outHeaders.set("content-type", utf8ContentType(respCt));
             const out = new Response(src, { status: resp.status, headers: outHeaders });
-            if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());
+            if (e.request.method === "GET")
+              void pageCacheStore(e.request, out.clone(), false, finalDest);
             return out;
           }
           WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
