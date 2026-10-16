@@ -106,19 +106,21 @@ as engine bugs, environmental walls, or documented design limits.
 - **YouTube** - watch pages boot, the video element reaches a ready state.
 - **slither.io** - canvas renders, nickname entry and server join work.
 - **Brave Search** - full SERP with favicons; subresource MIME checks pass
-  standalone. The Ask AI tab does NOT answer through the engine (verified
-  2026-10-16 with a direct control that answers in ~10s without the proxy):
-  Brave serp is a SvelteKit app whose client router matches routes on the
-  opaque engine pathname, so every in-app navigation throws `Not found:
-  /zl/<token>` and falls back to a full document load, which drops the
-  client-minted conversation state; Brave then serves the empty `New
-  conversation` shell and the answer, which only streams client-side from
-  the in-conversation state, never loads. Same architectural class as
-  Google SPA routing: the NAVH split-identity route (#144) preserves
-  the real path for engine-side recovery, but SvelteKit matches its
-  route table against the full pathname, so the engine route prefix
-  still breaks route matching - the documented "string-match without
-  tolerating the suffix" design limit.
+  standalone. The Ask AI tab now boots through the engine (verified
+  2026-10-16 live): #235 ships the AST pass in the wasm rewriter that
+  renames page `location` reads (bare and member reads, scope-aware)
+  to the `__zl` virtual location, and #236 ships the runtime
+  `applyVloc` location view over the virtual path/query/hash with
+  pushState/replaceState re-anchoring, so the SvelteKit client router
+  matches `/ask` on the virtual pathname instead of the opaque engine
+  route (its regression fix stops the re-anchored `__zl_prel__` tail
+  from snowballing across SPA fallback reloads, which previously ended
+  in 429 retry loops and 414 Request-URI-Too-Long). Ask answers
+  currently do not stream from the hosted deployment because Brave
+  bot-walls the datacenter exit IPs (429 + a "Verifying you are not a
+  bot" interstitial, reproduced 2026-10-16 direct from a datacenter
+  host with no proxy involved), the same environmental class as the
+  Google Search entry below.
 - **Hacker News, example.com, plain content sites** - full load.
 
 ### Captcha and challenge coverage
@@ -153,8 +155,13 @@ as engine bugs, environmental walls, or documented design limits.
   github.com append class now boots). The host stays opaque to the
   browser, history and extensions; the path exposure is a recorded
   decision (docs/security.md). Routers that string-match the bare
-  opaque token without tolerating the suffix remain limited by the
-  LegacyUnforgeable location, a recorded design decision, not a bug.
+  opaque token without tolerating the suffix used to stay limited by
+  the LegacyUnforgeable location; #235/#236 fix that class for scripts
+  the rewriter processes (page `location` reads are renamed to the
+  `__zl` virtual location at rewrite time, and the runtime serves the
+  virtual path/query/hash). Code the pass cannot rewrite (parse
+  failures, unrewritten script bodies) still reads the opaque route,
+  and `window.location` itself stays LegacyUnforgeable and native.
 - **Runtime-constructed asset names** - single-segment script/style names
   built by page code at runtime (github.com module CSS) are recovered by
   the global observed asset-base heuristic (#134).
