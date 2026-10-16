@@ -565,16 +565,20 @@ function patchedStreamResponse(
     }
   };
   const real_end_callback = (error: number) => {
+    /* Headers already delivered before this end: the body has started
+       (or the response is bodiless and its stream is already closed,
+       in which case erroring is a no-op). */
+    const body_started = headers_received;
+    const lower = "\r\n" + raw_header_text.toLowerCase();
+    const has_length = /(?:^|\r\n)content-length:/.test(lower);
+    const length_zero = /(?:^|\r\n)content-length:\s*0(?:\r|$)/.test(lower);
+    const has_chunked = /(?:^|\r\n)transfer-encoding:/.test(lower);
     if (!headers_received && error === 56) {
       /* The #11 fix, scoped: RECV_ERROR with the header set already
          delivered and a close-delimited body is end-of-body, not a
          transport failure. Length-delimited bodies (content-length > 0
          or chunked) keep the original rejection: error 56 before their
          framing completed is truncation, and truncation must fail. */
-      const lower = "\r\n" + raw_header_text.toLowerCase();
-      const has_length = /(?:^|\r\n)content-length:/.test(lower);
-      const length_zero = /(?:^|\r\n)content-length:\s*0(?:\r|$)/.test(lower);
-      const has_chunked = /(?:^|\r\n)transfer-encoding:/.test(lower);
       if (!has_chunked && (!has_length || length_zero)) {
         headers_received = true;
         try {
@@ -589,10 +593,26 @@ function patchedStreamResponse(
       headers_received = true;
       headers_callback(stream);
     }
-    try {
-      stream_controller?.close();
-    } catch {
-      /* already closed or errored */
+    /* #180: a transport error after the headers, on a body with
+       declared framing (content-length > 0 or chunked), is truncation.
+       Error the stream so the reader rejects instead of reporting a
+       clean end; the rewriters must never see a complete body here.
+       This branch is deliberately outside the try/catch below, which
+       only guards close() against an already-closed stream. The
+       close-delimited salvage (#11) and clean ends still close. */
+    const framed = has_chunked || (has_length && !length_zero);
+    if (error !== 0 && body_started && framed) {
+      stream_controller?.error(
+        new TypeError(
+          `upstream body truncated (transport error ${error} before the body framing completed)`,
+        ),
+      );
+    } else {
+      try {
+        stream_controller?.close();
+      } catch {
+        /* already closed or errored */
+      }
     }
     end_callback(error);
   };

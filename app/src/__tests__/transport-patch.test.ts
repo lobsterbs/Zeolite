@@ -434,3 +434,109 @@ describe("applyTransportEOF", () => {
     expect(headerCalls).toHaveLength(0);
   });
 });
+
+/* Read until done or rejection, returning what arrived and the rejection
+   (if any). A stream error discards queued chunks, so each test reads
+   the delivered prefix before the transport error fires. */
+async function readOutcome(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<{ done: boolean; error?: unknown }> {
+  try {
+    const r = await reader.read();
+    return { done: r.done };
+  } catch (error) {
+    return { done: false, error };
+  }
+}
+
+describe("mid-body transport failures (#180)", () => {
+  it.each([56, 18])(
+    "length-delimited body cut by error %i after the headers and a partial body errors the stream",
+    async (code) => {
+      const seam = makeSeam();
+      expect(applyTransportEOF(seam.session)).toBe(true);
+      const headerCalls: ReadableStream[] = [];
+      const ends: number[] = [];
+      const cbs = start(
+        seam,
+        (stream) => headerCalls.push(stream),
+        (error) => ends.push(error),
+      );
+      cbs.headers(LENGTH_DELIMITED_200);
+      cbs.data(new Uint8Array([65, 66, 67]));
+      expect(headerCalls).toHaveLength(1);
+      const reader = headerCalls[0].getReader();
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+      expect(Array.from(first.value as Uint8Array)).toEqual([65, 66, 67]);
+      cbs.end(code);
+      expect(ends).toEqual([code]);
+      const after = await readOutcome(reader);
+      expect(after.done).toBe(false);
+      expect(after.error).toBeInstanceOf(TypeError);
+    },
+  );
+
+  it("chunked body cut by error 56 after a partial body errors the stream", async () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: ReadableStream[] = [];
+    const ends: number[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      (error) => ends.push(error),
+    );
+    cbs.headers(
+      enc.encode("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"),
+    );
+    /* libcurl hands the transport the de-chunked payload, not the
+       chunk framing, so the data callback sees the bare bytes */
+    cbs.data(enc.encode("hello"));
+    const reader = headerCalls[0].getReader();
+    const first = await reader.read();
+    expect(Array.from(first.value as Uint8Array)).toEqual(
+      Array.from(enc.encode("hello")),
+    );
+    cbs.end(56);
+    expect(ends).toEqual([56]);
+    const after = await readOutcome(reader);
+    expect(after.error).toBeInstanceOf(TypeError);
+  });
+
+  it("close-delimited body with error 56 after full headers and a body still resolves as clean EOF (#11)", async () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: ReadableStream[] = [];
+    const ends: number[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      (error) => ends.push(error),
+    );
+    cbs.headers(CLOSE_DELIMITED_302);
+    cbs.data(new Uint8Array([65, 66]));
+    const reader = headerCalls[0].getReader();
+    expect(Array.from((await reader.read()).value as Uint8Array)).toEqual([65, 66]);
+    cbs.end(56);
+    expect(ends).toEqual([56]);
+    expect(await readOutcome(reader)).toEqual({ done: true });
+  });
+
+  it("a clean end (error 0) on a complete length-delimited body still closes normally", async () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: ReadableStream[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      () => {},
+    );
+    cbs.headers(LENGTH_DELIMITED_200);
+    cbs.data(new Uint8Array([65]));
+    const reader = headerCalls[0].getReader();
+    expect(Array.from((await reader.read()).value as Uint8Array)).toEqual([65]);
+    cbs.end(0);
+    expect(await readOutcome(reader)).toEqual({ done: true });
+  });
+});
