@@ -2245,8 +2245,14 @@ export function handleFetch(e: FetchEvent): void {
              hostile-header surgery strips it from the page view. A 3xx
              that surfaced (hop cap, unresolvable or unreplayable hop)
              still lands here, captured against its own hop URL. */
-          /* #179: the store gate for every fresh-path cache write below. */
-          const storeUnbound = !carriedSession;
+          /* #179: the store gate for every fresh-path cache write below.
+             #184: a redirected response is never stored. Its entry would
+             be keyed by the pre-redirect request, and a later hit would
+             rewrite its links (or resolve its module specifiers) against
+             the pre-redirect target instead of the final URL. A redirected
+             visit always takes the live path, which rewrites against
+             finalDest. */
+          const storeUnbound = !carriedSession && !finalDest;
           const admitted = applySetCookie(finalDest ?? hopUrl, jarHeaders(resp));
           /* #35 (browser E2E): the page's document.cookie getter is
              synchronous, so the bootstrap keeps an optimistic copy; a

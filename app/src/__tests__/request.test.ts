@@ -630,3 +630,87 @@ describe("page cache does not carry one user's session to another (#179)", () =>
     expect(store.size).toBe(0);
   });
 });
+
+/* #184: a redirected document is cached under the pre-redirect key, so a
+   second visit served from cache rewrote its links against the pre-redirect
+   origin. A redirected response is not stored: the second visit takes the
+   live path and rewrites against the final URL. */
+describe("redirected responses are not cached under the pre-redirect key (#184)", () => {
+  const ORIGIN = "https://w.example.org";
+  const ROUTE = ORIGIN + encodeDestLegacy("https://site.example/");
+
+  const mkEvent = (clientId: string) => {
+    const armed: Promise<Response>[] = [];
+    const ev = {
+      request: {
+        url: ROUTE,
+        method: "GET",
+        mode: "navigate",
+        destination: "document",
+        credentials: "same-origin",
+        referrer: "",
+        body: null,
+        headers: new Headers(),
+      },
+      clientId,
+      resultingClientId: clientId + "-new",
+      respondWith: (p: Promise<Response>) => void armed.push(p),
+      waitUntil: () => {},
+    } as unknown as FetchEvent;
+    return { ev, armed };
+  };
+
+  let store: Map<string, Response>;
+
+  beforeEach(() => {
+    transportMock.calls = 0;
+    transportMock.gate = undefined;
+    transportMock.urls = [];
+    transportMock.queue = [];
+    transportMock.inits = [];
+    store = new Map();
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN },
+      registration: { scope: ORIGIN + "/" },
+      clients: { get: async () => null },
+    });
+    const keyOf = (req: unknown) => (typeof req === "string" ? req : (req as Request).url);
+    vi.stubGlobal("caches", {
+      open: async () => ({
+        match: async (req: unknown) => store.get(keyOf(req))?.clone(),
+        put: async (req: unknown, resp: Response) => void store.set(keyOf(req), resp),
+        delete: async (req: unknown) => store.delete(keyOf(req)),
+        keys: async () => [...store.keys()].map((url) => ({ url })),
+      }),
+      delete: async () => true,
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("stores nothing for a 301 chain and the second visit goes live to the final URL", async () => {
+    transportMock.queue = [
+      new Response(null, { status: 301, headers: { location: "https://www.site.example/" } }),
+      new Response("first", { headers: { "content-type": "text/plain" } }),
+      new Response(null, { status: 301, headers: { location: "https://www.site.example/" } }),
+      new Response("second", { headers: { "content-type": "text/plain" } }),
+    ];
+    const first = mkEvent("doc-a");
+    handleFetch(first.ev);
+    expect(await (await first.armed[0]!).text()).toBe("first");
+    expect(store.size).toBe(0);
+
+    const second = mkEvent("doc-b");
+    handleFetch(second.ev);
+    expect(await (await second.armed[0]!).text()).toBe("second");
+    expect(transportMock.urls).toEqual([
+      "https://site.example/",
+      "https://www.site.example/",
+      "https://site.example/",
+      "https://www.site.example/",
+    ]);
+  });
+});
+
