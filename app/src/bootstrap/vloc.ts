@@ -68,8 +68,16 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
   }
   /* The entry route, captured at bootstrap: every re-anchor rides
      it, so history entries stay siblings under one route. An
-     engine-origin root document anchors nothing. */
-  const entry = natUrl.pathname;
+     engine-origin root document anchors nothing. A prel tail is
+     stripped first: a document loaded at a re-anchored
+     <entry>/__zl_prel__/<encoded> URL must anchor NEW tails on
+     the bare entry. Anchoring on the accumulated pathname nests
+     the previous tail inside every re-encoded tail, and each
+     fallback reload doubled it (the Brave Ask snowball: 429
+     loops, then a 414 Request-URI-Too-Long). */
+  const navpCut = natUrl.pathname.indexOf(NAVP);
+  const entry =
+    navpCut > 0 ? natUrl.pathname.slice(0, navpCut) : natUrl.pathname;
   if (entry.length < 2) return;
   const origin = natUrl.origin;
 
@@ -82,6 +90,29 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
       const tail = pn.slice(NAVH.length + 1);
       const slash = tail.indexOf("/");
       const rest = slash < 0 ? "/" : tail.slice(slash);
+      /* A prel tail on the handle route is the NEWER virtual
+         state (a re-anchored pushState/assign), not site path:
+         decode it; the visible path before it is the load-time
+         view. Reading the tail as path snowballed every
+         re-anchor (the Brave Ask 414 class). */
+      const tcut = rest.indexOf(NAVP);
+      if (tcut >= 0) {
+        try {
+          const seg = rest.slice(tcut + NAVP.length);
+          let d = decodeURIComponent(
+            (seg.startsWith("/") ? seg.slice(1) : seg).split("#")[0],
+          );
+          if (d.charAt(0) === "/") {
+            /* legacy snowball defense: an embedded marker inside
+               the decoded tail is older accumulation, not path */
+            const emb = d.indexOf(NAVP);
+            if (emb >= 0) d = d.slice(0, emb);
+            return u.hash ? d + u.hash : d;
+          }
+        } catch {
+          /* an undecodable tail falls to the visible path */
+        }
+      }
       /* #202 parity: builder-escaped surplus leading slashes
          restore to the real "//" pathname. */
       const path = rest.replace(
@@ -99,6 +130,10 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
         return null;
       }
       if (d.charAt(0) !== "/") return null;
+      /* legacy snowball defense: an embedded marker inside the
+         decoded tail is older accumulation, not path */
+      const emb = d.indexOf(NAVP);
+      if (emb >= 0) d = d.slice(0, emb);
       /* a native hash (an anchor click on the re-anchored URL) is
          newer than the hash pushed inside the tail */
       return u.hash ? d.split("#")[0] + u.hash : d;

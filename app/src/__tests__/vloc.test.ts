@@ -143,6 +143,50 @@ describe("applyVloc (#236)", () => {
     expect(w.__zl).toBeUndefined();
   });
 
+  it("anchors on the bare entry after loading at a prel URL (no tail nesting)", () => {
+    const { w, state } = makeWin(
+      ENGINE + ENTRY + "/__zl_prel__/" + encodeURIComponent("/spa/one?k=1"),
+    );
+    applyVloc(w, "/spa/one?k=1");
+    const h = w.history as { pushState(s: unknown, t: string, u?: string | null): void };
+    h.pushState({}, "", "/spa/two?k=2");
+    expect(state.href).toBe(
+      ENGINE + ENTRY + "/__zl_prel__/" + encodeURIComponent("/spa/two?k=2"),
+    );
+  });
+
+  it("decodes a prel tail on the handle route instead of reading it as path", () => {
+    const { w } = makeWin(
+      ENGINE + "/__zl_navh__/TOKEN123/search/__zl_prel__/" + encodeURIComponent("/search?q=a"),
+    );
+    applyVloc(w);
+    expect(zl(w).pathname).toBe("/search");
+    expect(zl(w).search).toBe("?q=a");
+  });
+
+  it("restores the tail view on popstate (NAVH + prel)", () => {
+    const { w, state, fire } = makeWin(ENGINE + "/__zl_navh__/TOKEN123/search");
+    applyVloc(w, "/search");
+    state.href =
+      ENGINE + "/__zl_navh__/TOKEN123/search/__zl_prel__/" + encodeURIComponent("/search?q=b");
+    fire("popstate");
+    expect(zl(w).pathname).toBe("/search");
+    expect(zl(w).search).toBe("?q=b");
+  });
+
+  it("strips an embedded marker from a legacy accumulated tail", () => {
+    const { w } = makeWin(
+      ENGINE +
+        ENTRY +
+        "/__zl_prel__/" +
+        encodeURIComponent("/spa/one") +
+        "/__zl_prel__/" +
+        encodeURIComponent("/spa/two"),
+    );
+    applyVloc(w);
+    expect(zl(w).pathname).toBe("/spa/one");
+  });
+
   it("is idempotent: a second run keeps the first view", () => {
     const { w } = makeWin(ENGINE + ENTRY);
     applyVloc(w, "/one");
