@@ -464,41 +464,7 @@ impl Rewriter {
     /// Try to fully parse + rewrite the tag at the start of buf.
     /// Returns (bytes consumed, rewritten tag) if the tag is complete.
     fn try_rewrite_tag(&mut self, buf: &str) -> Option<(usize, String)> {
-        // Find the '>' that closes the tag, respecting quoted attr values.
-        let bytes = buf.as_bytes();
-        let mut i = 1; // past '<'
-        if i < bytes.len() && bytes[i] == b'/' {
-            i += 1;
-        }
-        // #175: a quote opens a quoted VALUE only immediately after
-        // '='; anywhere else it is an ordinary character. Tracking
-        // quotes anywhere made '<p class=it\'s>' swallow the rest of
-        // the document hunting a closing quote.
-        let mut quote: Option<u8> = None;
-        let mut prev = b'x'; // any non-'=' starter
-        while i < bytes.len() {
-            let b = bytes[i];
-            match quote {
-                Some(q) => {
-                    if b == q {
-                        quote = None;
-                    }
-                }
-                None => {
-                    if (b == b'"' || b == b'\'') && prev == b'=' {
-                        quote = Some(b);
-                    } else if b == b'>' {
-                        break;
-                    }
-                }
-            }
-            prev = b;
-            i += 1;
-        }
-        if i >= bytes.len() {
-            return None; // no closing '>' yet
-        }
-        let end = i + 1; // include '>'
+        let end = scan_tag_end(buf)?;
         let rewritten = self.rewrite_single_tag(&buf[..end]);
         Some((end, rewritten))
     }
@@ -534,7 +500,7 @@ impl Rewriter {
         let mut is_refresh = false;
         if name == "meta" {
             let mut scan = rest;
-            while let Some(a) = next_attr(scan, true) {
+            while let AttrStep::Attr(a) = next_attr(scan, true) {
                 if a.name.eq_ignore_ascii_case("http-equiv") {
                     if let Some(val) = a.value.as_deref() {
                         let v = val.trim().to_ascii_lowercase();
@@ -555,7 +521,7 @@ impl Rewriter {
         }
         let mut first_url: Option<String> = None;
         let mut has_loading = false;
-        while let Some(attr) = next_attr(rest, !close_tag) {
+        while let AttrStep::Attr(attr) = next_attr(rest, !close_tag) {
             let Attr {
                 consumed,
                 lead_ws,
@@ -859,13 +825,26 @@ struct Attr {
     quote: Option<char>,
 }
 
+/// One step of the attribute grammar shared by tag-end detection
+/// (scan_tag_end) and attribute rewriting (rewrite_single_tag).
+enum AttrStep {
+    /// An attribute (name, optional value) starts here.
+    Attr(Attr),
+    /// The attribute list is over: '>' or "/>" is next, or no text is left.
+    End,
+    /// A quoted value opened but its closing quote has not arrived yet.
+    Incomplete,
+}
+
 /// Pull one attribute (name, optional =value) off the front of s.
-/// Returns None when the remaining text is not an attribute (tag end).
-fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
+/// Quotes open a value only where the grammar expects one: directly
+/// after '=' (ASCII whitespace allowed, as in HTML). Anywhere else a
+/// quote is an ordinary name or value character (#175).
+fn next_attr(s: &str, fold_slash: bool) -> AttrStep {
     let trimmed = s.trim_start();
     let mut lead_ws = s[..s.len() - trimmed.len()].to_string();
     if trimmed.is_empty() || trimmed.starts_with('>') || trimmed.starts_with("/>") {
-        return None;
+        return AttrStep::End;
     }
     // #173: a lone '/' between attributes is a separator (HTML5
     // parity); it never joins the name, so '<img/src=...>' rewrites
@@ -900,7 +879,9 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
         let (val, consumed_v, quote) = if vstart.starts_with('"') || vstart.starts_with('\'') {
             let q = vstart.as_bytes()[0] as char;
             // Value not closed yet.
-            let i = vstart[1..].find(q)?;
+            let Some(i) = vstart[1..].find(q) else {
+                return AttrStep::Incomplete;
+            };
             (vstart[1..1 + i].to_string(), ws + 1 + i + 1, Some(q))
         } else {
             let end = vstart
@@ -909,7 +890,7 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
             (vstart[..end].to_string(), ws + end, None)
         };
         let consumed = lead_ws.len() + eq + consumed_v;
-        return Some(Attr {
+        return AttrStep::Attr(Attr {
             consumed,
             lead_ws,
             name,
@@ -919,13 +900,47 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
     }
     // Boolean attribute (no value).
     let consumed = lead_ws.len() + name_end;
-    Some(Attr {
+    AttrStep::Attr(Attr {
         consumed,
         lead_ws,
         name,
         value: None,
         quote: None,
     })
+}
+
+/// Byte length of the complete tag at the start of buf (through its
+/// closing '>'), or None while the tag is still incomplete. It walks
+/// the same attribute grammar as rewrite_single_tag, so the tag end
+/// it finds is the end the attribute parser sees (#175: a '>' inside
+/// a quoted value must not end the tag).
+fn scan_tag_end(buf: &str) -> Option<usize> {
+    let close = buf.starts_with("</");
+    // Same name boundary rewrite_single_tag uses. A close tag's
+    // attribute walk starts at its '/' (fold_slash is off for close
+    // tags), so the walk begins at the name end in both paths.
+    let name_end = buf[1..]
+        .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+        .map(|i| i + 1)
+        .unwrap_or(buf.len());
+    let mut pos = name_end;
+    loop {
+        match next_attr(&buf[pos..], !close) {
+            AttrStep::Attr(a) => pos += a.consumed,
+            AttrStep::End => break,
+            AttrStep::Incomplete => return None,
+        }
+    }
+    let tail = &buf[pos..];
+    let t = tail.trim_start();
+    let skipped = tail.len() - t.len();
+    if t.starts_with('>') {
+        Some(pos + skipped + 1)
+    } else if t.starts_with("/>") {
+        Some(pos + skipped + 2)
+    } else {
+        None // no tag end yet (or the buffer ends)
+    }
 }
 
 /// The full HTML4 named-entity table plus the two apostrophe
@@ -2839,6 +2854,26 @@ mod tests {
         );
         assert!(
             out.contains(&cfg().encode_url("https://t.example/p.gif")),
+            "{}",
+            out
+        );
+    }
+    #[test]
+    fn attr_quotes_open_only_after_equals_every_split() {
+        // #175: a quote opens a value only directly after '=' (spaces
+        // allowed). A stray quote in an unquoted value must not hold
+        // the tag open to EOF, and a '>' inside a spaced quoted value
+        // must not end the tag early and hide the src that follows.
+        let out = assert_split_invariant(
+            "<p class=it's>hi</p><img src=\"https://t.example/i.png\"><p>end</p><img alt= \"a>b\" src=\"https://t.example/j.png\">",
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/i.png")),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/j.png")),
             "{}",
             out
         );
