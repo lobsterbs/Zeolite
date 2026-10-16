@@ -36,7 +36,7 @@ vi.mock("../transport", () => ({
   },
 }));
 
-import { classifyRtype, forwardedHeaders, handleFetch, pageCacheMatch, reqDest, stripCrossOriginHopHeaders, withDeadline } from "../request";
+import { classifyRtype, forwardedHeaders, handleFetch, mergeRouteSearch, pageCacheMatch, reqDest, stripCrossOriginHopHeaders, withDeadline } from "../request";
 import { setFingerprint, setSiteEnabled } from "../swstate";
 import { establishContext, resolveRelative } from "../vctx";
 import { VCTX } from "../swstate";
@@ -640,3 +640,94 @@ describe("redirect hop gates and cross-origin header scoping (#186, #194)", () =
   });
 });
 
+
+/* 2026-10-16 live strand (Brave Ask): a JS-literal mint encodes the
+   full destination - query inside the token. The Ask SPA then does a
+   query-only relative navigation ("?q=..."), so the route search must
+   REPLACE the token-encoded query (browser "?x" resolution), never
+   concatenate it ("...?a=1?b=2" strands the new question upstream). */
+describe("route search replaces a token-encoded query (Brave Ask strand)", () => {
+  const ORIGIN = "https://w.example.org";
+
+  const mkEvent = (routeUrl: string, clientId: string) => {
+    const armed: Promise<Response>[] = [];
+    const ev = {
+      request: {
+        url: routeUrl,
+        method: "GET",
+        mode: "navigate",
+        destination: "document",
+        credentials: "same-origin",
+        referrer: "",
+        body: null,
+        headers: new Headers(),
+      },
+      clientId,
+      resultingClientId: clientId + "-new",
+      respondWith: (p: Promise<Response>) => void armed.push(p),
+      waitUntil: () => {},
+    } as unknown as FetchEvent;
+    return { ev, armed };
+  };
+
+  beforeEach(() => {
+    transportMock.calls = 0;
+    transportMock.gate = undefined;
+    transportMock.urls = [];
+    transportMock.queue = [];
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN },
+      registration: { scope: ORIGIN + "/" },
+      clients: { get: async () => null },
+    });
+    vi.stubGlobal("caches", {
+      open: async () => {
+        throw new Error("no cache storage");
+      },
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("replaces the token-encoded query with the route search", async () => {
+    transportMock.queue = [new Response("ok", { headers: { "content-type": "text/plain" } })];
+    const route =
+      ORIGIN + encodeDestLegacy("https://site.example/ask?q=old+question&source=web");
+    const { ev, armed } = mkEvent(route + "?q=new+question&conversation=", "ask-1");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(transportMock.urls).toEqual([
+      "https://site.example/ask?q=new+question&conversation=",
+    ]);
+  });
+
+  it("keeps the token-encoded query when the route carries no search", async () => {
+    transportMock.queue = [new Response("ok", { headers: { "content-type": "text/plain" } })];
+    const route =
+      ORIGIN + encodeDestLegacy("https://site.example/ask?q=old+question&source=web");
+    const { ev, armed } = mkEvent(route, "ask-2");
+    handleFetch(ev);
+    await armed[0]!;
+    expect(transportMock.urls).toEqual([
+      "https://site.example/ask?q=old+question&source=web",
+    ]);
+  });
+
+  it("appends the route search onto a query-free decode (#38 shape)", async () => {
+    transportMock.queue = [new Response("ok", { headers: { "content-type": "text/plain" } })];
+    const route = ORIGIN + encodeDestLegacy("https://site.example/ask") + "?q=x";
+    const { ev, armed } = mkEvent(route, "ask-3");
+    handleFetch(ev);
+    await armed[0]!;
+    expect(transportMock.urls).toEqual(["https://site.example/ask?q=x"]);
+  });
+
+  it("mergeRouteSearch unit: replace, append, and no-op shapes", () => {
+    expect(mergeRouteSearch("https://s.example/a?b=1", "?c=2")).toBe("https://s.example/a?c=2");
+    expect(mergeRouteSearch("https://s.example/a", "?c=2")).toBe("https://s.example/a?c=2");
+    expect(mergeRouteSearch("https://s.example/a?b=1", "")).toBe("https://s.example/a?b=1");
+  });
+});

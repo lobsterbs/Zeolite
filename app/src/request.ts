@@ -388,6 +388,19 @@ function requestHasCredentials(req: Request, dest: string): boolean {
   return !!cookieHeaderFor(dest);
 }
 
+/** A route search replaces the decoded destination's own query - the
+    resolution a browser applies to a query-only relative navigation
+    ("?x" keeps the path, swaps the query). JS-literal mints and legacy
+    full-dest tokens encode their query inside the token, so gluing the
+    outer search on produced "...?a=1?b=2" (Brave Ask live strand: the
+    new question never reached the page). A query-free decode keeps
+    plain concat - the ordinary #38 route shape. */
+export function mergeRouteSearch(dest: string, search: string): string {
+  if (!search) return dest;
+  const qi = dest.indexOf("?");
+  return (qi >= 0 ? dest.slice(0, qi) : dest) + search;
+}
+
 /** #184: a redirected entry rewrites against the final URL it was
     served from, not the pre-redirect key it is cached under. */
 export function cacheRewriteBase(hit: Response, target: string): string {
@@ -412,7 +425,7 @@ export async function pageCacheStore(
   {
     const su = new URL(req.url);
     const sroute = decodePath(su.pathname);
-    if (requestHasCredentials(req, sroute ? sroute + su.search : su.href)) return null;
+    if (requestHasCredentials(req, sroute ? mergeRouteSearch(sroute, su.search) : su.href)) return null;
   }
   /* #195: big bodies never enter the page cache - the clone() tee
      buffers them whole in memory while the cache write trails the page
@@ -437,7 +450,7 @@ export async function pageCacheStore(
        replay against the browser on every hit). */
     const cu = new URL(req.url);
     const croute = decodePath(cu.pathname);
-    mapRefreshHeader(storedHeaders, croute ? croute + cu.search : cu.href);
+    mapRefreshHeader(storedHeaders, croute ? mergeRouteSearch(croute, cu.search) : cu.href);
     const stored = new Response(resp.body, { status: 200, headers: storedHeaders });
     stored.headers.set(ZL_CACHED_AT, String(Date.now()));
     /* #184: the final URL after redirect hops rides the entry so a
@@ -701,7 +714,7 @@ async function wispFetchCacheBypass(
      refresh can actually update the entry. */
   const u = new URL(req.url);
   const route = decodePath(u.pathname);
-  let dest = destOverride ?? (route ? route + u.search : u.href);
+  let dest = destOverride ?? (route ? mergeRouteSearch(route, u.search) : u.href);
   let finalUrl = dest;
   /* ponytail: five hops, the same practical ceiling as the live hop
      chain; the honest 3xx surfaces beyond it. */
@@ -1338,11 +1351,11 @@ export function handleFetch(e: FetchEvent): void {
         const handleDest = navhTail.includes("/") ? null : decodeNavHandle(navhTail);
         if (handleDest) {
           dest0 = handleDest;
-          /* #144: an origin-only token leaves the real query in the
-             route search, so the query merge below applies - but
-             never onto a legacy full-dest token that already carries
-             one (issue #38: no doubled queries). */
-          routeCarriesQuery = !handleDest.includes("?");
+          /* #144: the real query rides in the route search; the merge
+             seam replaces a full-dest token's own query with it
+             (browser "?x" semantics), so a legacy token that carries
+             one keeps its query only while the route has none. */
+          routeCarriesQuery = true;
         } else if (e.request.mode === "navigate") {
           /* #144: pathname-routed SPAs parked on the opaque handle
              route push location.pathname-built URLs as
@@ -1553,8 +1566,9 @@ export function handleFetch(e: FetchEvent): void {
         ? dest0.split("#", 1)[0] || dest0
         : dest0;
       // Query string travels outside the encoded destination - engine
-      // routes only (see routeCarriesQuery above).
-      let target = routeCarriesQuery && url.search ? bareDest + url.search : bareDest;
+      // routes only (see routeCarriesQuery above). A token-encoded
+      // query loses to the route search (browser "?x" semantics).
+      let target = routeCarriesQuery && url.search ? mergeRouteSearch(bareDest, url.search) : bareDest;
       /* #53: the single upgrade choke point. Every destination
          shape (rewriter-emitted routes, navguard markers, escaped
          same-origin paths, foreign-origin requests) resolves here
@@ -1570,7 +1584,7 @@ export function handleFetch(e: FetchEvent): void {
           const q = new URLSearchParams(url.searchParams);
           q.delete("zlHttpOk");
           const qs = q.toString();
-          target = qs ? bareDest + "?" + qs : bareDest;
+          target = qs ? mergeRouteSearch(bareDest, "?" + qs) : bareDest;
         }
       }
       target = destUpgraded(target);
@@ -3229,7 +3243,7 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     if (!ref) {
       ref = decodeLegacyRoute(refU.pathname);
     }
-    if (ref) out.set("referer", ref + refU.search);
+    if (ref) out.set("referer", mergeRouteSearch(ref, refU.search));
     /* #127: a page with an origin-only referrer policy (google.com
        serves one) sends the engine ORIGIN root as Referer, which no
        route decode recovers, so every subresource from that page
