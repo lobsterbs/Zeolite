@@ -198,6 +198,17 @@ function parseUrl(u: string): ParsedUrl | null {
   }
 }
 
+/* #191: loopback hosts are potentially trustworthy, so browsers treat
+   them as a secure context for Secure cookies even over http. */
+function isLoopbackHost(host: string): boolean {
+  return host === "localhost" || host.endsWith(".localhost") || /^127\.\d+\.\d+\.\d+$/.test(host) || host === "[::1]";
+}
+
+/* #191: the origin may carry Secure cookies: https, or a loopback host. */
+function isSecureOrigin(u: ParsedUrl): boolean {
+  return u.secure || isLoopbackHost(u.host);
+}
+
 /* Dotless-Domain heuristic (the PSL gate below covers multi-label
    public suffixes): a Domain with no dot that is not the host itself
    is refused, which blocks TLD-wide cookies (Domain=com) and keeps a
@@ -400,6 +411,13 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
     return { name, stored: false, deleted: false, rejected: "samesite none without secure" };
   }
 
+  /* #191: a Secure cookie is only admitted from a secure response
+     origin (https, or loopback). Browsers refuse it from plain http. */
+  if (secure && !isSecureOrigin(u)) {
+    DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: secure cookie from insecure origin" });
+    return { name, stored: false, deleted: false, rejected: "secure from insecure origin" };
+  }
+
   if (!domain) domain = u.host;
   path = path || defaultPath(u.path);
 
@@ -415,6 +433,21 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
     });
     traceDecision({ subsystem: "cookies", original: responseUrl, result: "rejected:domain " + name });
     return { name, stored: false, deleted: false, rejected: "domain" };
+  }
+
+  /* #191: RFC 6265bis 4.1.3 name prefixes (case-sensitive). Checked
+     before the deletion branch, so a deletion that breaks them is
+     refused too. __Secure- needs Secure; __Host- needs Secure, Path=/
+     and no Domain attribute (host-only). */
+  if (name.startsWith("__Secure-") || name.startsWith("__Host-")) {
+    if (!secure) {
+      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: __Secure- or __Host- prefix without secure" });
+      return { name, stored: false, deleted: false, rejected: "prefix requires secure" };
+    }
+  }
+  if (name.startsWith("__Host-") && (!hostOnly || path !== "/")) {
+    DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: __Host- prefix needs host-only and path /" });
+    return { name, stored: false, deleted: false, rejected: "__Host- requires host-only and path /" };
   }
 
   const now = Date.now();
@@ -510,7 +543,7 @@ export function cookieHeaderFor(requestUrl: string, ctx?: CookieRequestContext):
     if (!inProfile(key)) continue;
     for (const c of list) {
       const domainOk = c.hostOnly ? u.host === c.domain : domainMatch(u.host, c.domain);
-      if (domainOk && (!c.secure || u.secure) && pathMatch(u.path, c.path) && sameSiteAllows(c, u, ctx)) {
+      if (domainOk && (!c.secure || isSecureOrigin(u)) && pathMatch(u.path, c.path) && sameSiteAllows(c, u, ctx)) {
         matched.push(c);
       }
     }
@@ -536,7 +569,7 @@ export function documentCookieRead(pageUrl: string): string {
       const domainOk = c.hostOnly ? u.host === c.domain : domainMatch(u.host, c.domain);
       /* RFC 6265 5.4: path scope applies to document.cookie reads
          too, the same match request cookies use. */
-      if (domainOk && (!c.secure || u.secure) && pathMatch(u.path, c.path)) matched.push(c);
+      if (domainOk && (!c.secure || isSecureOrigin(u)) && pathMatch(u.path, c.path)) matched.push(c);
     }
   }
   /* RFC 6265 5.4: same ordering the Cookie header uses, longer

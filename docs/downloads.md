@@ -84,7 +84,16 @@ same honest-restart rule as `zl:adblock`).
   entry, never a live stream, so an all-active ring honestly runs
   over capacity instead of losing a running download (#25). Since
   2.2 the ring persists across SW restarts; before 2.2 it was in
-  memory only.
+  memory only. Eviction (#192) also releases the evicted entry's
+  buffered bytes and stored partial, and never takes an entry with a
+  resume in flight (the fetch included).
+- Buffered partial bytes are capped globally at
+  `ZL_DL_BUFFER_TOTAL_MAX` (128 MiB) across every entry (#192). Past
+  it the oldest buffers are dropped and their entries honestly lose
+  resumability. A resume whose buffer is dropped ends as `error`
+  ("artifact not retained"), never as a silent empty result. Known
+  limit: partials persisted before a worker restart are not counted
+  against the budget until they are loaded again.
 - Resume (#118) needs the bytes: a worker cannot reach the partial
   file the browser started writing, so resumable downloads buffer in
   the worker, capped at `ZL_DL_RESUME_MAX` (64 MiB). Above the cap,
