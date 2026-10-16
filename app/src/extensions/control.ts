@@ -370,12 +370,13 @@ async function handleExtMessage(
   if (msg && typeof msg === "object" && typeof msg.__zlTabReply === "string") {
     /* Content-script reply to a tabs.sendMessage: route it back to
        the pending promise (unknown nonces are ignored). */
-    TABS.resolveTabMessage(String(msg.__zlTabReply), msg.response);
+    TABS.resolveTabMessage(String(msg.__zlTabReply), rec.id, msg.response);
     return { ok: true };
   }
   if (msg && typeof msg === "object" && typeof msg.__zlTabError === "string") {
     TABS.rejectTabMessage(
       String(msg.__zlTabError),
+      rec.id,
       String(msg.error ?? "zeolite: content-script message failed"),
     );
     return { ok: true };

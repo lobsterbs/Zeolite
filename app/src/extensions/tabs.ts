@@ -85,7 +85,7 @@ export class TabRegistry {
     | null = null;
   private readonly pendingMessages = new Map<
     string,
-    { tabId: number; resolve: (v: unknown) => void; reject: (e: Error) => void }
+    { tabId: number; extId: string; resolve: (v: unknown) => void; reject: (e: Error) => void }
   >();
   private nonceSeq = 0;
 
@@ -132,7 +132,14 @@ export class TabRegistry {
       return Promise.reject(new Error("zeolite: no tab host attached to this engine"));
     }
     const dispatch = this.messageDispatch;
-    const nonce = "zl-m" + ++this.nonceSeq;
+    /* #185: a predictable "zl-m<n>" nonce let any content script
+       guess or brute-force another extension's reply nonces; a
+       per-send random nonce makes them unguessable. */
+    const nonce =
+      "zl-m-" +
+      (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : ++this.nonceSeq + "-" + Math.random().toString(36).slice(2));
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pendingMessages.delete(nonce)) {
@@ -141,6 +148,7 @@ export class TabRegistry {
       }, 30000);
       this.pendingMessages.set(nonce, {
         tabId,
+        extId: ext.id,
         resolve: (v) => {
           clearTimeout(timer);
           resolve(v);
@@ -166,18 +174,21 @@ export class TabRegistry {
 
   /** Content-script reply routed back through the SW (zl:ext
       __zlTabReply). Only the first reply to a nonce resolves. */
-  resolveTabMessage(nonce: string, response: unknown): void {
+  resolveTabMessage(nonce: string, extId: string, response: unknown): void {
     const p = this.pendingMessages.get(nonce);
-    if (!p) return;
+    /* #185: the reply binds to the extension that sent the message;
+       another extension answering with the same nonce is a no-op. */
+    if (!p || p.extId !== extId) return;
     this.pendingMessages.delete(nonce);
     p.resolve(response);
   }
 
   /** Content-script error report (zl:ext __zlTabError): the bridge
       answers honestly when no listener is registered. */
-  rejectTabMessage(nonce: string, error: string): void {
+  rejectTabMessage(nonce: string, extId: string, error: string): void {
     const p = this.pendingMessages.get(nonce);
-    if (!p) return;
+    /* #185: same binding as resolveTabMessage. */
+    if (!p || p.extId !== extId) return;
     this.pendingMessages.delete(nonce);
     p.reject(new Error(error));
   }

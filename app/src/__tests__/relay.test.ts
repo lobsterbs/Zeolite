@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tapChannel } from "../bootstrap/relay";
+import { applyRelay, tapChannel } from "../bootstrap/relay";
 
 /* The Worker/SharedWorker channel tap (#54 dedicated-Worker hook):
    wrapper shapes ({zl:"ws"} / {zl:"mint"}) must reach the pre-tap
@@ -68,5 +68,51 @@ describe("tapChannel (#54 dedicated-Worker hook)", () => {
       throw new Error("app boom");
     };
     expect(() => ch.dispatchEvent(msg({ ok: 1 }))).not.toThrow();
+  });
+});
+
+
+
+describe("window relay arm (#169: fails closed)", () => {
+  it("relays only same-origin self-posted messages", async () => {
+    /* The repo's vitest runs the node environment, so the test feeds
+       applyRelay a bare realm record and injects the two globals the
+       arm reads (location, and the realm addEventListener it captures
+       through a temporary shadow). */
+    const O = "http://engine.example";
+    const G = globalThis as unknown as Record<string, unknown>;
+    let captured: ((e: MessageEvent) => void) | null = null;
+    const nativeAdd = G.addEventListener;
+    G.addEventListener = (t: string, l: (e: MessageEvent) => void) => {
+      if (t === "message") captured = l;
+    };
+    G.location = { origin: O };
+    const w: Record<string, unknown> = {};
+    try {
+      applyRelay(w, "", "https://engine.example/page");
+    } finally {
+      G.addEventListener = nativeAdd;
+    }
+    expect(captured).toBeTypeOf("function");
+    const seen: unknown[] = [];
+    const fakePort = {
+      postMessage: (m: unknown) => seen.push(m),
+      close: () => undefined,
+    };
+    const ev = (origin: string, source: unknown): MessageEvent =>
+      ({ origin, source, ports: [fakePort], data: { zl: "ws" } }) as unknown as MessageEvent;
+    /* Cross-origin sender: never relayed. */
+    captured!(ev("https://evil.example", w));
+    /* Same origin but a child frame, not the page realm itself. */
+    captured!(ev(O, { child: true }));
+    await new Promise((res) => setTimeout(res, 20));
+    expect(seen).toHaveLength(0);
+    /* Self-posted (source is the realm): relayed; with no controller
+       the fail-closed terminal error frame is observable on the port. */
+    captured!(ev(O, w));
+    await new Promise((res) => setTimeout(res, 20));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({ ev: "error", code: 1006, clean: false });
+    delete G.location;
   });
 });

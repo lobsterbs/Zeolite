@@ -25,6 +25,7 @@
    route from here). */
 
 import { decodePath, encodeDest, setScheme } from "./codec";
+import { siteToken } from "./pageload";
 
 /** Route one worker-issued URL (an importScripts() argument or a
     fetch() input) through the engine codec, resolved against the
@@ -115,6 +116,7 @@ const G = globalThis as unknown as {
   importScripts?: (...args: string[]) => void;
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   __ZL_PREFIX__?: string;
+  __ZL_SITE__?: string;
   __zlPreludeInit?: (route: string) => void;
   WebSocket?: new (u: string, p?: string | string[]) => WebSocket;
   postMessage?: (m: unknown, t?: Transferable[]) => void;
@@ -137,6 +139,15 @@ export function installWorkerPrelude(route: string): void {
   setScheme(prefix);
   const workerUrl = decodePath(route) ?? G.location?.href ?? "";
   const engineOrigin = G.location?.origin ?? "";
+
+  /* #171: worker realms get the same per-site storage scoping the
+     page bootstrap installs (indexedDB, caches, BroadcastChannel,
+     all prefixed "zl:<site>:"). Opaque worker scripts (blob:/data:)
+     have no decodable upstream URL, so the SW bakes
+     self.__ZL_SITE__ into their prelude head; route workers derive
+     the token from their upstream URL instead. */
+  const site = G.__ZL_SITE__ ?? siteToken(workerUrl);
+  applyWorkerStorage(globalThis, "zl:" + site + ":");
 
   if (typeof G.importScripts === "function") {
     const IS = G.importScripts.bind(globalThis);
@@ -379,6 +390,96 @@ export function fireHandler(t: object, e: Event): void {
   try {
     if (h) h.call(t, e);
   } catch { /* contained, like a native listener */ }
+}
+
+/* #171: per-site storage scoping for worker realms, mirroring the
+   page bootstrap's bootstrap/storage.ts + isolation.ts shims: DB and
+   cache names carry the site prefix (two proxied sites never share a
+   database or a cache, and neither touches an engine-own one), and
+   BroadcastChannel names are prefixed the same way. databases() stays
+   deliberately absent (honest unimplemented API: wrapping it would
+   leak engine-own database names). Exported so worker.test.ts pins it. */
+export function applyWorkerStorage(t: Record<string, unknown>, P: string): void {
+  const pre = (n: string) => P + n;
+  {
+    const IDB = t.indexedDB as IDBFactory | undefined;
+    if (IDB) {
+      const OPEN = IDB.open.bind(IDB);
+      const DEL = IDB.deleteDatabase.bind(IDB);
+      const shim: Record<string, unknown> = {
+        open: (n: string, v?: number) => OPEN(pre(n), v),
+        deleteDatabase: (n: string) => DEL(pre(n)),
+      };
+      if (typeof IDB.cmp === "function") {
+        const CMP = IDB.cmp.bind(IDB);
+        shim.cmp = (a: string, b: string) => CMP(pre(a), pre(b));
+      }
+      try {
+        Object.defineProperty(t, "indexedDB", { value: shim, configurable: true });
+      } catch { /* read-only: stays unscoped */ }
+    }
+  }
+  {
+    const CA = t.caches as CacheStorage | undefined;
+    if (CA) {
+      const OPEN = CA.open.bind(CA);
+      const DEL = CA.delete.bind(CA);
+      const HAS = CA.has.bind(CA);
+      const KEYS = CA.keys.bind(CA);
+      const own = (n: string) => n.startsWith(P);
+      const shim: Record<string, unknown> = {
+        open: (n: string) => OPEN(pre(n)),
+        delete: (n: string) => DEL(pre(n)),
+        has: (n: string) => HAS(pre(n)),
+        keys: () => KEYS().then((ks) => ks.filter(own).map((n) => n.slice(P.length))),
+        match: async (rq: Request | string, o?: CacheQueryOptions) => {
+          for (const n of await KEYS()) {
+            if (!own(n)) continue;
+            const hit = await (await CA.open(n)).match(rq, o);
+            if (hit) return hit;
+          }
+          return undefined;
+        },
+      };
+      try {
+        Object.defineProperty(t, "caches", { value: shim, configurable: true });
+      } catch { /* read-only: stays unscoped */ }
+    }
+  }
+  {
+    const BC = t.BroadcastChannel as (new (name: string) => BroadcastChannel) | undefined;
+    if (typeof BC === "function") {
+      const BCtor: new (name: string) => BroadcastChannel = BC;
+      const ScopedChannel = function (this: unknown, name: string): BroadcastChannel & { name: string } {
+        const real = new BCtor(P + name);
+        return {
+          name,
+          get onmessage() {
+            return real.onmessage;
+          },
+          set onmessage(fn) {
+            real.onmessage = fn;
+          },
+          get onmessageerror() {
+            return real.onmessageerror;
+          },
+          set onmessageerror(fn) {
+            real.onmessageerror = fn;
+          },
+          postMessage: (m: unknown) => real.postMessage(m),
+          close: () => real.close(),
+          addEventListener: (ev: string, l: unknown, o?: unknown) =>
+            real.addEventListener(ev, l as EventListener, o as boolean | AddEventListenerOptions),
+          removeEventListener: (ev: string, l: unknown, o?: unknown) =>
+            real.removeEventListener(ev, l as EventListener, o as boolean | EventListenerOptions),
+          dispatchEvent: (ev: Event) => real.dispatchEvent(ev),
+        };
+      };
+      try {
+        Object.defineProperty(t, "BroadcastChannel", { value: ScopedChannel, configurable: true });
+      } catch { /* read-only: stays unscoped */ }
+    }
+  }
 }
 
 /* The baked init line calls this global after the module source. */

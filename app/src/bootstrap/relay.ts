@@ -107,7 +107,17 @@ const relay = (e: MessageEvent) => {
  }
  }
 };
-addEventListener("message", relay);
+/* #169: the window-level arm fails closed: a message is only relayed
+ as the page when it is same-origin and self-posted (e.source is this
+ window); a cross-origin or child-frame sender can no longer pose as
+ the page toward the engine's seams. The Worker-object and
+ SharedWorker-port taps below keep the plain relay: those channels
+ are page-owned hardware, not arbitrary senders. */
+const windowRelay = (e: MessageEvent) => {
+ if (e.origin !== location.origin || (e.source as unknown) !== w) return;
+ relay(e);
+};
+addEventListener("message", windowRelay);
 
 /* SharedWorker ctor wrapper (2.3 Selenide): the wrapper does not touch
  the script URL (same routing story as dedicated workers: relative

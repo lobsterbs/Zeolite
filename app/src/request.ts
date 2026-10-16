@@ -44,6 +44,7 @@ import { adoptResponse } from "./downloads";
    call sites. */
 import { flatRed, netLogPush, type NetDetail } from "./netlog";
 import { traceDecision } from "./tracing";
+import { siteToken } from "./pageload";
 
 import { altConfigured, altEndpoint, altRegister, altWispFetch, wispTransport } from "./transport";
 
@@ -617,7 +618,9 @@ async function upstreamFetch(
       }
     }
   }
-  return wispTransport.fetch(dest, init);
+  /* #226: thread the trace id so cooldown relay failures are
+     attributed in the diagnostics ring. */
+  return wispTransport.fetch(dest, init, traceId);
 }
 
 async function wispFetchCacheBypass(
@@ -970,7 +973,40 @@ export function handleFetch(e: FetchEvent): void {
      generated downloads pass through untouched. Checked before the
      origin test: their origin is "null" or a foreign blob origin, and
      they stay browser-owned in every case. */
-  if (isOpaqueUrl(url)) return;
+  if (isOpaqueUrl(url)) {
+    /* #171: opaque WORKER scripts still execute engine-prepended
+       prelude bytes, so their realm is engine-shaped; without a baked
+       site token the worker's indexedDB/caches/BroadcastChannel stay
+       raw (unscoped). Derive the creating page's site identity from
+       the creating client and bake it into the prelude head. Every
+       other opaque request stays browser-owned, as before. */
+    if (!isWorkerDestination(e.request.destination) || e.request.method !== "GET") return;
+    e.respondWith(
+      (async () => {
+        let site = "";
+        try {
+          const client = e.clientId ? await self.clients.get(e.clientId) : null;
+          if (client) {
+            const cu = new URL(client.url);
+            site = siteToken(decodeClientUrl(cu) ?? recoverPath(cu.pathname) ?? "");
+          }
+        } catch { /* honest fallback: an empty token still isolates */ }
+        const resp = await fetch(e.request);
+        const ct = resp.headers.get("content-type") ?? "";
+        const src = decodeBody(await resp.arrayBuffer(), ct);
+        const head =
+          "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
+          "self.__ZL_SITE__=" + JSON.stringify(site) + ";\n" +
+          (await workerPrelude()) +
+          "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(e.request.url) ?? "") + ");\n";
+        return new Response(head + src, {
+          status: resp.status,
+          headers: { "content-type": utf8ContentType(ct) },
+        });
+      })(),
+    );
+    return;
+  }
   /* Issue #34: cross-origin http(s) requests from controlled pages are
      engine work, not browser work. Every subresource a controlled page
      issues reaches this handler - only navigations are scope-bound, and
@@ -2090,7 +2126,7 @@ export function handleFetch(e: FetchEvent): void {
             recordAssetBase(initiator, target);
           if (resp.status >= 400 && isRecoverableAssetDest(dest)) {
             const rec = await recoverFlatAsset(initiator ?? "", target, dest, e.request.headers, (u2, init2) =>
-              wispTransport.fetch(u2, init2));
+              wispTransport.fetch(u2, init2, traceId));
             if (rec) {
               DIAG.emit({
                 traceId,
@@ -2461,6 +2497,7 @@ export function handleFetch(e: FetchEvent): void {
             const wFp = getFpWorkerScript() ?? (await siteProfileFor(target))?.workerScript ?? "";
             const head =
               "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
+              "self.__ZL_SITE__=" + JSON.stringify(siteToken(target)) + ";\n" +
               (await workerPrelude()) +
               "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n" +
               (wFp ? "\n" + wFp : "");
@@ -2489,6 +2526,7 @@ export function handleFetch(e: FetchEvent): void {
             const preludeW = getFpWorkerScript() ?? (await siteProfileFor(target))?.workerScript ?? "";
             const prelude =
               "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
+              "self.__ZL_SITE__=" + JSON.stringify(siteToken(target)) + ";\n" +
               (await workerPrelude()) +
               "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n" +
               (preludeW ? "\n" + preludeW : "");

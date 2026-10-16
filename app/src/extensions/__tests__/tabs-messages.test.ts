@@ -17,7 +17,7 @@ function tab(id: number, url: string, extra: Partial<UiTab> = {}): UiTab {
 /** Only the fields tabs.sendMessage consults; the registry never
     touches the rest of the record. */
 function fakeExt(hostPermissions: string[]): ExtensionRecord {
-  return { hostPermissions } as unknown as ExtensionRecord;
+  return { id: "test-ext", hostPermissions } as unknown as ExtensionRecord;
 }
 
 describe("TabRegistry.sendMessage", () => {
@@ -33,8 +33,8 @@ describe("TabRegistry.sendMessage", () => {
     expect(delivered[0][0]).toBe(1);
     expect(delivered[0][1]).toBe("https://a.example/");
     expect(delivered[0][3].msg).toEqual({ hello: 1 });
-    r.resolveTabMessage(delivered[0][3].nonce, { ok: true });
-    r.resolveTabMessage(delivered[0][3].nonce, { ignored: true });
+    r.resolveTabMessage(delivered[0][3].nonce, "test-ext", { ok: true });
+    r.resolveTabMessage(delivered[0][3].nonce, "test-ext", { ignored: true });
     await expect(p).resolves.toEqual({ ok: true });
   });
 
@@ -44,7 +44,7 @@ describe("TabRegistry.sendMessage", () => {
     let nonce = "";
     r.setMessageDispatch((_tabId, _url, _ext, payload) => { nonce = payload.nonce; });
     const p = r.sendMessage(fakeExt(["<all_urls>"]), 2, "x");
-    r.rejectTabMessage(nonce, "listener failed");
+    r.rejectTabMessage(nonce, "test-ext", "listener failed");
     await expect(p).rejects.toThrow(/listener failed/);
   });
 
@@ -78,8 +78,8 @@ describe("TabRegistry.sendMessage", () => {
     const p1 = r.sendMessage(fakeExt(["<all_urls>"]), 5, "x", {});
     const p2 = r.sendMessage(fakeExt(["<all_urls>"]), 5, "x");
     expect(nonces).toHaveLength(2);
-    r.resolveTabMessage(nonces[0], 1);
-    r.resolveTabMessage(nonces[1], 2);
+    r.resolveTabMessage(nonces[0], "test-ext", 1);
+    r.resolveTabMessage(nonces[1], "test-ext", 2);
     await expect(p1).resolves.toBe(1);
     await expect(p2).resolves.toBe(2);
   });
@@ -96,17 +96,17 @@ describe("TabRegistry.sendMessage", () => {
     // 30s timeout; tab 7's pending message must be untouched.
     r.syncFromUi([tab(7, "https://g.example/")]);
     await expect(p).rejects.toThrow(/tab closed before a content script replied/);
-    r.resolveTabMessage(nonces[1], { ok: true });
+    r.resolveTabMessage(nonces[1], "test-ext", { ok: true });
     await expect(pOther).resolves.toEqual({ ok: true });
     // The removed tab's stale nonce and unknown nonces stay no-ops.
-    r.resolveTabMessage(nonces[0], { ignored: true });
-    r.rejectTabMessage("nope", "never registered");
+    r.resolveTabMessage(nonces[0], "test-ext", { ignored: true });
+    r.rejectTabMessage("nope", "test-ext", "never registered");
   });
 
   it("ignores replies for unknown nonces", () => {
     const r = new TabRegistry();
-    r.resolveTabMessage("nope", 1);
-    r.rejectTabMessage("nope", "x");
+    r.resolveTabMessage("nope", "test-ext", 1);
+    r.rejectTabMessage("nope", "test-ext", "x");
   });
 });
 
@@ -143,9 +143,45 @@ describe("browser.tabs.sendMessage (buildApi)", () => {
     let nonce = "";
     TABS.setMessageDispatch((_tabId, _url, _ext, payload) => { nonce = payload.nonce; });
     const p = send(7, "ping");
-    TABS.resolveTabMessage(nonce, "pong");
+    TABS.resolveTabMessage(nonce, id, "pong");
     await expect(p).resolves.toBe("pong");
     await expect(send(999, "x")).rejects.toThrow(/Invalid tab ID/);
     TABS.setMessageDispatch(null);
+  });
+});
+
+
+describe("sendMessage reply binding (#185)", () => {
+  it("mints unguessable per-send nonces", async () => {
+    const r = new TabRegistry();
+    r.syncFromUi([tab(1, "https://a.example/")]);
+    const nonces: string[] = [];
+    r.setMessageDispatch((_t, _u, _e, payload) => { nonces.push(payload.nonce); });
+    const p1 = r.sendMessage(fakeExt(["<all_urls>"]), 1, "x");
+    const p2 = r.sendMessage(fakeExt(["<all_urls>"]), 1, "y");
+    expect(nonces[0].startsWith("zl-m-")).toBe(true);
+    expect(nonces[0].length).toBeGreaterThanOrEqual(20);
+    expect(nonces[1]).not.toBe(nonces[0]);
+    r.resolveTabMessage(nonces[0], "test-ext", 1);
+    r.resolveTabMessage(nonces[1], "test-ext", 2);
+    await expect(p1).resolves.toBe(1);
+    await expect(p2).resolves.toBe(2);
+  });
+
+  it("ignores replies and errors bound to another extension", async () => {
+    const r = new TabRegistry();
+    r.syncFromUi([tab(2, "https://b.example/")]);
+    const nonces: string[] = [];
+    r.setMessageDispatch((_t, _u, _e, payload) => { nonces.push(payload.nonce); });
+    const p = r.sendMessage(fakeExt(["<all_urls>"]), 2, "x");
+    r.resolveTabMessage(nonces[0], "other-ext", { nope: true });
+    r.rejectTabMessage(nonces[0], "other-ext", "hijack");
+    const state = await Promise.race([
+      p.then(() => "settled"),
+      new Promise((res) => setTimeout(() => res("pending"), 50)),
+    ]);
+    expect(state).toBe("pending");
+    r.resolveTabMessage(nonces[0], "test-ext", { ok: true });
+    await expect(p).resolves.toEqual({ ok: true });
   });
 });

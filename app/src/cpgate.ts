@@ -48,3 +48,28 @@ export function senderIsProxiedPath(pathname: string): boolean {
     pathname.startsWith(CS_ROUTE)
   );
 }
+
+
+/* #170: the HOST-page half of the gate. The old classifier trusted
+   anything that was not an engine path, so an about:blank, blob: or
+   unknown-route client passed as a host page; the gate must fail
+   closed onto a small allowlist of the engine's own pages instead:
+   the adapter (LB's single-page UI lives at "/"), its index, and
+   the devtools page. Everything else - unparseable, cross-origin,
+   opaque or unknown - is treated as untrusted. */
+const HOST_PATHS = new Set(["/", "/index.html", "/devtools.html"]);
+
+/** True only when the sender is one of the engine's own host pages:
+    the URL must parse against this origin, be same-origin, and name
+    a known host path. #170: control.ts's senderIsProxiedPage inverts
+    this so host-only control messages fail closed. */
+export function senderIsHostPage(url: string, origin: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url, origin);
+  } catch {
+    return false;
+  }
+  if (u.origin !== origin) return false;
+  return HOST_PATHS.has(u.pathname);
+}

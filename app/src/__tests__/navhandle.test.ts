@@ -17,7 +17,7 @@ import {
 } from "../codec";
 import { NAV } from "../bootstrap/navguard";
 import { navhTailDest, navpResolve } from "../request";
-import { PAGE_MESSAGES, senderIsProxiedPath } from "../cpgate";
+import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "../cpgate";
 
 /* Issue #63 (#54 design D): the opaque initial-navigation handle.
    The host asks the SW for a handle over zl:navHandle and navigates a
@@ -372,3 +372,30 @@ describe("NAVH tail origin binding (#202)", () => {
   });
 });
 
+
+
+describe("senderIsHostPage (#170: the host gate fails closed)", () => {
+  const O = "http://engine.example";
+  it("accepts only the engine's host pages", () => {
+    expect(senderIsHostPage(O + "/", O)).toBe(true);
+    expect(senderIsHostPage(O + "/index.html", O)).toBe(true);
+    expect(senderIsHostPage(O + "/devtools.html", O)).toBe(true);
+    /* The LB adapter is a single-page app at "/": query strings do not
+       change the pathname. */
+    expect(senderIsHostPage(O + "/?view=browser", O)).toBe(true);
+  });
+  it("refuses proxied routes and extension code", () => {
+    expect(senderIsHostPage(O + "/j/abc", O)).toBe(false);
+    expect(senderIsHostPage(O + "/zl-ext/x.js", O)).toBe(false);
+    expect(senderIsHostPage(O + "/zl-cs/x.js", O)).toBe(false);
+    expect(senderIsHostPage(O + NAVH + "/token", O)).toBe(false);
+  });
+  it("fails closed on opaque, unknown or cross-origin senders", () => {
+    expect(senderIsHostPage("about:blank", O)).toBe(false);
+    expect(senderIsHostPage("about:srcdoc", O)).toBe(false);
+    expect(senderIsHostPage("blob:" + O + "/uuid", O)).toBe(false);
+    expect(senderIsHostPage("data:text/html,hi", O)).toBe(false);
+    expect(senderIsHostPage(O + "/app/unknown", O)).toBe(false);
+    expect(senderIsHostPage("https://evil.example/", O)).toBe(false);
+  });
+});

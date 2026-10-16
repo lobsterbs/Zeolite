@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decodePath, encodeDest, isWorkerDestination, setScheme } from "../codec";
-import { fireHandler, installWorkerPrelude, pickRelayPort, routeWorkerUrl } from "../worker-prelude";
+import { applyWorkerStorage, fireHandler, installWorkerPrelude, pickRelayPort, routeWorkerUrl } from "../worker-prelude";
 import { swShimApply, swShimGet, swShimRegister } from "../swshim";
 
 describe("worker destinations (1.6)", () => {
@@ -189,5 +189,56 @@ describe("navigator.serviceWorker shim (1.6)", () => {
     expect(list.length).toBe(1);
     const ready = await (c.ready as Promise<{ active: unknown }>);
     expect(ready.active).toBeTruthy();
+  });
+});
+
+
+describe("worker storage scoping (#171)", () => {
+  it("prefixes indexedDB, caches and BroadcastChannel to the site scope", async () => {
+    const idbSeen: string[] = [];
+    const idb = {
+      open: (n: string) => (idbSeen.push("open:" + n), { done: true }),
+      deleteDatabase: (n: string) => (idbSeen.push("del:" + n), undefined),
+      cmp: (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0),
+    };
+    const cacheStore: string[] = ["engine-own"];
+    const caches = {
+      open: (n: string) => (cacheStore.push(n), { ok: true }),
+      delete: (n: string) => Promise.resolve(true),
+      has: (n: string) => Promise.resolve(cacheStore.includes(n)),
+      keys: () => Promise.resolve([...cacheStore]),
+      match: async () => undefined,
+    };
+    const bcNames: string[] = [];
+    class FakeBC {
+      constructor(public name: string) { bcNames.push(name); }
+      postMessage(): void {}
+      close(): void {}
+      addEventListener(): void {}
+      removeEventListener(): void {}
+      dispatchEvent(): boolean { return true; }
+      onmessage: unknown = null;
+      onmessageerror: unknown = null;
+    }
+    const t: Record<string, unknown> = {
+      indexedDB: idb,
+      caches,
+      BroadcastChannel: FakeBC,
+    };
+    applyWorkerStorage(t, "zl:site1:");
+    const I = t.indexedDB as unknown as Record<string, (a: unknown, b?: unknown) => unknown>;
+    I.open!("db1");
+    I.deleteDatabase!("db1");
+    expect(idbSeen).toEqual(["open:zl:site1:db1", "del:zl:site1:db1"]);
+    const C = t.caches as unknown as {
+      open: (n: string) => unknown;
+      keys: () => Promise<string[]>;
+    };
+    C.open("c1");
+    expect(await C.keys()).toEqual(["c1"]);
+    const BC = t.BroadcastChannel as unknown as new (name: string) => { name: string };
+    const ch = new BC("ch1");
+    expect(bcNames).toEqual(["zl:site1:ch1"]);
+    expect(ch.name).toBe("ch1");
   });
 });

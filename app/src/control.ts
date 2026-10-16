@@ -5,7 +5,7 @@
 import { buildNavHandleUrl, currentPrefix, decodeClientUrl, encodeDest, mintableDest, setScheme } from "./codec";
 import type { JarConflictRule } from "./cookies";
 import { documentCookieRead, documentCookieWrite, jarClear, jarClearScope, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy } from "./cookies";
-import { PAGE_MESSAGES, senderIsProxiedPath } from "./cpgate";
+import { PAGE_MESSAGES, senderIsHostPage } from "./cpgate";
 import { DIAG } from "./diag";
 /* #90: the download registry instance lives in ./downloads; the
    control plane lists and cancels entries through the subsystem. */
@@ -209,13 +209,12 @@ function senderOrigin(e: ExtendableMessageEvent): string | null {
    proxied route or nav marker. #48: extension-origin pages are
    extension code, not host pages, so they are untrusted here too. */
 function senderIsProxiedPage(e: ExtendableMessageEvent): boolean {
+  /* #170: fail closed onto the host-page allowlist: an unparseable,
+     cross-origin, opaque or unknown-path sender is never a host
+     page, so it gets the proxied-page refusal. */
   const src = e.source as Client | null;
   if (!src || !src.url) return true;
-  try {
-    return senderIsProxiedPath(new URL(src.url, self.location.origin).pathname);
-  } catch {
-    return true;
-  }
+  return !senderIsHostPage(src.url, self.location.origin);
 }
 
 /* Page-facing control messages and the pathname half of the sender
