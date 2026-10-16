@@ -105,9 +105,18 @@ as engine bugs, environmental walls, or documented design limits.
 - **Wikipedia** - search suggestions, search results, full article navigation.
 - **YouTube** - watch pages boot, the video element reaches a ready state.
 - **slither.io** - canvas renders, nickname entry and server join work.
-- **Brave Search** - full SERP with favicons and Ask AI (site passed all
-  subresource MIME checks standalone; one transient engine error page was
-  observed in a batch run and did not reproduce).
+- **Brave Search** - full SERP with favicons; subresource MIME checks pass
+  standalone. The Ask AI tab does NOT answer through the engine (verified
+  2026-10-16 with a direct control that answers in ~10s without the proxy):
+  Brave serp is a SvelteKit app whose client router matches routes on the
+  opaque engine pathname, so every in-app navigation throws `Not found:
+  /zl/<token>` and falls back to a full document load, which drops the
+  client-minted conversation state; Brave then serves the empty `New
+  conversation` shell and the answer, which only streams client-side from
+  the in-conversation state, never loads. Same architectural class as
+  Google SPA routing: `window.location` is LegacyUnforgeable, and
+  route-preserving URLs would reintroduce the plaintext-destination leak
+  closed by #32.
 - **Hacker News, example.com, plain content sites** - full load.
 
 ### Captcha and challenge coverage
