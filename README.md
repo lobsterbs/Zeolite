@@ -116,11 +116,16 @@ as engine bugs, environmental walls, or documented design limits.
   route (its regression fix stops the re-anchored `__zl_prel__` tail
   from snowballing across SPA fallback reloads, which previously ended
   in 429 retry loops and 414 Request-URI-Too-Long). Ask answers
-  currently do not stream from the hosted deployment because Brave
-  bot-walls the datacenter exit IPs (429 + a "Verifying you are not a
-  bot" interstitial, reproduced 2026-10-16 direct from a datacenter
-  host with no proxy involved), the same environmental class as the
-  Google Search entry below.
+  do not stream through the engine yet: the hosted tab re-drive
+  reloads the same SERP document repeatedly and Brave rate-limits
+  the repeats (429 plus the PoW interstitial, which #168 already
+  records never completes through the relay class), so the loop
+  never clears. The ScramJet engine on the same deployment egress
+  runs the same flow with single document loads and passes clean
+  (verified 2026-10-16 live on the beta deployment: SERP renders,
+  Ask tab boots, zero 429s), so the wall is keyed on the request
+  pattern, not on the exit IP class; the datacenter-IP claim that
+  stood here was wrong (retracted).
 - **Hacker News, example.com, plain content sites** - full load.
 
 ### Captcha and challenge coverage
