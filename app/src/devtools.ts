@@ -119,7 +119,14 @@ function render(): void {
     ...sorted.map((e) => {
       const tr = document.createElement("tr");
       tr.className = "net";
+      tr.tabIndex = 0;
       tr.addEventListener("click", () => showDetail(e));
+      tr.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          showDetail(e);
+        }
+      });
       const cells = [
         fmtTime(e.ts),
         e.method,
@@ -191,7 +198,9 @@ function renderDiag(): void {
 
 // Column header sorting.
 document.querySelectorAll("th[data-sort]").forEach((th) => {
-  th.addEventListener("click", () => {
+  const thEl = th as HTMLElement;
+  thEl.tabIndex = 0;
+  const apply = () => {
     const key = (th as HTMLElement).dataset.sort as keyof NetEntry;
     if (key === sortKey) sortDesc = !sortDesc;
     else {
@@ -199,6 +208,13 @@ document.querySelectorAll("th[data-sort]").forEach((th) => {
       sortDesc = false;
     }
     render();
+  };
+  thEl.addEventListener("click", apply);
+  thEl.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      apply();
+    }
   });
 });
 
