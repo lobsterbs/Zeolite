@@ -9,8 +9,8 @@
 
    Source modules under ./bootstrap bundle into one synchronous
    artifact (patches must exist before page scripts run); the CI size
-   gate covers the built artifact. Budget: under 25088 bytes minified
-   (last raise: 24576 -> 25088 for #132).
+   gate covers the built artifact. Budget: under 25600 bytes minified
+   (last raise: 25088 -> 25600 for the #132 identity-race follow-up).
 
    Budget raises (each decided with the feature, never creep): 5 KiB
    original; 6.5 #28 nav guard; 8 #35 single file; 10 #37 isolation;

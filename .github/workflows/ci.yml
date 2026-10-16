@@ -290,7 +290,12 @@ jobs:
           # event beats the first post-bootstrap read - without
           # it the strict channel check failed on every anchor
           # rebuild and the widget timed out). Same class again.
-          if [ "$SIZE" -ge 25088 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 25088)"; exit 1; fi
+          # Raised again 25088 -> 25600 in 4a27a55: the #132
+          # identity-race fix (mintChildProxy / childProxyByFrame
+          # convergence) shipped with the #169-#171 control-plane
+          # wave; measured 25115, decided with the feature, same
+          # class as every raise above.
+          if [ "$SIZE" -ge 25600 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 25600)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
