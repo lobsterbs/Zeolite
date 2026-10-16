@@ -294,8 +294,13 @@ jobs:
           # identity-race fix (mintChildProxy / childProxyByFrame
           # convergence) shipped with the #169-#171 control-plane
           # wave; measured 25115, decided with the feature, same
-          # class as every raise above.
-          if [ "$SIZE" -ge 25600 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 25600)"; exit 1; fi
+          # class as every raise above. Raised again 25600 -> 27648
+          # for #236: the virtual location (applyVloc: the
+          # location-like view, pushState/replaceState re-anchoring,
+          # popstate/hashchange sync) shipped with the #235 AST
+          # globals rename; measured 27117, decided with the feature,
+          # same class as every raise above.
+          if [ "$SIZE" -ge 27648 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 27648)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

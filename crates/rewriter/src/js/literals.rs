@@ -2,9 +2,10 @@
 //! string literals ('...', "...", backtick-quoted) and rewrite the ones
 //! that look like URLs (scheme-absolute http(s)/ws(s) or protocol-relative).
 //! Relative literals are left alone: the runtime bootstrap and the SW
-//! resolve those at request time. Full AST rewriting (oxc) is
-//! unscheduled: it would only be considered if the compat suite
-//! proves this pass plus the runtime shims insufficient (#146).
+//! resolve those at request time. URL literals stay scan-based by
+//! design, but #235 shipped the one AST pass the runtime needed
+//! (js/globals.rs: location reads -> the #236 virtual location);
+//! a general AST rewrite remains unscheduled (#146).
 
 /// Rewrite URL-like string literals in a <script> body.
 pub fn rewrite_script(js: &str, enc: &dyn Fn(&str) -> String) -> String {

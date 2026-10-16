@@ -418,6 +418,31 @@ var pre = "/dir/"; var im3 = new Image(); im3.id = "concat"; im3.src = pre + "im
         const woff = Buffer.from("wOFFzl-torture-font-bytes", "utf8");
         res.writeHead(200, { "content-type": "font/woff2", "content-length": woff.length });
         res.end(woff);
+      } else if (path === "/spa/home" || path.startsWith("/spa/")) {
+        /* #236: pathname-routed SPA fixture. The same shell answers
+           every route; the inline router matches location.pathname
+           (the #235 rename turns that read into the bootstrap's
+           virtual location) and renders the matched path, so the
+           engine either hands the router the real path or the
+           fixture degrades exactly like an unpatched SPA. */
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><head><title>zl spa</title></head><body>
+<p id="zl-spa-marker">zl-spa-page</p>
+<p id="zl-spa-route"></p>
+<button id="zl-spa-go">go</button>
+<script>
+window.__zlSpaN = (window.__zlSpaN || 0) + 1;
+function zlSpaRender() {
+  document.getElementById("zl-spa-route").textContent =
+    location.pathname + location.search;
+}
+window.addEventListener("popstate", zlSpaRender);
+zlSpaRender();
+document.getElementById("zl-spa-go").addEventListener("click", function () {
+  history.pushState({}, "", "/spa/about?q=1");
+  zlSpaRender();
+});
+</script>
+</body></html>`);
       } else if (path === "/__hits") {
         send(res, "application/json", JSON.stringify(hits));
       } else {

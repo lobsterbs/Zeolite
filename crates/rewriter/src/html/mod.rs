@@ -235,7 +235,15 @@ impl Rewriter {
             return js.to_string();
         }
         let rewritten = crate::js::rewrite_script(js, &|u| self.enc_literal(u));
-        crate::js::antiframe(&rewritten)
+        let neutral = crate::js::antiframe(&rewritten);
+        // #235: location reads rename to the virtual location global
+        // (#236) after the literal and frame-buster passes, so the
+        // parse gate sees the final body.
+        if self.cfg.rewrite_globals {
+            crate::js::globals::rewrite_globals(&neutral)
+        } else {
+            neutral
+        }
     }
 
     /// Rewrite an iframe srcdoc document (issue #36). The attribute
@@ -436,7 +444,15 @@ impl Rewriter {
                             // navigation sinks apply to the final body.
                             let rewritten =
                                 crate::js::rewrite_script(&raw, &|u| self.enc_literal(u));
-                            out.push_str(&crate::js::antiframe(&rewritten));
+                            let neutral = crate::js::antiframe(&rewritten);
+                            // #235: the same globals pass the external
+                            // body path runs, on the final body.
+                            let with_globals = if self.cfg.rewrite_globals {
+                                crate::js::globals::rewrite_globals(&neutral)
+                            } else {
+                                neutral
+                            };
+                            out.push_str(&with_globals);
                         } else {
                             out.push_str(&raw);
                         }

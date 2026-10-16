@@ -30,6 +30,10 @@ pub struct RewriteConfig {
     /// lack one, so below-the-fold images defer until they approach
     /// the viewport. Off by default; a host toggle.
     pub lazy_images: bool,
+    /// #235: rename location reads in script bodies to the bootstrap's
+    /// virtual location global (#236). Parse failures fall back
+    /// unchanged, never broken JS.
+    pub rewrite_globals: bool,
 }
 
 impl Default for RewriteConfig {
@@ -46,6 +50,7 @@ impl Default for RewriteConfig {
             injections: Vec::new(),
             block_hosts: Vec::new(),
             lazy_images: false,
+            rewrite_globals: true,
         }
     }
 }

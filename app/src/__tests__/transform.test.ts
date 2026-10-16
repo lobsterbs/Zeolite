@@ -34,6 +34,8 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
     JsCssRewriter,
     rewriteCss: (css: string) => css,
     rewriteJsBody: (js: string) => js,
+    /* #235: cumulative globals-pass counters the diag seam diffs */
+    globalsStats: () => "0,0,0",
     default: async () => {
       if (mockState.initFails) throw new Error("wasm 404");
     },

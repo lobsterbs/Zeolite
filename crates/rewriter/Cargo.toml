@@ -11,6 +11,16 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 wasm-bindgen = { workspace = true, optional = true }
 
+# #235: oxc powers the JS globals AST pass (location reads -> __zl).
+# Same parser family the Scramjet reference engine uses; pure Rust,
+# wasm-compatible, no default features beyond the parser itself.
+oxc_allocator = "0.154.0"
+oxc_parser = "0.154.0"
+oxc_span = "0.154.0"
+oxc_ast = "0.154.0"
+oxc_ast_visit = "0.154.0"
+oxc_semantic = "0.154.0"
+
 [features]
 default = ["wasm"]
 wasm = ["dep:wasm-bindgen"]

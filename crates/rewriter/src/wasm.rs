@@ -210,6 +210,13 @@ impl JsCssRewriter {
     }
 }
 
+/// #235 diagnostics: cumulative JS globals-pass counters
+/// ("parsed,failed,renamed") for the SW's diag seam.
+#[wasm_bindgen(js_name = "globalsStats")]
+pub fn globals_stats() -> String {
+    crate::js::globals::stats_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

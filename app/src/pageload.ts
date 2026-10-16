@@ -33,14 +33,31 @@ export function siteToken(dest: string): string {
   return keyedSiteToken(origin) ?? fnv1a(origin);
 }
 
+/** #236: the destination's hostless path (pathname + search +
+    hash) seeding the virtual location. The #144 decision already
+    made the real path visible by design (NAVH handle URLs carry
+    it), so the page realm seeing its OWN path is the same
+    relaxation: the host stays opaque. Empty for opaque
+    destinations. */
+function vPath(dest: string): string {
+  try {
+    const u = new URL(dest);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    return u.pathname + u.search + u.hash;
+  } catch {
+    return "";
+  }
+}
+
 /** The inline init script spliced into the rewritten stream head
     AFTER the doctype (quirks fix; it used to ride the very first
     chunk, before the doctype, which forced quirks mode on every
     proxied document). An active fingerprint profile rides the same
-    splice (1.8). */
+    splice (1.8). #236 adds the hostless vpath the virtual location
+    seeds from. */
 export function initScript(dest: string, fpScript: string | null): string {
   return (
-    `<script>window.__ZL=${JSON.stringify({ site: siteToken(dest) })};</script>` +
+    `<script>window.__ZL=${JSON.stringify({ site: siteToken(dest), vpath: vPath(dest) })};</script>` +
     (fpScript ? `<script>${fpScript}</script>` : "")
   );
 }

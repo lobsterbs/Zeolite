@@ -27,7 +27,11 @@ describe("siteToken (issue #32)", () => {
 describe("initScript (issue #32)", () => {
   it("injects the opaque site identity, never the destination", () => {
     const s = initScript(DEST, null);
-    expect(s).toMatch(/^<script>window\.__ZL=\{"site":"[a-z0-9]+"\};<\/script>$/);
+    expect(s).toMatch(
+      /^<script>window\.__ZL=\{"site":"[a-z0-9]+","vpath":"[^"]*"\};<\/script>$/,
+    );
+    /* #236: the hostless vpath rides the identity, the host never */
+    expect(s).toContain('"vpath":"/deep/page?q=1"');
     expect(s).not.toContain("real.site");
     expect(s).not.toContain(DEST);
   });
@@ -35,7 +39,9 @@ describe("initScript (issue #32)", () => {
   it("rides the fingerprint profile on the same first chunk", () => {
     const s = initScript(DEST, "/*fp*/");
     expect(s).toBe(
-      '<script>window.__ZL={"site":"' + siteToken(DEST) + '"};</script><script>/*fp*/</script>',
+      '<script>window.__ZL={"site":"' +
+        siteToken(DEST) +
+        '","vpath":"/deep/page?q=1"};</script><script>/*fp*/</script>',
     );
   });
 });
@@ -75,7 +81,11 @@ describe("siteToken (keyed mode)", () => {
   it("initScript injects the keyed identity, never the destination", () => {
     setRouteKey(KEY);
     const s = initScript(DEST, null);
-    expect(s).toBe('<script>window.__ZL={"site":"' + siteToken(DEST) + '"};</script>');
+    expect(s).toBe(
+      '<script>window.__ZL={"site":"' +
+        siteToken(DEST) +
+        '","vpath":"/deep/page?q=1"};</script>',
+    );
     expect(s).not.toContain("real.site");
     expect(s).not.toContain(DEST);
   });
@@ -86,6 +96,19 @@ describe("siteToken (keyed mode)", () => {
    mode and the doctype is then ignored. Doctype-less documents keep
    the stream-start placement (index 0) so they stay in quirks mode,
    no accidental upgrade. */
+describe("initScript vpath (#236)", () => {
+  it("carries the real hostless path, search and hash", () => {
+    const s = initScript("https://real.site/a/b?x=1#h", null);
+    expect(s).toContain('"vpath":"/a/b?x=1#h"');
+    expect(s).not.toContain("real.site");
+  });
+
+  it("is empty for opaque destinations", () => {
+    expect(initScript("about:blank", null)).toContain('"vpath":""');
+    expect(initScript("data:text/plain,hi", null)).toContain('"vpath":""');
+  });
+});
+
 describe("initSplicePoint (quirks fix)", () => {
   it("splices after a leading doctype", () => {
     expect(initSplicePoint("<!doctype html><html>")).toBe(15);

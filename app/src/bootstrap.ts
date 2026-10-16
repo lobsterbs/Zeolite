@@ -9,8 +9,8 @@
 
    Source modules under ./bootstrap bundle into one synchronous
    artifact (patches must exist before page scripts run); the CI size
-   gate covers the built artifact. Budget: under 25600 bytes minified
-   (last raise: 25088 -> 25600 for the #132 identity-race follow-up).
+   gate covers the built artifact. Budget: under 27648 bytes minified
+   (last raise: 25600 -> 27648 for the #236 virtual location).
 
    Budget raises (each decided with the feature, never creep): 5 KiB
    original; 6.5 #28 nav guard; 8 #35 single file; 10 #37 isolation;
@@ -19,7 +19,7 @@
    isolation + popup guard; 20 #109 popup sync-open; 21 #121
    engineUpdate notice; 22.5 #128/#129 postMessage repair; 23 #130
    vorigin marker + filter; 24 #132 contentWindow sender half +
-   virtual-origin parity drop.
+   virtual-origin parity drop; 26.5 #236 virtual location.
 
    Page-global contract (#32): window.__ZL = { site: "<opaque>" } -
    a per-site identity computed from the real destination, which
@@ -38,10 +38,11 @@ import { applyFindLoad } from "./bootstrap/findload";
 import { applyUpdateNotice } from "./bootstrap/update";
 import { applyPostMessage } from "./bootstrap/postmsg";
 import { applyVirtualOrigin } from "./bootstrap/vorigin";
+import { applyVloc } from "./bootstrap/vloc";
 
 const w = window as unknown as Record<string, unknown>;
 const loc = w.location as Location;
-const ZL = (w.__ZL as { site?: string } | undefined) ?? {};
+const ZL = (w.__ZL as { site?: string; vpath?: string } | undefined) ?? {};
 const site = ZL.site || fnv1a(pageOrigin(document.baseURI) || "unknown");
 
 /* "zl:" + opaque per-site token + ":": same scoping as before #32,
@@ -68,3 +69,6 @@ applyUpdateNotice(w);
 applyPostMessage(w);
 /* #130: virtual-origin marker + message-event origin filter. */
 applyVirtualOrigin(w);
+/* #236: the virtual location the #235 renames read; pathname-
+   routed SPAs see their real path without a document reload. */
+applyVloc(w, ZL.vpath);

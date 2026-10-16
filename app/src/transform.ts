@@ -59,6 +59,9 @@ interface RewriterMod {
      frame-buster neutralization), used by the script-destination
      serve seam. */
   rewriteJsBody(js: string, origin: string, base: string, prefix: string, scheme: string, key?: string): string;
+  /* #235: cumulative globals-pass counters ("parsed,failed,renamed").
+     Optional: older dist wasm exports nothing. */
+  globalsStats?(): string;
   /* wasm-pack --target web output: `default` is the async init that
      fetches and instantiates the .wasm binary. Without it every
      JsRewriter call dies on an unbound wasm table. */
@@ -428,7 +431,30 @@ export function prewarmRewriter(): void {
     depends on this transformer seam rather than the wasm module surface
     (issue #86). Rejects on a wasm load failure; the caller decides
     whether the untransformed body still serves. */
+/* #235: parse failures fall back to the unrenamed body, so the
+   honest signal is a diagnostic, not a broken script. Diffed per
+   call: one diag per new failure, never one per script. */
+let lastGlobalsFailed = 0;
+function reportGlobals(mod: RewriterMod): void {
+  if (typeof mod.globalsStats !== "function") return;
+  let failed = -1;
+  try {
+    failed = Number(mod.globalsStats().split(",")[1]);
+  } catch {
+    return;
+  }
+  if (!Number.isFinite(failed) || failed <= lastGlobalsFailed) return;
+  lastGlobalsFailed = failed;
+  DIAG.emit({
+    category: "REWRITE",
+    severity: "warning",
+    message: "js globals pass parse failures: " + String(failed),
+  });
+}
+
 export async function rewriteJsBody(js: string, base: string): Promise<string> {
   const mod = await rewriter();
-  return mod.rewriteJsBody(js, self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined);
+  const out = mod.rewriteJsBody(js, self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined);
+  reportGlobals(mod);
+  return out;
 }

@@ -126,13 +126,13 @@ async function frameWith(pg, sel) {
   return null;
 }
 
-async function openProxied(target) {
+async function openProxied(target, marker = "#zl-marker") {
   const pg = await context.newPage();
   const rec = attachRecorder(pg);
   await pg.goto(ENGINE + "/?url=" + encodeURIComponent(target));
   let frame = null;
   try {
-    frame = await waitFor("proxied frame for " + target, 45000, () => frameWith(pg, "#zl-marker"));
+    frame = await waitFor("proxied frame for " + target, 45000, () => frameWith(pg, marker));
   } catch (e) {
     const status = await pg
       .evaluate(() => document.getElementById("zl-status")?.textContent ?? "(no status node)")
@@ -306,17 +306,62 @@ async function main() {
     return landing.url().slice(0, 44);
   });
 
-  await check("routing: SPA pushState stays engine-origin and API fetches reroute to the fixture", async () => {
+  await check("routing: SPA pushState re-anchors engine-side and the router reads the virtual path (#236)", async () => {
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "pushState", `async () => {
       history.pushState(null, "", "/spa-here");
       const r = await fetch("/api/data");
       const j = await r.json();
-      return { href: location.href, status: r.status, zl: j.zl };
+      return {
+        href: location.href,
+        virt: window.__zl ? window.__zl.href : null,
+        status: r.status,
+        zl: j.zl,
+      };
     }`);
-    assert(out.href === ENGINE + "/spa-here", "SPA URL is not engine-origin: " + out.href);
+    /* #236: the native URL re-anchors through the entry route (never
+       a bare engine-origin path again), the virtual location carries
+       exactly what the router pushed. */
+    assert(out.href.startsWith(ENGINE), "SPA URL left the engine origin: " + out.href);
+    assert(out.href.includes("/__zl_prel__/"), "pushState did not re-anchor: " + out.href);
+    eq(out.virt, ENGINE + "/spa-here", "the virtual location the router reads");
     eq(out.zl, "api", "rerouted fetch body");
-    return out.href;
+    return out.virt + " @ " + out.href.slice(0, 48);
+  });
+
+  await check("routing: a pathname-routed SPA matches its route without a document reload (#236)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/spa/home", "#zl-spa-marker");
+    eq(await frame.locator("#zl-spa-route").textContent(), "/spa/home", "router matched the virtual path");
+    await frame.locator("#zl-spa-go").click();
+    const t = await waitFor("spa route swap", 10000, async () => {
+      const x = await frame.locator("#zl-spa-route").textContent();
+      return x === "/spa/about?q=1" ? x : null;
+    });
+    /* the eval counter proves the same document served both routes: a
+       fallback document reload would reset it to 1 on a new context */
+    const n = await evalIn(frame, "spa eval counter", `() => window.__zlSpaN`);
+    eq(n, 1, "the document reloaded instead of routing in-app");
+    return t;
+  });
+
+  await check("routing: a deep-link reload of the pushed route restores the same page (#236)", async () => {
+    const { page, frame } = await openProxied(ORIGIN_A + "/spa/home", "#zl-spa-marker");
+    await frame.locator("#zl-spa-go").click();
+    await waitFor("spa route swap", 10000, async () => {
+      const x = await frame.locator("#zl-spa-route").textContent();
+      return x === "/spa/about?q=1" ? x : null;
+    });
+    const pushed = frame.url();
+    assert(pushed.startsWith(ENGINE), "pushed URL left the engine origin: " + pushed);
+    assert(pushed.includes("/__zl_prel__/"), "pushed URL is not re-anchored: " + pushed);
+    assert(!pushed.includes("7101"), "pushed URL leaks the fixture origin: " + pushed);
+    /* the deep link is the re-anchored engine route itself: a fresh
+       top-level load of it must decode back to /spa/about?q=1 */
+    await page.goto(pushed);
+    await waitFor("restored route", 45000, () =>
+      page.locator("#zl-spa-route").textContent().then((x) => (x === "/spa/about?q=1" ? x : null)),
+    );
+    return pushed.slice(0, 60) + "...";
   });
 
   await check("routing: reload keeps the page proxied", async () => {
