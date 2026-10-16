@@ -29,7 +29,15 @@ of a response and admits each cookie with:
   public suffix: `Domain=com`, `Domain=co.uk`, `Domain=github.io`.
 - `Path`: defaults to the RFC 6265 default-path (the response path's
   directory); request matching is RFC 6265 path-match.
-- `Secure`: stored; secure cookies attach only to https requests.
+- `Secure`: admitted only from a secure response origin (https, or a
+  loopback host such as `localhost`, #191); a Secure cookie set over
+  plain http is refused. Secure cookies attach only to https (or
+  loopback) requests.
+- Name prefixes (#191, RFC 6265bis 4.1.3, case-sensitive): `__Secure-`
+  needs `Secure`; `__Host-` needs `Secure`, `Path=/` and no `Domain`
+  attribute (host-only). A set that breaks these is refused, including
+  a deletion, so a sibling subdomain cannot plant a `__Host-` cookie
+  over the real one.
 - `HttpOnly`: stored; there is no page-side cookie exposure to enforce
   it against yet.
 - `SameSite`: parsed and stored. Enforced only through the opt-in

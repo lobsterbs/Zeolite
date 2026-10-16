@@ -104,6 +104,12 @@ const RING = 200;
     honestly unavailable. Mirrors the page-cache cap rationale. */
 export const ZL_DL_RESUME_MAX = 64 * 1024 * 1024;
 
+/** #192: global ceiling on partial bytes held in memory across every
+    entry. The per-entry cap alone allowed the ring's 200 entries to
+    hold 200 x 64 MiB; past this budget the oldest buffers are dropped
+    (their entries honestly lose resumability). */
+export const ZL_DL_BUFFER_TOTAL_MAX = 128 * 1024 * 1024;
+
 export class DownloadTracker {
   private readonly entries: DownloadEntry[] = [];
   private readonly streams = new Map<string, TransformStream<Uint8Array, Uint8Array>>();
@@ -121,6 +127,61 @@ export class DownloadTracker {
   private readonly partials = new Map<string, { chunks: Uint8Array[]; n: number }>();
   private readonly resumePumps = new Set<string>();
   private resumeFetch: ((url: string, init: { headers: Record<string, string> }) => Promise<Response>) | null = null;
+
+  /** @param bufferBudget global ceiling on buffered partial bytes
+      across every entry (#192); tests inject a small one. */
+  constructor(private readonly bufferBudget: number = ZL_DL_BUFFER_TOTAL_MAX) {}
+
+  /** Partial bytes currently held in memory, across all entries. */
+  bufferedBytes(): number {
+    let total = 0;
+    for (const p of this.partials.values()) total += p.n;
+    return total;
+  }
+
+  /** #192: release one entry's buffered bytes (memory and IndexedDB)
+      and its resumability. A pump still draining that entry finds no
+      buffer and stops buffering. */
+  private dropBuffer(id: string): void {
+    const p = this.partials.get(id);
+    if (p) {
+      p.chunks.length = 0;
+      p.n = 0;
+    }
+    const entry = this.entries.find((x) => x.id === id);
+    if (entry) entry.resumable = false;
+    this.forgetPartial(id);
+  }
+
+  /** #192: make room for n more buffered bytes under the global budget,
+      dropping the oldest other buffers first (paused entries before live
+      ones). False when the bytes cannot fit even with every other buffer
+      gone. */
+  private admitBytes(id: string, n: number): boolean {
+    if (this.bufferedBytes() + n <= this.bufferBudget) return true;
+    const victims = this.entries
+      .filter((e) => e.id !== id && this.partials.has(e.id))
+      .sort((a, b) => Number(a.status === "active") - Number(b.status === "active"));
+    for (const v of victims) {
+      this.dropBuffer(v.id);
+      if (this.bufferedBytes() + n <= this.bufferBudget) return true;
+    }
+    return this.bufferedBytes() + n <= this.bufferBudget;
+  }
+
+  /** #192: buffer one chunk for a resumable entry. The per-entry cap
+      and the global budget both refuse by dropping the entry's buffer,
+      so the entry honestly loses resumability instead of growing. */
+  private bufferChunk(entry: DownloadEntry, chunk: Uint8Array): void {
+    const p = this.partials.get(entry.id);
+    if (!entry.resumable || !p) return;
+    if (p.n + chunk.byteLength > ZL_DL_RESUME_MAX || !this.admitBytes(entry.id, chunk.byteLength)) {
+      this.dropBuffer(entry.id);
+      return;
+    }
+    p.chunks.push(chunk);
+    p.n += chunk.byteLength;
+  }
 
   /** Register a new attachment response; returns its entry id. */
   begin(source: string, headers: Headers, mime: string, size: number): string {
@@ -143,8 +204,15 @@ export class DownloadTracker {
        drop the oldest idle entry instead, and honestly run over
        capacity when every slot is live. */
     if (this.entries.length > RING) {
-      const i = this.entries.findIndex((e) => !this.streams.has(e.id));
-      if (i >= 0) this.entries.splice(i, 1);
+      /* #192: an entry with a resume in flight is as live as one with a
+         stream: evicting it would assemble its artifact to null later. */
+      const i = this.entries.findIndex((e) => !this.streams.has(e.id) && !this.resumePumps.has(e.id));
+      if (i >= 0) {
+        const [gone] = this.entries.splice(i, 1);
+        /* #192: an evicted entry takes its buffered bytes and its stored
+           partial with it, instead of holding them until restart. */
+        this.forgetPartial(gone.id);
+      }
     }
     this.schedulePersist();
     return id;
@@ -262,16 +330,9 @@ export class DownloadTracker {
         if (entry && entry.status === "active") {
           entry.received += chunk.byteLength;
           /* #118: keep the bytes that make resume possible, up to the
-             cap; over it the entry honestly loses resumability. */
-          const p = tracker.partials.get(id);
-          if (entry.resumable && p) {
-            p.chunks.push(chunk);
-            p.n += chunk.byteLength;
-            if (p.n > ZL_DL_RESUME_MAX) {
-              entry.resumable = false;
-              tracker.partials.delete(id);
-            }
-          }
+             per-entry cap and the global budget (#192); over either the
+             entry honestly loses resumability. */
+          if (entry.resumable) tracker.bufferChunk(entry, chunk);
         }
         ctrl.enqueue(chunk);
       },
@@ -395,6 +456,21 @@ export class DownloadTracker {
     if (!entry.resumable) return { ok: false, error: "no resumable bytes (cap exceeded or none buffered)" };
     if (!this.resumeFetch) return { ok: false, error: "no resume transport wired" };
     if (this.resumePumps.has(id)) return { ok: false, error: "resume already in flight" };
+    /* #192: marked in flight for the whole resume, the fetch included,
+       so eviction can never take an entry whose bytes are still coming. */
+    this.resumePumps.add(id);
+    try {
+      return await this.doResume(id, entry, this.resumeFetch);
+    } finally {
+      this.resumePumps.delete(id);
+    }
+  }
+
+  private async doResume(
+    id: string,
+    entry: DownloadEntry,
+    fetchRange: (url: string, init: { headers: Record<string, string> }) => Promise<Response>,
+  ): Promise<{ ok: boolean; error?: string }> {
     /* Restore the partial buffer after a worker restart: paused
        entries keep their bytes in IndexedDB, not memory. */
     if (!this.partials.has(id)) {
@@ -410,7 +486,7 @@ export class DownloadTracker {
     entry.error = undefined;
     this.schedulePersist();
     try {
-      const res = await this.resumeFetch(entry.source, { headers: { range: "bytes=" + entry.received + "-" } });
+      const res = await fetchRange(entry.source, { headers: { range: "bytes=" + entry.received + "-" } });
       if (res.status === 416) {
         entry.status = "error";
         entry.endedAt = Date.now();
@@ -431,9 +507,11 @@ export class DownloadTracker {
       }
       /* 200 (server ignored Range) or any other full answer: the
          partial is worthless, restart from zero. */
-      const p = this.partials.get(id)!;
-      p.chunks.length = 0;
-      p.n = 0;
+      const p = this.partials.get(id);
+      if (p) {
+        p.chunks.length = 0;
+        p.n = 0;
+      }
       entry.received = 0;
       entry.startedAt = Date.now();
       return { ok: await this.pumpResume(id, res.body) };
@@ -452,12 +530,14 @@ export class DownloadTracker {
       handed back to the UI host through assemble(). */
   private async pumpResume(id: string, body: ReadableStream<Uint8Array> | null): Promise<boolean> {
     const entry = this.entries.find((x) => x.id === id);
-    const p = this.partials.get(id);
-    if (!entry || !p) {
-      if (entry) entry.status = "paused";
+    if (!entry || !this.partials.has(id)) {
+      if (entry) {
+        /* #192: the buffer was dropped while the fetch was in flight */
+        entry.status = "paused";
+        entry.error = "resume artifact not retained: buffer dropped by the size cap or budget";
+      }
       return false;
     }
-    this.resumePumps.add(id);
     try {
       if (body) {
         const reader = body.getReader();
@@ -465,16 +545,20 @@ export class DownloadTracker {
           const { done, value } = await reader.read();
           if (done) break;
           entry.received += value.byteLength;
-          p.chunks.push(value);
-          p.n += value.byteLength;
-          if (p.n > ZL_DL_RESUME_MAX) {
-            /* over the cap the buffer is dropped: the entry keeps
-               counting but honestly loses the artifact. */
-            entry.resumable = false;
-            p.chunks.length = 0;
-            p.n = 0;
-          }
+          /* over the cap or the global budget the buffer is dropped:
+             the entry keeps counting but honestly loses the artifact. */
+          this.bufferChunk(entry, value);
         }
+      }
+      /* #192: a completed resume whose buffer was dropped has no artifact.
+         It must not finish as "done", where assemble() would return null
+         with no reason. */
+      if (!this.partials.has(id)) {
+        entry.status = "error";
+        entry.endedAt = Date.now();
+        entry.error = "resume artifact not retained: buffer dropped by the size cap or budget";
+        this.schedulePersist();
+        return false;
       }
       entry.status = "done";
       entry.endedAt = Date.now();
@@ -488,8 +572,6 @@ export class DownloadTracker {
       void this.persistPartial(id);
       this.schedulePersist();
       return false;
-    } finally {
-      this.resumePumps.delete(id);
     }
   }
 

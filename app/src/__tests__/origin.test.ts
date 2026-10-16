@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { senderVirtualOrigin, virtualOriginHeaders, virtualRefererFallback } from "../origin";
-import { b64uEncode, encodeDest, setRouteKeys, setScheme } from "../codec";
+import { b64uEncode, buildNavHandleUrl, encodeDest, setRouteKey, setRouteKeys, setScheme } from "../codec";
 
 describe("virtualOriginHeaders (issue #23: upstream Origin / Sec-Fetch-Site)", () => {
   const PAGE = "https://chatgpt.com/";
@@ -106,6 +106,38 @@ describe("senderVirtualOrigin (bug-scout: control-message sender verification)",
     setScheme("/zl/");
     const route = "https://engine.host" + encodeDest("data:text/plain,hi");
     expect(senderVirtualOrigin(route, ENGINE)).toBeNull();
+  });
+});
+
+/* #193: a page loaded through a NAVH handle (/__zl_navh__/<token>/...)
+   is a proxied page. senderVirtualOrigin used decodePath alone, which
+   returns null for NAVH, so document.cookie and the virtual-origin
+   marker both failed closed for every handle-navigated page. */
+describe("senderVirtualOrigin on NAVH handle routes (#193)", () => {
+  const ENGINE = "https://engine.host";
+
+  it("recovers the virtual origin from a NAVH client URL", () => {
+    setRouteKey(b64uEncode(new Uint8Array(16).fill(5)));
+    const url = buildNavHandleUrl("https://site.example/app");
+    expect(url).not.toBeNull();
+    expect(senderVirtualOrigin(ENGINE + url, ENGINE)).toBe("https://site.example");
+    setRouteKey(null);
+  });
+
+  it("matches the plain-route answer for the same destination", () => {
+    setScheme("/zl/");
+    setRouteKey(b64uEncode(new Uint8Array(16).fill(5)));
+    const url = buildNavHandleUrl("https://site.example/app?x=1");
+    expect(senderVirtualOrigin(ENGINE + url, ENGINE)).toBe(
+      senderVirtualOrigin(ENGINE + encodeDest("https://site.example/app?x=1"), ENGINE),
+    );
+    setRouteKey(null);
+  });
+
+  it("fails closed for a NAVH client URL with a forged token", () => {
+    setRouteKey(b64uEncode(new Uint8Array(16).fill(5)));
+    expect(senderVirtualOrigin(ENGINE + "/__zl_navh__/AAAAAAAAAAAAAAAAAAAAAAAAAAAA/app", ENGINE)).toBeNull();
+    setRouteKey(null);
   });
 });
 

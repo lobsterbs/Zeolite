@@ -511,3 +511,104 @@ describe("download resume (#118)", () => {
     expect(r.error).toContain("no resume transport");
   });
 });
+
+/* #192: eviction must release what the evicted entry held, a resume
+   pump in flight must never be evicted (its artifact would assemble
+   to null silently), and buffered bytes are bounded globally, not just
+   per entry (200 entries x 64 MiB was the old worst case). */
+describe("download eviction and buffer budget (#192)", () => {
+  beforeEach(async () => {
+    try {
+      const db = await openDb();
+      await idbClear(db, STORE_DOWNLOADS);
+      await idbClear(db, STORE_PARTIALS);
+    } catch {
+      /* storage unavailable: the persistence assertions then fail honestly */
+    }
+  });
+
+  function endless(size: number): ReadableStream<Uint8Array> {
+    return new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        ctrl.enqueue(new Uint8Array(size).fill(7));
+      },
+    });
+  }
+
+  function fillIdle(t: DownloadTracker, n: number): void {
+    for (let i = 0; i < n; i++) {
+      t.begin("https://x.test/idle" + i, headers({ "content-disposition": "attachment" }), "a", -1);
+    }
+  }
+
+  it("evicting a paused entry releases its buffered bytes and its stored partial", async () => {
+    const t = new DownloadTracker();
+    const id = t.begin("https://x.test/big.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", 10);
+    const reader = t.wrap(id, endless(4)).getReader();
+    await reader.read();
+    t.pause(id);
+    await t.persistPartial(id);
+    expect(t.bufferedBytes()).toBe(4);
+    expect(await idbGetAllKeys((await openDb()), STORE_PARTIALS)).toContain(id);
+
+    fillIdle(t, 200); /* 200 more pushes the paused entry out of the ring */
+    expect(t.snapshot().some((e) => e.id === id)).toBe(false);
+    expect(t.bufferedBytes()).toBe(0);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(await idbGetAllKeys((await openDb()), STORE_PARTIALS)).not.toContain(id);
+    t.reset();
+  });
+
+  it("a resume pump in flight is never evicted and its artifact survives", async () => {
+    const t = new DownloadTracker();
+    const id = t.begin("https://x.test/big.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", 10);
+    const reader = t.wrap(id, endless(4)).getReader();
+    await reader.read();
+    t.pause(id);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const body = new ReadableStream<Uint8Array>({
+      async pull(ctrl) {
+        await gate;
+        ctrl.enqueue(new Uint8Array(6).fill(9));
+        ctrl.close();
+      },
+    });
+    t.setResumeFetch(async () => new Response(body, { status: 206, headers: { "content-range": "bytes 4-9/10" } }));
+    const pending = t.resume(id);
+    await new Promise((r) => setTimeout(r, 5)); /* pump is now draining */
+
+    fillIdle(t, 200); /* would evict the oldest idle entry: the pumping one must be skipped */
+    expect(t.snapshot().some((e) => e.id === id)).toBe(true);
+
+    release();
+    expect((await pending).ok).toBe(true);
+    const art = await t.assemble(id);
+    expect(art).not.toBeNull();
+    expect(new Uint8Array(await art!.blob.arrayBuffer())).toHaveLength(10);
+    t.reset();
+  });
+
+  it("the global buffer budget bounds held bytes across entries, dropping the oldest buffers first", async () => {
+    const budget = 3 * 1024;
+    const t = new DownloadTracker(budget);
+    const a = t.begin("https://x.test/a.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", -1);
+    const ra = t.wrap(a, endless(1024)).getReader();
+    await ra.read();
+    await ra.read();
+    t.pause(a); /* 2 KiB held by a paused entry */
+    expect(t.bufferedBytes()).toBe(2048);
+
+    const b = t.begin("https://x.test/b.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", -1);
+    const rb = t.wrap(b, endless(1024)).getReader();
+    for (let i = 0; i < 4; i++) await rb.read(); /* 4 KiB through a live entry */
+
+    expect(t.bufferedBytes()).toBeLessThanOrEqual(budget);
+    const snapA = t.snapshot().find((e) => e.id === a)!;
+    expect(snapA.resumable).toBe(false);
+    expect(snapA.status).toBe("paused");
+    t.cancel(b);
+    t.reset();
+  });
+});

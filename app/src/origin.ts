@@ -14,7 +14,7 @@
    turns those into the header decisions a real browser would have made.
    Pure code: no self.location, no fetch, trivially testable. */
 
-import { decodePath, recoverPath, unwrapDest } from "./codec";
+import { decodeClientUrl, recoverPath, unwrapDest } from "./codec";
 
 export interface VirtualOriginHeaders {
   /** Origin value to send; absent = send none. */
@@ -91,7 +91,11 @@ export function senderVirtualOrigin(
       keyed token, so decodePath alone fails; retry with recoverPath -
       the same MAC-verified recovery the request engine uses - and
       peel nested routes the same way it does. */
-  const raw = decodePath(cu.pathname) ?? recoverPath(cu.pathname);
+  /* #193: decodeClientUrl resolves both client shapes, the /j/ route and
+     the NAVH handle (/__zl_navh__/<token>/...). decodePath alone returns
+     null for a handle, which failed closed for every handle-navigated page
+     (no document.cookie, no virtual-origin marker). */
+  const raw = decodeClientUrl(cu) ?? recoverPath(cu.pathname);
   if (!raw) return null;
   const dest = unwrapDest(raw);
   let du: URL;

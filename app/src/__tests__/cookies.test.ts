@@ -7,6 +7,7 @@ import {
   cookieHeaderFor,
   cookiesResetForTests,
   documentCookieRead,
+  documentCookieWrite,
   jarHeaders,
   jarLoad,
   jarMerge,
@@ -366,5 +367,90 @@ describe("RFC 6265 5.1.1 cookie-date parser", () => {
     /* overflow day rule (tough-cookie recycle): 70 -> day 69-1... no:
        values 60-99 recycle as day-1 for legacy GoAnimate-style dates */
     expect(parseCookieDate("Wed, 09 Jun 2021 10:18:14 GMT")).not.toBeNull();
+  });
+});
+
+/* #191: RFC 6265bis 4.1.3 name prefixes and the Secure origin rule.
+   A __Secure- cookie needs Secure; a __Host- cookie needs Secure,
+   Path=/ and no Domain (host-only). Secure cookies are only admitted
+   from a secure response origin (https, or a localhost loopback). */
+describe("RFC 6265bis cookie prefixes and Secure origin (#191)", () => {
+  it("__Secure- without the Secure attribute is rejected", () => {
+    const r = applySetCookie("https://a.example/", resp(["__Secure-sid=1; Path=/"]));
+    expect(r[0].stored).toBe(false);
+    expect(r[0].rejected).toBeTruthy();
+    expect(cookieHeaderFor("https://a.example/")).toBeNull();
+  });
+
+  it("__Secure- with Secure over https is stored", () => {
+    const r = applySetCookie("https://a.example/", resp(["__Secure-sid=1; Secure"]));
+    expect(r[0].stored).toBe(true);
+    expect(cookieHeaderFor("https://a.example/")).toBe("__Secure-sid=1");
+  });
+
+  it("__Host- with a Domain attribute is rejected even when Secure", () => {
+    const r = applySetCookie("https://a.example/", resp(["__Host-sid=1; Secure; Path=/; Domain=a.example"]));
+    expect(r[0].stored).toBe(false);
+    expect(cookieHeaderFor("https://a.example/")).toBeNull();
+  });
+
+  it("__Host- requires Path=/ (an explicit narrower path is rejected)", () => {
+    const r = applySetCookie("https://a.example/", resp(["__Host-sid=1; Secure; Path=/x"]));
+    expect(r[0].stored).toBe(false);
+  });
+
+  it("__Host- with the default path (directory of the response) is rejected", () => {
+    const r = applySetCookie("https://a.example/x/y", resp(["__Host-sid=1; Secure"]));
+    expect(r[0].stored).toBe(false);
+  });
+
+  it("__Host- without Secure is rejected", () => {
+    const r = applySetCookie("https://a.example/", resp(["__Host-sid=1; Path=/"]));
+    expect(r[0].stored).toBe(false);
+  });
+
+  it("a valid __Host- cookie (Secure, Path=/, no Domain) is stored host-only", () => {
+    const r = applySetCookie("https://a.example/deep/page", resp(["__Host-sid=1; Secure; Path=/"]));
+    expect(r[0].stored).toBe(true);
+    const c = jarSnapshot().get(registerOrigin("https://a.example").id)!;
+    expect(c[0].hostOnly).toBe(true);
+    expect(c[0].path).toBe("/");
+    expect(cookieHeaderFor("https://a.example/anything")).toBe("__Host-sid=1");
+  });
+
+  it("a sibling subdomain cannot plant a Domain-scoped __Host- cookie over the real one", () => {
+    applySetCookie("https://app.example.test/", resp(["__Host-sid=real; Secure; Path=/"]));
+    const r = applySetCookie("https://evil.example.test/", resp(["__Host-sid=evil; Secure; Path=/; Domain=example.test"]));
+    expect(r[0].stored).toBe(false);
+    expect(cookieHeaderFor("https://app.example.test/")).toBe("__Host-sid=real");
+  });
+
+  it("a deletion that breaks the __Host- rules is rejected, the cookie survives", () => {
+    applySetCookie("https://a.example/", resp(["__Host-sid=1; Secure; Path=/"]));
+    const r = applySetCookie("https://a.example/", resp(["__Host-sid=; Path=/; Max-Age=0"]));
+    expect(r[0].deleted).toBe(false);
+    expect(cookieHeaderFor("https://a.example/")).toBe("__Host-sid=1");
+  });
+
+  it("a Secure cookie from an http response is rejected", () => {
+    const r = applySetCookie("http://a.example/", resp(["sid=1; Secure"]));
+    expect(r[0].stored).toBe(false);
+    expect(cookieHeaderFor("https://a.example/")).toBeNull();
+  });
+
+  it("a Secure cookie from an http response is rejected for document.cookie writes too", () => {
+    const r = documentCookieWrite("http://a.example/", "sid=1; Secure");
+    expect(r.stored).toBe(false);
+    expect(documentCookieRead("https://a.example/")).toBe("");
+  });
+
+  it("localhost is a secure origin: Secure cookies are admitted over http://localhost", () => {
+    const r = applySetCookie("http://localhost:8080/", resp(["sid=1; Secure"]));
+    expect(r[0].stored).toBe(true);
+  });
+
+  it("a plain cookie from http is unaffected by the Secure rule", () => {
+    const r = applySetCookie("http://a.example/", resp(["sid=1"]));
+    expect(r[0].stored).toBe(true);
   });
 });
