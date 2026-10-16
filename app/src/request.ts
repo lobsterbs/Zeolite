@@ -193,7 +193,10 @@ export function withDeadline<T>(
    eviction. x-zl-cached-at carries the stored-at time. */
 
 
-const ZL_PAGES = "zeolite-pages-v1";
+/* v2 (#179): v1 entries predate the session gates and may hold one
+   user's personalized copy with no Cache-Control; the new name leaves
+   them unreferenced instead of serving them to anyone. */
+const ZL_PAGES = "zeolite-pages-v2";
 const ZL_CACHED_AT = "x-zl-cached-at";
 const ZL_DEFAULT_TTL = 10 * 60 * 1000;
 const ZL_PAGE_LIMIT = 60;
@@ -212,11 +215,49 @@ export function cacheTtl(headers: Headers): number {
   return ZL_DEFAULT_TTL;
 }
 
-/** #115: only no-store is uncacheable. A no-cache response is stored
-    (zero TTL) and revalidated before every use; an entry without
-    validators revalidates as an unconditional probe. */
+/** #115: a no-cache response is stored (zero TTL) and revalidated before
+    every use. #179: no-store and private responses are never stored, and
+    neither is one that varies on the session (Cookie, Authorization, or
+    *): a shared copy of it would answer a different user. */
 export function cacheStorable(headers: Headers): boolean {
-  return !/\bno-store\b/.test((headers.get("cache-control") ?? "").toLowerCase());
+  const cc = (headers.get("cache-control") ?? "").toLowerCase();
+  if (/\bno-store\b|\bprivate\b/.test(cc)) return false;
+  const vary = (headers.get("vary") ?? "").toLowerCase();
+  return !/(^|[,\s])(\*|cookie|authorization)(?=[,\s]|$)/.test(vary);
+}
+
+/** #179: the target a page-cache key stands for: the same decode the
+    revalidation fetch uses, so the jar is asked about the right origin. */
+function cacheTargetOf(req: Request): string {
+  const u = new URL(req.url);
+  const route = decodePath(u.pathname);
+  return route ? route + u.search : u.href;
+}
+
+/** #179: a request carrying page-session state (an Authorization header,
+    or a jar cookie for its target) never reads the page cache, and its
+    response is never stored. The jar is the authority for cookies, not the
+    engine-origin Cookie header on the event request. */
+export function requestBindsSession(req: Request): boolean {
+  if (req.headers.has("authorization")) return true;
+  try {
+    return cookieHeaderFor(cacheTargetOf(req)) !== null;
+  } catch {
+    return true;
+  }
+}
+
+/** #179: drop every stored page. Called when the jar identity changes
+    (zl:clearJar, a jar profile switch) so the next user never meets the
+    previous user's pages. In-flight refreshes stay anonymous by construction
+    (see requestBindsSession). */
+export async function pageCacheClear(): Promise<void> {
+  staleRefreshInFlight.clear();
+  try {
+    await caches.delete(ZL_PAGES);
+  } catch {
+    /* no storage: nothing to drop */
+  }
 }
 
 /* #94 + #35: ONE copy of the JS-transform destination set - the
@@ -234,6 +275,9 @@ export async function pageCacheMatch(
   req: Request,
   keepAlive: (p: Promise<unknown>) => void = () => {},
 ): Promise<Response | null> {
+  /* #179: a request with page-session state (authorization, or a jar
+     cookie for its target) is answered live, never from the shared cache. */
+  if (requestBindsSession(req)) return null;
   let hit: Response | undefined;
   try {
     hit = await (await caches.open(ZL_PAGES)).match(req);
@@ -243,10 +287,10 @@ export async function pageCacheMatch(
   if (!hit) return null;
   const at = Number(hit.headers.get(ZL_CACHED_AT) ?? 0);
   const ttl = cacheTtl(hit.headers);
-  /* #115: a stored no-store view can only be a legacy entry; it stays
-     unserved. */
+  /* #115/#179: a stored no-store or session-varying view can only be a
+     legacy entry; it stays unserved. */
+  if (!cacheStorable(hit.headers)) return null;
   const cc = (hit.headers.get("cache-control") ?? "").toLowerCase();
-  if (/\bno-store\b/.test(cc)) return null;
   const rangeHeader = req.headers.get("range");
   /* #115: no-cache revalidates BEFORE use (RFC 9111): the conditional
      fetch blocks this response, and only a wire 304 hands the page the
@@ -371,8 +415,10 @@ async function pageCacheStore(
   keepView = false,
 ): Promise<Response | null> {
   /* #115: no-cache entries are stored too - cacheTtl gives them a zero
-     TTL, so every use revalidates - and only no-store is never stored. */
+     TTL, so every use revalidates. #179: never store for a request that
+     carries session state, nor a private or session-varying response. */
   if (!cacheStorable(resp.headers) || resp.status !== 200) return null;
+  if (requestBindsSession(req)) return null;
   try {
     const cache = await caches.open(ZL_PAGES);
     /* Issue #2 + hostile-header hygiene: the cache must never store the
@@ -1972,6 +2018,12 @@ export function handleFetch(e: FetchEvent): void {
           const jarCookie = cookieHeaderFor(target, reqCtx);
           if (jarCookie) sendHeaders.set("cookie", jarCookie);
           else sendHeaders.delete("cookie");
+          /* #179: any session state sent on any hop (the page's
+             Authorization, a jar cookie for the target or a hop) makes
+             this response personalized: it is never stored. Decided from
+             what was sent, not from the jar after the response lands (a
+             logout in between must not turn it into a shared copy). */
+          let carriedSession = e.request.headers.has("authorization") || jarCookie !== null;
           /* 2.2 Arsenide: the transport fetch adapter ignores the redirect
              option and surfaces 3xx responses, so hops followed inside
              the transport never reached the jar and dropped their
@@ -2059,6 +2111,7 @@ export function handleFetch(e: FetchEvent): void {
             const hopCookie = cookieHeaderFor(next, reqCtx);
             if (hopCookie) sendHeaders.set("cookie", hopCookie);
             else sendHeaders.delete("cookie");
+            if (hopCookie) carriedSession = true;
             DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
             hopUrl = next;
             /* #201: the hop's body is never read; cancel it so the
@@ -2192,6 +2245,8 @@ export function handleFetch(e: FetchEvent): void {
              hostile-header surgery strips it from the page view. A 3xx
              that surfaced (hop cap, unresolvable or unreplayable hop)
              still lands here, captured against its own hop URL. */
+          /* #179: the store gate for every fresh-path cache write below. */
+          const storeUnbound = !carriedSession;
           const admitted = applySetCookie(finalDest ?? hopUrl, jarHeaders(resp));
           /* #35 (browser E2E): the page's document.cookie getter is
              synchronous, so the bootstrap keeps an optimistic copy; a
@@ -2347,7 +2402,8 @@ export function handleFetch(e: FetchEvent): void {
             e.request.method === "GET" &&
             !workerServe &&
             !scriptServe &&
-            !(DOC_DESTS.has(dest) && respCt === "")
+            !(DOC_DESTS.has(dest) && respCt === "") &&
+            storeUnbound
           ) {
             void pageCacheStore(e.request, resp.clone());
           }
@@ -2474,7 +2530,7 @@ export function handleFetch(e: FetchEvent): void {
                and the served header says so. */
             outHeaders.set("content-type", utf8ContentType(respCt));
             const out = new Response(head + src, { status: resp.status, headers: outHeaders });
-            if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());
+            if (e.request.method === "GET" && storeUnbound) void pageCacheStore(e.request, out.clone());
             return out;
           }
           if (isWorkerDestination(e.request.destination) && resp.body) {
@@ -2527,7 +2583,7 @@ export function handleFetch(e: FetchEvent): void {
                keeps its streaming path while the cache consumes the
                other fork. */
             const out = new Response(body, { status: resp.status, headers: outHeaders });
-            if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());
+            if (e.request.method === "GET" && storeUnbound) void pageCacheStore(e.request, out.clone());
             return out;
           }
           /* #35 (browser E2E): page <script type="module"> bodies. An
@@ -2570,7 +2626,7 @@ export function handleFetch(e: FetchEvent): void {
                the served header must say so. */
             outHeaders.set("content-type", utf8ContentType(respCt));
             const out = new Response(src, { status: resp.status, headers: outHeaders });
-            if (e.request.method === "GET") void pageCacheStore(e.request, out.clone());
+            if (e.request.method === "GET" && storeUnbound) void pageCacheStore(e.request, out.clone());
             return out;
           }
           WEBREQ.completed({ ...wrDetails, statusCode: resp.status });

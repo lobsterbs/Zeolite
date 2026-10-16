@@ -24,7 +24,7 @@ import {
   type ControlMessage,
 } from "../control";
 import { EXT_CONTROL_TYPES, dispatchExtControl } from "../extensions/control";
-import { documentCookieRead, documentCookieWrite } from "../cookies";
+import { documentCookieRead, documentCookieWrite, setJarProfile } from "../cookies";
 
 /* Derives the case labels from the dispatcher's own source, the way the
    wiring sees it after vitest's transform (unminified). */
@@ -303,5 +303,54 @@ describe("zl:wispRegister persists the route shape (#168 idle-kill)", () => {
     });
     expect(bad.replies).toEqual([{ ok: false, error: "wisp registration needs a ws(s):// url or an empty string" }]);
     expect(persist).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* #179: the page cache is dropped when the jar identity changes. */
+describe("zl:clearJar and zl:jarProfile drop the page cache (#179)", () => {
+  const ctxFor = (replies: unknown[], pending: Promise<unknown>[]) => ({
+    e: { waitUntil: (p: Promise<unknown>) => void pending.push(p) } as unknown as ExtendableMessageEvent,
+    reply: (d: unknown) => void replies.push(d),
+    port: {},
+    persistRoute: async () => {},
+  });
+
+  beforeEach(() => {
+    vi.stubGlobal("caches", {
+      open: async () => {
+        throw new Error("no cache storage in this test");
+      },
+      delete: vi.fn(async () => true),
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setJarProfile("default");
+  });
+
+  it("zl:clearJar clears the page cache and replies after the clear", async () => {
+    const replies: unknown[] = [];
+    const pending: Promise<unknown>[] = [];
+    await dispatchCore({ type: "zl:clearJar" } as unknown as ControlMessage, ctxFor(replies, pending));
+    await Promise.all(pending);
+    expect((caches.delete as unknown as ReturnType<typeof vi.fn>).mock.calls).toEqual([["zeolite-pages-v2"]]);
+    expect(replies.length).toBe(1);
+    expect(replies[0]).toMatchObject({ ok: true });
+  });
+
+  it("a jar profile switch clears the page cache; a re-send of the same profile does not", async () => {
+    const del = caches.delete as unknown as ReturnType<typeof vi.fn>;
+    const replies: unknown[] = [];
+    const pending: Promise<unknown>[] = [];
+    await dispatchCore({ type: "zl:jarProfile", profile: "inc-test" } as unknown as ControlMessage, ctxFor(replies, pending));
+    await Promise.all(pending);
+    expect(del).toHaveBeenCalledTimes(1);
+    expect(replies[0]).toEqual({ ok: true, profile: "inc-test" });
+
+    await dispatchCore({ type: "zl:jarProfile", profile: "inc-test" } as unknown as ControlMessage, ctxFor(replies, pending));
+    await Promise.all(pending);
+    expect(del).toHaveBeenCalledTimes(1);
+    expect(replies[1]).toEqual({ ok: true, profile: "inc-test" });
   });
 });

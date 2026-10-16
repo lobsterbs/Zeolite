@@ -41,6 +41,7 @@ import { setFingerprint } from "../swstate";
 import { establishContext, resolveRelative } from "../vctx";
 import { VCTX } from "../swstate";
 import { encodeDestLegacy } from "../codec";
+import { applySetCookie, cookiesResetForTests } from "../cookies";
 
 describe("reqDest (#82 seam)", () => {
   it("falls back to sec-fetch-dest when destination is empty (Firefox, #40)", () => {
@@ -521,5 +522,111 @@ describe("Sec-Fetch-Storage-Access persona synthesis (Chrome 133+)", () => {
         "sec-fetch-storage-access",
       ),
     ).toBe(null);
+  });
+});
+
+/* #179: two viewers of one browser share the page cache. A personalized
+   response to alice (her jar cookie on the request) must never be served
+   to bob after the jar is cleared, and the cache must not hold it. */
+describe("page cache does not carry one user's session to another (#179)", () => {
+  const ORIGIN = "https://w.example.org";
+  const ROUTE = ORIGIN + encodeDestLegacy("https://site.example/api");
+
+  const mkEvent = (clientId: string) => {
+    const armed: Promise<Response>[] = [];
+    const ev = {
+      request: {
+        url: ROUTE,
+        method: "GET",
+        mode: "cors",
+        destination: "empty",
+        credentials: "include",
+        referrer: "",
+        body: null,
+        headers: new Headers(),
+      },
+      clientId,
+      respondWith: (p: Promise<Response>) => void armed.push(p),
+      waitUntil: () => {},
+    } as unknown as FetchEvent;
+    return { ev, armed };
+  };
+
+  let store: Map<string, Response>;
+
+  beforeEach(() => {
+    transportMock.calls = 0;
+    transportMock.gate = undefined;
+    transportMock.urls = [];
+    transportMock.queue = [];
+    transportMock.inits = [];
+    store = new Map();
+    cookiesResetForTests();
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN },
+      registration: { scope: ORIGIN + "/" },
+      clients: { get: async () => null },
+    });
+    const keyOf = (req: unknown) => (typeof req === "string" ? req : (req as Request).url);
+    vi.stubGlobal("caches", {
+      open: async () => ({
+        match: async (req: unknown) => store.get(keyOf(req))?.clone(),
+        put: async (req: unknown, resp: Response) => void store.set(keyOf(req), resp),
+        delete: async (req: unknown) => store.delete(keyOf(req)),
+        keys: async () => [...store.keys()].map((url) => ({ url })),
+      }),
+      delete: async () => {
+        store.clear();
+        return true;
+      },
+    });
+  });
+
+  afterEach(() => {
+    cookiesResetForTests();
+    vi.unstubAllGlobals();
+  });
+
+  it("alice's personalized copy is neither stored nor served to bob after logout", async () => {
+    const sid = new Headers();
+    sid.append("set-cookie", "sid=alice; Path=/");
+    applySetCookie("https://site.example/", sid);
+    transportMock.queue = [
+      new Response("alice-private-data", { headers: { "content-type": "text/plain" } }),
+      new Response("bob-public-data", { headers: { "content-type": "text/plain" } }),
+    ];
+
+    const a = mkEvent("alice");
+    handleFetch(a.ev);
+    expect(await (await a.armed[0]!).text()).toBe("alice-private-data");
+    expect(store.size).toBe(0);
+
+    /* logout: the jar drops alice's session before bob's request */
+    cookiesResetForTests();
+    const b = mkEvent("bob");
+    handleFetch(b.ev);
+    expect(await (await b.armed[0]!).text()).toBe("bob-public-data");
+    expect(transportMock.calls).toBe(2);
+  });
+
+  it("a request that carried a jar cookie does not store even after the jar is cleared mid-flight", async () => {
+    const sid = new Headers();
+    sid.append("set-cookie", "sid=alice; Path=/");
+    applySetCookie("https://site.example/", sid);
+    let release!: () => void;
+    transportMock.gate = new Promise<void>((r) => (release = r));
+    transportMock.queue = [new Response("alice-private-data", { headers: { "content-type": "text/plain" } })];
+
+    const a = mkEvent("alice");
+    handleFetch(a.ev);
+    /* logout lands once alice's upstream round trip is in flight (the jar
+       is read after the pre-fetch awaits, so wait for the send) */
+    while (transportMock.calls === 0) await new Promise((r) => setTimeout(r, 0));
+    expect(transportMock.inits[0]?.headers?.get("cookie")).toBe("sid=alice");
+    cookiesResetForTests();
+    release();
+    expect(await (await a.armed[0]!).text()).toBe("alice-private-data");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(store.size).toBe(0);
   });
 });

@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /* Page-cache behavior seams: the stale-while-revalidate refresh must
    not block the response it serves, and #115 makes the cache
@@ -28,7 +28,8 @@ vi.mock("../transport", () => ({
   },
 }));
 
-import { cacheStorable, cacheTtl, pageCacheMatch } from "../request";
+import { cacheStorable, cacheTtl, pageCacheClear, pageCacheMatch } from "../request";
+import { applySetCookie, cookiesResetForTests } from "../cookies";
 
 describe("cacheTtl / cacheStorable", () => {
   it("gives no-cache and no-store a zero TTL", () => {
@@ -333,3 +334,73 @@ describe("pageCacheMatch Range on rewritable types (#204)", () => {
   });
 });
 
+
+/* #179: the page cache is shared by every viewer of the browser. A
+   response that carries one user's session (a jar cookie or an
+   Authorization header on the request, Cache-Control private, or
+   Vary on Cookie/Authorization) must never be served to another. */
+describe("page cache session and auth gates (#179)", () => {
+  const storedAt = (headers: Record<string, string>) =>
+    new Response("stored", { headers: { "content-type": "text/plain", "x-zl-cached-at": String(Date.now()), ...headers } });
+
+  const installCache = (entry: Response | undefined) => {
+    const deletes: string[] = [];
+    (globalThis as { caches?: unknown }).caches = {
+      open: async () => ({
+        match: async () => entry,
+        delete: async () => true,
+        put: async () => {},
+        keys: async () => [] as Request[],
+      }),
+      delete: async (name: string) => void deletes.push(name),
+    };
+    (globalThis as { self?: unknown }).self = { location: { origin: "https://zl.test" } };
+    return deletes;
+  };
+
+  beforeEach(() => cookiesResetForTests());
+  afterEach(() => {
+    cookiesResetForTests();
+    delete (globalThis as { caches?: unknown }).caches;
+    delete (globalThis as { self?: unknown }).self;
+  });
+
+  it("does not serve a stored copy to a request whose target holds a jar cookie", async () => {
+    installCache(storedAt({ "cache-control": "max-age=60" }));
+    expect(await pageCacheMatch(new Request("https://e.example/p"))).not.toBeNull();
+    const sid = new Headers();
+    sid.append("set-cookie", "sid=alice; Path=/");
+    applySetCookie("https://e.example/", sid);
+    expect(await pageCacheMatch(new Request("https://e.example/p"))).toBeNull();
+  });
+
+  it("does not serve a stored copy to a request with Authorization", async () => {
+    installCache(storedAt({ "cache-control": "max-age=60" }));
+    const req = new Request("https://e.example/p", { headers: { authorization: "Bearer alice" } });
+    expect(await pageCacheMatch(req)).toBeNull();
+  });
+
+  it("never stores private, Vary: Cookie or Vary: Authorization responses", () => {
+    expect(cacheStorable(new Headers({ "cache-control": "private, max-age=60" }))).toBe(false);
+    expect(cacheStorable(new Headers({ "cache-control": "private" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "Cookie" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "Accept-Encoding, Cookie" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "authorization" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "*" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "Accept-Encoding" }))).toBe(true);
+    expect(cacheStorable(new Headers({ "cache-control": "max-age=60" }))).toBe(true);
+  });
+
+  it("leaves a legacy private or Vary: Cookie entry unserved", async () => {
+    installCache(storedAt({ "cache-control": "private, max-age=600" }));
+    expect(await pageCacheMatch(new Request("https://e.example/p"))).toBeNull();
+    installCache(storedAt({ vary: "Cookie", "cache-control": "max-age=600" }));
+    expect(await pageCacheMatch(new Request("https://e.example/p"))).toBeNull();
+  });
+
+  it("pageCacheClear drops the page cache by its name", async () => {
+    const deletes = installCache(undefined);
+    await pageCacheClear();
+    expect(deletes).toEqual(["zeolite-pages-v2"]);
+  });
+});

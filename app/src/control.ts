@@ -7,6 +7,7 @@ import type { JarConflictRule } from "./cookies";
 import { documentCookieRead, documentCookieWrite, jarClear, jarClearScope, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy } from "./cookies";
 import { PAGE_MESSAGES, senderIsProxiedPath } from "./cpgate";
 import { DIAG } from "./diag";
+import { pageCacheClear } from "./request";
 /* #90: the download registry instance lives in ./downloads; the
    control plane lists and cancels entries through the subsystem. */
 import { DL } from "./downloads";
@@ -379,7 +380,21 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          are dropped on the switch back (cookies.ts). Resets to
          default on SW restart; the host re-sends on boot, on the
          incognito toggle, and on controllerchange. */
-      reply(setJarProfile(msg.profile));
+      /* #179: a switch changes whose cookies answer requests, so the page
+         cache is dropped too. A re-send of the same profile (boot,
+         controllerchange) keeps the cache. */
+      {
+        const before = jarProfileState();
+        const r = setJarProfile(msg.profile);
+        if (r.profile !== before) {
+          e.waitUntil((async () => {
+            await pageCacheClear();
+            reply(r);
+          })());
+        } else {
+          reply(r);
+        }
+      }
       break;
     case "zl:getJars":
       /* #41: jar enumeration for the host (the host settings UI
@@ -391,7 +406,12 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       /* #41: clear the active (or named) jar profile, or one origin
          inside it. Refuses malformed input instead of coercing. */
       const r = jarClearScope(msg.profile, msg.origin);
-      reply(r.ok ? { ok: true, jars: r.jars, cookies: r.cookies } : { ok: false, error: r.error });
+      /* #179: a cleared jar must not leave the previous user's pages in
+         the shared page cache. */
+      e.waitUntil((async () => {
+        if (r.ok) await pageCacheClear();
+        reply(r.ok ? { ok: true, jars: r.jars, cookies: r.cookies } : { ok: false, error: r.error });
+      })());
       break;
     }
         case "zl:transport": {
