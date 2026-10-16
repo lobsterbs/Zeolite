@@ -564,6 +564,15 @@ function patchedStreamResponse(
       }
     }
   };
+  /* #180/#11: close-delimited framing check, shared by the error-56
+     salvage branch and the mid-body error decision below. */
+  const closeDelimited = () => {
+    const lower = "\r\n" + raw_header_text.toLowerCase();
+    const has_length = /(?:^|\r\n)content-length:/.test(lower);
+    const length_zero = /(?:^|\r\n)content-length:\s*0(?:\r|$)/.test(lower);
+    const has_chunked = /(?:^|\r\n)transfer-encoding:/.test(lower);
+    return !has_chunked && (!has_length || length_zero);
+  };
   const real_end_callback = (error: number) => {
     if (!headers_received && error === 56) {
       /* The #11 fix, scoped: RECV_ERROR with the header set already
@@ -571,11 +580,7 @@ function patchedStreamResponse(
          transport failure. Length-delimited bodies (content-length > 0
          or chunked) keep the original rejection: error 56 before their
          framing completed is truncation, and truncation must fail. */
-      const lower = "\r\n" + raw_header_text.toLowerCase();
-      const has_length = /(?:^|\r\n)content-length:/.test(lower);
-      const length_zero = /(?:^|\r\n)content-length:\s*0(?:\r|$)/.test(lower);
-      const has_chunked = /(?:^|\r\n)transfer-encoding:/.test(lower);
-      if (!has_chunked && (!has_length || length_zero)) {
+      if (closeDelimited()) {
         headers_received = true;
         try {
           headers_callback(stream);
@@ -589,10 +594,25 @@ function patchedStreamResponse(
       headers_received = true;
       headers_callback(stream);
     }
-    try {
-      stream_controller?.close();
-    } catch {
-      /* already closed or errored */
+    /* #180: a transport error after the headers were delivered must
+       not close the body as clean EOF - a truncated response would
+       look complete. Error the stream instead. Error 56 with
+       close-delimited framing is the #11 end-of-body case and still
+       closes cleanly. */
+    if (headers_received && error !== 0 && !(error === 56 && closeDelimited())) {
+      try {
+        stream_controller?.error(
+          new TypeError("upstream transport error " + error + " mid-body"),
+        );
+      } catch {
+        /* already closed or errored */
+      }
+    } else {
+      try {
+        stream_controller?.close();
+      } catch {
+        /* already closed or errored */
+      }
     }
     end_callback(error);
   };

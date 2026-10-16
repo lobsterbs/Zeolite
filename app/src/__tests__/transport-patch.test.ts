@@ -433,4 +433,39 @@ describe("applyTransportEOF", () => {
     cbs.headers(LENGTH_DELIMITED_200);
     expect(headerCalls).toHaveLength(0);
   });
+
+  it("mid-body transport error errors the stream, not a clean EOF (#180)", async () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: ReadableStream[] = [];
+    const ends: number[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      (error) => ends.push(error),
+    );
+    cbs.headers(LENGTH_DELIMITED_200);
+    cbs.data(enc.encode("x".repeat(100)));
+    cbs.end(18);
+    await expect(readAll(headerCalls[0])).rejects.toThrow(/mid-body/);
+    expect(ends).toEqual([18]);
+  });
+
+  it("close-delimited error 56 after body data is still end-of-body (#180/#11)", async () => {
+    const seam = makeSeam();
+    expect(applyTransportEOF(seam.session)).toBe(true);
+    const headerCalls: ReadableStream[] = [];
+    const ends: number[] = [];
+    const cbs = start(
+      seam,
+      (stream) => headerCalls.push(stream),
+      (error) => ends.push(error),
+    );
+    cbs.headers(enc.encode("HTTP/1.1 200 OK\r\n\r\n"));
+    cbs.data(enc.encode("hello"));
+    cbs.end(56);
+    const out = await readAll(headerCalls[0]);
+    expect(out).toEqual(Array.from(enc.encode("hello")));
+    expect(ends).toEqual([56]);
+  });
 });
