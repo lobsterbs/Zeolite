@@ -35,7 +35,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - run: cargo install wasm-pack --version 0.13.1 || true
+      - name: Install wasm-pack (pinned prebuilt)
+        # See ci.yml: cargo install broke when zip 2.x was yanked.
+        run: |
+          curl -sSfL -o /tmp/wasm-pack.tar.gz https://github.com/rustwasm/wasm-pack/releases/download/v0.13.1/wasm-pack-v0.13.1-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf /tmp/wasm-pack.tar.gz -C /tmp
+          sudo mv /tmp/wasm-pack-v0.13.1-x86_64-unknown-linux-musl/wasm-pack /usr/local/bin/wasm-pack
+          wasm-pack --version
       - name: Build rewriter wasm
         run: |
           wasm-pack build crates/rewriter --target web --release --out-name rewriter_wasm

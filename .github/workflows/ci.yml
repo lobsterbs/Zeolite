@@ -59,7 +59,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - run: cargo install wasm-pack --version 0.13.1 || true
+      - name: Install wasm-pack (pinned prebuilt)
+        # cargo install wasm-pack 0.13.1 stopped resolving on 2026-10-16:
+        # every zip 2.x release its binary-install dep accepts was
+        # yanked from crates.io, so the install failed and the || true
+        # moved the failure into the build step. The pinned prebuilt
+        # tarball has no crates.io dependency surface at all.
+        run: |
+          curl -sSfL -o /tmp/wasm-pack.tar.gz https://github.com/rustwasm/wasm-pack/releases/download/v0.13.1/wasm-pack-v0.13.1-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf /tmp/wasm-pack.tar.gz -C /tmp
+          sudo mv /tmp/wasm-pack-v0.13.1-x86_64-unknown-linux-musl/wasm-pack /usr/local/bin/wasm-pack
+          wasm-pack --version
       - name: Build rewriter wasm
         run: |
           if ! wasm-pack build crates/rewriter --target web --release --out-name rewriter_wasm > wasm1.out 2>&1; then
