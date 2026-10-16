@@ -10,6 +10,7 @@ wisp-core = { path = "../wisp-core" }
 sha2 = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
+pbkdf2 = { workspace = true }
 subtle = { workspace = true }
 
 [dev-dependencies]

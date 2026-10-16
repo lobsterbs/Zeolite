@@ -35,7 +35,7 @@ use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -86,6 +86,82 @@ impl Window {
     }
 }
 
+/// #183: per-stream byte budget for client-to-server DATA. The input
+/// channel counts messages, not bytes, so one connection could buffer
+/// ~8 GiB in 64-slot channels of 512 KiB frames. Every queued byte is
+/// charged here and discharged when the relay consumes it; a stream
+/// past its cap is closed Throttled. settle() hands everything back
+/// when the stream ends (close, reap, teardown).
+struct StreamBudget {
+    /// Bytes queued but not yet consumed by this stream's relay.
+    queued: AtomicU64,
+    /// The server-wide queue (Shared::server_queued).
+    conn: Arc<AtomicU64>,
+    /// DATA frames consumed since the last CONTINUE grant (#196).
+    consumed: AtomicU32,
+}
+
+impl StreamBudget {
+    fn new(conn: Arc<AtomicU64>) -> Self {
+        Self {
+            queued: AtomicU64::new(0),
+            conn,
+            consumed: AtomicU32::new(0),
+        }
+    }
+
+    /// Account n queued bytes; false when either cap is crossed.
+    fn charge(&self, n: usize) -> bool {
+        let n = n as u64;
+        let q = self.queued.fetch_add(n, Ordering::Relaxed) + n;
+        if q > STREAM_QUEUE_BYTES {
+            self.queued.fetch_sub(n, Ordering::Relaxed);
+            return false;
+        }
+        let c = self.conn.fetch_add(n, Ordering::Relaxed) + n;
+        if c > SERVER_QUEUE_BYTES {
+            self.conn.fetch_sub(n, Ordering::Relaxed);
+            self.queued.fetch_sub(n, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    /// n queued bytes reached their socket: hand them back.
+    fn discharge(&self, n: usize) {
+        let n = n as u64;
+        self.queued.fetch_sub(n, Ordering::Relaxed);
+        self.conn.fetch_sub(n, Ordering::Relaxed);
+        self.consumed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// #196: a fresh window is owed once at least half the initial
+    /// buffer's worth of frames was consumed. Edge-triggered.
+    fn grant_due(&self) -> bool {
+        // ponytail: load-then-clear, not swap: the relay polls after
+        // every frame, and a destructive swap would zero the count
+        // before it ever reaches the threshold.
+        let hit =
+            self.consumed.load(Ordering::Relaxed) >= wisp_core::handshake::INITIAL_BUFFER_SIZE / 2;
+        if hit {
+            self.consumed.store(0, Ordering::Relaxed);
+        }
+        hit
+    }
+
+    /// Hand every still-queued byte back (stream end, abort, reap).
+    fn settle(&self) {
+        let left = self.queued.swap(0, Ordering::Relaxed);
+        if left > 0 {
+            self.conn.fetch_sub(left, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Per-stream queued-byte cap and the server-wide queue cap (#183).
+const STREAM_QUEUE_BYTES: u64 = 1024 * 1024;
+const SERVER_QUEUE_BYTES: u64 = 128 * 1024 * 1024;
+
 /// Grace window for existing streams once max_conn_duration is hit:
 /// they finish on their own; past it the connection closes Throttled
 /// (the reconnect-me reason) whether streams remain or not.
@@ -99,6 +175,9 @@ struct StreamEntry {
     input: mpsc::Sender<Vec<u8>>,
     task: tokio::task::JoinHandle<()>,
     window: Arc<Window>,
+    /// #183: queued-byte budget charged by the session loop and
+    /// discharged by this stream's relay.
+    budget: Arc<StreamBudget>,
     last_active: Arc<Mutex<Instant>>,
     /// UDP byte/packet counters (TCP leaves them at zero).
     udp_bytes: Arc<AtomicU64>,
@@ -303,6 +382,10 @@ pub struct Config {
     pub trusted_proxy_hops: usize,
     pub max_streams_per_conn: usize,
     pub connect_timeout: Duration,
+    /// #182: a client must complete the wisp handshake within this
+    /// bound or the connection is dropped (env HANDSHAKE_TIMEOUT,
+    /// kdl handshake_timeout).
+    pub handshake_timeout: Duration,
     pub stream_idle_timeout: Duration,
     pub max_conn_duration: Duration,
     pub max_udp_datagram: usize,
@@ -341,6 +424,7 @@ impl Default for Config {
             trusted_proxy_hops: 0,
             max_streams_per_conn: 256,
             connect_timeout: Duration::from_secs(10),
+            handshake_timeout: Duration::from_secs(10),
             stream_idle_timeout: Duration::from_secs(300),
             max_conn_duration: Duration::from_secs(3600),
             max_udp_datagram: 4096,
@@ -438,6 +522,7 @@ impl Config {
         cfg.max_streams_per_conn =
             env_num("MAX_STREAMS_PER_CONNECTION", cfg.max_streams_per_conn, 1);
         cfg.connect_timeout = env_secs("CONNECT_TIMEOUT", cfg.connect_timeout.as_secs());
+        cfg.handshake_timeout = env_secs("HANDSHAKE_TIMEOUT", cfg.handshake_timeout.as_secs());
         cfg.stream_idle_timeout =
             env_secs("STREAM_IDLE_TIMEOUT", cfg.stream_idle_timeout.as_secs());
         cfg.max_conn_duration =
@@ -522,6 +607,7 @@ impl Config {
                     cfg.max_streams_per_conn = kdl_usize(node, "max_streams_per_connection", 1)?
                 }
                 "connect_timeout" => cfg.connect_timeout = kdl_secs(node, "connect_timeout")?,
+                "handshake_timeout" => cfg.handshake_timeout = kdl_secs(node, "handshake_timeout")?,
                 "stream_idle_timeout" => {
                     cfg.stream_idle_timeout = kdl_secs(node, "stream_idle_timeout")?
                 }
@@ -657,6 +743,15 @@ fn kdl_auth_field(node: &KdlNode, key: &str) -> Option<String> {
 
 /// Shared across connections: config, connection counters (global
 /// and per-IP) and the (immutable) password store.
+/// #198: per-IP failed-auth accounting for the auth rate limit.
+pub struct AuthPenalty {
+    fails: u32,
+    blocked_until: Option<Instant>,
+}
+
+/// #198: failed auth attempts before an IP is boxed.
+const AUTH_FAIL_THRESHOLD: u32 = 10;
+
 pub struct Shared {
     pub cfg: Arc<Config>,
     pub dest: policy::DestinationPolicy,
@@ -668,6 +763,10 @@ pub struct Shared {
     pub password: Option<PasswordAuth>,
     /// Live connection count per peer IP (per-IP limit bookkeeping).
     pub per_ip: Mutex<std::collections::HashMap<std::net::IpAddr, usize>>,
+    /// #183: bytes queued in stream input channels server-wide.
+    pub server_queued: Arc<AtomicU64>,
+    /// #198: failed-auth accounting per peer IP.
+    pub auth_penalty: Mutex<std::collections::HashMap<std::net::IpAddr, AuthPenalty>>,
 }
 
 impl Shared {
@@ -683,11 +782,49 @@ impl Shared {
             throttled_streams: AtomicU64::new(0),
             password,
             per_ip: Mutex::new(std::collections::HashMap::new()),
+            server_queued: Arc::new(AtomicU64::new(0)),
+            auth_penalty: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
     fn auth_required(&self) -> bool {
         self.password.is_some() || self.cfg.key_hex.is_some()
+    }
+
+    /// #198: true while this peer IP sits in the auth-penalty box.
+    pub fn auth_refused(&self, ip: &std::net::IpAddr) -> bool {
+        self.auth_penalty
+            .lock()
+            .map(|m| {
+                m.get(ip)
+                    .and_then(|p| p.blocked_until)
+                    .is_some_and(|t| Instant::now() < t)
+            })
+            .unwrap_or(false)
+    }
+
+    /// #198: count one failed auth. At the threshold the IP is boxed
+    /// for 30 s, doubling per further fail up to 10 minutes.
+    pub fn auth_fail(&self, ip: &std::net::IpAddr) {
+        if let Ok(mut m) = self.auth_penalty.lock() {
+            let p = m.entry(*ip).or_insert(AuthPenalty {
+                fails: 0,
+                blocked_until: None,
+            });
+            p.fails += 1;
+            if p.fails >= AUTH_FAIL_THRESHOLD {
+                let steps = (p.fails - AUTH_FAIL_THRESHOLD).min(5);
+                let block = Duration::from_secs(30) * (1u32 << steps);
+                p.blocked_until = Some(Instant::now() + block.min(Duration::from_secs(600)));
+            }
+        }
+    }
+
+    /// #198: a completed handshake clears the peer's accounting.
+    pub fn auth_ok(&self, ip: &std::net::IpAddr) {
+        if let Ok(mut m) = self.auth_penalty.lock() {
+            m.remove(ip);
+        }
     }
 }
 
@@ -710,6 +847,42 @@ impl Drop for ConnGuard {
         }
     }
 }
+/// #189: connection-limit reservation as one atomic step. The old
+/// check-then-increment let a burst of concurrent upgrades each pass
+/// the soft check and then all increment, overshooting both caps.
+/// CAS the global counter, account the per-IP entry (always, so the
+/// bookkeeping stays honest), and hand the global slot back on a
+/// per-IP refusal.
+fn reserve_slot(sh: &Arc<Shared>, ip: &std::net::IpAddr) -> bool {
+    let mut cur = sh.active.load(Ordering::SeqCst);
+    loop {
+        if cur >= sh.cfg.max_connections {
+            return false;
+        }
+        match sh
+            .active
+            .compare_exchange(cur, cur + 1, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => break,
+            Err(c) => cur = c,
+        }
+    }
+    let mut ok = true;
+    if let Ok(mut m) = sh.per_ip.lock() {
+        let n = m.entry(*ip).or_insert(0);
+        *n += 1;
+        if sh.cfg.max_connections_per_ip > 0 && *n > sh.cfg.max_connections_per_ip {
+            *n -= 1;
+            ok = false;
+        }
+    }
+    if !ok {
+        sh.active.fetch_sub(1, Ordering::SeqCst);
+        return false;
+    }
+    true
+}
+
 /// Client IP from X-Forwarded-For when the deployment sits behind
 /// trusted reverse-proxy hops (TRUSTED_PROXY_HOPS > 0). Proxies
 /// append left to right, so with N trusted hops the client is the
@@ -905,12 +1078,14 @@ pub async fn wisp_handler(
     upgrade
         .max_message_size(max)
         .on_upgrade(move |socket| async move {
-            let _guard = ConnGuard(sh.clone(), Some(ip));
-            sh.active.fetch_add(1, Ordering::SeqCst);
-            if let Ok(mut m) = sh.per_ip.lock() {
-                *m.entry(ip).or_insert(0) += 1;
+            // #189: reserve the slot atomically; a refused upgrade
+            // never holds one. ConnGuard balances both counters.
+            if !reserve_slot(&sh, &ip) {
+                tracing::warn!(%ip, "connection limit hit at upgrade; refusing");
+                return;
             }
-            wisp_session(socket, v2, sh).await;
+            let _guard = ConnGuard(sh.clone(), Some(ip));
+            wisp_session(socket, v2, sh, Some(ip)).await;
             tracing::info!("wisp connection closed");
         })
 }
@@ -1018,7 +1193,16 @@ impl Session {
     /// with Throttled. Also stops the duplicate-Close wart: a client
     /// Close for a finished stream no longer finds an entry to echo.
     fn reap_finished(&mut self) {
-        self.streams.retain(|_, e| !e.task.is_finished());
+        // #183: a finished relay never discharges the rest of its
+        // queue; settle here so the server-wide count stays honest.
+        self.streams.retain(|_, e| {
+            if e.task.is_finished() {
+                e.budget.settle();
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// Fully close one stream: cancel its relay task, drop the input
@@ -1026,6 +1210,8 @@ impl Session {
     fn close_stream(&mut self, stream_id: u32) -> bool {
         match self.streams.remove(&stream_id) {
             Some(e) => {
+                // #183: hand the queued bytes back with the task.
+                e.budget.settle();
                 e.task.abort();
                 tracing::info!(stream_id, kind = ?e.kind, "stream closed");
                 true
@@ -1065,7 +1251,19 @@ impl Session {
     }
 }
 
-async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
+async fn wisp_session(
+    socket: WebSocket,
+    v2: bool,
+    shared: Arc<Shared>,
+    ip: Option<std::net::IpAddr>,
+) {
+    // #198: a boxed IP does not even start handshake work.
+    if let Some(peer) = &ip {
+        if shared.auth_refused(peer) {
+            tracing::warn!(%peer, "wisp session refused: auth penalty active");
+            return;
+        }
+    }
     let (mut ws_sink, mut ws_stream) = socket.split();
     let (ws_tx, mut ws_rx) = mpsc::channel::<Message>(128);
 
@@ -1109,6 +1307,10 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
         next_sweep: Instant::now() + Duration::from_secs(5),
     };
     let deadline = Instant::now() + shared.cfg.max_conn_duration;
+    // #182: the handshake gets its own bound; a client that opens the
+    // WebSocket but never completes it must not hold a slot for the
+    // whole connection duration.
+    let handshake_deadline = Instant::now() + shared.cfg.handshake_timeout;
     let mut draining_since: Option<Instant> = None;
     let mut handshake_done = false;
     let mut auth_verified = false;
@@ -1126,6 +1328,9 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
             AuthState::Reject(reason) => {
                 let _ = send_packet(&ws_tx, &wisp_core::handshake_reject(reason)).await;
                 tracing::warn!(?reason, "v1 connection rejected: auth required");
+                if let Some(peer) = &ip {
+                    shared.auth_fail(peer);
+                }
                 return;
             }
             AuthState::NotRequired | AuthState::Ok => {}
@@ -1166,6 +1371,13 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                 Some(Ok(m)) => m,
                 Some(Err(_)) | None => break,
             },
+            // #182: drop the connection when the handshake stalls.
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(handshake_deadline)),
+                if !handshake_done =>
+            {
+                tracing::warn!("handshake timeout: dropping connection");
+                break;
+            }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(sess.next_sweep)) => {
                 sess.sweep();
                 sess.next_sweep = Instant::now() + Duration::from_secs(5);
@@ -1234,6 +1446,9 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                                 let _ =
                                     send_packet(&ws_tx, &wisp_core::handshake_reject(reason)).await;
                                 tracing::warn!(?reason, "handshake rejected: auth");
+                                if let Some(peer) = &ip {
+                                    shared.auth_fail(peer);
+                                }
                                 return;
                             }
                             AuthState::NotRequired | AuthState::Ok => {
@@ -1245,6 +1460,11 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                         return;
                     }
                     handshake_done = true;
+                    // #198: a completed handshake clears the peer's
+                    // failed-auth accounting.
+                    if let Some(peer) = &ip {
+                        shared.auth_ok(peer);
+                    }
                     tracing::info!(version = ?handshake.version(), "handshake complete");
                 }
                 Ok(None) => {
@@ -1261,9 +1481,17 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                         )
                         .await;
                         tracing::warn!("handshake rejected: auth required, none offered");
+                        if let Some(peer) = &ip {
+                            shared.auth_fail(peer);
+                        }
                         return;
                     }
                     handshake_done = true;
+                    // #198: a completed handshake clears the peer's
+                    // failed-auth accounting.
+                    if let Some(peer) = &ip {
+                        shared.auth_ok(peer);
+                    }
                     tracing::info!(version = ?handshake.version(), "handshake complete");
                 }
                 Err(reason) => {
@@ -1349,15 +1577,44 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
                 }
             }
             Packet::Data { stream_id, payload } => {
+                // #181/#183: the session loop never awaits a stream
+                // channel. One try-send per frame; a full or
+                // over-budget stream is closed Throttled instead of
+                // wedging every other stream on this WebSocket.
+                let mut throttled = false;
                 if let Some(entry) = sess.streams.get(&stream_id) {
                     if entry.kind == StreamKind::Udp && payload.len() > shared.cfg.max_udp_datagram
                     {
                         // Oversized datagrams are dropped, not fatal.
                         continue;
                     }
-                    // Bounded channel: a slow socket back-pressures the
-                    // client's own window (TCP) or budget (UDP).
-                    let _ = entry.input.send(payload).await;
+                    if !entry.budget.charge(payload.len()) {
+                        throttled = true;
+                    } else {
+                        match entry.input.try_send(payload) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => throttled = true,
+                            Err(mpsc::error::TrySendError::Closed(_)) => {}
+                        }
+                    }
+                }
+                if throttled {
+                    let throttled_streams =
+                        shared.throttled_streams.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::warn!(
+                        stream_id,
+                        throttled_streams,
+                        "stream input over budget: closing Throttled"
+                    );
+                    sess.close_stream(stream_id);
+                    let _ = send_packet(
+                        &ws_tx,
+                        &Packet::Close {
+                            stream_id,
+                            reason: CloseReason::Throttled,
+                        },
+                    )
+                    .await;
                 }
                 // DATA for an unknown/closed stream is ignored: the
                 // relay may have closed a moment ago.
@@ -1403,7 +1660,21 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
     // Teardown: cancel every relay task and drop every entry. Aborted
     // tasks close their sockets; nothing leaks.
     for (_, e) in sess.streams.drain() {
+        // #183: settle the budget before dropping the entry.
+        e.budget.settle();
         e.task.abort();
+    }
+}
+
+/// #181: bound every upstream socket write. A peer that stops
+/// draining its receive buffer wedged the relay task forever; the
+/// write arm now gives up and the stream closes. Two seconds under
+/// cfg(test) so the wedged-write regression runs fast.
+fn upstream_write_timeout() -> Duration {
+    if cfg!(test) {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_secs(30)
     }
 }
 
@@ -1416,6 +1687,7 @@ async fn wisp_session(socket: WebSocket, v2: bool, shared: Arc<Shared>) {
 /// closed (the relay should end); true once a credit is available.
 async fn drain_until_credited(
     w: &Window,
+    budget: &StreamBudget,
     input_rx: &mut mpsc::Receiver<Vec<u8>>,
     wr: &mut tokio::net::tcp::OwnedWriteHalf,
     la: &Mutex<Instant>,
@@ -1425,13 +1697,19 @@ async fn drain_until_credited(
             _ = w.notified.notified() => true,
             m = input_rx.recv() => match m {
                 Some(bytes) => {
-                    if wr.write_all(&bytes).await.is_err() {
-                        false
-                    } else {
-                        if let Ok(mut t) = la.lock() {
-                            *t = Instant::now();
+                    // #181: a wedged upstream write must not park the
+                    // relay forever.
+                    match tokio::time::timeout(upstream_write_timeout(), wr.write_all(&bytes))
+                        .await
+                    {
+                        Ok(Ok(())) => {
+                            budget.discharge(bytes.len());
+                            if let Ok(mut t) = la.lock() {
+                                *t = Instant::now();
+                            }
+                            true
                         }
-                        true
+                        _ => false,
                     }
                 }
                 None => false,
@@ -1458,6 +1736,7 @@ async fn drain_until_credited(
 async fn connect_with_drain<T, F>(
     ws_tx: &WsTx,
     stream_id: u32,
+    budget: &StreamBudget,
     input_rx: &mut mpsc::Receiver<Vec<u8>>,
     fut: F,
 ) -> Option<Result<(T, std::collections::VecDeque<Vec<u8>>), ConnectFailure>>
@@ -1472,6 +1751,9 @@ where
             r = &mut fut => return Some(r.map(|v| (v, buffered))),
             m = input_rx.recv() => match m {
                 Some(bytes) => {
+                    // #183: consumed from the queue the moment the
+                    // relay takes it over.
+                    budget.discharge(bytes.len());
                     buffered_bytes += bytes.len();
                     if buffered_bytes > 128 * 1024 {
                         let _ = send_packet(
@@ -1503,6 +1785,7 @@ async fn tcp_relay_loop(
     ws_tx: &WsTx,
     stream_id: u32,
     w: &Window,
+    budget: &StreamBudget,
     client_flow: bool,
     la: &Mutex<Instant>,
 ) {
@@ -1517,8 +1800,20 @@ async fn tcp_relay_loop(
             // starved and the input channel was never drained;
             // drain_until_credited keeps the input side flowing
             // until the window is granted again.
-            if !drain_until_credited(w, &mut input_rx, &mut wr, la).await {
+            if !drain_until_credited(w, budget, &mut input_rx, &mut wr, la).await {
                 break;
+            }
+            // #196: a grant may be owed for the frames the drain
+            // consumed while the window was starved.
+            if budget.grant_due() {
+                let _ = send_packet(
+                    ws_tx,
+                    &Packet::Continue {
+                        stream_id,
+                        buffer_remaining: wisp_core::handshake::INITIAL_BUFFER_SIZE,
+                    },
+                )
+                .await;
             }
         }
         tokio::select! {
@@ -1545,11 +1840,30 @@ async fn tcp_relay_loop(
             },
             m = input_rx.recv() => match m {
                 Some(bytes) => {
-                    if wr.write_all(&bytes).await.is_err() {
-                        break;
-                    }
-                    if let Ok(mut t) = la.lock() {
-                        *t = Instant::now();
+                    // #181/#196: bound the upstream write, hand the
+                    // queued bytes back, and replenish the client's
+                    // send window once half the buffer is consumed.
+                    match tokio::time::timeout(upstream_write_timeout(), wr.write_all(&bytes))
+                        .await
+                    {
+                        Ok(Ok(())) => {
+                            budget.discharge(bytes.len());
+                            if let Ok(mut t) = la.lock() {
+                                *t = Instant::now();
+                            }
+                            if client_flow && budget.grant_due() {
+                                let _ = send_packet(
+                                    ws_tx,
+                                    &Packet::Continue {
+                                        stream_id,
+                                        buffer_remaining:
+                                            wisp_core::handshake::INITIAL_BUFFER_SIZE,
+                                    },
+                                )
+                                .await;
+                            }
+                        }
+                        _ => break,
                     }
                 }
                 None => break,
@@ -1577,10 +1891,12 @@ async fn spawn_tcp_relay(
     let shared = sess.shared.clone();
     let ws_tx = sess.ws_tx.clone();
     let window = Arc::new(Window::default());
+    let budget = Arc::new(StreamBudget::new(shared.server_queued.clone()));
     let last_active = Arc::new(Mutex::new(Instant::now()));
     let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(64);
 
     let w = window.clone();
+    let task_budget = budget.clone();
     let la = last_active.clone();
     let cfg = shared.cfg.clone();
     let dest = shared.dest.clone();
@@ -1593,6 +1909,7 @@ async fn spawn_tcp_relay(
         let (rd, wr) = match connect_with_drain(
             &ws_tx,
             stream_id,
+            &task_budget,
             &mut input_rx,
             connect_validated(&dest, &host, port, cfg.connect_timeout),
         )
@@ -1651,7 +1968,18 @@ async fn spawn_tcp_relay(
                 (rd, wr)
             }
         };
-        tcp_relay_loop(rd, wr, input_rx, &ws_tx, stream_id, &w, client_flow, &la).await;
+        tcp_relay_loop(
+            rd,
+            wr,
+            input_rx,
+            &ws_tx,
+            stream_id,
+            &w,
+            &task_budget,
+            client_flow,
+            &la,
+        )
+        .await;
     });
 
     sess.streams.insert(
@@ -1661,6 +1989,7 @@ async fn spawn_tcp_relay(
             input: input_tx,
             task,
             window,
+            budget,
             last_active,
             udp_bytes: Arc::new(AtomicU64::new(0)),
             udp_packets: Arc::new(AtomicU64::new(0)),
@@ -1680,6 +2009,7 @@ async fn udp_relay_loop(
     stream_id: u32,
     bytes_ctr: Arc<AtomicU64>,
     pkt_ctr: Arc<AtomicU64>,
+    budget: &StreamBudget,
     la: Arc<Mutex<Instant>>,
     max_dgram: usize,
     max_bytes: u64,
@@ -1729,6 +2059,9 @@ async fn udp_relay_loop(
                         || bytes_ctr.load(Ordering::Relaxed) > max_bytes
                         || pkt_ctr.load(Ordering::Relaxed) > max_packets
                     {
+                        // #183: dropped datagrams were charged when
+                        // queued; hand the bytes back.
+                        budget.discharge(dgram.len());
                         continue;
                     }
                     // #209: ECONNREFUSED here is datagram loss too
@@ -1740,6 +2073,7 @@ async fn udp_relay_loop(
                         Err(_) => break,
                         Ok(_) => {}
                     }
+                    budget.discharge(dgram.len());
                     bytes_ctr.fetch_add(dgram.len() as u64, Ordering::Relaxed);
                     pkt_ctr.fetch_add(1, Ordering::Relaxed);
                     if let Ok(mut t) = la.lock() {
@@ -1759,12 +2093,14 @@ async fn spawn_udp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname
     let udp_bytes = Arc::new(AtomicU64::new(0));
     let udp_packets = Arc::new(AtomicU64::new(0));
     let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(64);
+    let budget = Arc::new(StreamBudget::new(shared.server_queued.clone()));
 
     let cfg = shared.cfg.clone();
     let dest = shared.dest.clone();
     let host = hostname.clone();
     let bytes_ctr = udp_bytes.clone();
     let pkt_ctr = udp_packets.clone();
+    let task_budget = budget.clone();
     let la = last_active.clone();
     let max_dgram = cfg.max_udp_datagram;
     let max_bytes = cfg.max_udp_bytes;
@@ -1833,6 +2169,7 @@ async fn spawn_udp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname
             stream_id,
             bytes_ctr,
             pkt_ctr,
+            &task_budget,
             la,
             max_dgram,
             max_bytes,
@@ -1857,6 +2194,7 @@ async fn spawn_udp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname
             input: input_tx,
             task,
             window: Arc::new(Window::default()),
+            budget,
             last_active,
             udp_bytes,
             udp_packets,
@@ -2230,7 +2568,18 @@ mod tests {
         let la = last_active.clone();
         let relay = tokio::spawn(async move {
             let (rd, wr) = sock.into_split();
-            tcp_relay_loop(rd, wr, input_rx, &ws_tx, stream_id, &w, true, &la).await;
+            tcp_relay_loop(
+                rd,
+                wr,
+                input_rx,
+                &ws_tx,
+                stream_id,
+                &w,
+                &Arc::new(StreamBudget::new(Arc::new(AtomicU64::new(0)))),
+                true,
+                &la,
+            )
+            .await;
         });
 
         // Outbound data through the input channel.
@@ -2289,7 +2638,18 @@ mod tests {
         let w = window.clone();
         let relay = tokio::spawn(async move {
             let (rd, wr) = sock.into_split();
-            tcp_relay_loop(rd, wr, input_rx, &ws_tx, stream_id, &w, true, &la).await;
+            tcp_relay_loop(
+                rd,
+                wr,
+                input_rx,
+                &ws_tx,
+                stream_id,
+                &w,
+                &Arc::new(StreamBudget::new(Arc::new(AtomicU64::new(0)))),
+                true,
+                &la,
+            )
+            .await;
         });
 
         // More than the input channel's own capacity: with the old
@@ -2399,6 +2759,214 @@ mod tests {
         );
     }
 
+    /// #189: reserve_slot is check-and-increment in one step.
+    #[test]
+    fn reserve_slot_caps_global_and_per_ip() {
+        let cfg = Config {
+            max_connections: 2,
+            ..Default::default()
+        };
+        let sh = Shared::new(cfg);
+        let a: std::net::IpAddr = "1.2.3.4".parse().unwrap();
+        assert!(reserve_slot(&sh, &a));
+        assert!(reserve_slot(&sh, &a));
+        assert!(!reserve_slot(&sh, &a), "global cap overshot");
+        assert_eq!(sh.active.load(Ordering::SeqCst), 2);
+
+        let cfg = Config {
+            max_connections: 10,
+            max_connections_per_ip: 1,
+            ..Default::default()
+        };
+        let sh = Shared::new(cfg);
+        let a: std::net::IpAddr = "1.2.3.4".parse().unwrap();
+        let b: std::net::IpAddr = "5.6.7.8".parse().unwrap();
+        assert!(reserve_slot(&sh, &a));
+        assert!(!reserve_slot(&sh, &a), "per-IP cap overshot");
+        assert!(reserve_slot(&sh, &b));
+        assert_eq!(sh.active.load(Ordering::SeqCst), 2);
+    }
+
+    /// #198: the auth penalty boxes an IP at the threshold and clears
+    /// on success.
+    #[test]
+    fn auth_penalty_threshold_and_clear() {
+        let sh = Shared::new(Config::default());
+        let ip: std::net::IpAddr = "1.2.3.4".parse().unwrap();
+        for _ in 0..AUTH_FAIL_THRESHOLD - 1 {
+            sh.auth_fail(&ip);
+        }
+        assert!(!sh.auth_refused(&ip), "below threshold: not boxed");
+        sh.auth_fail(&ip);
+        assert!(sh.auth_refused(&ip), "at threshold: boxed");
+        sh.auth_ok(&ip);
+        assert!(!sh.auth_refused(&ip), "success clears the box");
+    }
+
+    /// #183: the stream budget charges, discharges and settles.
+    #[test]
+    fn stream_budget_charge_discharge_settle() {
+        let conn = Arc::new(AtomicU64::new(0));
+        let b = StreamBudget::new(conn.clone());
+        assert!(b.charge(2048));
+        assert_eq!(b.queued.load(Ordering::Relaxed), 2048);
+        assert_eq!(conn.load(Ordering::Relaxed), 2048);
+        b.discharge(1024);
+        assert_eq!(b.queued.load(Ordering::Relaxed), 1024);
+        assert_eq!(conn.load(Ordering::Relaxed), 1024);
+        b.settle();
+        assert_eq!(b.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(conn.load(Ordering::Relaxed), 0);
+        assert!(b.charge(STREAM_QUEUE_BYTES as usize));
+        assert!(!b.charge(1), "per-stream cap must refuse");
+        assert_eq!(b.queued.load(Ordering::Relaxed), STREAM_QUEUE_BYTES);
+        b.settle();
+        assert_eq!(conn.load(Ordering::Relaxed), 0);
+    }
+
+    /// #196: a window grant is owed once half the initial buffer was
+    /// consumed; grant_due is edge-triggered.
+    #[test]
+    fn grant_due_at_half_window() {
+        let b = StreamBudget::new(Arc::new(AtomicU64::new(0)));
+        assert!(!b.grant_due());
+        for _ in 0..(wisp_core::handshake::INITIAL_BUFFER_SIZE / 2 - 1) {
+            b.discharge(1);
+        }
+        assert!(!b.grant_due());
+        b.discharge(1);
+        assert!(b.grant_due());
+        assert!(!b.grant_due());
+    }
+
+    /// #196: the server replenishes the client's send window during a
+    /// sustained upload; CONTINUE is no longer once-per-stream.
+    #[tokio::test]
+    async fn tcp_relay_replenishes_client_window() {
+        let lst = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = lst.local_addr().unwrap();
+        let echo = tokio::spawn(async move {
+            if let Ok((mut s, _)) = lst.accept().await {
+                let (mut r, mut w) = s.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            }
+        });
+        let sock = TcpStream::connect(addr).await.unwrap();
+        let (ws_tx, mut ws_rx) = mpsc::channel::<Message>(256);
+        let window = Arc::new(Window::default());
+        window.grant(wisp_core::handshake::INITIAL_BUFFER_SIZE);
+        let la = Arc::new(Mutex::new(Instant::now()));
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(1024);
+        let budget = Arc::new(StreamBudget::new(Arc::new(AtomicU64::new(0))));
+        let stream_id = 5u32;
+        let w = window.clone();
+        let b = budget.clone();
+        let relay = tokio::spawn(async move {
+            let (rd, wr) = sock.into_split();
+            tcp_relay_loop(rd, wr, input_rx, &ws_tx, stream_id, &w, &b, true, &la).await;
+        });
+        for i in 0..200u8 {
+            input_tx.send(vec![i; 64]).await.unwrap();
+        }
+        let mut continues = 0usize;
+        let mut frames = 0usize;
+        while frames < 200 && continues < 2 {
+            let msg = tokio::time::timeout(Duration::from_secs(5), ws_rx.recv())
+                .await
+                .expect("timeout waiting for relay output")
+                .expect("ws channel closed");
+            let bin = match msg {
+                Message::Binary(b) => b,
+                other => panic!("expected binary, got {other:?}"),
+            };
+            let mut buf = BytesMut::from(&bin[..]);
+            let frame = Frame::decode(&mut buf).unwrap().unwrap();
+            match frame.parse_packet().unwrap() {
+                Packet::Continue {
+                    stream_id,
+                    buffer_remaining,
+                } => {
+                    assert_eq!(stream_id, 5);
+                    assert_eq!(buffer_remaining, wisp_core::handshake::INITIAL_BUFFER_SIZE);
+                    continues += 1;
+                }
+                Packet::Data { stream_id, payload } => {
+                    assert_eq!(stream_id, 5);
+                    frames += payload.len() / 64;
+                }
+                other => panic!("unexpected packet {other:?}"),
+            }
+        }
+        assert!(
+            continues >= 2,
+            "sustained upload never earned a window replenish ({continues} grants)"
+        );
+        relay.abort();
+        echo.abort();
+    }
+
+    /// #181: an upstream that stops draining its receive buffer gets
+    /// its relay write bounded instead of wedging the task forever.
+    #[tokio::test]
+    async fn wedged_upstream_write_times_out_and_closes() {
+        let lst = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = lst.local_addr().unwrap();
+        let sink = tokio::spawn(async move {
+            if let Ok((s, _)) = lst.accept().await {
+                // Hold the socket open and never read.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                drop(s);
+            }
+        });
+        let sock = TcpStream::connect(addr).await.unwrap();
+        let (ws_tx, mut ws_rx) = mpsc::channel::<Message>(64);
+        let window = Arc::new(Window::default());
+        let la = Arc::new(Mutex::new(Instant::now()));
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(1024);
+        let budget = Arc::new(StreamBudget::new(Arc::new(AtomicU64::new(0))));
+        let stream_id = 3u32;
+        let w = window.clone();
+        let b = budget.clone();
+        let relay = tokio::spawn(async move {
+            let (rd, wr) = sock.into_split();
+            tcp_relay_loop(rd, wr, input_rx, &ws_tx, stream_id, &w, &b, false, &la).await;
+        });
+        // 8 MiB against a peer that never reads: the kernel buffers
+        // fill and one write stalls into the bounded timeout.
+        for _ in 0..128u32 {
+            let _ = input_tx.try_send(vec![0u8; 64 * 1024]);
+        }
+        let mut closed = false;
+        for _ in 0..40 {
+            let msg = tokio::time::timeout(Duration::from_secs(5), ws_rx.recv())
+                .await
+                .expect("timeout waiting for Close")
+                .expect("ws channel closed without Close");
+            let bin = match msg {
+                Message::Binary(b) => b,
+                other => panic!("expected binary, got {other:?}"),
+            };
+            let mut buf = BytesMut::from(&bin[..]);
+            let frame = Frame::decode(&mut buf).unwrap().unwrap();
+            if let Packet::Close { stream_id, .. } = frame.parse_packet().unwrap() {
+                assert_eq!(stream_id, 3);
+                closed = true;
+                break;
+            }
+        }
+        assert!(closed, "wedged upstream write never closed the stream");
+        relay.abort();
+        sink.abort();
+    }
+
+    /// #182: the handshake timeout is a first-class duration.
+    #[test]
+    fn handshake_timeout_default_and_kdl() {
+        assert_eq!(Config::default().handshake_timeout, Duration::from_secs(10));
+        let cfg = Config::from_kdl("handshake_timeout 25").unwrap();
+        assert_eq!(cfg.handshake_timeout, Duration::from_secs(25));
+    }
+
     #[tokio::test]
     async fn udp_relay_datagram_boundaries() {
         // Local UDP echo.
@@ -2436,6 +3004,7 @@ mod tests {
                 stream_id,
                 bc,
                 pc,
+                &Arc::new(StreamBudget::new(Arc::new(AtomicU64::new(0)))),
                 la,
                 4096,
                 16 * 1024 * 1024,
@@ -2496,6 +3065,7 @@ mod tests {
                 7,
                 Arc::new(AtomicU64::new(0)),
                 Arc::new(AtomicU64::new(0)),
+                &Arc::new(StreamBudget::new(Arc::new(AtomicU64::new(0)))),
                 Arc::new(Mutex::new(Instant::now())),
                 4096,
                 16 * 1024 * 1024,
@@ -2550,6 +3120,7 @@ mod tests {
                 9,
                 Arc::new(AtomicU64::new(0)),
                 Arc::new(AtomicU64::new(0)),
+                &Arc::new(StreamBudget::new(Arc::new(AtomicU64::new(0)))),
                 Arc::new(Mutex::new(Instant::now())),
                 4096,
                 16 * 1024 * 1024,

@@ -5,29 +5,44 @@
 //! [user_len u8][user][password]. On mismatch the server must send
 //! CLOSE(0xc0) and drop the websocket.
 
-use sha2::{Digest, Sha256};
+use pbkdf2::pbkdf2_hmac;
+use rand::RngCore;
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
+
+/// #198: PBKDF2-HMAC-SHA256 work factor (OWASP 2023 minimum for this
+/// KDF). A single fast SHA-256 let an offline attacker try billions
+/// of candidates per GPU-second against a leaked store; the KDF moves
+/// that cost onto every guess.
+const PBKDF2_ROUNDS: u32 = 600_000;
+/// #198: fresh random salt per stored user.
+const SALT_LEN: usize = 16;
 
 /// Server-side password store.
 ///
-/// Passwords are stored as salted SHA-256 hashes. This is a deliberately
-/// simple scheme matching the protocol-level use case (gatekeeping a proxy
-/// endpoint, not protecting crown jewels); deployments wanting stronger KDFs
-/// can implement their own checks on top of `verify_hashed`.
+/// Passwords are stored as PBKDF2-HMAC-SHA256 digests over a random
+/// per-user salt (#198). Verification walks every entry so username
+/// enumeration does not leak through timing.
 pub struct PasswordAuth {
     required: bool,
-    /// username -> salted hash
-    users: Vec<(String, [u8; 32])>,
+    /// username -> (salt, PBKDF2 digest)
+    users: Vec<(String, Vec<u8>, [u8; 32])>,
 }
 
 impl PasswordAuth {
-    /// Create with a set of (username, password) pairs; hashes them now.
+    /// Create with a set of (username, password) pairs; derives each
+    /// store entry now.
     pub fn new(required: bool, users: Vec<(String, String)>) -> Self {
         Self {
             required,
             users: users
                 .into_iter()
-                .map(|(u, p)| (u.clone(), Self::hash(&u, &p)))
+                .map(|(u, p)| {
+                    let mut salt = vec![0u8; SALT_LEN];
+                    rand::thread_rng().fill_bytes(&mut salt);
+                    let digest = Self::hash(&salt, &p);
+                    (u, salt, digest)
+                })
                 .collect(),
         }
     }
@@ -36,16 +51,11 @@ impl PasswordAuth {
         self.required
     }
 
-    /// Salted hash for storage.
-    fn hash(username: &str, password: &str) -> [u8; 32] {
-        let mut h = Sha256::new();
-        h.update(username.as_bytes());
-        h.update([0]);
-        h.update(password.as_bytes());
-        let out = h.finalize();
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&out);
-        arr
+    /// Salted PBKDF2 digest for storage.
+    fn hash(salt: &[u8], password: &str) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, PBKDF2_ROUNDS, &mut out);
+        out
     }
 
     /// Verify a client INFO payload:
@@ -61,8 +71,8 @@ impl PasswordAuth {
     pub fn verify(&self, username: &str, password: &str) -> bool {
         // Compare against every entry to avoid username-enumeration timing.
         let mut ok = false;
-        for (user, stored) in &self.users {
-            let candidate = Self::hash(user, password);
+        for (user, salt, stored) in &self.users {
+            let candidate = Self::hash(salt, password);
             let user_match = user.as_bytes().ct_eq(username.as_bytes());
             let hash_match = candidate.ct_eq(stored);
             // Only when both match do we set ok; timing stays uniform.
@@ -94,5 +104,26 @@ mod tests {
         let bad = wisp_core::extension::password_auth_client("ada", "nope").unwrap();
         assert!(!auth.verify_payload(&bad));
         assert!(!auth.verify_payload(&[99, 1, 2])); // malformed
+    }
+
+    /// #198: each construction derives a fresh random salt, so two
+    /// stores built from identical credentials hold different
+    /// digests; verification still works per-store.
+    #[test]
+    fn fresh_salt_per_construction() {
+        let a = PasswordAuth::new(true, vec![("ada".into(), "hunter2".into())]);
+        let b = PasswordAuth::new(true, vec![("ada".into(), "hunter2".into())]);
+        assert!(a.verify("ada", "hunter2"));
+        assert!(b.verify("ada", "hunter2"));
+        // Salt is the store's own; cross-store digests differ (salt
+        // differs, PBKDF2 output follows). Observable only via verify
+        // against a swapped salt, so assert the positive path only.
+        let (user, salt, digest) = &a.users[0];
+        assert_eq!(user, "ada");
+        assert_eq!(salt.len(), SALT_LEN);
+        let recomputed = PasswordAuth::hash(salt, "hunter2");
+        assert_eq!(&recomputed, digest);
+        let other_salt = &b.users[0].1;
+        assert_ne!(salt, other_salt, "salt must be random per store");
     }
 }
