@@ -114,9 +114,11 @@ as engine bugs, environmental walls, or documented design limits.
   client-minted conversation state; Brave then serves the empty `New
   conversation` shell and the answer, which only streams client-side from
   the in-conversation state, never loads. Same architectural class as
-  Google SPA routing: `window.location` is LegacyUnforgeable, and
-  route-preserving URLs would reintroduce the plaintext-destination leak
-  closed by #32.
+  Google SPA routing: the NAVH split-identity route (#144) preserves
+  the real path for engine-side recovery, but SvelteKit matches its
+  route table against the full pathname, so the engine route prefix
+  still breaks route matching - the documented "string-match without
+  tolerating the suffix" design limit.
 - **Hacker News, example.com, plain content sites** - full load.
 
 ### Captcha and challenge coverage
