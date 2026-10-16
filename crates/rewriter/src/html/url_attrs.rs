@@ -85,24 +85,49 @@ pub fn is_challenge_script_src(url: &str) -> bool {
     host.eq_ignore_ascii_case("challenges.cloudflare.com")
 }
 
-/// Rewrite one `url(...)` SVG paint value through `enc`. Values that
-/// are not a bare `url(...)` token pass through unchanged: plain
-/// colors, `none`, fragment-only references (`url(#local)`, never a
-/// request) and paint fallbacks (`url(#a) #333`). Only a fetchable
-/// external reference is routed.
+/// Rewrite one `url(...)` SVG paint value through `enc`. Only a
+/// fetchable external reference is routed. Values that are not a
+/// `url(...)` token at all pass through unchanged: plain colors,
+/// `none`. Fragment-only references (`url(#local)`, never a request)
+/// pass through untouched, whatever follows them.
+///
+/// Issue #227: the value may carry a tail after the `url(...)` token
+/// (a CSS fallback chain such as `filter: url(f.svg#g) blur(2px)` or a
+/// paint fallback `url(#a) #333`). The leading token is parsed up to
+/// its own closing paren - honoring quotes - the external inner URL
+/// is rewritten, and the tail is kept verbatim.
 pub fn rewrite_svg_paint(value: &str, enc: &dyn Fn(&str) -> String) -> String {
     let t = value.trim();
-    let Some(inner) = t.strip_prefix("url(") else {
+    let Some(rest) = t.strip_prefix("url(") else {
         return value.to_string();
     };
-    let Some(body) = inner.strip_suffix(')') else {
-        return value.to_string();
+    // Find the end of this url() token. A quoted URL ends at the
+    // matching quote followed by ')'; an unquoted URL cannot contain
+    // ')' unescaped, so the first ')' closes the token.
+    let (body, tail) = match rest.chars().next() {
+        Some(q @ ('\'' | '"')) => {
+            let after_first_q = q.len_utf8();
+            let Some(qpos) = rest[after_first_q..].find(q) else {
+                return value.to_string();
+            };
+            let after_q = after_first_q + qpos + q.len_utf8();
+            let Some(tail) = rest[after_q..].strip_prefix(')') else {
+                return value.to_string();
+            };
+            (&rest[..after_q], tail)
+        }
+        _ => {
+            let Some(cpos) = rest.find(')') else {
+                return value.to_string();
+            };
+            (&rest[..cpos], &rest[cpos + 1..])
+        }
     };
     let url = body.trim().trim_matches(|c| c == '\'' || c == '"');
     if url.is_empty() || url.starts_with('#') {
         return value.to_string();
     }
-    format!("url('{}')", enc(url))
+    format!("url('{}'){}", enc(url), tail)
 }
 
 /// Rewrite a srcset value through `enc`, following the WHATWG "parse
@@ -291,5 +316,24 @@ mod tests {
         assert_eq!(rewrite_svg_paint("none", &enc), "none");
         assert_eq!(rewrite_svg_paint("#ff0000", &enc), "#ff0000");
         assert_eq!(rewrite_svg_paint("url(#a) #333", &enc), "url(#a) #333");
+        // Issue #227: external references with a tail are rewritten
+        // and the tail is kept verbatim.
+        assert_eq!(
+            rewrite_svg_paint("url(f.svg#g) blur(2px)", &enc),
+            "url('[f.svg#g]') blur(2px)"
+        );
+        assert_eq!(
+            rewrite_svg_paint("url(paint.svg#p) #333", &enc),
+            "url('[paint.svg#p]') #333"
+        );
+        assert_eq!(
+            rewrite_svg_paint("url(mask.svg#m) luminance", &enc),
+            "url('[mask.svg#m]') luminance"
+        );
+        // Fragment-only tokens with a tail still pass through.
+        assert_eq!(
+            rewrite_svg_paint("url(#a) blur(2px)", &enc),
+            "url(#a) blur(2px)"
+        );
     }
 }

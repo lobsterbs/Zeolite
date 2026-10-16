@@ -52,6 +52,9 @@ export function b64encode(bytes: Uint8Array): string {
 export function b64decode(s: string): Uint8Array {
   const stripped = s.replace(/=+$/, "");
   if (/[^A-Za-z0-9+/]/.test(stripped)) throw new Error("bad base64");
+  // Issue #228: a stripped length of 4k+1 is undecodable base64; the
+  // trailing 6-bit group used to be silently dropped.
+  if (stripped.length % 4 === 1) throw new Error("bad base64");
   const out = new Uint8Array(Math.floor((stripped.length * 3) / 4));
   let o = 0;
   let buf = 0;

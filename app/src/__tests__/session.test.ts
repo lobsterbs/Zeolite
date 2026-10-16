@@ -12,6 +12,9 @@ describe("b64", () => {
   });
   it("rejects non-base64 input", () => {
     expect(() => b64decode("!!!")).toThrow("bad base64");
+    // Issue #228: a 4k+1 stripped length is undecodable, not silently
+    // truncated to wrong-length bytes.
+    expect(() => b64decode("AAAAA")).toThrow("bad base64");
   });
 });
 

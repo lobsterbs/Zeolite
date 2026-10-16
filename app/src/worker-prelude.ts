@@ -63,6 +63,13 @@ export function routeWorkerUrl(
    deleted so a retry after the page settles can succeed. */
 
 const mintMemo = new Map<string, Promise<string | null>>();
+/* Issue #229: successful mints used to stay memoized for the lifetime
+   of the worker realm, so a long-lived worker fetching many unique
+   destinations grew the map without bound. The memo is now capped;
+   the least recently used entry is evicted. Dropping an entry only
+   costs a re-mint round trip - the SW-side route-key history keeps
+   old minted routes decodable. */
+const MINT_MEMO_CAP = 256;
 
 /** Mint an engine route from a worker, over the page relay post
     (dedicated workers: the Worker object's own message channel;
@@ -77,7 +84,12 @@ export function mintUrlViaRelay(
 ): Promise<string | null> {
   if (!post) return Promise.resolve(null);
   const hit = mintMemo.get(dest);
-  if (hit) return hit;
+  if (hit) {
+    // LRU by recency: re-insert so eviction order tracks usage.
+    mintMemo.delete(dest);
+    mintMemo.set(dest, hit);
+    return hit;
+  }
   const p = new Promise<string | null>((resolve) => {
     const ch = new MessageChannel();
     let done = false;
@@ -100,6 +112,10 @@ export function mintUrlViaRelay(
     }
     if (!delivered) fin(null);
   });
+  if (mintMemo.size >= MINT_MEMO_CAP) {
+    const oldest = mintMemo.keys().next();
+    if (!oldest.done) mintMemo.delete(oldest.value);
+  }
   mintMemo.set(dest, p);
   p.then((route) => {
     if (!route) mintMemo.delete(dest);

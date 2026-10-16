@@ -287,6 +287,29 @@ describe("worker mint relay (#54 residual 5)", () => {
     const post = () => true;
     expect(await mintUrlViaRelay(post, "https://worker.example/x?t=14", 20)).toBeNull();
   });
+
+  it("evicts memoized mints beyond the cap and re-mints on repeat (#229)", async () => {
+    let posts = 0;
+    const post = (m: unknown, tr?: Transferable[]) => {
+      posts += 1;
+      (tr?.[0] as MessagePort).postMessage({ ok: true, route: "/j/w" });
+      return true;
+    };
+    const first = "https://worker.example/evict?a=0";
+    expect(await mintUrlViaRelay(post, first)).toBe("/j/w");
+    expect(posts).toBe(1);
+    // A memo hit does not re-post.
+    expect(await mintUrlViaRelay(post, first)).toBe("/j/w");
+    expect(posts).toBe(1);
+    // cap more unique destinations evict first (LRU by recency).
+    for (let i = 1; i <= 256; i++) {
+      await mintUrlViaRelay(post, "https://worker.example/evict?a=" + i);
+    }
+    expect(posts).toBe(257);
+    // first was evicted, so a repeat mints again instead of leaking.
+    expect(await mintUrlViaRelay(post, first)).toBe("/j/w");
+    expect(posts).toBe(258);
+  });
 });
 describe("fetch init SRI (#77 runtime half)", () => {
   it("strips init.integrity from re-emitted cross-origin fetches", async () => {
