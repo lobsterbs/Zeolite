@@ -16,6 +16,12 @@
 //!   local is never renamed) -> __zl
 //! - <window|self|globalThis|document|top|parent>.location reads
 //!   -> __zl
+//! - document.URL / document.documentURI reads (receiver
+//!   'document' only; window.URL is the URL constructor) ->
+//!   __zl.href (#238): SvelteKit's start() compares document.URL
+//!   with location.href and self-assigns on mismatch (kit PR
+//!   11179); against the opaque route the compare never passes
+//!   and the self-assign reload-storms the document.
 //!
 //! Deliberate v1 limits (kept honest in README Working sites):
 //! - writes stay native ('location = x', 'window.location = x'):
@@ -47,6 +53,11 @@ use oxc_span::{SourceType, Span};
 /// purpose: renamed minified bundles carry one occurrence per read.
 pub const VLOC: &str = "__zl";
 
+/// document.URL/documentURI reads rename to the virtual href,
+/// not the virtual location object: they are string reflections
+/// of the page URL (#238).
+const DOC_URL: &str = "__zl.href";
+
 /// Receivers whose .location read is the page location.
 const RECEIVERS: [&str; 6] = ["window", "self", "globalThis", "document", "top", "parent"];
 
@@ -75,8 +86,12 @@ pub fn stats_string() -> String {
 /// unchanged: broken JS is worse than a missed rewrite, and the
 /// runtime paths still own the residual class.
 pub fn rewrite_globals(js: &str) -> String {
-    // Fast path: nothing to rename without the token.
-    if !js.contains("location") || js.len() > MAX_BYTES {
+    // Fast path: nothing to rename without the tokens.
+    if js.len() > MAX_BYTES
+        || !(js.contains("location")
+            || js.contains("document.URL")
+            || js.contains("documentURI"))
+    {
         return js.to_string();
     }
     let Some(edits) = collect(js) else {
@@ -88,11 +103,11 @@ pub fn rewrite_globals(js: &str) -> String {
     }
     PARSED.fetch_add(1, Ordering::Relaxed);
     RENAMED.fetch_add(edits.len() as u32, Ordering::Relaxed);
-    let mut out = String::with_capacity(js.len() + edits.len() * (VLOC.len() + 1));
+    let mut out = String::with_capacity(js.len() + edits.len() * (VLOC.len() + 5));
     let mut pos = 0usize;
-    for (start, end) in &edits {
+    for (start, end, repl) in &edits {
         out.push_str(&js[pos..*start]);
-        out.push_str(VLOC);
+        out.push_str(repl);
         pos = *end;
     }
     out.push_str(&js[pos..]);
@@ -101,7 +116,7 @@ pub fn rewrite_globals(js: &str) -> String {
 
 /// Parse and collect the (start, end) byte spans to replace, or None
 /// when the body does not parse as module or script.
-fn collect(js: &str) -> Option<Vec<(usize, usize)>> {
+fn collect(js: &str) -> Option<Vec<(usize, usize, &'static str)>> {
     let allocator = Allocator::default();
     let module = SourceType::default().with_module(true);
     let ret = Parser::new(&allocator, js, module).parse();
@@ -126,7 +141,7 @@ fn collect(js: &str) -> Option<Vec<(usize, usize)>> {
         edits: Vec::new(),
     };
     w.visit_program(&program);
-    w.edits.sort_by_key(|(s, _)| *s);
+    w.edits.sort_by_key(|(s, _, _)| *s);
     Some(w.edits)
 }
 
@@ -136,7 +151,7 @@ struct Walker<'a, 's> {
     /// Shorthand property values ({ location }): renaming the value
     /// would change the key, so their spans are excluded.
     shorthand: HashSet<Span>,
-    edits: Vec<(usize, usize)>,
+    edits: Vec<(usize, usize, &'static str)>,
 }
 
 impl<'a, 's> Visit<'a> for Walker<'a, 's> {
@@ -160,8 +175,11 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                         && flags.contains(ReferenceFlags::Read)
                         && !flags.contains(ReferenceFlags::Write)
                     {
-                        self.edits
-                            .push((id.span.start as usize, id.span.end as usize));
+                        self.edits.push((
+                            id.span.start as usize,
+                            id.span.end as usize,
+                            VLOC,
+                        ));
                     }
                 }
             }
@@ -174,8 +192,40 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                         && !self.is_write_target(m.span)
                         && !self.is_delete_target(m.span)
                     {
-                        self.edits
-                            .push((m.span.start as usize, m.span.end as usize));
+                        self.edits.push((
+                            m.span.start as usize,
+                            m.span.end as usize,
+                            VLOC,
+                        ));
+                    }
+                }
+            }
+            // #238: document.URL/documentURI are read-only
+            // reflections of the document's URL. SvelteKit's
+            // start() compares document.URL with location.href
+            // and self-assigns location.href to resync (kit PR
+            // 11179, basic-auth drop): against the opaque native
+            // route the compare never passes and the self-assign
+            // reload-storms the document (the Brave SERP 429
+            // wall). Both sides must see the same virtual URL.
+            // Only 'document' carries the reflection;
+            // window.URL is the URL constructor.
+            AstKind::StaticMemberExpression(m)
+                if matches!(m.property.name.as_str(), "URL" | "documentURI")
+                    && !self.is_write_target(m.span)
+                    && !self.is_delete_target(m.span) =>
+            {
+                if let Expression::Identifier(obj) = &m.object {
+                    if obj.name.as_str() == "document"
+                        && obj.reference_id.get().is_some_and(|rid| {
+                            self.sem.scoping().get_reference(rid).symbol_id().is_none()
+                        })
+                    {
+                        self.edits.push((
+                            m.span.start as usize,
+                            m.span.end as usize,
+                            DOC_URL,
+                        ));
                     }
                 }
             }
@@ -332,6 +382,38 @@ mod tests {
     fn property_delete_tail_is_not_the_keyword() {
         // #242: ".delete" is a property access, not the operator.
         assert_eq!(rw("o.delete\nwindow.location.href"), "o.delete\n__zl.href");
+    }
+
+    #[test]
+    fn document_url_reflection_renames() {
+        // #238: both sides of SvelteKit's resync compare must see
+        // the virtual URL, or start() re-navigates every load.
+        assert_eq!(
+            rw("document.URL!==location.href&&(location.href=location.href);"),
+            "__zl.href!==__zl.href&&(__zl.href=__zl.href);"
+        );
+        assert_eq!(rw("var u = document.URL;"), "var u = __zl.href;");
+        assert_eq!(rw("var u = document.documentURI;"), "var u = __zl.href;");
+        // a deeper chain keeps the tail.
+        assert_eq!(
+            rw("document.URL.startsWith('x');"),
+            "__zl.href.startsWith('x');"
+        );
+    }
+
+    #[test]
+    fn document_url_writes_and_shadows_stay_native() {
+        // read-only reflection: a rename would turn a browser
+        // no-op write into a navigation through the href setter.
+        assert_eq!(rw("document.URL = '/x';"), "document.URL = '/x';");
+        assert_eq!(rw("delete document.URL;"), "delete document.URL;");
+        assert_eq!(rw("document.URL++;"), "document.URL++;");
+        // window.URL / globalThis.URL are the URL constructor.
+        assert_eq!(rw("var U = window.URL;"), "var U = window.URL;");
+        assert_eq!(rw("var U = globalThis.URL;"), "var U = globalThis.URL;");
+        // a shadowed local document is not the global.
+        let js = "function f(document) { return document.URL; }";
+        assert_eq!(rw(js), js);
     }
 
     #[test]
