@@ -16,7 +16,7 @@ import {
   setScheme,
 } from "../codec";
 import { NAV } from "../bootstrap/navguard";
-import { navhTailDest, navpResolve } from "../request";
+import { derefSelfRoute, navhTailDest, navpResolve } from "../request";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "../cpgate";
 
 /* Issue #63 (#54 design D): the opaque initial-navigation handle.
@@ -397,5 +397,54 @@ describe("senderIsHostPage (#170: the host gate fails closed)", () => {
     expect(senderIsHostPage("data:text/html,hi", O)).toBe(false);
     expect(senderIsHostPage(O + "/app/unknown", O)).toBe(false);
     expect(senderIsHostPage("https://evil.example/", O)).toBe(false);
+  });
+});
+
+/* The prel peel: a handle route carrying a #101 re-anchor tail is
+   the newer virtual state, SW-side parity with vloc's fromNative.
+   Live class (google.com/ai): vloc minted a prel-of-prel (the page
+   re-emitted its own opaque route), navpResolve stripped the outer
+   layer and decodeNavHandlePath read the remaining tail verbatim,
+   serving the engine markers upstream as a Google 404. */
+describe("prel tail on the handle route (google.com/ai reload class)", () => {
+  it("peels a prel tail to the newer virtual state", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle("https://example.com/ai")!;
+    expect(
+      decodeNavHandlePath(tok + "/ai/__zl_prel__/" + encodeURIComponent("/search?udm=50")),
+    ).toBe("https://example.com/search?udm=50");
+  });
+
+  it("peels a stacked tail to the deepest virtual state", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle("https://example.com")!;
+    const inner = "/__zl_navh__/" + tok + "/ai/__zl_prel__/" + encodeURIComponent("/search?q=1");
+    const tail = "/__zl_navh__/" + tok + "/ai/__zl_prel__/" + encodeURIComponent(inner);
+    expect(decodeNavHandlePath(tail.slice(NAVH.length + 1))).toBe(
+      "https://example.com/search?q=1",
+    );
+  });
+
+  it("resolves the evidenced reload URL through navpResolve + derefSelfRoute", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle("https://example.com")!;
+    const inner =
+      "/__zl_navh__/" + tok + "/ai/__zl_prel__/" + encodeURIComponent("/search?udm=50&aep=11");
+    const path = "/__zl_navh__/" + tok + "/ai/__zl_prel__/" + encodeURIComponent(inner);
+    const dest = navpResolve(path)!;
+    expect(dest).toContain(NAVH);
+    expect(derefSelfRoute(dest, "https://engine.example")).toBe(
+      "https://example.com/search?udm=50&aep=11",
+    );
+  });
+
+  it("keeps the honest null for a non-virtual prel tail", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle("https://example.com/dir")!;
+    expect(
+      decodeNavHandlePath(
+        tok + "/sub/__zl_prel__/" + encodeURIComponent("https://evil.example/x"),
+      ),
+    ).toBeNull();
   });
 });

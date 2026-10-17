@@ -316,6 +316,10 @@ export function mintableDest(dest: string): boolean {
     token carrying the handle payload, so the address bar, history
     and the network panel see an opaque token only. */
 export const NAVH = "/__zl_navh__";
+/* The #101 parent-relative re-anchor marker, duplicated from
+   bootstrap/navguard so codec stays import-free (the SW, worker
+   and test realms all load it standalone). Keep in lockstep. */
+const NAVP = "/__zl_prel__";
 /** Payload tag: disjoint from any http(s) destination string, so a
     handle token can never collide with a route token's payload. */
 const NAVH_TAG = "zl:navh:";
@@ -389,6 +393,36 @@ export function decodeNavHandlePath(tail: string): string | null {
      tail reads protocol-relative under URL resolution and would
      escape the minted origin. */
   if (rest.startsWith("/") || rest.startsWith("\\")) return null;
+  /* A #101 prel tail on the handle route is the NEWER virtual state
+     (a re-anchored pushState/assign minted by vloc), not site path:
+     peel it and discard the visible path before the marker, SW-side
+     parity with vloc's fromNative. Reading the tail verbatim leaked
+     the engine markers into the upstream path (the google.com/ai
+     reload-404 class). Stacked tails peel to the deepest (newest)
+     level, bounded. */
+  if (rest.indexOf(NAVP) >= 0) {
+    let cur = rest;
+    for (let hop = 0; hop < 4 && cur.indexOf(NAVP) >= 0; hop++) {
+      const seg = cur.slice(cur.indexOf(NAVP) + NAVP.length);
+      try {
+        cur = decodeURIComponent((seg.startsWith("/") ? seg.slice(1) : seg).split("#")[0]);
+      } catch {
+        return null;
+      }
+    }
+    /* vloc mints root-relative virtual paths; anything else, or a
+       stack deeper than 4, is the honest null, never a guess. */
+    if (cur.charAt(0) !== "/" || cur.indexOf(NAVP) >= 0) return null;
+    try {
+      const base = new URL(dest);
+      const u = new URL(cur, base.origin + "/");
+      /* #202: the handle binds to the minted origin. */
+      if (u.origin !== base.origin) return null;
+      return u.href;
+    } catch {
+      return null;
+    }
+  }
   try {
     const u = new URL(rest, dest.endsWith("/") ? dest : dest + "/");
     /* #202: the handle binds to the minted origin; a tail resolving

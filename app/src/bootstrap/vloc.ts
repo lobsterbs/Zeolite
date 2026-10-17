@@ -177,6 +177,21 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
     ) {
       return null;
     }
+    /* A route-shaped input is the page re-emitting its own opaque
+       route (location is LegacyUnforgeable, so a native pathname
+       or href read still carries the engine's markers), not a
+       virtual path. Wrapping it in a prel tail stacked routes on
+       top of routes - the prel-of-prel mint whose reload served
+       the engine markers upstream (the google.com/ai 404 class).
+       Decode it back to the virtual state it carries instead. */
+    if (u.pathname.startsWith(NAVH + "/") || u.pathname.indexOf(NAVP + "/") > 0) {
+      try {
+        const dec = fromNative(new URL("http://v" + u.pathname + u.search + u.hash));
+        if (dec !== null) return dec;
+      } catch {
+        /* fall through to the plain-path read */
+      }
+    }
     return u.pathname + u.search + u.hash;
   };
 

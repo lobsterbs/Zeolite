@@ -211,3 +211,23 @@ describe("applyVloc (#236)", () => {
     expect(zl(w).pathname).toBe("/one");
   });
 });
+
+describe("route-shaped inputs decode, never stack (prel-of-prel mint)", () => {
+  it("assign of the page's own opaque route re-anchors, not stacks", () => {
+    const href =
+      ENGINE + "/__zl_navh__/TOKEN123/ai/__zl_prel__/" + encodeURIComponent("/search?udm=50");
+    const { w, state } = makeWin(href);
+    applyVloc(w);
+    zl(w).assign(href);
+    expect(state.href).toBe(href);
+  });
+
+  it("pushState of a re-emitted engine-origin href stays single-level", () => {
+    const href = ENGINE + ENTRY + "/__zl_prel__/" + encodeURIComponent("/spa/one");
+    const { w, state } = makeWin(href);
+    applyVloc(w, "/spa/one");
+    const h = w.history as { pushState(s: unknown, t: string, u?: string | null): void };
+    h.pushState({}, "", href);
+    expect(state.href).toBe(href);
+  });
+});
