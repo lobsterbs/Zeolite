@@ -152,8 +152,18 @@ as engine bugs, environmental walls, or documented design limits.
 
 ### Environmental failures (not engine bugs)
 
-- **Google Search** - the shared datacenter exit IP is risk-flagged and
-  serves the sorry/captcha wall.
+- **Google Search** - request-class keyed, not engine-specific: fresh
+  sessions through both embedder engines (this engine via the
+  LobsterBrowse relay, ScramJet via its wisp endpoint; same Render
+  egress class) draw the /sorry reCAPTCHA wall identically (A/B probes
+  2026-10-17), so the challenge is upstream risk scoring of the shared
+  exit, not an engine defect. The #248 recaptcha-solve loop (a
+  preliminary-of-preliminary NAVH mint decoded the post-solve continue
+  URL into a 404, so a solved challenge reloaded into a fresh one) is
+  fixed on dist 9b6f7f8 / pin 82: post-fix probes show the continue
+  navigation decoding to the full upstream URL and the served page
+  staying stable, with no repeated document regeneration. Detection
+  only; no solve, no bypass.
 - **duck.ai** - upstream TLS refuses the host's IP range.
 - **chatgpt.com** - anonymous chat is login-walled upstream.
 - **krunker.io** - datacenter-IP bot wall.
@@ -182,6 +192,7 @@ as engine bugs, environmental walls, or documented design limits.
 - **Runtime-constructed asset names** - single-segment script/style names
   built by page code at runtime (github.com module CSS) are recovered by
   the global observed asset-base heuristic (#134).
+
 ## Repository layout
 
 | Path | Purpose |
