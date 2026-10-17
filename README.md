@@ -116,16 +116,28 @@ as engine bugs, environmental walls, or documented design limits.
   route (its regression fix stops the re-anchored `__zl_prel__` tail
   from snowballing across SPA fallback reloads, which previously ended
   in 429 retry loops and 414 Request-URI-Too-Long). Ask answers
-  do not stream through the engine yet: the hosted tab re-drive
-  reloads the same SERP document repeatedly and Brave rate-limits
-  the repeats (429 plus the PoW interstitial, which #168 already
-  records never completes through the relay class), so the loop
-  never clears. The ScramJet engine on the same deployment egress
-  runs the same flow with single document loads and passes clean
-  (verified 2026-10-16 live on the beta deployment: SERP renders,
-  Ask tab boots, zero 429s), so the wall is keyed on the request
-  pattern, not on the exit IP class; the datacenter-IP claim that
-  stood here was wrong (retracted).
+  stream through the engine now (verified 2026-10-17 live on the
+  beta deployment, dist a84c43f): the last blocker was #238 -
+  SvelteKit's client start() compares `document.URL` with
+  `location.href` and self-assigns `location.href` when they differ
+  (kit PR 11179, a basic-auth credential drop); the #235 pass had
+  renamed `location.href` reads to the virtual `__zl.href` but left
+  `document.URL` native, so against the opaque navh route the
+  compare never passed and start() re-navigated on every load (43
+  identical document loads in ~30s live), tripping Brave's
+  request-pattern 429 + PoW interstitial. The globals pass now also
+  rewrites scope-resolved `document.URL` and `document.documentURI`
+  reads to `__zl.href` (writes, deletes and shadowed receivers stay
+  native), so the check never fires: the full Ask flow completes
+  with three document navigations total (search, post-verify,
+  /ask), zero re-drive loops, and the answer streams in-app. Brave
+  still serves its bot-check interstitial on a cold session's first
+  fresh load through the wisp class (the clearance then survives in
+  the cookie jar); the challenge completes through the engine with
+  one Verify click, which ScramJet from the same egress is not
+  asked for (recorded #238 evidence). The wall is keyed on the
+  request pattern, not on the exit IP class; the datacenter-IP
+  claim that stood here was wrong (retracted).
 - **Hacker News, example.com, plain content sites** - full load.
 
 ### Captcha and challenge coverage
