@@ -88,9 +88,7 @@ pub fn stats_string() -> String {
 pub fn rewrite_globals(js: &str) -> String {
     // Fast path: nothing to rename without the tokens.
     if js.len() > MAX_BYTES
-        || !(js.contains("location")
-            || js.contains("document.URL")
-            || js.contains("documentURI"))
+        || !(js.contains("location") || js.contains("document.URL") || js.contains("documentURI"))
     {
         return js.to_string();
     }
@@ -175,11 +173,8 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                         && flags.contains(ReferenceFlags::Read)
                         && !flags.contains(ReferenceFlags::Write)
                     {
-                        self.edits.push((
-                            id.span.start as usize,
-                            id.span.end as usize,
-                            VLOC,
-                        ));
+                        self.edits
+                            .push((id.span.start as usize, id.span.end as usize, VLOC));
                     }
                 }
             }
@@ -192,11 +187,8 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                         && !self.is_write_target(m.span)
                         && !self.is_delete_target(m.span)
                     {
-                        self.edits.push((
-                            m.span.start as usize,
-                            m.span.end as usize,
-                            VLOC,
-                        ));
+                        self.edits
+                            .push((m.span.start as usize, m.span.end as usize, VLOC));
                     }
                 }
             }
@@ -221,11 +213,8 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                             self.sem.scoping().get_reference(rid).symbol_id().is_none()
                         })
                     {
-                        self.edits.push((
-                            m.span.start as usize,
-                            m.span.end as usize,
-                            DOC_URL,
-                        ));
+                        self.edits
+                            .push((m.span.start as usize, m.span.end as usize, DOC_URL));
                     }
                 }
             }
