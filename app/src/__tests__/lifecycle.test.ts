@@ -4,6 +4,7 @@ import {
   clientDest,
   installLifecycle,
   isHostClient,
+  raceBoot,
   wireDispatchers,
   type DispatchHosts,
   type WinClient,
@@ -282,5 +283,52 @@ describe("dispatch wiring (#243)", () => {
     expect(page.messages.length).toBe(2);
     expect(other.messages.length).toBe(0);
     expect(host.messages.length).toBe(0);
+  });
+});
+
+/* #249: bounded boot. A hung boot step (storage open, extension
+   phase) must never wedge the fetch handler or the control plane:
+   raceBoot resolves degraded past its deadline, install bounds its
+   prewarm, and a wedged extension phase does not block the phases
+   after it. */
+describe("bounded boot gates (#249)", () => {
+  it("raceBoot passes a settled value through and propagates rejection", async () => {
+    expect(await raceBoot(Promise.resolve(7), "settled", 1000)).toBe(7);
+    await expect(raceBoot(Promise.reject(new Error("boom")), "rejects", 1000)).rejects.toThrow("boom");
+  });
+
+  it("raceBoot resolves undefined past the deadline instead of hanging", async () => {
+    const t0 = Date.now();
+    const v = await raceBoot(new Promise<number>(() => {}), "wedged", 20);
+    expect(v).toBeUndefined();
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+
+  it("installLifecycle bounds a hanging prewarm: waitUntil still settles", async () => {
+    stubSelf([]);
+    const held: Promise<unknown>[] = [];
+    installLifecycle(mkEvent(held), () => new Promise<void>(() => {}), 20);
+    expect(held.length).toBe(1);
+    await held[0];
+  });
+
+  it("bootExtensionSubsystem continues past a wedged phase", async () => {
+    const ran: string[] = [];
+    await bootExtensionSubsystem(
+      {
+        startup: () => new Promise<void>(() => {}),
+        boot: () => {
+          ran.push("boot");
+        },
+        wireAlarm: () => {
+          ran.push("alarm");
+        },
+        wireMgmt: () => {
+          ran.push("mgmt");
+        },
+      },
+      20,
+    );
+    expect(ran).toEqual(["boot", "alarm", "mgmt"]);
   });
 });

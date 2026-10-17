@@ -46,7 +46,7 @@ import { initTransform, prewarmRewriter } from "./transform";
 /* #243-#247: client isolation, install lifetime, phased extension
    boot and dispatcher wiring live in ./lifecycle; this entrypoint
    is the composition root only. */
-import { bootExtensionSubsystem, installLifecycle, wireDispatchers } from "./lifecycle";
+import { bootExtensionSubsystem, installLifecycle, raceBoot, wireDispatchers } from "./lifecycle";
 /* #87: the shared service-worker runtime state (degraded flag, route
    key, fingerprint scripts, per-site profile cache) lives in
    ./swstate; this entrypoint and the request engine are call sites. */
@@ -214,7 +214,9 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
   void handleControlEvent(e, {
     ready: (async () => {
       await routeReady;
-      await initReady;
+      /* #249: bounded - a hung boot step must not wedge the control
+         plane (netLog and diag queries) too. */
+      await raceBoot(initReady, "control-plane boot");
     })(),
     persistRoute,
   });

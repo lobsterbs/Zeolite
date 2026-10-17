@@ -70,15 +70,55 @@ export function clientDest(c: WinClient): string | null {
   }
 }
 
+/** #249: bounded boot. Storage restores settle in milliseconds, but a
+    hung IndexedDB or Cache Storage open (corrupt store, quota wedge)
+    never rejects, and the boot promises gate the fetch handler and
+    the control plane: one hang wedges every proxied request until
+    the embedder page timeout, with the UI itself still loading (its
+    same-origin requests escape the gate). raceBoot races the step
+    against a deadline; past it the caller proceeds on the
+    documented degraded defaults (in-memory jar, default route
+    shape) and the diagnostic names the wedged step. A rejection
+    still propagates unchanged. */
+export function raceBoot<T>(p: Promise<T>, label: string, ms = 10000): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<undefined>((res) => {
+    timer = setTimeout(() => {
+      DIAG.emit({
+        category: "SERVICE_WORKER",
+        severity: "error",
+        message: "boot step wedged; continuing degraded: " + label,
+      });
+      res(undefined);
+    }, ms);
+  });
+  return Promise.race([p, deadline]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+/** The boot deadline every gate shares (#249). */
+export const BOOT_DEADLINE_MS = 10000;
+
 /** #244: install lifetime. skipWaiting stays; the async prewarm is
     held by waitUntil and settles to undefined on rejection (the
     loader emits the degradation diagnostic itself). */
-export function installLifecycle(e: ExtendableEvent, prewarm: () => Promise<void>): void {
+export function installLifecycle(
+  e: ExtendableEvent,
+  prewarm: () => Promise<void>,
+  ms = BOOT_DEADLINE_MS,
+): void {
   void self.skipWaiting();
+  /* #249: bounded - a hung prewarm must never stall install past
+     activation (the update would wedge the old session forever). */
   e.waitUntil(
-    prewarm().then(
-      () => undefined,
-      () => undefined,
+    raceBoot(
+      prewarm().then(
+        () => undefined,
+        () => undefined,
+      ),
+      "rewriter prewarm",
+      ms,
     ),
   );
 }
@@ -94,10 +134,12 @@ export interface BootPhases {
 /** #245: run each boot phase in its own failure boundary; a failure
     emits an EXTENSION diagnostic and never silently skips the
     phases after it. */
-export async function bootExtensionSubsystem(p: BootPhases): Promise<void> {
+export async function bootExtensionSubsystem(p: BootPhases, ms = BOOT_DEADLINE_MS): Promise<void> {
+  /* #249: raceBoot bounds a HUNG phase the way .catch bounds a failed
+     one - a wedged registry restore must not block the wiring
+     phases behind it. */
   const phase = (fail: string, run: () => Promise<void> | void): Promise<void> =>
-    Promise.resolve()
-      .then(run)
+    raceBoot(Promise.resolve().then(run), fail, ms)
       .catch((err: unknown) => {
         DIAG.emit({
           category: "EXTENSION",

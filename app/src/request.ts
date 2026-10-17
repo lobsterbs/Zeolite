@@ -47,6 +47,7 @@ import { traceDecision } from "./tracing";
 import { siteToken } from "./pageload";
 
 import { altConfigured, altEndpoint, altRegister, altWispFetch, wispTransport } from "./transport";
+import { raceBoot } from "./lifecycle";
 
 
 
@@ -884,7 +885,7 @@ const routeKeyUrl = () => new URL("route-config.kdl", self.registration.scope).h
 /* The pre-KDL deployment persisted the shape as JSON; the restore
    still reads that entry, the persist writes KDL only. */
 const routeKeyUrlLegacy = () => new URL("route-config.json", self.registration.scope).href;
-export const routeReady: Promise<void> = (async () => {
+const routeRestore: Promise<void> = (async () => {
   try {
     const cache = await caches.open(ZL_ROUTE_CACHE);
     const hit = await cache.match(routeKeyUrl());
@@ -936,6 +937,9 @@ export const routeReady: Promise<void> = (async () => {
     /* storage unavailable: keyed codec stays off */
   }
 })();
+/* #249: bounded - a hung Cache Storage open must not wedge every
+   fetch that awaits the route shape. */
+export const routeReady: Promise<void> = raceBoot(routeRestore, "route shape restore").then(() => undefined);
 
 export async function persistRoute(prefix: string): Promise<void> {
   try {
@@ -1132,7 +1136,7 @@ export function handleFetch(e: FetchEvent): void {
         (async () => {
           /* Restart-safe: extension serving needs the restored
              registry (a restarted worker boots with none). */
-          await engineReady;
+          if (engineReady) await raceBoot(engineReady, "extension subsystem boot");
           /* #51: the requesting page destination, resolved like the
              #33 initiator (virtual context first, client URL decode
              as the fallback). Never page-supplied; when unknown the
@@ -1192,7 +1196,10 @@ export function handleFetch(e: FetchEvent): void {
   e.respondWith(
     (async () => {
       await routeReady;
-      await engineReady;
+      /* #249: a wedged boot step (storage, extension boot) must not
+         hang the whole fetch path; serve degraded past the
+         deadline. */
+      if (engineReady) await raceBoot(engineReady, "engine boot");
       /* Route computation. Three shapes reach this handler:
          - foreign-origin http(s) requests (#34): the whole URL is the
            destination. Only requests from proxied documents are
