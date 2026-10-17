@@ -1,0 +1,105 @@
+// Compatibility policy (issues #135, #136, #137, #138). Rules let an
+// operator override the default transit decision for narrowly scoped
+// compatibility cases. Grammar: docs/policy.md.
+//
+//   rule "short-id" priority=10 {
+//     match host="cdn.example.com" path="/assets/"  // both optional
+//     types "script" "fetch"                        // optional
+//     route "rewrite"                               // or "native", "relay" or "wisp"
+//     reason "short operator explanation"           // optional
+//   }
+//
+// route "rewrite" upgrades matching requests onto the rewrite path.
+// route "native" (#138) demotes the JS literal pass for hosts whose
+// raw script bodies work through the patched runtime seams.
+// route "relay" (#137) moves the fetch onto the embedder's network
+// stack for hosts that block the wasm TLS ClientHello shapes.
+// route "wisp" (#168) rides the engine's own wasm wisp transport
+// through the PUBLIC wisp endpoint the embedder announces.
+// Highest priority wins; on equal priority the later rule wins. A
+// rejected file keeps the defaults active (diagnostics carry the
+// error).
+
+// Wave 17 (2026-10-13): the LobsterBrowse deployment keeps wisp
+// password auth ON (operator decision) while the engine bundle's
+// wisp client cannot authenticate - the vendored transport has no
+// password support and receives no credentials - so every wisp
+// connection from the service worker is refused (wisp v1 and v2
+// both close with auth reasons) and the wasm transit is dead on
+// that deployment. The match-less rule below routes every upstream
+// fetch onto the embedder relay so the engine serves pages at all;
+// it sits FIRST in the file so any later rule overrides it on equal
+// priority, and a future auth-capable wisp client can delete it.
+rule "default-relay" {
+  route "relay"
+  reason "deployment wisp auth rejects the wasm client: relay all fetches"
+}
+
+// #168: brave search's bot wall is the inverse of the #149 set: it
+// refuses the embedder relay transport class (the PoW interstitial
+// never completes) and accepts the engine's own wasm wisp ClientHello
+// through the PUBLIC wisp endpoint the embedder announces (the
+// ScramJet wisp-js backend, zl:wispRegister; LB serves it as
+// /build sjWisp). The route carries only when the embedder announced
+// that endpoint; without it the fetch rides the default path and a
+// TRANSPORT warning names the gap. Honest ceiling: the public
+// endpoint's egress is shared with the ScramJet engine option.
+rule "brave-wisp" {
+  match host="search.brave.com"
+  route "wisp"
+  reason "#168: relay transport class refused, wasm wisp ClientHello accepted"
+}
+
+// #137: duckduckgo.com rejects the wasm TLS client shapes at the
+// handshake (libcurl error 35, epoxy UnexpectedEof) while native
+// stacks from the same IP pass; the embedder relays with its own TLS.
+rule "ddg-relay" {
+  match host="duckduckgo.com"
+  route "relay"
+  reason "TLS-fingerprint block: wasm ClientHello rejected, embedder relay"
+}
+
+// #149 (closed not_planned): the hosts below reject the wasm TLS/h2
+// client shapes deterministically while direct fetches from the same
+// egress pass: cbc/united/opentable/acer fail in the HTTP/2 framing
+// layer (libcurl error 92, epoxy RST_STREAM(1) INTERNAL_ERROR),
+// slither.io fails at the TLS handshake (libcurl error 35, epoxy
+// handshake eof). The wisp relay itself is byte-honest (a native TLS
+// client carried through the exact same tunnel gets identical
+// responses, suite/e2e/wisp-tls-probe.mjs), so the block is upstream
+// bot management fingerprinting the wasm stacks. The embedder relays
+// these hosts with its own TLS.
+rule "cbc-relay" {
+  match host="cbc.ca"
+  route "relay"
+  reason "#149: h2 framing reject of wasm client shapes, embedder relay"
+}
+rule "united-relay" {
+  match host="united.com"
+  route "relay"
+  reason "#149: h2 framing reject of wasm client shapes, embedder relay"
+}
+rule "opentable-relay" {
+  match host="opentable.com"
+  route "relay"
+  reason "#149: h2 framing reject of wasm client shapes, embedder relay"
+}
+rule "acer-relay" {
+  match host="acer.com"
+  route "relay"
+  reason "#149: h2 framing reject of wasm client shapes, embedder relay"
+}
+rule "slither-relay" {
+  match host="slither.io"
+  route "relay"
+  reason "#149: TLS handshake reject of wasm ClientHello, embedder relay"
+}
+
+// delta.com: TLS connect refused from the test egress (egress-level,
+// not proven upstream), relay gives it a native stack + the
+// deployer's egress.
+rule "delta-relay" {
+  match host="delta.com"
+  route "relay"
+  reason "#149: TLS connect refused at test egress, embedder relay"
+}
