@@ -422,8 +422,11 @@ export function cssRewriteStream(
 /** Prewarm the wasm module during SW install: instantiation is the
     slowest cold-path step, so the first HTML response should not pay
     it. sw.ts calls this seam, not the wasm loader (issue #86). */
-export function prewarmRewriter(): void {
-  void rewriter().catch(() => undefined);
+export function prewarmRewriter(): Promise<void> {
+  /* #244: a settled promise so the install seam can hold it in
+     waitUntil; a failure degrades honestly (setDegraded inside
+     rewriter()) and maps to undefined here. */
+  return rewriter().then(() => undefined, () => undefined);
 }
 
 /** #46 one-shot external script body pass (URL literals + frame-buster

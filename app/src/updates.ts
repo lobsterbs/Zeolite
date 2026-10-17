@@ -66,10 +66,16 @@ export async function broadcastEngineUpdate(): Promise<void> {
   }
 }
 
-/** Poll the browser's own update oracle: one check per worker
-    evaluation (a worker that wakes after an idle kill re-runs this),
-    then every CHECK_MS while the worker stays alive. */
+let started = false;
+
+/** Poll the browser's own update oracle: once per worker evaluation
+    (a worker that wakes after an idle kill re-runs this), then every
+    CHECK_MS while the worker stays alive. #246: the guard keeps a
+    second call on the same evaluation from stacking another interval
+    and updatefound listener. */
 export function startUpdateChecks(): void {
+  if (started) return;
+  started = true;
   try {
     self.registration.addEventListener("updatefound", () => {
       DIAG.emit({

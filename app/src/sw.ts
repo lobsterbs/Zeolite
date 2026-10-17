@@ -43,10 +43,10 @@ import { initTransport, wispTransport } from "./transport";
    live in ./transform; this entrypoint wires the state seam and
    prewarms the rewriter wasm on install. */
 import { initTransform, prewarmRewriter } from "./transform";
-/* The tabs.sendMessage dispatch decodes a client's engine path to
-   match the target tab's destination (codec is shared with the
-   request engine). */
-import { decodeClientUrl } from "./codec";
+/* #243-#247: client isolation, install lifetime, phased extension
+   boot and dispatcher wiring live in ./lifecycle; this entrypoint
+   is the composition root only. */
+import { bootExtensionSubsystem, installLifecycle, wireDispatchers } from "./lifecycle";
 /* #87: the shared service-worker runtime state (degraded flag, route
    key, fingerprint scripts, per-site profile cache) lives in
    ./swstate; this entrypoint and the request engine are call sites. */
@@ -99,11 +99,11 @@ initTransform({
 export { ZEOLITE_VERSION };
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
-self.addEventListener("install", () => {
-  self.skipWaiting();
+self.addEventListener("install", (e) => {
   /* Prewarm: instantiate the rewriter wasm during install, not on the
-     first HTML response (instantiation is the slowest cold-path step). */
-  prewarmRewriter();
+     first HTML response (instantiation is the slowest cold-path step).
+     #244: the async prewarm is held by waitUntil (./lifecycle). */
+  installLifecycle(e, prewarmRewriter);
 });
 
 /* Restart-safe engine init (runs once per worker evaluation). A
@@ -141,65 +141,23 @@ const initReady = (async () => {
      end-to-end (the seam test pins that it is sent). */
   DL.setResumeFetch((url, init) => wispTransport.fetch(url, { method: "GET", headers: init.headers }));
   /* Extensions: load the installed set, then boot enabled
-     background scripts. Any failure lands in that extension's
-     record; the engine itself never fails because of one. */
-  try {
-    await extensions.startup();
-    await bootEnabled();
+     background scripts. #245: independent phases - a failed registry
+     restore or boot no longer silently skips alarm wake wiring and
+     management wiring; each failure lands in DIAG (./lifecycle). */
+  await bootExtensionSubsystem({
+    startup: () => extensions.startup(),
+    boot: () => bootEnabled(),
     /* Alarms wake MV3 backgrounds through the background module;
        management events observe the manager's lifecycle stream. */
-    ALARMS.setWake(wakeExtension);
-    MGMT.wire(extensions);
-  } catch {
-    /* extension subsystem unavailable: stays inert */
-  }
-  /* Tabs bridge: extension ops broadcast to the engine UI clients,
-     which own the real tab model and mirror changes back through
-     the zl:tabs sync channel. */
-  TABS.setDispatch((op) => {
-    void self.clients.matchAll({ type: "window" }).then((cs) => {
-      for (const c of cs) c.postMessage({ type: "zl:tabsOp", op });
-    });
+    wireAlarm: () => ALARMS.setWake(wakeExtension),
+    wireMgmt: () => MGMT.wire(extensions),
   });
-  /* tabs.sendMessage: each page verifies it is the addressee by
-     destination, so the payload carries the target tab's url. */
-  TABS.setMessageDispatch((_tabId, tabUrl, extId, payload) => {
-    void self.clients.matchAll({ type: "window" }).then((cs) => {
-      for (const c of cs) {
-        let cdest = "";
-        try {
-          const cu = new URL(c.url, self.location.origin);
-          cdest = decodeClientUrl(cu) ?? "";
-        } catch {
-          continue;
-        }
-        if (cdest === tabUrl) {
-          c.postMessage({ type: "zl:tabMessage", extId, dest: tabUrl, payload });
-        }
-      }
-    });
-  });
-  /* Scripting: the payload carries the exact page destination; the
-     page listener drops anything not addressed to itself. */
-  SCRIPTING.setDispatch((msg) => {
-    void self.clients.matchAll({ type: "window" }).then((cs) => {
-      for (const c of cs) c.postMessage(msg);
-    });
-  });
-  /* Downloads: the UI host owns the save. */
-  DOWNLOADS.setDispatch((op) => {
-    void self.clients.matchAll({ type: "window" }).then((cs) => {
-      for (const c of cs) c.postMessage({ type: "zl:downloadOp", op });
-    });
-  });
-  /* Notifications (#43): the UI host renders (the embedding host
-     owns the surface) and reports interactions back via
-     zl:notifyEvent. */
-  NOTIFY.setDispatch((op) => {
-    void self.clients.matchAll({ type: "window" }).then((cs) => {
-      for (const c of cs) c.postMessage({ type: "zl:notifyOp", op });
-    });
-  });
+  /* #243: tab/download/notify ops reach host clients only; a
+     tabs.sendMessage or scripting payload reaches only the client
+     whose decoded destination matches the target (an unmatched
+     scripting payload is dropped, never broadcast to proxied
+     pages). Wiring lives in ./lifecycle. */
+  wireDispatchers({ tabs: TABS, scripting: SCRIPTING, downloads: DOWNLOADS, notify: NOTIFY });
   /* Advanced permissions: request/remove run through the manager
      so grants persist and the master record stays authoritative. */
   PERMS.setBackend(async (id, op, perms) => {

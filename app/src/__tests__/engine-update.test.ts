@@ -173,4 +173,31 @@ describe("engine update worker module (#121)", () => {
     expect(seen.update).toBe(2);
     vi.useRealTimers();
   });
+
+  it("startUpdateChecks is idempotent within one worker evaluation (#246)", async () => {
+    const seen = { update: 0, listeners: 0 };
+    vi.stubGlobal("self", {
+      registration: {
+        update: () => {
+          seen.update++;
+          return Promise.resolve();
+        },
+        addEventListener: () => {
+          seen.listeners++;
+        },
+      },
+    });
+    vi.useFakeTimers();
+    /* Fresh module instance: the once-per-evaluation guard is module
+       state and the static import above already consumed it. */
+    vi.resetModules();
+    const { startUpdateChecks: fresh } = await import("../updates");
+    fresh();
+    fresh();
+    expect(seen.update).toBe(1);
+    expect(seen.listeners).toBe(1);
+    vi.advanceTimersByTime(5 * 60 * 1000);
+    expect(seen.update).toBe(2);
+    vi.useRealTimers();
+  });
 });
