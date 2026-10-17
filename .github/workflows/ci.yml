@@ -194,113 +194,27 @@ jobs:
           test -f app/dist/libcurl/index.mjs
           test -f app/dist/epoxy/epoxy.js
           test -f app/dist/epoxy/epoxy.wasm
-      - name: Bootstrap size budget (must stay under 22 KiB minified)
-        # Raised from 5120 for the #28 navigation guard (window.open,
-        # anchor/area/iframe/form/link URL property + setAttribute
-        # rewrites, form submit paths, WebRTC removal) and the module
-        # split; raised again 6656 -> 8192 when the bootstrap became a
-        # single classic file (the first real-browser run, issue #35):
-        # what used to ride in shared ESM chunks (the nav guard, the
-        # codec helpers) now bundles into the one artifact the page
-        # loads. Measured 6864. Raised 8192 -> 10240 for #37: the
-        # cross-site channel isolation (storage-event filter,
-        # BroadcastChannel name scoping, window.name, cookieStore
-        # removal) is a per-page correctness requirement, not
-        # optional payload. Raised 10240 -> 11264 for the #28
-        # parser-inserted iframe observer: a frame injected by
-        # innerHTML or document.write has no bootstrap of its own,
-        # so the document-side MutationObserver that rewires its src
-        # before the browser's queued load task is per-page
-        # correctness too. Measured 10790. Raised 11264 -> 12288 for #58/#59:
-        # the srcdoc child-document pass (a srcdoc frame's inline
-        # document gets no bootstrap, so the parent rewrites its
-        # navigable attributes) and the setAttribute robustness rows
-        # (case-insensitive name compare, page-truthful raw store).
-        # Raised 12288 -> 16384 for #54: the page-realm mint client
-        # and re-emission (fetch, sendBeacon, XHR, EventSource
-        # inputs ride minted engine routes) and the navguard
-        # swap/defer seams (runtime DOM navigation values upgrade
-        # from the decodable marker to keyed routes) is per-page
-        # privacy correctness, same class as the rows above.
-        # Raised 16384 -> 18432 for the #54 dedicated-Worker hook: the
-        # relay taps worker message channels (a Worker object, a
-        # SharedWorker port) so mint/ws wrappers reach the engine
-        # without leaking into the app's handlers - per-page
-        # correctness again - and the WS/EventSource shims gain
-        # instanceof and close-state parity in the same pass.
-        # Raised 18432 -> 18944 for #101: the child-realm re-emission
-        # anchor (root-relative fetch/XHR/beacon/EventSource inputs
-        # from a same-origin child iframe re-emit through the parent
-        # page's engine route instead of escaping to the proxy
-        # origin) - per-page correctness, same class as the rows
-        # above; the seams were deduplicated in the same pass.
-        # Raised 18944 -> 19456 for #106/#108: the popup activation
-        # guard (a target=_blank or modifier/middle activation on a
-        # raw-destination anchor fires no navigate event in the
-        # initiating document, so a capture-phase listener cancels
-        # and re-drives it through the guarded window.open) and the
-        # child-realm page-surface isolation (an about:blank/srcdoc
-        # child inherits the proxy origin, so its storage/cookie
-        # surfaces get the guarding page's site scoping) - per-page
-        # privacy correctness, same class as the rows above.
-        # Raised 19456 -> 20480 for #109: the popup sync-open (a
-        # popup-class activation must ride the original window.open
-        # while its transient user activation is live; the minted
-        # re-drive outlived the activation window on heavy pages,
-        # so the popup was blocked and the button only visibly
-        # pressed) and the relative navigation-bound re-emit
-        # (anchor/area href, iframe src, form action relative
-        # writes re-emit through the #101 parent-relative marker
-        # so the navigation stays in engine scope instead of
-        # landing on the proxy origin) - per-page correctness,
-        # same class as the rows above.
-        # Raises are deliberate
-        # decisions recorded here, never quiet accommodations; CI
-        # prints the measured size.
+      - name: Bootstrap size budget (must stay under 28 KiB minified)
+        # Raises are deliberate decisions recorded here, never quiet
+        # accommodations; CI prints the measured size. Every raise bought
+        # per-page correctness that cannot ride outside the one artifact
+        # the page loads: #28/#35 nav guard + classic-file split, #37
+        # cross-site channel isolation, #58/#59 srcdoc + setAttribute,
+        # #54 page-realm mint client + Worker hooks, #101 child-realm
+        # re-emit, #106/#108 popup guard + child isolation, #109 popup
+        # sync-open + relative nav re-emit, #121 engineUpdate reload
+        # listener, #128 legacy WebKit postMessage, #130/#132 frame
+        # identity relabel races, #236 virtual location, #248 the
+        # route-shaped vloc decode (prel-of-prel stack prevention).
+        # Raised 27648 -> 28672 for #248; measured 27678.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          # 21 KiB for #121 (the zl:engineUpdate reload listener:
-          # a stale page keeps its old rewritten DOM until it
-          # reloads). Raise decided with the feature, same class as
-          # every raise above. Raised again 21504 -> 22528 for the
-          # #128 follow-up: the legacy WebKit postMessage(msg,
-          # transfer[, targetOrigin]) call shape (reCAPTCHA's frame
-          # protocol posts the bare two-argument port form) is
-          # per-page correctness - replaying it with a phantom
-          # third argument threw "Invalid target origin" and killed
-          # the widget protocol. Same class as every raise above.
-          # Raised again 22528 -> 23552 for #130: the virtual-origin
-          # marker (zl:getVirtualOrigin control client) + the
-          # message-event origin filter replace the #128 synthetic
-          # delivery with native delivery (real ev.source, live
-          # ports) - per-page correctness for every frame protocol,
-          # reCAPTCHA first. Same class as every raise above.
-          # Raised again 23552 -> 24576 for #132: the contentWindow
-          # sender half (parent->child frame calls deliver with the
-          # genuine sender window, the direction the #131 receiver
-          # wrapper cannot restore) + the virtual-origin parity drop
-          # (a targetOrigin the recipient's marker does not match is
-          # dropped, the unproxied behavior) - per-page correctness
-          # for every frame protocol, reCAPTCHA first. Same class as
-          # every raise above. Raised again 24576 -> 25088 for the
-          # #132 identity-race follow-up (mintChildProxy /
-          # childProxyByFrame: the relabel and the contentWindow
-          # getter converge on one proxy identity even when the
-          # event beats the first post-bootstrap read - without
-          # it the strict channel check failed on every anchor
-          # rebuild and the widget timed out). Same class again.
-          # Raised again 25088 -> 25600 in 4a27a55: the #132
-          # identity-race fix (mintChildProxy / childProxyByFrame
-          # convergence) shipped with the #169-#171 control-plane
-          # wave; measured 25115, decided with the feature, same
-          # class as every raise above. Raised again 25600 -> 27648
-          # for #236: the virtual location (applyVloc: the
-          # location-like view, pushState/replaceState re-anchoring,
-          # popstate/hashchange sync) shipped with the #235 AST
-          # globals rename; measured 27117, decided with the feature,
-          # same class as every raise above.
-          if [ "$SIZE" -ge 27648 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 27648)"; exit 1; fi
+          # #248: route-shaped vloc inputs decode via fromNative
+          # instead of re-wrapping (a prel-of-prel mint served the
+          # engine markers upstream as a Google 404). Measured 27678,
+          # decided with the feature, same class as every raise above.
+          if [ "$SIZE" -ge 28672 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 28672)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
