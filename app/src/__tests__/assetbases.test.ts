@@ -62,7 +62,9 @@ describe("asset base registry (#134)", () => {
     expect(order[0]).toContain("https://cdn4.example/assets/flat.css");
     expect(order[1]).toContain("https://cdn5.example/assets/flat.css");
     expect(order[2]).toContain("https://cdn3.example/assets/flat.css");
-    expect(order.length).toBe(3);
+    expect(order[3]).toContain("https://cdn2.example/assets/flat.css");
+    /* #259: maxTries now walks every recorded base (the per-origin cap). */
+    expect(order.length).toBe(4);
   });
 
   it("requires a flat single-segment path", async () => {
@@ -239,6 +241,33 @@ describe("directory-minted flat names (#143)", () => {
     expect(isRecoverableAssetPath("/owner/repo/flat.css")).toBe(false);
     expect(isRecoverableAssetPath("/a/b/c/d/e.module.css")).toBe(false);
     expect(isRecoverableAssetPath("")).toBe(false);
+  });
+
+  it("isRecoverableAssetPath accepts a SvelteKit dotted hash (#259)", () => {
+    expect(isRecoverableAssetPath("/assets/brave-logo-small.Bdzj7Bzm.svg")).toBe(true);
+    expect(isRecoverableAssetPath("/assets/favicon-96x96.whEolsYu.png")).toBe(true);
+    expect(isRecoverableAssetPath("/assets/brave-logo-small.svg")).toBe(false);
+    expect(isRecoverableAssetPath("/sp/search")).toBe(false);
+    expect(isRecoverableAssetPath("/assets/brave-logo-small.Bdzj7Bzm.svg.min.js")).toBe(false);
+  });
+
+  it("recovers a runtime-minted two-segment image against an observed base (#259)", async () => {
+    recordAssetBase("https://p.example/", "https://cdn.example/immutable/assets/app.css");
+    let calls = 0;
+    const rec = await recoverFlatAsset(
+      "https://p.example/",
+      "https://p.example/assets/brave-logo-small.Bdzj7Bzm.svg",
+      "image",
+      new Headers(),
+      async (u: string) => {
+        calls++;
+        if (u === "https://cdn.example/immutable/assets/brave-logo-small.Bdzj7Bzm.svg")
+          return new Response("<svg/>", { status: 200, headers: { "content-type": "image/svg+xml" } });
+        return new Response("no", { status: 404 });
+      },
+    );
+    expect(rec?.url).toBe("https://cdn.example/immutable/assets/brave-logo-small.Bdzj7Bzm.svg");
+    expect(calls).toBe(1);
   });
 
   it("assetBaseCount reports the observed bases for the initiator origin", () => {

@@ -74,7 +74,14 @@ export function isRecoverableAssetPath(pathname: string): boolean {
   if (!last) return false;
   if (segs.length === 1) return true;
   if (segs.length > 4) return false;
-  return /[0-9a-f]{6,}/i.test(last) || last.includes(".module.");
+  if (/[0-9a-f]{6,}/i.test(last) || last.includes(".module.")) return true;
+  /* #259: SvelteKit mints hashed asset names with a base64ish
+     middle segment (brave-logo-small.Bdzj7Bzm.svg) at runtime
+     against the page origin, while the real asset sits on an
+     observed CDN base. Accept the dotted-hash shape; the retry
+     itself stays gated by upstream status, MIME and the recorded
+     base list. */
+  return /^[^/]+\.[A-Za-z0-9_-]{6,12}\.[a-z0-9]{1,8}$/i.test(last);
 }
 
 /** Observed-base count for the diagnostics at the fetch seam. */
@@ -117,7 +124,10 @@ export async function recoverFlatAsset(
   dest: string,
   reqHeaders: Headers,
   fetchUpstream: FlatFetch,
-  maxTries = 3,
+  /* #259: the correct base can sit fourth in the LRU list on a
+     page that loads many script chunks after its CSS, so walk all
+     recorded bases. */
+  maxTries = ASSET_BASES_PER_ORIGIN,
 ): Promise<{ url: string; resp: Response } | null> {
   if (!isRecoverableAssetDest(dest)) return null;
   if (!initiator) return null;
