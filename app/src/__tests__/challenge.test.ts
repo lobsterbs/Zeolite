@@ -138,3 +138,48 @@ describe("passChallengeRedirFixed (absolute engine URL, anubis 1.26+)", () => {
     setRouteKey(null);
   });
 });
+
+/* #258: anubis 1.26+ emits redir as the absolute page location
+   whenever the page URL does not start with the deployment's
+   configured public URL; through the engine that is the engine
+   ORIGIN with the page-authored return path (root "/" on the
+   live startpage case), not a decodable route. The repair
+   rebuilds redir against the challenge page's virtual home. */
+describe("passChallengeRedirFixed (#258 bare engine-origin redir)", () => {
+  const ORIGIN = "https://proxy.example";
+  const pcAbs = (redir: string) =>
+    "https://startpage.com/.within.website/x/cmd/anubis/api/pass-challenge?redir=" +
+    encodeURIComponent(redir);
+
+  it("repairs the bare engine-origin root redir against the frame context", () => {
+    const fixed = passChallengeRedirFixed(pcAbs(ORIGIN + "/"), ORIGIN, "https://www.startpage.com/");
+    expect(fixed).not.toBeNull();
+    expect(new URL(fixed!).searchParams.get("redir")).toBe("https://www.startpage.com/");
+  });
+
+  it("repairs a page-authored path with its query", () => {
+    const fixed = passChallengeRedirFixed(
+      pcAbs(ORIGIN + "/sp/search?query=test"),
+      ORIGIN,
+      "https://www.startpage.com/",
+    );
+    expect(new URL(fixed!).searchParams.get("redir")).toBe(
+      "https://www.startpage.com/sp/search?query=test",
+    );
+  });
+
+  it("falls back to the navh handle origin when no context exists", () => {
+    setRouteKey(b64uEncode(crypto.getRandomValues(new Uint8Array(16))));
+    const token = encodeNavHandle("https://www.startpage.com/")!;
+    const routePath = NAVH + "/" + token + "/__zl_prel__/%2F.within.website%2Fx%2Fcmd%2Fanubis%2F";
+    const fixed = passChallengeRedirFixed(pcAbs(ORIGIN + "/"), ORIGIN, null, routePath);
+    expect(fixed).not.toBeNull();
+    expect(new URL(fixed!).searchParams.get("redir")).toBe("https://www.startpage.com/");
+    setRouteKey(null);
+  });
+
+  it("still refuses the bare engine-origin redir with no home", () => {
+    expect(passChallengeRedirFixed(pcAbs(ORIGIN + "/"), ORIGIN)).toBeNull();
+    expect(passChallengeRedirFixed(pcAbs(ORIGIN + "/"), ORIGIN, null, "/not-a-route")).toBeNull();
+  });
+});

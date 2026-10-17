@@ -764,8 +764,49 @@ export function referrerDest(referrer: string, path: string): string | null {
     page URL so the challenge can finish; the response redirect chain
     maps the hop back to an engine route through the ordinary
     pipeline. Returns the fixed absolute URL, or null when redir is
-    absent or not a decodable engine route. */
-export function passChallengeRedirFixed(dest: string, engineOrigin: string): string | null {
+    absent or not repairable. #258: a redir that is an absolute
+    engine-ORIGIN URL with no decodable route (anubis >= 1.26 emits
+    window.location.href, and a root-page challenge resolves to the
+    bare engine origin) is repaired against the challenge page's
+    virtual home: the requesting client's context origin (the
+    post-redirect final destination), else the navh handle the
+    request itself rides. */
+/* #258: the challenge page's virtual home for the bare engine-origin
+   redir repair: the requesting client's context origin when the
+   caller has one (the post-redirect final destination the engine
+   established for the challenge page), else the origin minted into
+   the navh handle the request itself rides. Null = no home, no
+   repair. */
+function passChallengeHome(homeOrigin?: string | null, routePath?: string | null): string | null {
+  if (homeOrigin && /^https?:/i.test(homeOrigin)) {
+    try {
+      return new URL(homeOrigin).origin;
+    } catch {
+      return null;
+    }
+  }
+  if (routePath && routePath.startsWith(NAVH + "/")) {
+    const tail = routePath.slice(NAVH.length + 1);
+    const cut = tail.indexOf("/");
+    const token = cut < 0 ? tail : tail.slice(0, cut);
+    const dest = decodeNavHandle(token);
+    if (dest) {
+      try {
+        return new URL(dest).origin;
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+export function passChallengeRedirFixed(
+  dest: string,
+  engineOrigin: string,
+  homeOrigin?: string | null,
+  routePath?: string | null,
+): string | null {
   let u: URL;
   try {
     u = new URL(dest);
@@ -808,9 +849,35 @@ export function passChallengeRedirFixed(dest: string, engineOrigin: string): str
        real query is the route query, tailQuery above); resolve the
        token plus tail back to the full destination. */
     decoded = decodeNavHandlePath(path.slice(NAVH.length + 1));
-  } else {
-    if (!isEnginePath(path)) return null;
+  } else if (isEnginePath(path)) {
     decoded = decodePath(path);
+  } else {
+    decoded = null;
+  }
+  /* #258: anubis >= 1.26 emits redir as the absolute challenge-page
+     location whenever the page URL does not start with the
+     deployment's public URL - through the engine that is an
+     engine-origin URL whose path is the page-authored return path
+     ("/" on a root-page challenge, the live startpage case), not a
+     decodable route. Unproxied, that same path resolves against the
+     challenge page's own origin; repair it against the frame's
+     virtual home - the requesting client's established context (the
+     post-redirect final destination), else the navh handle the
+     request itself rides. */
+  if (!decoded) {
+    const home = passChallengeHome(homeOrigin, routePath);
+    if (home) {
+      try {
+        const rebuilt = new URL(path + (tailQuery ? "?" + tailQuery : ""), home);
+        if (rebuilt.origin === new URL(home).origin) {
+          const out258 = new URL(dest);
+          out258.searchParams.set("redir", rebuilt.href);
+          return out258.href;
+        }
+      } catch {
+        /* an unbuildable pair falls through to the honest null */
+      }
+    }
   }
   if (!decoded || !(decoded.startsWith("http://") || decoded.startsWith("https://"))) return null;
   const out = new URL(dest);

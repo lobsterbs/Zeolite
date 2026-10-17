@@ -1606,7 +1606,15 @@ export function handleFetch(e: FetchEvent): void {
          ordinary pipeline. The CHALLENGE event is the log line hosts
          see when this fires. */
       if (isPassChallenge(target)) {
-        const fixed = passChallengeRedirFixed(target, self.location.origin);
+        /* #258: the challenge page's virtual home. The frame's
+           established context names the post-redirect final
+           destination - the origin an unproxied page would have
+           echoed into redir; the request's own route path backs
+           the navh-handle fallback. */
+        const homeCtx = contextOf(VCTX, e.clientId);
+        const homeOrigin =
+          homeCtx && /^https?:/i.test(homeCtx.targetOrigin) ? homeCtx.targetOrigin : null;
+        const fixed = passChallengeRedirFixed(target, self.location.origin, homeOrigin, url.pathname);
         if (fixed && fixed !== target) {
           const ctid = DIAG.trace();
           DIAG.emit({
