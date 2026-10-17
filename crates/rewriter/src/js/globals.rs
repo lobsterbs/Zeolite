@@ -197,8 +197,31 @@ impl Walker<'_, '_> {
         ];
         let b = self.src.as_bytes();
         let mut i = span.end as usize;
-        while i < b.len() && matches!(b[i], b' ' | 0x09 | 0x0a | 0x0d) {
-            i += 1;
+        loop {
+            match b.get(i) {
+                Some(b' ') | Some(0x09) | Some(0x0a) | Some(0x0d) => i += 1,
+                /* #240: a comment between the member and the
+                operator hides the write from a whitespace-only
+                peek. A parsed body has no unterminated comment;
+                an unclosed one falls back to "write", the safe
+                direction that keeps the member native. */
+                Some(b'/') if b.get(i + 1) == Some(&b'*') => {
+                    match b[i + 2..]
+                        .windows(2)
+                        .position(|w| w[0] == b'*' && w[1] == b'/')
+                    {
+                        Some(k) => i += k + 4,
+                        None => return true,
+                    }
+                }
+                Some(b'/') if b.get(i + 1) == Some(&b'/') => {
+                    match b[i + 2..].iter().position(|c| *c == b'\n') {
+                        Some(k) => i += k + 2,
+                        None => return true,
+                    }
+                }
+                _ => break,
+            }
         }
         // Postfix ++/--: an update target.
         if matches!(b.get(i), Some(b'+') | Some(b'-')) && b.get(i) == b.get(i + 1) {
@@ -221,7 +244,13 @@ impl Walker<'_, '_> {
             // i points AT the "delete" run: the word boundary is the
             // byte BEFORE it, and a head that IS the word deletes too.
             Some(i) => {
-                trimmed.ends_with("delete") && (i == 0 || !is_ident_byte(trimmed.as_bytes()[i - 1]))
+                /* #242: a property-access tail (.delete) is not
+                the keyword; only a real boundary before the
+                word deletes. */
+                trimmed.ends_with("delete")
+                    && (i == 0
+                        || (!is_ident_byte(trimmed.as_bytes()[i - 1])
+                            && trimmed.as_bytes()[i - 1] != b'.'))
             }
         }
     }
@@ -279,6 +308,30 @@ mod tests {
         // A property chain on the read half of the assignment still
         // renames the read: the proxy receives the href set.
         assert_eq!(rw("location.href = '/x';"), "__zl.href = '/x';");
+    }
+
+    #[test]
+    fn comment_gap_before_assignment_stays_native() {
+        // #240: the write peek must skip comments.
+        assert_eq!(
+            rw("window.location /* c */ = '/x';"),
+            "window.location /* c */ = '/x';"
+        );
+        assert_eq!(
+            rw("window.location // c\n= '/x';"),
+            "window.location // c\n= '/x';"
+        );
+        // a comment after the member does not block a real read.
+        assert_eq!(
+            rw("var p = window.location /* c */.pathname;"),
+            "var p = __zl /* c */.pathname;"
+        );
+    }
+
+    #[test]
+    fn property_delete_tail_is_not_the_keyword() {
+        // #242: ".delete" is a property access, not the operator.
+        assert_eq!(rw("o.delete\nwindow.location.href"), "o.delete\n__zl.href");
     }
 
     #[test]

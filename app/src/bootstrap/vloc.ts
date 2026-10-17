@@ -165,8 +165,18 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
     }
     if (!/^https?:$/.test(u.protocol)) return null;
     /* an absolute input naming another origin is not this page's
-       path: null, the caller passes through natively */
-    if (/^[a-z][a-z0-9+.-]*:/i.test(s) && u.origin !== origin) return null;
+       path: null, the caller passes through natively. #239: the
+       scheme test runs on the whitespace-stripped text (the URL
+       parser strips it too) and a protocol-relative tail is an
+       absolute input, so no cross-origin resolution slips through
+       as a same-origin path. */
+    const lead = s.replace(/^[\u0000-\u0020]+/, "");
+    if (
+      (/^[a-z][a-z0-9+.-]*:/i.test(lead) || lead.startsWith("//")) &&
+      u.origin !== origin
+    ) {
+      return null;
+    }
     return u.pathname + u.search + u.hash;
   };
 

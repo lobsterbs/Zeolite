@@ -187,6 +187,23 @@ describe("applyVloc (#236)", () => {
     expect(zl(w).pathname).toBe("/spa/one");
   });
 
+  it("passes cross-origin protocol-relative inputs through natively (#239)", () => {
+    const { w, calls } = makeWin(ENGINE + ENTRY);
+    applyVloc(w, "/real");
+    (w.history as { pushState(s: unknown, t: string, u?: string | null): void })
+      .pushState(1, "", "//evil.com/x?a=1");
+    expect(calls[0]).toBe("push //evil.com/x?a=1");
+    expect(zl(w).pathname).toBe("/real");
+  });
+
+  it("passes whitespace-prefixed cross-origin URLs through natively (#239)", () => {
+    const { w, state } = makeWin(ENGINE + ENTRY);
+    applyVloc(w, "/real");
+    zl(w).assign("  https://evil.com/x");
+    expect(state.href).toBe("https://evil.com/x");
+    expect(zl(w).href).toBe(ENGINE + "/real");
+  });
+
   it("is idempotent: a second run keeps the first view", () => {
     const { w } = makeWin(ENGINE + ENTRY);
     applyVloc(w, "/one");

@@ -683,9 +683,16 @@ impl Rewriter {
                             Some(e)
                         }
                     } else if is_event_attr(&lower) && self.cfg.rewrite_js_literals {
-                        Some(crate::js::antiframe(&crate::js::rewrite_inline(&v, &|u| {
+                        let neutral = crate::js::antiframe(&crate::js::rewrite_inline(&v, &|u| {
                             self.enc_literal(u)
-                        })))
+                        }));
+                        // #241: handlers read the same virtual
+                        // location as script bodies.
+                        Some(if self.cfg.rewrite_globals {
+                            crate::js::globals::rewrite_globals(&neutral)
+                        } else {
+                            neutral
+                        })
                     } else {
                         None
                     };
