@@ -130,8 +130,13 @@ impl StreamBudget {
     /// n queued bytes reached their socket: hand them back.
     fn discharge(&self, n: usize) {
         let n = n as u64;
-        self.queued.fetch_sub(n, Ordering::Relaxed);
-        self.conn.fetch_sub(n, Ordering::Relaxed);
+        // #350: clamped, never wrapping: a discharge racing a settle
+        // (close_stream on one worker while a finished write_all has
+        // not run discharge yet on another) used to wrap the
+        // counters, after which charge() refused every DATA until
+        // restart.
+        sub_clamped(&self.queued, n);
+        sub_clamped(&self.conn, n);
         self.consumed.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -153,7 +158,26 @@ impl StreamBudget {
     fn settle(&self) {
         let left = self.queued.swap(0, Ordering::Relaxed);
         if left > 0 {
-            self.conn.fetch_sub(left, Ordering::Relaxed);
+            // #350: clamped for the same discharge/settle race.
+            sub_clamped(&self.conn, left);
+        }
+    }
+}
+
+/// #350: subtract n, clamped at zero. A plain fetch_sub wraps on the
+/// discharge-after-settle race and permanently wedges the budget;
+/// the clamp turns the narrow race into a transient accounting
+/// wobble that the next charge/discharge corrects.
+fn sub_clamped(v: &AtomicU64, n: u64) {
+    let mut cur = v.load(Ordering::Relaxed);
+    loop {
+        if cur == 0 {
+            return;
+        }
+        let next = cur - n.min(cur);
+        match v.compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(actual) => cur = actual,
         }
     }
 }
@@ -161,6 +185,15 @@ impl StreamBudget {
 /// Per-stream queued-byte cap and the server-wide queue cap (#183).
 const STREAM_QUEUE_BYTES: u64 = 1024 * 1024;
 const SERVER_QUEUE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// #352: cap on concurrently open relay streams server-wide. Every
+/// stream holds exactly one socket, so the per-connection limits
+/// alone (defaults: 256 conns x 256 streams = 65,536 sockets) could
+/// outrun the process file-descriptor table and take accept() down
+/// for every client, not only the abuser. 4096 sits under typical
+/// container fd limits; the refusal reuses the Throttled close, the
+/// same signal the per-connection cap sends.
+const MAX_OPEN_STREAMS: usize = 4096;
 
 /// Grace window for existing streams once max_conn_duration is hit:
 /// they finish on their own; past it the connection closes Throttled
@@ -765,6 +798,8 @@ pub struct Shared {
     pub per_ip: Mutex<std::collections::HashMap<std::net::IpAddr, usize>>,
     /// #183: bytes queued in stream input channels server-wide.
     pub server_queued: Arc<AtomicU64>,
+    /// #352: relay streams open server-wide (each holds one socket).
+    pub live_streams: AtomicUsize,
     /// #198: failed-auth accounting per peer IP.
     pub auth_penalty: Mutex<std::collections::HashMap<std::net::IpAddr, AuthPenalty>>,
 }
@@ -783,8 +818,39 @@ impl Shared {
             password,
             per_ip: Mutex::new(std::collections::HashMap::new()),
             server_queued: Arc::new(AtomicU64::new(0)),
+            live_streams: AtomicUsize::new(0),
             auth_penalty: Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// #352: reserve one server-wide stream slot; false at the
+    /// cap. fetch_add plus rollback instead of a CAS loop: a racing
+    /// release can make one reserve refuse early, which a cap is
+    /// allowed to do.
+    pub fn reserve_stream_slot(&self) -> bool {
+        let prev = self.live_streams.fetch_add(1, Ordering::Relaxed);
+        if prev >= MAX_OPEN_STREAMS {
+            self.live_streams.fetch_sub(1, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    /// #352: release one server-wide stream slot, clamped at zero: a
+    /// stray release must not wrap the counter into the cap.
+    pub fn release_stream_slot(&self) {
+        let mut cur = self.live_streams.load(Ordering::Relaxed);
+        while cur > 0 {
+            match self.live_streams.compare_exchange_weak(
+                cur,
+                cur - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => cur = actual,
+            }
+        }
     }
 
     fn auth_required(&self) -> bool {
@@ -887,9 +953,13 @@ fn reserve_slot(sh: &Arc<Shared>, ip: &std::net::IpAddr) -> bool {
 /// trusted reverse-proxy hops (TRUSTED_PROXY_HOPS > 0). Proxies
 /// append left to right, so with N trusted hops the client is the
 /// (len - N)th entry; entries in front of it were client-supplied
-/// and are discarded. None = fall back to the socket peer. Only used
-/// for per-IP accounting, never for auth.
+/// and are discarded. None = fall back to the socket peer. Used for
+/// per-IP connection accounting only; the auth penalty box is keyed
+/// on the socket peer, which no XFF entry can choose (#343).
 fn trusted_forwarded_ip(headers: &HeaderMap, hops: usize) -> Option<std::net::IpAddr> {
+    // #343: never feed this into the auth penalty paths; a spoofed
+    // entry at the trusted depth would let a client pick its own
+    // penalty bucket or box another IP.
     let xff = headers.get("x-forwarded-for")?.to_str().ok()?;
     let parts: Vec<&str> = xff.split(',').map(str::trim).collect();
     if hops == 0 || parts.len() < hops {
@@ -1034,6 +1104,10 @@ pub async fn wisp_handler(
     } else {
         peer.ip()
     };
+    // #343: the auth penalty box keys on the socket peer, which the
+    // client cannot choose; the forwarded value stays on per-IP
+    // connection accounting only.
+    let peer_ip = peer.ip();
     if sh.cfg.max_connections_per_ip > 0 {
         let n = sh
             .per_ip
@@ -1085,7 +1159,7 @@ pub async fn wisp_handler(
                 return;
             }
             let _guard = ConnGuard(sh.clone(), Some(ip));
-            wisp_session(socket, v2, sh, Some(ip)).await;
+            wisp_session(socket, v2, sh, peer_ip).await;
             tracing::info!("wisp connection closed");
         })
 }
@@ -1195,9 +1269,12 @@ impl Session {
     fn reap_finished(&mut self) {
         // #183: a finished relay never discharges the rest of its
         // queue; settle here so the server-wide count stays honest.
+        let shared = self.shared.clone();
         self.streams.retain(|_, e| {
             if e.task.is_finished() {
                 e.budget.settle();
+                // #352: the finished relay releases its slot.
+                shared.release_stream_slot();
                 false
             } else {
                 true
@@ -1212,6 +1289,8 @@ impl Session {
             Some(e) => {
                 // #183: hand the queued bytes back with the task.
                 e.budget.settle();
+                // #352: the removed entry releases its slot.
+                self.shared.release_stream_slot();
                 e.task.abort();
                 tracing::info!(stream_id, kind = ?e.kind, "stream closed");
                 true
@@ -1255,14 +1334,14 @@ async fn wisp_session(
     socket: WebSocket,
     v2: bool,
     shared: Arc<Shared>,
-    ip: Option<std::net::IpAddr>,
+    // #343: socket peer, not the forwarded IP: auth accounting must
+    // key on an address the client cannot choose.
+    peer_ip: std::net::IpAddr,
 ) {
     // #198: a boxed IP does not even start handshake work.
-    if let Some(peer) = &ip {
-        if shared.auth_refused(peer) {
-            tracing::warn!(%peer, "wisp session refused: auth penalty active");
-            return;
-        }
+    if shared.auth_refused(&peer_ip) {
+        tracing::warn!(%peer_ip, "wisp session refused: auth penalty active");
+        return;
     }
     let (mut ws_sink, mut ws_stream) = socket.split();
     let (ws_tx, mut ws_rx) = mpsc::channel::<Message>(128);
@@ -1328,9 +1407,7 @@ async fn wisp_session(
             AuthState::Reject(reason) => {
                 let _ = send_packet(&ws_tx, &wisp_core::handshake_reject(reason)).await;
                 tracing::warn!(?reason, "v1 connection rejected: auth required");
-                if let Some(peer) = &ip {
-                    shared.auth_fail(peer);
-                }
+                shared.auth_fail(&peer_ip);
                 return;
             }
             AuthState::NotRequired | AuthState::Ok => {}
@@ -1446,9 +1523,7 @@ async fn wisp_session(
                                 let _ =
                                     send_packet(&ws_tx, &wisp_core::handshake_reject(reason)).await;
                                 tracing::warn!(?reason, "handshake rejected: auth");
-                                if let Some(peer) = &ip {
-                                    shared.auth_fail(peer);
-                                }
+                                shared.auth_fail(&peer_ip);
                                 return;
                             }
                             AuthState::NotRequired | AuthState::Ok => {
@@ -1462,9 +1537,7 @@ async fn wisp_session(
                     handshake_done = true;
                     // #198: a completed handshake clears the peer's
                     // failed-auth accounting.
-                    if let Some(peer) = &ip {
-                        shared.auth_ok(peer);
-                    }
+                    shared.auth_ok(&peer_ip);
                     tracing::info!(version = ?handshake.version(), "handshake complete");
                 }
                 Ok(None) => {
@@ -1481,17 +1554,13 @@ async fn wisp_session(
                         )
                         .await;
                         tracing::warn!("handshake rejected: auth required, none offered");
-                        if let Some(peer) = &ip {
-                            shared.auth_fail(peer);
-                        }
+                        shared.auth_fail(&peer_ip);
                         return;
                     }
                     handshake_done = true;
                     // #198: a completed handshake clears the peer's
                     // failed-auth accounting.
-                    if let Some(peer) = &ip {
-                        shared.auth_ok(peer);
-                    }
+                    shared.auth_ok(&peer_ip);
                     tracing::info!(version = ?handshake.version(), "handshake complete");
                 }
                 Err(reason) => {
@@ -1558,6 +1627,24 @@ async fn wisp_session(
                         stream_id,
                         throttled,
                         "resource limit: max streams per connection"
+                    );
+                    let _ = send_packet(
+                        &ws_tx,
+                        &Packet::Close {
+                            stream_id,
+                            reason: CloseReason::Throttled,
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+                // #352: server-wide stream cap: one slot per relay.
+                if !shared.reserve_stream_slot() {
+                    let throttled = shared.throttled_streams.fetch_add(1, Ordering::Relaxed) + 1;
+                    tracing::warn!(
+                        stream_id,
+                        throttled,
+                        "resource limit: max open streams server-wide"
                     );
                     let _ = send_packet(
                         &ws_tx,
@@ -1662,6 +1749,8 @@ async fn wisp_session(
     for (_, e) in sess.streams.drain() {
         // #183: settle the budget before dropping the entry.
         e.budget.settle();
+        // #352: release the stream slot with the entry.
+        shared.release_stream_slot();
         e.task.abort();
     }
 }
@@ -1736,7 +1825,6 @@ async fn drain_until_credited(
 async fn connect_with_drain<T, F>(
     ws_tx: &WsTx,
     stream_id: u32,
-    budget: &StreamBudget,
     input_rx: &mut mpsc::Receiver<Vec<u8>>,
     fut: F,
 ) -> Option<Result<(T, std::collections::VecDeque<Vec<u8>>), ConnectFailure>>
@@ -1751,9 +1839,12 @@ where
             r = &mut fut => return Some(r.map(|v| (v, buffered))),
             m = input_rx.recv() => match m {
                 Some(bytes) => {
-                    // #183: consumed from the queue the moment the
-                    // relay takes it over.
-                    budget.discharge(bytes.len());
+                    // #340: keep the charge while the bytes sit in
+                    // the pre-connect buffer: it is discharged at the
+                    // flush write, and every failure path (close,
+                    // reap, teardown) settles the budget, so the
+                    // server-wide cap counts these bytes too instead
+                    // of up to 128 KiB per stream held outside it.
                     buffered_bytes += bytes.len();
                     if buffered_bytes > 128 * 1024 {
                         let _ = send_packet(
@@ -1790,6 +1881,10 @@ async fn tcp_relay_loop(
     la: &Mutex<Instant>,
 ) {
     let mut buf = vec![0u8; 16 * 1024];
+    // #351: EOF (upstream Ok(0)) closes Voluntary; every upstream
+    // error exit closes NetworkError so the client can tell a reset
+    // from a normal end.
+    let mut clean = true;
     loop {
         // Out of credits: stop reading the socket until the client
         // grants a new window with CONTINUE (real backpressure).
@@ -1818,7 +1913,12 @@ async fn tcp_relay_loop(
         }
         tokio::select! {
             r = rd.read(&mut buf) => match r {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(_) => {
+                    // #351: upstream read error, not EOF.
+                    clean = false;
+                    break;
+                }
                 Ok(n) => {
                     let data = Packet::Data {
                         stream_id,
@@ -1863,7 +1963,11 @@ async fn tcp_relay_loop(
                                 .await;
                             }
                         }
-                        _ => break,
+                        _ => {
+                            // #351: upstream write failure, not EOF.
+                            clean = false;
+                            break;
+                        }
                     }
                 }
                 None => break,
@@ -1874,11 +1978,16 @@ async fn tcp_relay_loop(
         ws_tx,
         &Packet::Close {
             stream_id,
-            reason: CloseReason::Voluntary,
+            // #351: Voluntary is EOF only.
+            reason: if clean {
+                CloseReason::Voluntary
+            } else {
+                CloseReason::NetworkError
+            },
         },
     )
     .await;
-    tracing::info!(stream_id, "tcp relay ended");
+    tracing::info!(stream_id, clean, "tcp relay ended");
 }
 
 async fn spawn_tcp_relay(
@@ -1909,7 +2018,6 @@ async fn spawn_tcp_relay(
         let (rd, wr) = match connect_with_drain(
             &ws_tx,
             stream_id,
-            &task_budget,
             &mut input_rx,
             connect_validated(&dest, &host, port, cfg.connect_timeout),
         )
@@ -1953,13 +2061,19 @@ async fn spawn_tcp_relay(
                         flush_failed = true;
                         break;
                     }
+                    // #340: the pre-connect charge is discharged at
+                    // the socket write, not when the drain buffered
+                    // it.
+                    task_budget.discharge(chunk.len());
                 }
                 if flush_failed {
                     let _ = send_packet(
                         &ws_tx,
                         &Packet::Close {
                             stream_id,
-                            reason: CloseReason::Voluntary,
+                            // #351: the upstream socket refused the
+                            // pre-connect flush: an error, not EOF.
+                            reason: CloseReason::NetworkError,
                         },
                     )
                     .await;
@@ -2822,6 +2936,45 @@ mod tests {
         assert_eq!(b.queued.load(Ordering::Relaxed), STREAM_QUEUE_BYTES);
         b.settle();
         assert_eq!(conn.load(Ordering::Relaxed), 0);
+    }
+
+    /// #350: a discharge racing a settle used to wrap the counters
+    /// and permanently wedge charge(); sub_clamped keeps the budget
+    /// usable after the race.
+    #[test]
+    fn budget_never_wraps_on_double_discharge() {
+        let conn = Arc::new(AtomicU64::new(0));
+        let b = StreamBudget::new(conn.clone());
+        assert!(b.charge(100));
+        b.settle();
+        // The stray discharge after settle is the race window.
+        b.discharge(100);
+        assert_eq!(b.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(conn.load(Ordering::Relaxed), 0);
+        assert!(b.charge(64), "budget must still be usable after the race");
+        b.settle();
+        assert_eq!(conn.load(Ordering::Relaxed), 0);
+    }
+
+    /// #352: the server-wide stream-slot cap reserves, refuses at
+    /// MAX_OPEN_STREAMS and releases without wrapping.
+    #[test]
+    fn stream_slot_cap_reserves_and_releases() {
+        let sh = Shared::new(Config::default());
+        for _ in 0..MAX_OPEN_STREAMS {
+            assert!(sh.reserve_stream_slot());
+        }
+        assert!(
+            !sh.reserve_stream_slot(),
+            "server-wide stream cap must refuse"
+        );
+        sh.release_stream_slot();
+        assert!(sh.reserve_stream_slot());
+        // Clamp: releases beyond the live count must not wrap.
+        for _ in 0..3 {
+            sh.release_stream_slot();
+        }
+        assert_eq!(sh.live_streams.load(Ordering::SeqCst), MAX_OPEN_STREAMS - 3);
     }
 
     /// #196: a window grant is owed once half the initial buffer was
