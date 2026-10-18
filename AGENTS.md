@@ -39,7 +39,7 @@ honest no-listener errors. This pass adds runtime.alarms (in-memory timers in th
 - `app/src/control.ts` â control plane: zl: message dispatch, sender gates, session recording state; `messageListener` keeps the message event alive for the whole handler and answers a failed dispatch with a structured error instead of an unhandled rejection (#250).
 - `app/src/extensions/control.ts` â extension control facade: extension message dispatch + content-script bridge handler.
 - `app/src/transform.ts` â response transformation: wasm rewriter lifecycle, worker prelude, streaming HTML/CSS rewrite pipelines (issue #86).
-- `app/src/transport.ts` â upstream transport seam: wisp/libcurl client lifecycle behind the Transport interface (issue #84).
+- `app/src/transport.ts` â upstream transport seam: wisp/libcurl client lifecycle behind the Transport interface (issue #84); the cooldown relay branch carries its own first-byte deadline: an embedder that never answers aborts with zl:relayCancel (WispStallError) instead of hanging (#261).
 - `app/src/extensions/` â WebExtension compatibility runtime.
 - `app/src/diag.ts` â bounded diagnostics.
 - `app/src/rules.ts` - interception rules engine (block/allow/rewrite/modify, compiled from /rules.kdl).
