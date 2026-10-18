@@ -97,3 +97,4 @@ Use **Implemented**, **Partial**, **Experimental**, or **Planned**. Never descri
 ## Versioning
 Current release: **3.0 Diamond** (`3.0.0`). See `docs/versioning.md` before changing version identifiers.
 
+- 2026-10-18 bootstrap compat wave (#268, #269, #273, #274, #275, #284): bootstrap relabels and removes EventListener-object listeners, BroadcastChannel/Worker/SharedWorker are subclassed so instances keep native instanceof/new-only semantics, scoped Storage forwards named props to the prefixed backing store (key(i) strips the prefix), and the EventSource shim keeps a removable listener registry with once/abort support. Bootstrap budget raised to 29696 (measured 29383).
