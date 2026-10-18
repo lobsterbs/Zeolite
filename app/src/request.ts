@@ -3048,7 +3048,12 @@ export function derefSelfRoute(target: string, engineOrigin: string): string {
   } catch {
     return target;
   }
-  if (du.origin !== u.origin) return target;
+  /* Cross-origin decode is the AI-overview asset class: the rewriter
+     minted this route for an asset on a sibling host (gstatic et al)
+     and page JS rebuilt it as <page origin> + location.pathname. The
+     token is MAC-authenticated, so dereferencing to the minted
+     destination adds no capability: the page could fetch the same
+     route on the engine origin directly. */
   return du.origin + du.pathname + (u.search || du.search);
 }
 

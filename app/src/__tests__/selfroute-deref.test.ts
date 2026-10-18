@@ -43,11 +43,14 @@ describe("derefSelfRoute (#112 follow-up)", () => {
     expect(derefSelfRoute(t, ENGINE)).toBe(t);
   });
 
-  it("never dereferences across origins", () => {
+  /* AI-overview asset class: the route was minted for an asset on a
+     sibling host, page JS rebuilt it under the page origin. The
+     MAC-authenticated token decodes to its minted destination. */
+  it("dereferences across origins when the token decodes", () => {
     setRouteKey(KEY);
-    const route = encodeDest("https://example.com/page");
-    const t = "https://www.google.com" + route;
-    expect(derefSelfRoute(t, ENGINE)).toBe(t);
+    const route = encodeDest("https://www.gstatic.com/asset.css");
+    expect(derefSelfRoute("https://www.google.com" + route + "?x=1", ENGINE))
+      .toBe("https://www.gstatic.com/asset.css?x=1");
   });
 
   it("leaves engine-origin URLs, non-http schemes and garbage alone", () => {
