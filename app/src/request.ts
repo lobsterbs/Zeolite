@@ -1777,7 +1777,11 @@ export function handleFetch(e: FetchEvent): void {
            report the interception itself, before any cache or upstream
            work. */
         if (e.request.mode === "navigate") WEBNAV.beforeNavigate(target);
-        /* Shared webRequest details for every hook below. */
+        /* Shared webRequest details for every hook below. #288: the
+           response-stage hooks (headersReceived/completed/errorOccurred)
+           must describe the URL the response actually came from, not
+           the pre-redirect target; lastHopUrl tracks the final hop for
+           the error path outside the try. */
         const wrDetails = {
           requestId: traceId,
           url: target,
@@ -1785,6 +1789,7 @@ export function handleFetch(e: FetchEvent): void {
           type: wrType(dest),
           timeStamp: Date.now(),
         };
+        let lastHopUrl = target;
         /* webRequest.onBeforeRequest: a blocking listener can cancel the
            request before cache or transport. */
         if (WEBREQ.beforeRequest(wrDetails)) {
@@ -2135,10 +2140,26 @@ export function handleFetch(e: FetchEvent): void {
                cookies from cross-site logins under sameSite approx. */
             navigation: e.request.mode === "navigate" || dest === "document",
           };
+          /* Issue #276: Request.credentials governs the virtual jar.
+             omit sends and stores nothing; include is unconditional;
+             same-origin admits only when the jar target shares origin
+             with the initiator (engine-initiated requests have no
+             initiator and stay admitted). */
+          const creds = e.request.credentials;
+          const credsEligible = (destUrl: string): boolean => {
+            if (creds === "include") return true;
+            if (creds === "omit") return false;
+            if (!reqCtx.initiator) return true;
+            try {
+              return new URL(destUrl).origin === new URL(reqCtx.initiator).origin;
+            } catch {
+              return true;
+            }
+          };
           /* 1.4 Boride: the jar is the authoritative Cookie source for
              engine-initiated requests, written last so rules and
              interception cannot smuggle another origin's cookies. */
-          const jarCookie = cookieHeaderFor(target, reqCtx);
+          const jarCookie = credsEligible(target) ? cookieHeaderFor(target, reqCtx) : "";
           if (jarCookie) sendHeaders.set("cookie", jarCookie);
           else sendHeaders.delete("cookie");
           /* 2.2 Arsenide: the transport fetch adapter ignores the redirect
@@ -2192,7 +2213,7 @@ export function handleFetch(e: FetchEvent): void {
                #35: any admission also pushes the jar view to the
                requesting client's docCookie port (see the main capture
                below). */
-            const hopAdmitted = applySetCookie(hopUrl, jarHeaders(resp));
+            const hopAdmitted = credsEligible(hopUrl) ? applySetCookie(hopUrl, jarHeaders(resp)) : [];
             if (hopAdmitted.some((r) => r.stored || r.deleted)) void pushDocCookieView(e.clientId);
             const loc = resp.headers.get("location");
             if (!loc) break; /* 3xx without Location: surface as-is */
@@ -2230,11 +2251,12 @@ export function handleFetch(e: FetchEvent): void {
             }
             /* The jar is per-origin: cookies for the hop target, not the
                original one. */
-            const hopCookie = cookieHeaderFor(next, reqCtx);
+            const hopCookie = credsEligible(next) ? cookieHeaderFor(next, reqCtx) : "";
             if (hopCookie) sendHeaders.set("cookie", hopCookie);
             else sendHeaders.delete("cookie");
             DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
             hopUrl = next;
+            lastHopUrl = next;
             /* #201: the hop's body is never read; cancel it so the
                upstream reader and the vendored transport stop
                buffering a response nobody will consume. */
@@ -2385,6 +2407,12 @@ export function handleFetch(e: FetchEvent): void {
              fallback. */
           const finalUrl = typeof resp.url === "string" ? resp.url : "";
           const finalDest = hopUrl !== target ? hopUrl : finalUrl && finalUrl !== target ? finalUrl : undefined;
+          /* #288: webRequest response/completion events carry the URL
+             of the hop that produced this response; an extension's
+             host permissions are then evaluated against the REAL
+             response URL, so a redirect from A to B can no longer hand
+             B's headers/status to an extension only permitted for A. */
+          const wrDetailsFinal = { ...wrDetails, url: finalDest ?? hopUrl };
           if (finalDest) {
             DIAG.stage(traceId, "REDIRECTED", { url: target, message: "final destination " + finalDest });
             /* #110: the hop chain is also the authority on where the
@@ -2414,7 +2442,7 @@ export function handleFetch(e: FetchEvent): void {
              hostile-header surgery strips it from the page view. A 3xx
              that surfaced (hop cap, unresolvable or unreplayable hop)
              still lands here, captured against its own hop URL. */
-          const admitted = applySetCookie(finalDest ?? hopUrl, jarHeaders(resp));
+          const admitted = credsEligible(finalDest ?? hopUrl) ? applySetCookie(finalDest ?? hopUrl, jarHeaders(resp)) : [];
           /* #35 (browser E2E): the page's document.cookie getter is
              synchronous, so the bootstrap keeps an optimistic copy; a
              Set-Cookie admitted on this fetch/XHR response was invisible
@@ -2447,7 +2475,7 @@ export function handleFetch(e: FetchEvent): void {
           applyEngineCors(headers, self.location.origin, e.request.credentials);
           /* webRequest.onHeadersReceived: blocking listeners may replace
              the response header set the page will see. */
-          const rHeaders = WEBREQ.headersReceived(wrDetails, resp.status, headers);
+          const rHeaders = WEBREQ.headersReceived(wrDetailsFinal, resp.status, headers);
           const outHeaders = rHeaders ?? headers;
           outHeaders.set("x-zl-proxy", "1");
           /* Finding 1: a 3xx that reached the page (hop cap reached, no
@@ -2536,7 +2564,7 @@ export function handleFetch(e: FetchEvent): void {
           if (rIc.body && !isHtml(resp) && !isCss(resp)) {
             const clen = Number(resp.headers.get("content-length") ?? -1);
             if (clen >= 0 && clen <= BODY_LIMIT) {
-              WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+              WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
               return new Response(rIc.body(await resp.text()), {
                 status: resp.status,
                 headers: outHeaders,
@@ -2587,7 +2615,7 @@ export function handleFetch(e: FetchEvent): void {
           const sct = resp.headers.get("content-type") ?? "";
           if (needsScriptBodyMask(dest, e.request.destination, sct)) {
             recordMaskedScript(target, e.request.referrer, target);
-            WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             return maskedScriptResponse(resp.status, sct);
           }
           if ((isHtml(resp) || (respCt === "" && DOC_DESTS.has(dest) && resp.body)) && resp.body) {
@@ -2603,7 +2631,7 @@ export function handleFetch(e: FetchEvent): void {
                  the document stream (and with it the navigation) is
                  done. */
               WEBNAV.completed(target);
-              WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+              WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             };
             if (respCt !== "") {
               /* Issue B: the rewritten body is re-encoded UTF-8; the
@@ -2653,7 +2681,7 @@ export function handleFetch(e: FetchEvent): void {
             return new Response(
               cssRewriteStream(resp.body, finalDest ?? target, respCt, () => {
                 DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
-                WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+                WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
               }),
               {
                 status: resp.status,
@@ -2687,7 +2715,7 @@ export function handleFetch(e: FetchEvent): void {
               (await workerPrelude()) +
               "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n" +
               (wFp ? "\n" + wFp : "");
-            WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             /* #35: the page cache holds the composed copy (specifiers
                rewritten, prelude prepended); a stored raw body would
                serve a second visit unrewritten. */
@@ -2747,7 +2775,7 @@ export function handleFetch(e: FetchEvent): void {
                 }
               },
             });
-            WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             /* #35: clone() tees the composed stream, so the browser
                keeps its streaming path while the cache consumes the
                other fork. */
@@ -2790,7 +2818,7 @@ export function handleFetch(e: FetchEvent): void {
                 url: target,
               });
             }
-            WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+            WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             /* Issue B: the decoded-with-upstream-charset body is
                re-encoded UTF-8 by the string Response constructor;
                the served header must say so. */
@@ -2800,7 +2828,7 @@ export function handleFetch(e: FetchEvent): void {
               void pageCacheStore(e.request, out.clone(), false, finalDest);
             return out;
           }
-          WEBREQ.completed({ ...wrDetails, statusCode: resp.status });
+          WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
           /* #96: surfaceNotModified above - a SW-served 304 cannot
              complete a page fetch, so the revalidation result is
              converted to a marked 200. */
@@ -2846,7 +2874,7 @@ export function handleFetch(e: FetchEvent): void {
             technicalReason: String(err),
             url: target,
           });
-          WEBREQ.errorOccurred({ ...wrDetails, error: String(err) });
+          WEBREQ.errorOccurred({ ...wrDetails, url: lastHopUrl, error: String(err) });
           /* Issue E: no transitRecord - errored, never completed (the
              netLog row carries the failure). */
           netLogPush({
@@ -3333,4 +3361,5 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
   }
   return out;
 }
+
 
