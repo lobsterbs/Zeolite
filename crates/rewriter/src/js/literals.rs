@@ -32,6 +32,10 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
     let mut last_sig: u8 = b';';
     let mut word = [0u8; MAX_KEYWORD];
     let mut wlen = 0usize;
+    // #345: was the last identifier run a property name (after '.')?
+    // a.in / obj.do are member accesses, never regex-position
+    // keywords.
+    let mut w_member = false;
     while i < b.len() {
         let c = b[i];
         // Comments: skip verbatim (never rewrite inside comments).
@@ -61,12 +65,13 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
         // rewriting it injected '/' characters from the engine route
         // that terminated the pattern early and broke the whole
         // script's parse (#122).
-        if c == b'/' && regex_allowed(last_sig, &word[..wlen]) {
+        if c == b'/' && regex_allowed(last_sig, &word[..wlen], w_member) {
             if let Some(close) = find_regex_end(&js[i + 1..]) {
                 out.push_str(&js[i..i + 1 + close + 1]);
                 i += 1 + close + 1;
                 last_sig = b'x'; // a regex literal is a value
                 wlen = 0;
+                w_member = false;
                 continue;
             }
             // No closing '/' before a line break: not a regex. The
@@ -121,6 +126,7 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
                 i += 1 + close + 1;
                 last_sig = b'x'; // a string literal is a value
                 wlen = 0;
+                w_member = false;
                 continue;
             }
         }
@@ -152,6 +158,7 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
                         i = end;
                         last_sig = b'x'; // a string literal is a value
                         wlen = 0;
+                        w_member = false;
                         continue;
                     }
                 }
@@ -159,8 +166,12 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
             if run.len() <= MAX_KEYWORD {
                 word[..run.len()].copy_from_slice(run.as_bytes());
                 wlen = run.len();
+                // #345: last_sig is still the sig BEFORE this run,
+                // so '.' here means property access, not a keyword.
+                w_member = last_sig == b'.';
             } else {
                 wlen = 0; // too long to be a keyword
+                w_member = false;
             }
             last_sig = b'x';
             continue;
@@ -177,6 +188,7 @@ fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool
             _ => {
                 last_sig = c;
                 wlen = 0;
+                w_member = false;
             }
         }
     }
@@ -234,7 +246,7 @@ fn is_bare_specifier(spec: &str) -> bool {
 /// are harmless: the span is copied verbatim, so the worst case is a
 /// missed literal rewrite (the runtime bootstrap catches those at
 /// request time). False negatives corrupt the script.
-fn regex_allowed(last_sig: u8, last_word: &[u8]) -> bool {
+fn regex_allowed(last_sig: u8, last_word: &[u8], word_member: bool) -> bool {
     const KEYWORDS: [&[u8]; 13] = [
         b"return",
         b"typeof",
@@ -250,7 +262,9 @@ fn regex_allowed(last_sig: u8, last_word: &[u8]) -> bool {
         b"throw",
         b"yield",
     ];
-    if KEYWORDS.contains(&last_word) {
+    // #345: an identifier after '.' is a property name (a.in,
+    // obj.do), never one of these keywords.
+    if !word_member && KEYWORDS.contains(&last_word) {
         return true;
     }
     matches!(
@@ -543,6 +557,20 @@ mod tests {
         let js = "a = (/x/.test(s)); b = typeof /y/;";
         let out = rewrite_script(js, &|u| format!("[{}]", u));
         assert_eq!(out, js);
+    }
+
+    #[test]
+    fn member_access_keyword_names_stay_division() {
+        // #345: a.in / obj.do are property accesses, not keywords;
+        // treating them as regex-position keywords swallowed the
+        // rest of the line as a regex body and left URL literals
+        // unrewritten.
+        let js = "x = a.in / 2; u = \"https://cdn.x.com/a.js\"; z = w.do / 3; v = \"https://cdn.y.com/b.js\";";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("[https://cdn.x.com/a.js]"), "{}", out);
+        assert!(out.contains("[https://cdn.y.com/b.js]"), "{}", out);
+        assert!(out.contains("a.in / 2"), "division preserved: {}", out);
+        assert!(out.contains("w.do / 3"), "division preserved: {}", out);
     }
 
     #[test]

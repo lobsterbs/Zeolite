@@ -457,13 +457,22 @@ impl Rewriter {
                     // (whitespace, '/' or '>' after the name): the
                     // string "</scripts" inside a script body never
                     // ends the block.
-                    let Some(ci) = find_ci_terminated(&self.buf, &close) else {
-                        self.trim_drop_raw();
-                        break;
+                    // #339: script raw content has escaped states
+                    // per the HTML tokenizer: "<!--" enters escaped,
+                    // "<script" inside escaped enters double-escaped,
+                    // and a terminated close tag inside double-escaped
+                    // does NOT end the element (only "-->" exits
+                    // back). The plain search closed at the first
+                    // inner </script> of a double-escaped block,
+                    // leaving the tail parsed as markup: literal URLs
+                    // unrewritten, antiframe skipped.
+                    let found = if self.cur_tag == "script" {
+                        find_script_close(&self.buf)
+                    } else {
+                        find_ci_terminated(&self.buf, &close)
+                            .and_then(|ci| self.buf[ci..].find('>').map(|k| (ci, ci + k + 1)))
                     };
-                    // The close tag's '>' (or a partial close: keep it).
-                    let after = self.buf[ci..].find('>').map(|i| ci + i + 1);
-                    let Some(end) = after else {
+                    let Some((ci, end)) = found else {
                         self.trim_drop_raw();
                         break;
                     };
@@ -851,6 +860,55 @@ fn is_event_attr(attr: &str) -> bool {
 /// per HTML's raw-text end-tag rules. A match at the very end of the
 /// input returns None: the terminator may still arrive in a later
 /// chunk, so the caller waits instead of cutting.
+/// #339: locate a script element's close tag per the HTML
+/// tokenizer's escaped states: "<!--" enters script-data-escaped,
+/// "<script" inside escaped enters double-escaped, and a terminated
+/// "</script" inside double-escaped does NOT close the element
+/// (only "-->" exits double-escaped back to escaped, and another
+/// "-->" exits escaped). Byte-exact lowercase markers: a mixed-case
+/// "<Script" inside an escaped block degrades to the plain
+/// first-close search, never a false close of a normal script.
+/// Returns (start of "</script", index just past its '>').
+fn find_script_close(buf: &str) -> Option<(usize, usize)> {
+    let b = buf.as_bytes();
+    let mut i = 0usize;
+    let mut escaped = false;
+    let mut double_escaped = false;
+    while i < b.len() {
+        if !escaped && b[i..].starts_with(b"<!--") {
+            escaped = true;
+            i += 4;
+            continue;
+        }
+        if escaped && !double_escaped && b[i..].starts_with(b"<script") {
+            double_escaped = true;
+            i += 7;
+            continue;
+        }
+        if double_escaped && b[i..].starts_with(b"-->") {
+            double_escaped = false;
+            i += 3;
+            continue;
+        }
+        if escaped && !double_escaped && b[i..].starts_with(b"-->") {
+            escaped = false;
+            i += 3;
+            continue;
+        }
+        if !double_escaped && b[i..].starts_with(b"</script") {
+            let after = i + 8;
+            if after < b.len()
+                && matches!(b[after], b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>')
+            {
+                let end = buf[after..].find('>').map(|k| after + k + 1)?;
+                return Some((i, end));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 fn find_ci_terminated(hay: &str, needle: &str) -> Option<usize> {
     let h = hay.as_bytes();
     let n = needle.as_bytes();
@@ -1319,9 +1377,12 @@ fn format_attr(name: &str, value: &str, quote: Option<char>) -> String {
     // or '"' let a decoded '>' re-open markup (XSS on the engine
     // origin). Quote on any character that can break the tag open,
     // and escape angle brackets on emit.
+    // #342: a decoded '&' re-emitted unquoted changes the DOM value
+    // (a&amp;lt;b re-emitted bare reads back as a<b), so '&' also
+    // forces quoting (the quoted branches re-escape it).
     let needs_quote = value
         .chars()
-        .any(|c| c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | '='));
+        .any(|c| c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | '=' | '&'));
     let quote = match quote {
         Some(q) => Some(q),
         None if needs_quote => Some('"'),
@@ -2621,6 +2682,29 @@ mod tests {
     }
 
     #[test]
+    fn unquoted_entity_value_round_trips() {
+        // #342: title=a&amp;lt;b must re-emit so the DOM value stays
+        // "a&lt;b"; the bare unquoted re-emit turned it into "a<b".
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}",
+            r.process("<p title=a&amp;lt;b>x</p><img src=\"https://t.example/i.png\">"),
+            r.finish()
+        );
+        assert!(
+            out.contains("title=\"a&amp;lt;b\""),
+            "quoted and escaped re-emit: {}",
+            out
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/i.png")),
+            "later markup rewritten: {}",
+            out
+        );
+    }
+
+    #[test]
     fn apostrophe_in_unquoted_attr_does_not_eat_document() {
         // #175: a quote opens a value only right after '='; the
         // apostrophe in an unquoted value must not start a quote hunt
@@ -2746,6 +2830,63 @@ mod tests {
             out
         );
         assert!(out.contains("</scripts"), "string intact: {}", out);
+    }
+
+    #[test]
+    fn double_escaped_script_closes_at_the_real_end() {
+        // #339: per the HTML tokenizer, "<!--" plus a nested
+        // "<script" enters the double-escaped state, where an inner
+        // "</script>" does NOT close the element. The old close
+        // search ended raw there, so everything after it was parsed
+        // as markup: URL literals unrewritten, antiframe skipped.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}",
+            r.process(
+                "<script><!--\ndocument.write('<script>a</script>');\nvar u = \"https://cdn.x.com/a.js\";\nif (top.location != self.location) top.location = location;\n//--></script><img src=\"https://t.example/z.gif\">"
+            ),
+            r.finish()
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://cdn.x.com/a.js")),
+            "literal after the double-escaped close rewritten: {}",
+            out
+        );
+        assert!(out.contains("document.write"), "body intact: {}", out);
+        // The close used must be the OUTER one: the img after the
+        // real close tag is rewritten as markup, not swallowed.
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/z.gif")),
+            "markup after the real close rewritten: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn escaped_comment_script_still_closes_normally() {
+        // #339 control: "<!--" WITHOUT a nested "<script" never
+        // enters double-escaped, so a later "</script>" still
+        // closes (escaped state closes on the close tag).
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = format!(
+            "{}{}",
+            r.process(
+                "<script><!-- guard\nvar u = \"https://cdn.x.com/a.js\";\n//--></script><img src=\"https://t.example/z.gif\">"
+            ),
+            r.finish()
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://cdn.x.com/a.js")),
+            "literal inside the escaped block rewritten: {}",
+            out
+        );
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/z.gif")),
+            "markup after the close rewritten: {}",
+            out
+        );
     }
 
     #[test]
