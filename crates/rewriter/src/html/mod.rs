@@ -21,6 +21,11 @@ pub mod url_attrs;
 use crate::config::RewriteConfig;
 use crate::encode::resolve;
 
+/// #322: while a blocked element is swallowed with no close tag yet,
+/// the retained buffer is capped: an upstream that never sends the
+/// close tag cannot pin the whole rest of the response in memory.
+const DROP_RAW_CAP: usize = 256 * 1024;
+
 /// Tokenizer state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum St {
@@ -92,6 +97,36 @@ impl Rewriter {
     /// Opt-in lazy images (host toggle): see RewriteConfig::lazy_images.
     pub fn set_lazy_images(&mut self) {
         self.cfg.lazy_images = true;
+    }
+
+    /// #322: bound the swallow buffer of a blocked element whose close
+    /// tag has not arrived. The normal raw path must mirror the
+    /// browser's own raw-text buffering (a cap would truncate legit
+    /// large scripts), but a blocked element's content is dropped
+    /// either way: the swallowed prefix is discarded and exactly the
+    /// longest suffix that could still be a prefix of the close
+    /// marker is kept (eat_comment's keep-3 technique, here for the
+    /// element's own close tag), so no close tag can be missed.
+    fn trim_drop_raw(&mut self) {
+        if !self.drop_raw || self.buf.len() <= DROP_RAW_CAP || self.cur_tag.is_empty() {
+            return;
+        }
+        let marker: Vec<u8> = format!("</{}", self.cur_tag)
+            .bytes()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        let bytes = self.buf.as_bytes();
+        let mut keep = 0;
+        for k in 1..=marker.len().min(bytes.len()) {
+            if bytes[bytes.len() - k..].eq_ignore_ascii_case(&marker[..k]) {
+                keep = k;
+            }
+        }
+        let mut cut = bytes.len() - keep;
+        while cut > 0 && !self.buf.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.buf.drain(..cut);
     }
 
     /// Add a script path to inject after <head> opens (Phase 3 hooks).
@@ -423,11 +458,13 @@ impl Rewriter {
                     // string "</scripts" inside a script body never
                     // ends the block.
                     let Some(ci) = find_ci_terminated(&self.buf, &close) else {
+                        self.trim_drop_raw();
                         break;
                     };
                     // The close tag's '>' (or a partial close: keep it).
                     let after = self.buf[ci..].find('>').map(|i| ci + i + 1);
                     let Some(end) = after else {
+                        self.trim_drop_raw();
                         break;
                     };
                     if self.drop_raw {
@@ -2771,5 +2808,48 @@ mod tests {
             "{}",
             c
         );
+    }
+
+    #[test]
+    fn blocked_raw_swallows_close_tagless_body_bounded() {
+        // #322: a blocked element with no close tag must not pin the
+        // whole rest of the response in memory while swallowing it.
+        let c = RewriteConfig {
+            block_hosts: vec!["ads.example.net".into()],
+            ..cfg()
+        };
+        let mut r = Rewriter::new(c);
+        r.set_base("https://example.com/");
+        let mut out = r.process("<script src=\"https://cdn.ads.example.net/x.js\">");
+        out.push_str(&r.process(&"x".repeat(DROP_RAW_CAP * 4)));
+        assert!(
+            r.buf.len() <= 4096,
+            "swallow buffer bounded without a close tag: {}",
+            r.buf.len()
+        );
+        out.push_str(&r.process("</script>after"));
+        out.push_str(&r.finish());
+        assert!(!out.contains("ads.example.net"), "blocked: {}", out);
+        assert!(out.contains("after"), "post-close text survives: {}", out);
+    }
+
+    #[test]
+    fn normal_raw_block_stays_untrimmed() {
+        // #322 guards only the blocked path: a legit large script still
+        // buffers whole until its close tag (browser raw-text parity).
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let big = "var x = 1;".repeat(60000);
+        let _ = r.process("<script>");
+        let _ = r.process(&big);
+        assert!(
+            r.buf.len() >= big.len(),
+            "normal raw buffer untouched: {}",
+            r.buf.len()
+        );
+        let mut out = r.process("</script>done");
+        out.push_str(&r.finish());
+        assert!(out.contains("var x = 1;"), "script body survives");
+        assert!(out.contains("done"));
     }
 }
