@@ -186,3 +186,57 @@ describe("window relay arm (#169: fails closed)", () => {
     delete G.location;
   });
 });
+
+describe("SharedWorker identity scoping (#260)", () => {
+  const setup = (site: string) => {
+    class FakeSharedWorker {
+      port: FakeChannel;
+      constructor(public u: string, public o?: unknown) {
+        this.port = new FakeChannel();
+      }
+    }
+    const G = globalThis as unknown as Record<string, unknown>;
+    const nativeAdd = G.addEventListener;
+    G.addEventListener = () => {};
+    const w: Record<string, unknown> = { SharedWorker: FakeSharedWorker };
+    try {
+      applyRelay(w, site, "https://engine.example/page");
+    } finally {
+      G.addEventListener = nativeAdd;
+    }
+    const seen: Array<{ u: string; o?: unknown }> = [];
+    const S = w.SharedWorker as unknown as new (u: string, o?: unknown) => {
+      u: string;
+      o?: unknown;
+    };
+    const mk = (u: string, o?: unknown) => {
+      const x = new S(u, o);
+      seen.push({ u: x.u, o: x.o });
+      return x;
+    };
+    return { seen, mk };
+  };
+
+  it("scopes the worker name per virtual site, both arg forms, URL untouched", () => {
+    const a = setup("siteA");
+    a.mk("/shared.js", "myname");
+    a.mk("/shared.js", { name: "myname", type: "classic" });
+    a.mk("/shared.js"); /* unnamed */
+    const b = setup("siteB");
+    b.mk("/shared.js", "myname");
+    expect(a.seen.map((x) => x.o)).toEqual([
+      "myname\u0000zl:siteA",
+      { name: "myname\u0000zl:siteA", type: "classic" },
+      { name: "\u0000zl:siteA" },
+    ]);
+    expect(b.seen[0].o).toBe("myname\u0000zl:siteB");
+    expect(b.seen[0].u).toBe("/shared.js"); /* the script URL is never touched */
+  });
+
+  it("same site, same URL and name share one scoped identity", () => {
+    const a = setup("siteA");
+    a.mk("/s.js", "n");
+    a.mk("/s.js", "n");
+    expect(a.seen[0].o).toBe(a.seen[1].o);
+  });
+});
