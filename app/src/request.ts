@@ -53,7 +53,7 @@ import { raceBoot } from "./lifecycle";
 
 import {PROXY_INJECTED_HEADERS, acceptLanguageValue, applyChUa, navigationAccept, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
-import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset } from "./assetbases";
+import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript } from "./assetbases";
 import { applySetCookie, cookieHeaderFor, isPassChallenge, jarHeaders, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
@@ -2387,9 +2387,22 @@ export function handleFetch(e: FetchEvent): void {
              then retry a failed flat-named asset (script, style, or a runtime-built binary) against them. */
           if (resp.status === 200 && (dest === "script" || dest === "style") && initiator)
             recordAssetBase(initiator, target);
+          /* #296: flag-surgery chunk paths (/httpd=1/exm=.../cb=.../m=...) come
+             from page JS mangling its own opaque script token; record the full
+             real URL of every successfully served JS script load (same-origin
+             included) so the miss can be retried against those bases. */
+          if (
+            resp.status === 200 &&
+            dest === "script" &&
+            initiator &&
+            /javascript|ecmascript/i.test(resp.headers.get("content-type") ?? "")
+          )
+            recordScriptUrl(initiator, hopUrl !== target ? hopUrl : target);
           if (resp.status >= 400 && isRecoverableAssetDest(dest)) {
-            const rec = await recoverFlatAsset(initiator ?? "", target, dest, e.request.headers, (u2, init2) =>
-              wispTransport.fetch(u2, init2, traceId));
+            /* #296 first: a flag-shaped script miss is the src-surgery class,
+             whose recovery owns the flag path shape; the flat-asset gate would
+             reject it and log a miss without ever trying the script bases. */
+            let rec = dest === "script" ? await recoverFlagSurgeryScript(initiator ?? "", target, e.request.headers, (u2, init2) => wispTransport.fetch(u2, init2, traceId)) : null;
             if (rec) {
               DIAG.emit({
                 traceId,
@@ -2397,7 +2410,21 @@ export function handleFetch(e: FetchEvent): void {
                 category: "REWRITE",
                 severity: "info",
                 stage: "UPSTREAM_RESPONSE",
-                message: "flat module asset recovered against an observed asset base (#134)",
+                message: "flag-surgery script path recovered against an observed script base (#296)",
+                url: target,
+              });
+            } else {
+              rec = await recoverFlatAsset(initiator ?? "", target, dest, e.request.headers, (u2, init2) =>
+                wispTransport.fetch(u2, init2, traceId));
+            }
+            if (rec) {
+              DIAG.emit({
+                traceId,
+                requestId: traceId,
+                category: "REWRITE",
+                severity: "info",
+                stage: "UPSTREAM_RESPONSE",
+                message: "module asset recovered against an observed base (#134/#296)",
                 url: target,
               });
               hopUrl = rec.url;

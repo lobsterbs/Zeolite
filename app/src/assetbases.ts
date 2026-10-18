@@ -172,7 +172,112 @@ export async function recoverFlatAsset(
   return null;
 }
 
+
+/* #296: page JS that does src-surgery on its own opaque script token
+   mints flag-segment chunk paths (/httpd=1/exm=<mods>/ed=1/cb=.../m=<mod>)
+   that resolve under the virtual page origin and 404 upstream. The real
+   chunk URLs live on the base of the scripts the page itself loaded, so
+   record the FULL real URL of every successfully served script
+   destination (same-origin included - the google case is same-origin,
+   which is exactly why the cross-origin #134 registry never saw it) and
+   retry a flag-shaped miss against bases derived from those. */
+const SCRIPT_URLS_PER_ORIGIN = 8;
+const SCRIPT_URLS_TOTAL = 64;
+const scriptUrls = new Map<string, string[]>();
+
+/** Record the full real URL of a successfully served script destination. */
+export function recordScriptUrl(initiator: string, url: string): void {
+  const page = originOf(initiator);
+  if (!page || !/^https?:/i.test(url)) return;
+  const clean = url.split("#")[0];
+  const list = scriptUrls.get(page) ?? [];
+  const i = list.indexOf(clean);
+  if (i >= 0) list.splice(i, 1);
+  list.unshift(clean);
+  if (list.length > SCRIPT_URLS_PER_ORIGIN) list.length = SCRIPT_URLS_PER_ORIGIN;
+  scriptUrls.set(page, list);
+  if (scriptUrls.size > SCRIPT_URLS_TOTAL) {
+    const oldest = scriptUrls.keys().next();
+    if (!oldest.done) scriptUrls.delete(oldest.value);
+  }
+}
+
+const FLAG_SEG = /^[a-z][a-z0-9_-]{0,30}=/i;
+
+/** A flag-surgery path carries >= 2 key=value path segments: the loader
+    minted its chunk flags as literal path segments. */
+export function isFlagSurgeryPath(pathname: string): boolean {
+  const segs = pathname.split("/").filter(Boolean);
+  let flags = 0;
+  for (const s of segs) if (FLAG_SEG.test(s)) flags++;
+  return flags >= 2;
+}
+
+/** Retry a flag-shaped script miss against bases derived from the page's
+    successfully served scripts: the recorded URL truncated at its first
+    flag segment (the google xjs base keeps its directory prefix), else its
+    directory; the observed flag tail rides along verbatim with its query.
+    Gate: 200 + a JS content type. Cookie/origin/referer never ride along. */
+export async function recoverFlagSurgeryScript(
+  initiator: string,
+  target: string,
+  reqHeaders: Headers,
+  fetchUpstream: FlatFetch,
+): Promise<{ url: string; resp: Response } | null> {
+  if (!initiator) return null;
+  const cands = scriptUrls.get(originOf(initiator)) ?? [];
+  if (cands.length === 0) return null;
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return null;
+  }
+  if (!isFlagSurgeryPath(u.pathname)) return null;
+  const safe = new Headers();
+  for (const h of ["user-agent", "accept", "accept-language"]) {
+    const v = reqHeaders.get(h);
+    if (v) safe.set(h, v);
+  }
+  const tried: string[] = [];
+  for (const c of cands.slice(0, 3)) {
+    let cu: URL;
+    try {
+      cu = new URL(c);
+    } catch {
+      continue;
+    }
+    const segs = cu.pathname.split("/");
+    const fi = segs.findIndex((sg) => FLAG_SEG.test(sg));
+    const bases: string[] = [];
+    if (fi > 0) {
+      const cut = segs.slice(0, fi).join("/");
+      if (!bases.includes(cut)) bases.push(cut);
+    }
+    const dir = cu.pathname.slice(0, cu.pathname.lastIndexOf("/") + 1).replace(/\/$/, "");
+    if (!bases.includes(dir)) bases.push(dir);
+    const tails = [u.pathname];
+    const stripped = u.pathname.replace(/^\/[^/]+\//, "/");
+    if (stripped !== u.pathname) tails.push(stripped);
+    for (const b of bases) {
+      for (const tail of tails) {
+        const candUrl = cu.origin + b + tail + (u.search || "");
+        if (tried.includes(candUrl)) continue;
+        tried.push(candUrl);
+        try {
+          const r = await fetchUpstream(candUrl, { method: "GET", headers: safe });
+          if (r.ok && mimeOkFor("script", r.headers.get("content-type") ?? "")) return { url: candUrl, resp: r };
+        } catch {
+          /* try the next candidate */
+        }
+      }
+    }
+  }
+  return null;
+}
+
 /* Test seam: clear the registry between cases. */
 export function resetAssetBases(): void {
   assetBases.clear();
+  scriptUrls.clear();
 }

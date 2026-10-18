@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { assetBaseCount, isFlatPath, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, resetAssetBases } from "../assetbases";
+import { assetBaseCount, isFlagSurgeryPath, isFlatPath, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, resetAssetBases } from "../assetbases";
 
 const mkResp = (status: number, ct: string) =>
   new Response("body", { status, headers: { "content-type": ct } });
@@ -275,5 +275,109 @@ describe("directory-minted flat names (#143)", () => {
     recordAssetBase("https://github.com/", "https://github.githubassets.com/assets/app.js");
     expect(assetBaseCount("https://github.com/")).toBe(1);
     expect(assetBaseCount("")).toBe(0);
+  });
+});
+
+describe("flag-surgery script recovery (#296)", () => {
+  beforeEach(() => resetAssetBases());
+
+  it("detects flag-surgery paths and rejects ordinary ones", () => {
+    expect(isFlagSurgeryPath("/httpd=1/exm=AIvLTe,a/ed=1/cb=loaded_undefined_9/m=xOTwoc")).toBe(true);
+    expect(isFlagSurgeryPath("/httpd=1/cb=loaded_undefined_109/m=ipDJ1")).toBe(true);
+    expect(isFlagSurgeryPath("/xjs/s/20261015/mm/x.js")).toBe(false);
+    expect(isFlagSurgeryPath("/search")).toBe(false);
+    expect(isFlagSurgeryPath("/")).toBe(false);
+  });
+
+  it("recovers a flag-surgery miss against the truncated xjs base of an observed script", async () => {
+    recordScriptUrl(
+      "https://www.google.com/search?q=dfgh",
+      "https://www.google.com/xjs/s/20261015/mm/httpd=1/exm=AIvLTe/ed=1/cb=loaded_undefined_1/m=xOTwoc?hl=en",
+    );
+    const seen: string[] = [];
+    const fetchUpstream = async (u: string) => {
+      seen.push(u);
+      return mkResp(200, "application/javascript");
+    };
+    const rec = await recoverFlagSurgeryScript(
+      "https://www.google.com/search?q=dfgh",
+      "https://www.google.com/httpd=1/exm=a/ed=1/cb=loaded_undefined_9/m=xOTwoc?hl=en",
+      new Headers(),
+      fetchUpstream,
+    );
+    expect(rec?.url).toBe(
+      "https://www.google.com/xjs/s/20261015/mm/httpd=1/exm=a/ed=1/cb=loaded_undefined_9/m=xOTwoc?hl=en",
+    );
+    expect(seen[0]).toBe(rec?.url);
+  });
+
+  it("falls back to the directory base with the first path segment stripped", async () => {
+    recordScriptUrl(
+      "https://www.google.com/sorry/",
+      "https://www.google.com/sorry/bg/sorrybg.ABC123.js?hl=en",
+    );
+    const seen: string[] = [];
+    const fetchUpstream = async (u: string) => {
+      seen.push(u);
+      /* the full observed tail 404s under the bg directory */
+      if (u === "https://www.google.com/sorry/bg/sorry/httpd=1/cb=loaded_undefined_9/m=ipDJ1")
+        return mkResp(404, "text/plain");
+      return mkResp(200, "text/javascript");
+    };
+    const rec = await recoverFlagSurgeryScript(
+      "https://www.google.com/sorry/",
+      "https://www.google.com/sorry/httpd=1/cb=loaded_undefined_9/m=ipDJ1",
+      new Headers(),
+      fetchUpstream,
+    );
+    expect(rec?.url).toBe("https://www.google.com/sorry/bg/httpd=1/cb=loaded_undefined_9/m=ipDJ1");
+    expect(seen).toEqual([
+      "https://www.google.com/sorry/bg/sorry/httpd=1/cb=loaded_undefined_9/m=ipDJ1",
+      "https://www.google.com/sorry/bg/httpd=1/cb=loaded_undefined_9/m=ipDJ1",
+    ]);
+  });
+
+  it("refuses non-flag paths and HTML answers, and the reset seam clears the registry", async () => {
+    const boom = async () => {
+      throw new Error("must not fetch");
+    };
+    recordScriptUrl("https://www.google.com/search?q=dfgh", "https://www.google.com/xjs/s/20261015/mm/x.js");
+    /* an ordinary script 404 is NOT the flag-surgery class: no retry */
+    expect(
+      await recoverFlagSurgeryScript(
+        "https://www.google.com/search?q=dfgh",
+        "https://www.google.com/xjs/s/20261015/mm/app.js",
+        new Headers(),
+        boom,
+      ),
+    ).toBeNull();
+    /* an origin that never served a script has no bases to try */
+    expect(
+      await recoverFlagSurgeryScript(
+        "https://other.example/",
+        "https://other.example/httpd=1/cb=x/m=y",
+        new Headers(),
+        boom,
+      ),
+    ).toBeNull();
+    /* a 200 HTML answer is a soft-404 shape, not a recovered script */
+    expect(
+      await recoverFlagSurgeryScript(
+        "https://www.google.com/search?q=dfgh",
+        "https://www.google.com/httpd=1/cb=loaded_undefined_9/m=xOTwoc",
+        new Headers(),
+        async () => mkResp(200, "text/html"),
+      ),
+    ).toBeNull();
+    /* the reset seam clears the script registry too */
+    resetAssetBases();
+    expect(
+      await recoverFlagSurgeryScript(
+        "https://www.google.com/search?q=dfgh",
+        "https://www.google.com/httpd=1/cb=loaded_undefined_9/m=xOTwoc",
+        new Headers(),
+        boom,
+      ),
+    ).toBeNull();
   });
 });
