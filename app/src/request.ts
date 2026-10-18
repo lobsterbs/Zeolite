@@ -238,7 +238,12 @@ export function cacheStorable(headers: Headers): boolean {
      vary on Cookie. */
   if (/\bno-store\b/.test(cc)) return false;
   if (/\bprivate\b/.test(cc)) return false;
-  if (/\bcookie\b/.test((headers.get("vary") ?? "").toLowerCase())) return false;
+  /* #346: the lookup keys on the URL alone, so any response that varies
+     on a request header (Cookie, User-Agent, Accept-Language, Origin, ...)
+     would be served to requests that differ in that header. Until the
+     entry stores its Vary list and compares it on lookup, a varying
+     response is not stored. */
+  if ((headers.get("vary") ?? "").trim() !== "") return false;
   return true;
 }
 
