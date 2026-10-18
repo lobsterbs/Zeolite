@@ -78,7 +78,7 @@ interface CompiledHost {
 export interface CompiledRules {
   block: CompiledHost[];
   allow: CompiledHost[];
-  rewrite: { from: string; to: string; types: Set<ResourceType> | null }[];
+  rewrite: { from: string; to: string; types: Set<ResourceType> | null; fromUrl: URL | null }[];
   modify: { host: string; headers: Record<string, string>; types: Set<ResourceType> | null }[];
 }
 
@@ -98,7 +98,15 @@ export function compileRules(data: RulesData | null | undefined): CompiledRules 
     allow: compileHosts(data?.allow),
     rewrite: (data?.rewrite ?? [])
       .filter((r) => r?.from && r?.to)
-      .map((r) => ({ from: r.from, to: r.to, types: r.types?.length ? new Set(r.types) : null })),
+      .map((r) => {
+        let fromUrl: URL | null = null;
+        try {
+          fromUrl = new URL(r.from);
+        } catch {
+          /* path-shaped from: the raw string semantics below */
+        }
+        return { from: r.from, to: r.to, types: r.types?.length ? new Set(r.types) : null, fromUrl };
+      }),
     modify: (data?.modify ?? [])
       .filter((m) => m?.host && m.headers)
       .map((m) => ({
@@ -161,7 +169,13 @@ export function applyRules(r: CompiledRules, url: string, rtype: ResourceType): 
   }
   let u = url;
   for (const e of r.rewrite) {
-    if (u.startsWith(e.from) && typeOk(e.types, rtype)) {
+    if (!u.startsWith(e.from)) continue;
+    /* #295: a from naming an origin must not prefix-match a
+       different host (http://a.com silently rewrote
+       http://a.community.com); unparsable froms keep the raw
+       string prefix semantics. */
+    if (e.fromUrl && hostOf(u) !== e.fromUrl.hostname) continue;
+    if (typeOk(e.types, rtype)) {
       u = e.to + u.slice(e.from.length);
       dec.url = u;
     }

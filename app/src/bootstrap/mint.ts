@@ -26,6 +26,11 @@ import { swc } from "./siteid";
 
 type AnyRecord = Record<string, any>;
 
+/* #294: the worker realm's exact class (#229) - a long-lived SPA
+   mints keyed/query-stringed endpoints and the memo grew without
+   bound for the document's lifetime. Capped, LRU eviction; a
+   dropped entry only costs a re-mint round trip. */
+const MINT_MEMO_CAP = 256;
 const memo = new Map<string, Promise<string | null>>();
 
 /** Mint an engine route for an absolute http(s) destination. Resolves
@@ -33,7 +38,12 @@ const memo = new Map<string, Promise<string | null>>();
     malformed, or the engine refuses. */
 export function mintRoute(dest: string, timeout = 5000): Promise<string | null> {
   const hit = memo.get(dest);
-  if (hit) return hit;
+  if (hit) {
+    // LRU by recency: re-insert so eviction order tracks usage.
+    memo.delete(dest);
+    memo.set(dest, hit);
+    return hit;
+  }
   const p = new Promise<string | null>((resolve) => {
     const ctl = swc();
     if (!ctl) {
@@ -59,6 +69,10 @@ export function mintRoute(dest: string, timeout = 5000): Promise<string | null> 
       fin(null);
     }
   });
+  if (memo.size >= MINT_MEMO_CAP) {
+    const oldest = memo.keys().next();
+    if (!oldest.done) memo.delete(oldest.value);
+  }
   memo.set(dest, p);
   p.then((route) => {
     if (!route) memo.delete(dest);

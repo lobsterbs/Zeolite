@@ -82,3 +82,32 @@ describe("page WebSocket shim abnormal close (#61)", () => {
     expect(seen).toEqual({ code: 1006, wasClean: false });
   });
 });
+
+describe("page WebSocket shim bufferedAmount (#293)", () => {
+  it("counts pre-open sends and resets on open", async () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return; /* no WebSocket global in this realm */
+    vi.stubGlobal("CloseEvent", FakeCloseEvent);
+    let port2: MessagePort | null = null;
+    ctlState.ctl = {
+      postMessage(_msg: unknown, transfer?: unknown[]) {
+        port2 = (transfer?.[0] as MessagePort) ?? null;
+      },
+    };
+    const w: Record<string, unknown> = { WebSocket: Real };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    const es = new WS("wss://relay.example/ws");
+    expect(es.readyState).toBe(0);
+    expect(es.bufferedAmount).toBe(0);
+    es.send("a");
+    es.send("b");
+    expect(es.bufferedAmount).toBe(2); /* the pre-handshake queue */
+    const port = port2 as MessagePort | null;
+    port?.postMessage({ ev: "open", protocol: "chat" });
+    await new Promise((r) => setTimeout(r, 0)); /* port delivery */
+    await new Promise((r) => setTimeout(r, 0)); /* queued events */
+    expect(es.readyState).toBe(1);
+    expect(es.bufferedAmount).toBe(0); /* queue drained at open */
+  });
+});

@@ -109,6 +109,21 @@ describe("response-header surgery never carries the plaintext destination", () =
     expect(decodePath(out.slice(out.indexOf("url=") + 4))).toBe("https://leaky.example.org/next");
   });
 
+  it("a quoted Refresh url followed by more params maps only the url (#291)", () => {
+    const h = new Headers({ refresh: '5; url="https://leaky.example.org/next"; foo=bar' });
+    mapRefreshHeader(h, "https://leaky.example.org/private/page");
+    const out = h.get("refresh")!;
+    expect(out).not.toContain("leaky.example.org");
+    expect(decodePath(out.slice(out.indexOf("url=") + 4))).toBe("https://leaky.example.org/next");
+  });
+
+  it("an unquoted Refresh url ends at the next header param (#291)", () => {
+    const h = new Headers({ refresh: "0; url=/other; foo=bar" });
+    mapRefreshHeader(h, "https://leaky.example.org/private/page");
+    const out = h.get("refresh")!;
+    expect(decodePath(out.slice(out.indexOf("url=") + 4))).toBe("https://leaky.example.org/other");
+  });
+
   it("browser-action headers are stripped (isolation + report escape)", () => {
     const h = new Headers({
       "clear-site-data": '"cache", "storage", "cookies"',

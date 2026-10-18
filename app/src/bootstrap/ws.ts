@@ -49,6 +49,9 @@ export function applyWs(w: Record<string, unknown>): void {
       let wsState = 0;
       let binType: "blob" | "arraybuffer" = "blob";
       let proto = "";
+      /* #293: pre-handshake sends queue at the bridge; count them so
+         bufferedAmount is honest state, not a frozen 0. */
+      let pend = 0;
       const ch = new MessageChannel();
       let q = Promise.resolve();
       /* The EventTarget has no native on* event-handler slots, so the
@@ -86,6 +89,7 @@ const disp = (e: Event) => {
         if (m.ev === "open") {
           if (wsState >= 2) return;
           wsState = 1;
+          pend = 0;
           proto = m.protocol ?? "";
           disp(new Event("open"));
         } else if (m.ev === "message") {
@@ -146,9 +150,15 @@ const disp = (e: Event) => {
             /* Spec: send() while CONNECTING buffers at the bridge; only
                CLOSING/CLOSED throw. */
             if (wsState >= 2) throw new DOMException("invalid state", "InvalidStateError");
+            if (wsState === 0) pend++;
             ch.port1.postMessage({ op: "send", data });
           },
         },
+        /* #293: own getter - without it the property resolved to the
+           native prototype's brand-checked accessor. Counts messages,
+           not bytes: the transport's queue depth is unreachable
+           without a bridge ack protocol. */
+        bufferedAmount: { get: () => pend },
       });
       return es;
     } as unknown as new (u: string, p?: string | string[]) => WebSocket;

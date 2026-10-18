@@ -48,6 +48,16 @@ describe("applyRules", () => {
     expect(d.url).toBe("https://insecure.example/page");
   });
 
+  it("a rewrite from does not prefix-match a different host (#295)", () => {
+    const r = compileRules({
+      rewrite: [{ from: "http://insecure.example", to: "https://insecure.example" }],
+    });
+    expect(applyRules(r, "http://insecure.example.attacker.org/payload", "document").url).toBeUndefined();
+    expect(applyRules(r, "http://insecure.example/payload", "document").url).toBe("https://insecure.example/payload");
+    const shared = compileRules({ rewrite: [{ from: "http://a.com", to: "https://a.com" }] });
+    expect(applyRules(shared, "http://a.community.com/x", "document").url).toBeUndefined();
+  });
+
   it("merges modify headers for the host", () => {
     const d = applyRules(RULES, "https://news.example/article", "fetch");
     expect(d.headers).toEqual({ "x-rule": "1" });

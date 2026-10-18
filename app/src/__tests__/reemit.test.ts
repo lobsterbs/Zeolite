@@ -117,6 +117,17 @@ describe("mintRoute client (#54 seam consumer)", () => {
     stubRefusal();
     expect(await mintRoute("https://refused.example/x?t=3")).toBeNull();
   });
+
+  it("evicts memoized page-realm mints beyond the cap and re-mints on repeat (#294)", async () => {
+    const posts: string[] = [];
+    stubMint("/j/m", posts);
+    const first = "https://evict.example/cap?a=0";
+    await mintRoute(first);
+    for (let i = 1; i <= 256; i++) await mintRoute("https://evict.example/cap?a=" + i);
+    expect(posts.length).toBe(257);
+    await mintRoute(first); /* evicted with the older entries: re-mints */
+    expect(posts.length).toBe(258);
+  });
 });
 
 describe("re-emission seams (#54 residual 2)", () => {

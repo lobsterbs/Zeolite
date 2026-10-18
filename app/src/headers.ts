@@ -74,7 +74,15 @@ export function mapRefreshHeader(headers: Headers, dest: string): void {
   const m = refresh.match(/url\s*=\s*/i);
   if (!m || m.index === undefined) return;
   let v = refresh.slice(m.index + m[0].length).trim();
-  if (v.startsWith('"')) v = v.slice(1).replace(/"$/, "");
+  /* #291: a quoted url ends at its closing quote - later header
+     params are not part of it; an unquoted url ends at ';'. */
+  if (v.startsWith('"')) {
+    const end = v.indexOf('"', 1);
+    v = end === -1 ? v.slice(1) : v.slice(1, end);
+  } else {
+    const semi = v.indexOf(";");
+    if (semi !== -1) v = v.slice(0, semi).trim();
+  }
   try {
     headers.set("refresh", refresh.slice(0, m.index) + "url=" + encodeDest(new URL(v, dest).href));
   } catch {

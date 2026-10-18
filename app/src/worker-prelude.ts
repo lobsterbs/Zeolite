@@ -273,6 +273,9 @@ export function installWorkerPrelude(route: string): void {
       let wsState = 0;
       let binType: "blob" | "arraybuffer" = "blob";
       let proto = "";
+      /* #293: pre-handshake sends queue at the bridge; count them so
+         bufferedAmount is honest state, not a frozen 0. */
+      let pend = 0;
       const ch = new MessageChannel();
       let q = Promise.resolve();
       /* Same contract as the page shim: raw on* handlers fire after
@@ -303,6 +306,7 @@ export function installWorkerPrelude(route: string): void {
         if (m?.ev === "open") {
           if (wsState >= 2) return;
           wsState = 1;
+          pend = 0;
           proto = m.protocol ?? "";
           disp(new Event("open"));
         } else if (m?.ev === "message") {
@@ -358,7 +362,9 @@ export function installWorkerPrelude(route: string): void {
             if (v === "blob" || v === "arraybuffer") binType = v;
           },
         },
-        bufferedAmount: { value: 0 },
+        /* #293: honest pre-handshake queue state (messages, not
+           bytes; the transport depth is unreachable). */
+        bufferedAmount: { get: () => pend },
         extensions: { value: "" },
         close: {
           value: (code?: number, reason?: string) => {
@@ -372,6 +378,7 @@ export function installWorkerPrelude(route: string): void {
             /* Spec: send() while CONNECTING buffers (the bridge queues
                until the handshake completes); only CLOSING/CLOSED throw. */
             if (wsState >= 2) throw new DOMException("invalid state", "InvalidStateError");
+            if (wsState === 0) pend++;
             ch.port1.postMessage({ op: "send", data });
           },
         },

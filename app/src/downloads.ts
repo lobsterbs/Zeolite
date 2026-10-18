@@ -58,10 +58,28 @@ export interface DownloadEntry {
     last path segment of the source URL, then to "download". */
 export function downloadFilename(source: string, headers: Headers): string {
   const cd = headers.get("content-disposition") ?? "";
-  const quoted = cd.match(/filename\*?=\s*"([^"]*)"/i);
+  /* #292: RFC 6266/5987 filename* ext-value wins over plain
+     filename: strip the charset'lang' prefix and percent-decode;
+     malformed escapes fall through to the plain filename. */
+  const ext = cd.match(/filename\*\s*=\s*(?:"([^"]*)"|([^;\s]+))/i);
+  if (ext) {
+    const parts = (ext[1] ?? ext[2] ?? "").split("'");
+    const val = parts.length === 3 ? parts[2] : "";
+    if (val) {
+      try {
+        const dec = decodeURIComponent(val).trim();
+        if (dec) return dec;
+      } catch {
+        /* broken percent-escapes: the plain filename below */
+      }
+    }
+  }
+  const quoted = cd.match(/filename\s*=\s*"([^"]*)"/i);
   if (quoted && quoted[1].trim()) return quoted[1].trim();
-  const token = cd.match(/filename\*?=\s*([^;"\s]+)/i);
+  const token = cd.match(/filename\s*=\s*([^;"\s]+)/i);
   if (token && token[1].trim()) return token[1].trim();
+
+
   try {
     const p = new URL(source).pathname.split("/").filter(Boolean).pop();
     if (p) return decodeURIComponent(p);

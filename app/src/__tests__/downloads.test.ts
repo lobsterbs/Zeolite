@@ -41,6 +41,25 @@ describe("downloadFilename", () => {
   it("ends at download when nothing helps", () => {
     expect(downloadFilename("https://x.test", headers({}))).toBe("download");
   });
+  it("decodes an RFC 6266 filename* ext-value (#292)", () => {
+    expect(
+      downloadFilename("https://x.test/f", headers({ "content-disposition": "attachment; filename*=UTF-8''%E6%97%A5%E6%9C%AC.txt" }))
+    ).toBe("日本.txt");
+  });
+  it("filename* wins over a plain filename and broken escapes fall back (#292)", () => {
+    expect(
+      downloadFilename(
+        "https://x.test/f",
+        headers({ "content-disposition": "attachment; filename=\"fallback.txt\"; filename*=UTF-8''%E2%82%AC%20rates.txt" })
+      )
+    ).toBe("€ rates.txt");
+    expect(
+      downloadFilename(
+        "https://x.test/f",
+        headers({ "content-disposition": "attachment; filename=\"fallback.txt\"; filename*=UTF-8''%E2%82%AC%%" })
+      )
+    ).toBe("fallback.txt");
+  });
 });
 
 describe("DownloadTracker", () => {
