@@ -64,18 +64,36 @@ export function applyIsolation(
       | ((t: string, l: unknown, o?: unknown) => void)
       | undefined;
     if (typeof add === "function" && typeof rem === "function") {
-      const handlers = new Set<StorageHandler>();
+      /* #266: keyed by the RAW listener so removeEventListener finds
+         the same registration for functions and object listeners. */
+      const handlers = new Map<unknown, StorageHandler>();
       let onstorage: StorageHandler | null = null;
       const wrappedAdd = (t: string, l: unknown, o?: unknown): void => {
-        if (t === "storage" && typeof l === "function") {
-          handlers.add(l as StorageHandler);
-          return;
+        /* #266: an object-style listener ({ handleEvent(ev) {} }) is as
+           standard as a function listener; both are filtered here, and
+           neither ever reaches the real (unfiltered) registration. */
+        if (t === "storage") {
+          if (typeof l === "function") {
+            handlers.set(l, l as StorageHandler);
+            return;
+          }
+          if (
+            l !== null &&
+            typeof l === "object" &&
+            typeof (l as EventListenerObject).handleEvent === "function"
+          ) {
+            handlers.set(
+              l,
+              (ev) => (l as EventListenerObject).handleEvent(ev),
+            );
+            return;
+          }
         }
         add(t, l, o);
       };
       const wrappedRem = (t: string, l: unknown, o?: unknown): void => {
         if (t === "storage") {
-          handlers.delete(l as StorageHandler);
+          handlers.delete(l);
           return;
         }
         rem(t, l, o);
@@ -155,7 +173,7 @@ export function applyIsolation(
               /* a page handler threw: not ours to surface */
             }
           }
-          for (const h of [...handlers]) {
+          for (const h of [...handlers.values()]) {
             try {
               h(fake);
             } catch {

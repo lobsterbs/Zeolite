@@ -154,6 +154,25 @@ describe("#37 isolation", () => {
     expect((got as { key: string }).key).toBe("k");
     expect((got as { storageArea: Storage }).storageArea).toBe(st.scopedLocal);
   });
+  it("storage events: object-style listeners are filtered too, and removal works (#266)", () => {
+    const { w, listeners } = fakeWindow(fakeStore().store, fakeStore().store);
+    const P = "zl:aaa:";
+    const st = isolate(w, P);
+    const seen: unknown[] = [];
+    const obj = { handleEvent: (e: unknown) => seen.push(e) };
+    (w.addEventListener as Fn)("storage", obj);
+    // Another virtual site's key: dropped for object listeners as well.
+    realStorageListener(listeners)(ev("zl:bbb:k", null));
+    expect(seen).toHaveLength(0);
+    // Own key: delivered through handleEvent, prefix stripped.
+    realStorageListener(listeners)(ev(P + "k", st.realLocal));
+    expect(seen).toHaveLength(1);
+    expect((seen[0] as { key: string }).key).toBe("k");
+    // removeEventListener finds the object registration and stops delivery.
+    (w.removeEventListener as Fn)("storage", obj);
+    realStorageListener(listeners)(ev(P + "k", st.realLocal));
+    expect(seen).toHaveLength(1);
+  });
 
   it("window.name is scoped per site and survives same-site reloads", () => {
     const session = fakeStore();

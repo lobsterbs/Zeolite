@@ -193,20 +193,44 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
        socket is known to wedge; without a channel (or for a body the
        relay cannot carry) fall through to the wisp path honestly. */
     if (transportCooling() && relayAvailable()) {
+      /* #261: relayFetch deliberately has no clock of its own, so
+         the first-byte deadline is applied HERE: an embedder that
+         never answers must not hang the request, and the abort
+         cancels the embedder's upstream fetch (zl:relayCancel)
+         instead of streaming an answer nobody waits for. A
+         caller abort stays an honest AbortError; only the
+         deadline surfaces as a stall. */
+      const ctl = new AbortController();
+      const relayTimer = setTimeout(() => ctl.abort(), WISP_TTFB_DEADLINE_MS);
+      const forward = () => ctl.abort();
+      init?.signal?.addEventListener("abort", forward, { once: true });
+      if (init?.signal?.aborted) ctl.abort();
       const relayInit = {
         method: init?.method ?? "GET",
         headers: init?.headers instanceof Headers ? init.headers : new Headers(init?.headers),
         body: init?.body as string | ArrayBuffer | null | undefined,
-        signal: init?.signal ?? undefined,
+        signal: ctl.signal,
       };
-      const rr = await relayFetch(dest, relayInit, traceId ?? "");
-      if (rr) return rr;
-      DIAG.emit({
-        category: "TRANSPORT",
-        severity: "info",
-        message: "cooldown relay could not carry this request; trying wisp",
-        url: dest,
-      });
+      try {
+        const rr = await relayFetch(dest, relayInit, traceId ?? "");
+        if (rr) return rr;
+        DIAG.emit({
+          category: "TRANSPORT",
+          severity: "info",
+          message: "cooldown relay could not carry this request; trying wisp",
+          url: dest,
+        });
+      } catch (err) {
+        if (init?.signal?.aborted) throw err;
+        throw new WispStallError(
+          "relay transport stall: no first byte within " +
+            WISP_TTFB_DEADLINE_MS +
+            "ms",
+        );
+      } finally {
+        clearTimeout(relayTimer);
+        init?.signal?.removeEventListener("abort", forward);
+      }
     }
     /* #119: the lifecycle machine (not the dead-but-present client)
        owns the answer to whether the transport is alive. A request

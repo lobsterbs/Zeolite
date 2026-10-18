@@ -163,3 +163,65 @@ describe("cooldown diagnostics and retry accounting (#226)", () => {
     expect(ev?.traceId).toBe("zl-tr-cool");
   });
 });
+/* #261: the cooldown relay branch must carry its own first-byte
+   deadline (relayFetch has none by design). Appended LAST: the
+   relay port is module state, each test re-registers its own. */
+describe("cooldown relay first-byte deadline (#261)", () => {
+  it("a silent embedder relay gets the same TTFB bound and cancels the upstream", async () => {
+    h.fetchImpl = () => new Promise<Response>(() => {});
+    await Promise.allSettled([
+      wispTransport.fetch("https://a.example/1"),
+      wispTransport.fetch("https://a.example/2"),
+      wispTransport.fetch("https://a.example/3"),
+    ]);
+    expect(wispCoolingForTests()).toBe(true);
+    class SilentPort {
+      sent: unknown[] = [];
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      postMessage(m: unknown): void {
+        this.sent.push(m);
+      }
+    }
+    const port = new SilentPort();
+    relayRegister(port as unknown as MessagePort);
+    const err = await wispTransport.fetch("https://a.example/silent").then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: Error) => e,
+    );
+    expect(String(err)).toContain("relay transport stall: no first byte within 15ms");
+    expect(port.sent.some((m) => (m as { type: string }).type === "zl:relayCancel")).toBe(true);
+  });
+
+  it("a caller abort settles as AbortError, not a stall (#261)", async () => {
+    h.fetchImpl = () => new Promise<Response>(() => {});
+    await Promise.allSettled([
+      wispTransport.fetch("https://a.example/1"),
+      wispTransport.fetch("https://a.example/2"),
+      wispTransport.fetch("https://a.example/3"),
+    ]);
+    expect(wispCoolingForTests()).toBe(true);
+    class HushedPort {
+      sent: unknown[] = [];
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      postMessage(m: unknown): void {
+        this.sent.push(m);
+      }
+    }
+    const port = new HushedPort();
+    relayRegister(port as unknown as MessagePort);
+    const ac = new AbortController();
+    const respP = wispTransport.fetch("https://a.example/abort2", { signal: ac.signal });
+    ac.abort();
+    const err = await respP.then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: Error) => e,
+    );
+    expect(err.name).toBe("AbortError");
+    expect(String(err)).not.toContain("relay transport stall");
+    expect(port.sent.some((m) => (m as { type: string }).type === "zl:relayCancel")).toBe(true);
+  });
+});
