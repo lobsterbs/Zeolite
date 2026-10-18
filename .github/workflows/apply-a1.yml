@@ -19,19 +19,7 @@ jobs:
           git config user.name "zeolite-ci"
           git config user.email "zeolite-ci@users.noreply.github.com"
           git add app/src/control.ts app/src/sw.ts app/src/engine.ts app/src/swstate.ts app/src/__tests__/control.test.ts app/src/__tests__/engine-init.test.ts app/src/__tests__/swstate.test.ts
-          git commit -m "fix(app): control-plane lifecycle wave (#250, #252, #253)
-
-- #250: the message listener now extends the event lifetime over the
-  whole handler (synchronous e.waitUntil) and a handler failure is
-  caught, recorded as a RUNTIME diag and answered with a structured
-  error instead of an unhandled rejection (messageListener in control.ts)
-- #252: engine adapter honors acknowledgements - init() resolves
-  false when zl:config is refused or times out, setSiteRoute persists
-  only after an acknowledged toggle and throws otherwise, post()
-  settles exactly once (reply vs 5s timeout race, loser dropped,
-  reply port closed)
-- #253: docCookie port registry gains a per-client cap (16); the
-  evicted port is closed so the page channel reports dead"
+          git commit -m "fix(app): control-plane lifecycle wave (#250, #252, #253)"
           git push
       - name: remove workflow
         run: |
