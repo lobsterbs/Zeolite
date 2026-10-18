@@ -29,6 +29,7 @@ import type {
 } from "./notifications";
 import { cookiesGet, cookiesGetAll, cookiesSet, cookiesRemove, onCookieChanged } from "./cookies";
 import type { CookieChangeListener } from "./cookies";
+import { hostPatternsMatch } from "./permissions";
 import { isApiDetached } from "./apis";
 import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
@@ -89,7 +90,7 @@ function tabsEventArgs(
     case "created":
       return kind === "created" ? [tabView(ext, ev.tab)] : null;
     case "updated":
-      return kind === "updated" ? [ev.tabId, changeView(ext, ev.change), tabView(ext, ev.tab)] : null;
+      return kind === "updated" ? [ev.tabId, changeView(ext, ev.change, ev.tab.url), tabView(ext, ev.tab)] : null;
     case "activated":
       return kind === "activated" ? [{ tabId: ev.tabId, windowId: ev.windowId }] : null;
     case "removed":
@@ -270,9 +271,15 @@ export function buildApi(
     getCurrent: () =>
       Promise.reject(new Error("zeolite: tabs.getCurrent may only be called from a tab context")),
     query: (q: Record<string, unknown> = {}) => {
+      /* #278: url/title filtering needs the "tabs" permission OR a
+         host permission covering the tab. Without the broad permission
+         the result set is limited to host-visible tabs, so a filtered
+         query can neither leak nor confirm URLs outside the grants. */
       if (!ext.permissions.includes("tabs") && (q.url !== undefined || q.title !== undefined)) {
-        return Promise.reject(
-          new Error("zeolite: tabs.query url/title matching requires the 'tabs' permission"),
+        return Promise.resolve(
+          TABS.query(q)
+            .filter((t) => hostPatternsMatch(ext.hostPermissions, t.url))
+            .map((t) => tabView(ext, t)),
         );
       }
       return Promise.resolve(TABS.query(q).map((t) => tabView(ext, t)));
@@ -376,7 +383,10 @@ export function buildApi(
           getAll: (d?: Record<string, unknown>) => cookiesGetAll(ext, d),
           set: (d: Record<string, unknown> = {}) => cookiesSet(ext, d),
           remove: (d: Record<string, unknown> = {}) => cookiesRemove(ext, d),
-          onChanged: bridged<CookieChangeListener>((l) => onCookieChanged(l)),
+          /* #281: the listener travels with its owning extension so
+             delivery can re-check the cookies permission and a host
+             permission for the changed cookie. */
+          onChanged: bridged<CookieChangeListener>((l) => onCookieChanged(ext, l)),
         };
       })()
     : undefined;
@@ -412,8 +422,15 @@ export function buildApi(
               offs.set(
                 l,
                 WEBREQ.register(ext.id, kind, l as never, {
-                  hostPatterns: [...ext.hostPermissions],
-                  canBlock: ext.permissions.includes("webRequestBlocking"),
+                  /* #282: live permission view over the record the
+                     backend mutates on grant/revoke; the registry
+                     re-reads it on every delivery and blocking
+                     decision, so a revoke takes effect without a
+                     reload. */
+                  perm: () => ({
+                    hostPatterns: [...ext.hostPermissions],
+                    canBlock: ext.permissions.includes("webRequestBlocking"),
+                  }),
                   urls: (Array.isArray(filter?.urls) ? filter!.urls : []).map(String),
                 }),
               );
@@ -526,4 +543,5 @@ export function buildApi(
   /* Firefox-style chrome.* alias over the same implementations. */
   return { browser, chrome: browser };
 }
+
 

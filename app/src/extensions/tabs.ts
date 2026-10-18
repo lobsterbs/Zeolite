@@ -6,7 +6,7 @@
    through the same channel in the opposite direction: create/update/
    remove are dispatched to the engine UI clients as zl:tabsOp
    postMessages, and their promises resolve when the requested change
-   shows up in a later sync â the UI never needs a direct reply.
+   shows up in a later sync Ã¢ÂÂ the UI never needs a direct reply.
 
    Permission semantics follow Firefox: url/title visibility in Tab
    objects and changeInfo requires the "tabs" permission or a matching
@@ -73,12 +73,21 @@ function validUrl(url: string): boolean {
   }
 }
 
+type PendingUpdate = { want: UpdateProps; resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
+
+/* #283: UI tab-op acknowledgement deadline; a host that never
+   syncs settles the promise instead of leaving it pending forever. */
+const OP_DEADLINE_MS = 30000;
+
 export class TabRegistry {
   private readonly tabs = new Map<number, UiTab>();
   private readonly listeners = new Set<TabsListener>();
   private readonly pendingCreate = new Map<string, (t: UiTab) => void>();
-  private readonly pendingRemove = new Map<number, (() => void)[]>();
-  private readonly pendingUpdate = new Map<number, { want: UpdateProps; resolve: () => void }[]>();
+  private readonly pendingRemove = new Map<
+    number,
+    Array<{ timer: ReturnType<typeof setTimeout>; done: () => void }>
+  >();
+  private readonly pendingUpdate = new Map<number, PendingUpdate[]>();
   private dispatch: ((op: TabsOp) => void) | null = null;
   private messageDispatch:
     | ((tabId: number, tabUrl: string, extId: string, payload: TabMessage) => void)
@@ -108,7 +117,7 @@ export class TabRegistry {
       host rejects honestly. Frame targeting is not supported (see
       ./compat), and a caller that asks for one is rejected instead of
       having the option silently ignored. A tab whose page never
-      answers rejects on the 30s timeout — or immediately when the tab
+      answers rejects on the 30s timeout â or immediately when the tab
       is removed, whichever comes first. */
   sendMessage(
     ext: ExtensionRecord,
@@ -163,7 +172,7 @@ export class TabRegistry {
   }
 
   /** Tab removed: every still-pending sendMessage to it fails now,
-      not on the 30s timeout — the page that would answer is gone. */
+      not on the 30s timeout â the page that would answer is gone. */
   private rejectPendingForTab(tabId: number): void {
     for (const [nonce, p] of this.pendingMessages) {
       if (p.tabId !== tabId) continue;
@@ -214,7 +223,12 @@ export class TabRegistry {
     return null;
   }
 
-  query(q: Record<string, unknown>): UiTab[] {
+/* #286: WebExtension title patterns are glob-style (a "*" matches any
+   run of characters); a pattern without "*" is an exact match. */
+function titleMatch(pat: string, title: string): boolean {
+  if (!pat.includes("*")) return pat === title;
+  const re = new RegExp(
+    "^" + pat.split("*").map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\  query(q: Record<string, unknown>): UiTab[] {
     const out: UiTab[] = [];
     for (const t of this.tabs.values()) {
       if (q.active !== undefined && t.active !== !!q.active) continue;
@@ -225,6 +239,31 @@ export class TabRegistry {
         const pats = (Array.isArray(q.url) ? q.url : [q.url]).map(String);
         if (!hostPatternsMatch(pats, t.url)) continue;
       }
+      out.push(cloneTab(t));
+    }
+    return out.sort((a, b) => a.index - b.index);
+  }")).join(".*") + "$",
+  );
+  return re.test(title);
+}
+
+  query(q: Record<string, unknown>): UiTab[] {
+    /* #286: title filtering (string or array of patterns). */
+    const titlePats =
+      q.title === undefined
+        ? null
+        : (Array.isArray(q.title) ? q.title : [q.title]).map(String);
+    const out: UiTab[] = [];
+    for (const t of this.tabs.values()) {
+      if (q.active !== undefined && t.active !== !!q.active) continue;
+      if (q.pinned !== undefined && !!(t.pinned ?? false) !== !!q.pinned) continue;
+      if (q.windowId !== undefined && (t.windowId ?? 1) !== q.windowId) continue;
+      if (q.index !== undefined && t.index !== q.index) continue;
+      if (q.url !== undefined) {
+        const pats = (Array.isArray(q.url) ? q.url : [q.url]).map(String);
+        if (!hostPatternsMatch(pats, t.url)) continue;
+      }
+      if (titlePats && !titlePats.some((p) => titleMatch(p, t.title ?? ""))) continue;
       out.push(cloneTab(t));
     }
     return out.sort((a, b) => a.index - b.index);
@@ -245,7 +284,19 @@ export class TabRegistry {
       const waits = this.pendingRemove.get(id);
       if (waits) {
         this.pendingRemove.delete(id);
-        for (const w of waits) w();
+        for (const w of waits) {
+          clearTimeout(w.timer);
+          w.done();
+        }
+      }
+      /* #283: a closed tab settles its still-pending updates too. */
+      const ups = this.pendingUpdate.get(id);
+      if (ups) {
+        this.pendingUpdate.delete(id);
+        for (const w of ups) {
+          clearTimeout(w.timer);
+          w.reject(new Error("zeolite: tab closed before the update was observed"));
+        }
       }
     }
     for (const [id, t] of next) {
@@ -281,10 +332,12 @@ export class TabRegistry {
     /* Pending updates resolve when the change is observed. */
     for (const [id, waits] of [...this.pendingUpdate.entries()]) {
       const t = this.tabs.get(id);
-      const still: { want: UpdateProps; resolve: () => void }[] = [];
+      const still: PendingUpdate[] = [];
       for (const w of waits) {
-        if (t && this.satisfied(t, w.want)) w.resolve();
-        else still.push(w);
+        if (t && this.satisfied(t, w.want)) {
+          clearTimeout(w.timer);
+          w.resolve();
+        } else still.push(w);
       }
       if (still.length === 0) this.pendingUpdate.delete(id);
       else this.pendingUpdate.set(id, still);
@@ -303,7 +356,18 @@ export class TabRegistry {
       return Promise.reject(new Error("zeolite: tabs.create: unsupported URL: " + String(props.url)));
     }
     const nonce = "zl-c" + ++this.nonceSeq;
-    const p = new Promise<UiTab>((resolve) => this.pendingCreate.set(nonce, resolve));
+    /* #283: the op settles even when no UI sync ever acknowledges it. */
+    const p = new Promise<UiTab>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pendingCreate.delete(nonce)) {
+          reject(new Error("zeolite: tabs.create timed out; no tab host acknowledgement"));
+        }
+      }, OP_DEADLINE_MS);
+      this.pendingCreate.set(nonce, (t) => {
+        clearTimeout(timer);
+        resolve(t);
+      });
+    });
     this.dispatch({ op: "create", nonce, props: { ...props } });
     return p;
   }
@@ -317,13 +381,23 @@ export class TabRegistry {
     const want: UpdateProps = {};
     if (props.active !== undefined) want.active = !!props.active;
     if (props.url !== undefined) want.url = props.url;
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       let waits = this.pendingUpdate.get(id);
       if (!waits) {
         waits = [];
         this.pendingUpdate.set(id, waits);
       }
-      waits.push({ want, resolve });
+      /* #283: a pending update that never becomes true rejects on the
+         deadline instead of living in the map forever. */
+      const timer = setTimeout(() => {
+        const list = this.pendingUpdate.get(id);
+        if (!list) return;
+        const rest = list.filter((w) => w.timer !== timer);
+        if (rest.length === 0) this.pendingUpdate.delete(id);
+        else this.pendingUpdate.set(id, rest);
+        reject(new Error("zeolite: tabs.update timed out; the change was never observed"));
+      }, OP_DEADLINE_MS);
+      waits.push({ want, resolve, reject, timer });
       this.dispatch?.({ op: "update", tabId: id, props: { ...want } });
     });
   }
@@ -334,16 +408,34 @@ export class TabRegistry {
       if (!this.tabs.has(id)) return Promise.reject(new Error("Invalid tab ID: " + id));
     }
     const uniq = [...new Set(ids)];
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       let left = uniq.length;
+      let failed = false;
       for (const id of uniq) {
         let waits = this.pendingRemove.get(id);
         if (!waits) {
           waits = [];
           this.pendingRemove.set(id, waits);
         }
-        waits.push(() => {
-          if (--left === 0) resolve();
+        /* #283: per-tab removal deadline keeps the map bounded when a
+           tab host never acknowledges the op. */
+        const timer = setTimeout(() => {
+          const list = this.pendingRemove.get(id);
+          if (!list) return;
+          const rest = list.filter((w) => w.timer !== timer);
+          if (rest.length === 0) this.pendingRemove.delete(id);
+          else this.pendingRemove.set(id, rest);
+          if (!failed) {
+            failed = true;
+            reject(new Error("zeolite: tabs.remove timed out; the tab was never observed gone"));
+          }
+        }, OP_DEADLINE_MS);
+        waits.push({
+          timer,
+          done: () => {
+            clearTimeout(timer);
+            if (--left === 0) resolve();
+          },
         });
         this.dispatch?.({ op: "remove", tabId: id });
       }
@@ -383,8 +475,15 @@ export function tabView(ext: ExtensionRecord, tab: UiTab): Record<string, unknow
   };
 }
 
-export function changeView(ext: ExtensionRecord, change: TabChangeInfo): Record<string, unknown> {
-  const allowed = change.url === undefined || canSeeUrl(ext, change.url);
+/** changeInfo view (#271): url/title visibility is gated against the
+    tab's CURRENT url, not only change.url - a title-only change on a
+    page the extension cannot see must not leak the new title. */
+export function changeView(
+  ext: ExtensionRecord,
+  change: TabChangeInfo,
+  tabUrl?: string,
+): Record<string, unknown> {
+  const allowed = canSeeUrl(ext, change.url ?? tabUrl ?? "");
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(change)) {
     if ((k === "url" || k === "title") && !allowed) continue;
@@ -392,4 +491,5 @@ export function changeView(ext: ExtensionRecord, change: TabChangeInfo): Record<
   }
   return out;
 }
+
 

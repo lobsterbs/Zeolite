@@ -179,3 +179,43 @@ describe("browser.cookies (#42)", () => {
     expect(await rm({ url: "https://a.example.com/", name: "zl_xdom" })).toBeNull();
   });
 });
+
+/* #281: cookies.onChanged delivers only to the owning extension's
+   host grants, and permission revocation stops delivery. */
+describe("cookies.onChanged scoping (#281)", () => {
+  it("delivers set and remove only to host-permitted extensions", async () => {
+    const a = await install("Co281a", ["cookies", "https://a.example/*"]);
+    const b = await install("Co281b", ["cookies", "https://b.example/*"]);
+    const seenA: Record<string, unknown>[] = [];
+    const seenB: Record<string, unknown>[] = [];
+    const apiOf = (x: { api: { browser: Record<string, unknown> } }) =>
+      x.api.browser.cookies as Record<string, { addListener: (l: (c: Record<string, unknown>) => void) => void }>;
+    apiOf(a).onChanged.addListener((c) => seenA.push(c));
+    apiOf(b).onChanged.addListener((c) => seenB.push(c));
+    const setA = apiOf(a).set as unknown as (d: Record<string, unknown>) => Promise<unknown>;
+    const rmA = apiOf(a).remove as unknown as (d: Record<string, unknown>) => Promise<unknown>;
+    await setA({ url: "https://a.example/", name: "zl_chg", value: "v" });
+    expect(seenA).toHaveLength(1);
+    expect(seenA[0]).toMatchObject({ cause: "explicit", removed: false });
+    expect((seenA[0].cookie as Record<string, unknown>).name).toBe("zl_chg");
+    expect(seenB).toHaveLength(0);
+    await rmA({ url: "https://a.example/", name: "zl_chg" });
+    expect(seenA).toHaveLength(2);
+    expect(seenA[1]).toMatchObject({ removed: true });
+    expect(seenB).toHaveLength(0);
+  });
+
+  it("stops delivery when the cookies permission is revoked", async () => {
+    const a = await install("Co281c", ["cookies", "https://a.example/*"]);
+    const seen: Record<string, unknown>[] = [];
+    (a.api.browser.cookies as Record<string, { addListener: (l: (c: Record<string, unknown>) => void) => void }>)
+      .onChanged.addListener((c) => seen.push(c));
+    const idx = a.rec.permissions.indexOf("cookies");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    (a.rec.permissions as string[]).splice(idx, 1);
+    const setA = (a.api.browser.cookies as { set: (d: Record<string, unknown>) => Promise<unknown> })
+      .set;
+    await setA({ url: "https://a.example/", name: "zl_rev", value: "v" });
+    expect(seen).toHaveLength(0);
+  });
+});

@@ -7,17 +7,20 @@
                         page client also extension pages (options,
                         popup, #40) with the page bridge injected
    /zl-cs/<id>/<path>   content-script files: ONLY paths the manifest
-                        declares in content_scripts js/css may be
-                        served, so a page can never pull background,
-                        options or manifest files through this route.
+                        declares in content_scripts entries that MATCH
+                        the requesting virtual page (#285), so a page
+                        can never pull background, options, manifest
+                        files, or another site's scripts through this
+                        route.
 
    __bridge.js under /zl-cs/ is generated per request with the config
-   (which files, which run_at) validated against the manifest before
-   the bridge source is emitted. __page.js under /zl-ext/ is generated
-   per extension with the page call list (#40). */
+   (which files, which run_at) validated against the page-matching
+   entries before the bridge source is emitted. __page.js under
+   /zl-ext/ is generated per extension with the page call list (#40). */
 
 import { extensions } from "./manager";
 import { normalizeExtensionPath } from "./origin";
+import { contentScriptMatches } from "./content-scripts";
 import { BRIDGE_SOURCE } from "./bridge";
 import { LISTENER_SOURCE } from "./scripting";
 import { PAGE_BRIDGE_SOURCE } from "./pagebridge";
@@ -116,10 +119,14 @@ function htmlWithPageScript(bytes: Uint8Array, id: string): Response {
   });
 }
 
-/* Every js/css path any content_scripts entry declares. */
-function declaredCsFiles(rec: ExtensionRecord): Set<string> {
+/* #285: only files from content_scripts entries whose match rules
+   cover the SW-observed requesting page URL. Fail closed: without a
+   pageUrl NO content-script asset is served at all. */
+function csFilesForPage(rec: ExtensionRecord, pageUrl: string | null | undefined): Set<string> {
   const s = new Set<string>();
+  if (!pageUrl) return s;
   for (const cs of rec.contentScripts) {
+    if (!contentScriptMatches(cs, pageUrl, false)) continue;
     for (const f of cs.js) s.add(f.startsWith("/") ? f : "/" + f);
     for (const f of cs.css) s.add(f.startsWith("/") ? f : "/" + f);
   }
@@ -230,7 +237,11 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
         headers: { "content-type": "text/plain" },
       });
     }
-    const allowed = declaredCsFiles(rec);
+    /* #285: the cfg is page-supplied and untrusted; its files are
+       validated against the entries that actually match THIS page
+       (SW-observed pageUrl), not the manifest-wide union. A page
+       outside every entry's match scope gets an empty config. */
+    const allowed = csFilesForPage(rec, ctx?.pageUrl);
     const norm = (p: unknown): string | null =>
       typeof p === "string" ? (p.startsWith("/") ? p : "/" + p) : null;
     const js = (Array.isArray(cfg.js) ? cfg.js : [])
@@ -259,8 +270,11 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
   }
 
   if (sr.kind === "cs") {
-    if (!declaredCsFiles(rec).has(sr.path)) {
-      /* Not declared in content_scripts: a page is not entitled to it. */
+    /* #285: the path must be declared AND belong to an entry that
+       matches the requesting virtual page; a non-matching site can
+       neither fetch nor execute another site's content scripts. */
+    if (!csFilesForPage(rec, ctx?.pageUrl).has(sr.path)) {
+      /* Not declared for this page: it is not entitled to the file. */
       return notFound();
     }
     const bytes = await extensions.getResource(sr.id, sr.path, { fromWeb: false });

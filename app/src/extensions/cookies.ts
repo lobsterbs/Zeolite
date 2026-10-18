@@ -99,15 +99,36 @@ export interface CookieChange {
 
 export type CookieChangeListener = (change: CookieChange) => void;
 
-const cookieListeners = new Set<CookieChangeListener>();
+/* #281: each listener travels with its owning extension so delivery
+   can re-check the cookies permission and a host permission for the
+   changed cookie - extension A must not learn about extension B's
+   cookie operations for hosts A cannot see. */
+const cookieListeners = new Map<CookieChangeListener, ExtensionRecord>();
 
-export function onCookieChanged(l: CookieChangeListener): () => void {
-  cookieListeners.add(l);
+export function onCookieChanged(ext: ExtensionRecord, l: CookieChangeListener): () => void {
+  cookieListeners.set(l, ext);
   return () => cookieListeners.delete(l);
 }
 
+/** #281: a change is visible to an extension only when it holds the
+    cookies permission plus a host permission covering the cookie's
+    domain (both schemes tested when Secure is unknown, e.g. removal
+    events that carry no secure flag). */
+function changeVisible(ext: ExtensionRecord, cookie: Record<string, unknown>): boolean {
+  if (!ext.permissions.includes("cookies")) return false;
+  const domain = typeof cookie.domain === "string" ? cookie.domain.replace(/^\./, "") : "";
+  if (!domain) return false;
+  const path = typeof cookie.path === "string" && cookie.path.startsWith("/") ? cookie.path : "/";
+  const schemes = cookie.secure === true ? ["https"] : ["http", "https"];
+  for (const s of schemes) {
+    if (hostPatternsMatch(ext.hostPermissions, s + "://" + domain + path)) return true;
+  }
+  return false;
+}
+
 function emitCookieChange(change: CookieChange): void {
-  for (const l of cookieListeners) {
+  for (const [l, ext] of [...cookieListeners]) {
+    if (!changeVisible(ext, change.cookie)) continue;
     try {
       l(change);
     } catch {
@@ -286,3 +307,4 @@ export function cookiesRemove(
   }
   return Promise.resolve(removedIds > 0 ? { url: String(details.url), name } : null);
 }
+

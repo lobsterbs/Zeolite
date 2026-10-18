@@ -122,8 +122,12 @@ type AnyWrListener =
   | ErrorOccurredListener;
 
 interface ExtWrReg {
-  hostPatterns: string[];
-  canBlock: boolean;
+  /* #282: live permission view, not a registration-time snapshot.
+     Optional host permissions and webRequestBlocking can be revoked
+     while a listener stays registered, so every delivery and blocking
+     decision re-reads the owning extension's CURRENT grants through
+     this getter (built by the API layer over the live record). */
+  perm: () => { hostPatterns: string[]; canBlock: boolean };
   beforeRequest: Set<BeforeRequestListener>;
   beforeSendHeaders: Set<BeforeSendHeadersListener>;
   headersReceived: Set<HeadersReceivedListener>;
@@ -136,12 +140,11 @@ interface ExtWrReg {
 export class WebRequestRegistry {
   private readonly exts = new Map<ExtensionId, ExtWrReg>();
 
-  private reg(id: ExtensionId, opts: { hostPatterns: string[]; canBlock: boolean }): ExtWrReg {
+  private reg(id: ExtensionId, perm: () => { hostPatterns: string[]; canBlock: boolean }): ExtWrReg {
     let r = this.exts.get(id);
     if (!r) {
       r = {
-        hostPatterns: opts.hostPatterns,
-        canBlock: opts.canBlock,
+        perm,
         beforeRequest: new Set(),
         beforeSendHeaders: new Set(),
         headersReceived: new Set(),
@@ -159,9 +162,9 @@ export class WebRequestRegistry {
     id: ExtensionId,
     kind: WrKind,
     listener: AnyWrListener,
-    opts: { hostPatterns: string[]; canBlock: boolean; urls: string[] },
+    opts: { perm: () => { hostPatterns: string[]; canBlock: boolean }; urls: string[] },
   ): () => void {
-    const r = this.reg(id, opts);
+    const r = this.reg(id, opts.perm);
     switch (kind) {
       case "beforeRequest":
         r.beforeRequest.add(listener as BeforeRequestListener);
@@ -202,29 +205,33 @@ export class WebRequestRegistry {
     };
   }
 
-  /** Delivery gate: the extension's host permissions plus the
-      listener's own url filter must both match the request. */
+  /** Delivery gate: the extension's CURRENT host permissions (#282)
+      plus the listener's own url filter must both match the request
+      URL. The url is always the immutable engine-side request URL,
+      never a value a listener could have mutated (#272). */
   private visible(r: ExtWrReg, listener: AnyWrListener, url: string): boolean {
-    if (!hostPatternsMatch(r.hostPatterns, url)) return false;
+    if (!hostPatternsMatch(r.perm().hostPatterns, url)) return false;
     const f = r.filters.get(listener);
     return !f || hostPatternsMatch(f, url);
   }
 
   /** Engine hook: true when a blocking listener cancelled the request.
       Non-blocking extensions observe onBeforeRequest but cannot
-      cancel (Firefox semantics). */
+      cancel (Firefox semantics). Each listener gets its own defensive
+      copy of the details (#272): a mutated details object can never
+      alter the data a later listener or a later request stage sees. */
   beforeRequest(d: WrDetails): boolean {
     for (const r of this.exts.values()) {
       for (const l of [...r.beforeRequest]) {
         if (!this.visible(r, l, d.url)) continue;
         let res: void | { cancel?: boolean };
         try {
-          res = l(d);
+          res = l({ ...d });
         } catch {
           /* a broken listener is the extension's own problem */
           continue;
         }
-        if (r.canBlock && res && res.cancel === true) return true;
+        if (r.perm().canBlock && res && res.cancel === true) return true;
       }
     }
     return false;
@@ -235,7 +242,7 @@ export class WebRequestRegistry {
   beforeSendHeaders(d: WrDetails, headers: Headers): Headers | null {
     let out: Headers | null = null;
     for (const r of this.exts.values()) {
-      if (!r.canBlock) continue;
+      if (!r.perm().canBlock) continue;
       for (const l of [...r.beforeSendHeaders]) {
         if (!this.visible(r, l, d.url)) continue;
         const pairs = headersToPairs(out ?? headers);
@@ -258,7 +265,7 @@ export class WebRequestRegistry {
   headersReceived(d: WrDetails, statusCode: number, headers: Headers): Headers | null {
     let out: Headers | null = null;
     for (const r of this.exts.values()) {
-      if (!r.canBlock) continue;
+      if (!r.perm().canBlock) continue;
       for (const l of [...r.headersReceived]) {
         if (!this.visible(r, l, d.url)) continue;
         const pairs = headersToPairs(out ?? headers);
@@ -283,7 +290,7 @@ export class WebRequestRegistry {
       for (const l of [...r.completed]) {
         if (!this.visible(r, l, d.url)) continue;
         try {
-          l(d);
+          l({ ...d });
         } catch {
           /* observation only; listener errors are ignored */
         }
@@ -297,7 +304,7 @@ export class WebRequestRegistry {
       for (const l of [...r.errorOccurred]) {
         if (!this.visible(r, l, d.url)) continue;
         try {
-          l(d);
+          l({ ...d });
         } catch {
           /* observation only; listener errors are ignored */
         }
@@ -312,3 +319,4 @@ export class WebRequestRegistry {
 }
 
 export const WEBREQ = new WebRequestRegistry();
+

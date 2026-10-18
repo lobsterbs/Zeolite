@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TabRegistry, TABS, tabView } from "../tabs";
 import type { TabsEvent, TabsOp, UiTab } from "../tabs";
 import { ExtensionManager } from "../manager";
@@ -137,12 +137,14 @@ describe("browser.tabs (buildApi)", () => {
     await expect((tabsOf(bare).get as (id: number) => Promise<unknown>)(10)).resolves.toMatchObject({ id: 10 });
     await expect((tabsOf(bare).get as (id: number) => Promise<unknown>)(99)).rejects.toThrow(/Invalid tab ID/);
     await expect((tabsOf(bare).getCurrent as () => Promise<unknown>)()).rejects.toThrow(/tab context/);
+    /* #278: filtered queries no longer reject; they resolve to
+       host-visible tabs only (bare: none, host: the matching tab). */
     await expect(
-      (tabsOf(bare).query as (q?: unknown) => Promise<unknown>)({ url: "https://example.com/*" }),
-    ).rejects.toThrow(/requires the 'tabs' permission/);
-    await expect(
-      (tabsOf(withHost).query as (q?: unknown) => Promise<unknown>)({ url: "https://example.com/*" }),
-    ).rejects.toThrow(/requires the 'tabs' permission/);
+      (tabsOf(bare).query as (q?: unknown) => Promise<Record<string, unknown>[]>)({ url: "https://example.com/*" }),
+    ).resolves.toHaveLength(0);
+    const qHostUrl = (await (tabsOf(withHost).query as (q?: unknown) => Promise<Record<string, unknown>[]>)({ url: "https://example.com/*" })) as Record<string, unknown>[];
+    expect(qHostUrl).toHaveLength(1);
+    expect(qHostUrl[0]).toMatchObject({ id: 10, url: "https://example.com/" });
     await expect(
       (tabsOf(withPerm).query as (q?: unknown) => Promise<Record<string, unknown>[]>)({ url: "https://example.com/*" }),
     ).resolves.toHaveLength(1);
@@ -203,5 +205,77 @@ describe("browser.tabs (buildApi)", () => {
     await expect((windows.get as (id: number) => Promise<unknown>)(1)).resolves.toMatchObject({ id: 1 });
     await expect((windows.get as (id: number) => Promise<unknown>)(42)).rejects.toThrow(/Invalid window ID/);
     expect(windows.WINDOW_ID_CURRENT).toBe(-1);
+  });
+});
+
+/* #271: a title-only change must not leak title/url to an extension
+   without visibility of the tab's CURRENT url. */
+describe("tabs.onUpdated changeInfo gating (#271)", () => {
+  it("hides title changes on tabs outside host grants", async () => {
+    TABS.setDispatch(() => undefined);
+    TABS.syncFromUi([tab(50, "https://example.com/", { active: true, title: "old" })]);
+    const bare = await apiFor("Tabsy271", []);
+    const host = await apiFor("Tabsy271b", ["https://example.com/*"]);
+    const seenBare: unknown[][] = [];
+    const seenHost: unknown[][] = [];
+    const onUpdated = (a: { api: { browser: Record<string, unknown> } }, sink: unknown[][]) =>
+      ((a.api.browser.tabs as Record<string, unknown>).onUpdated as {
+        addListener: (l: (...args: unknown[]) => void) => void;
+      }).addListener((...args) => sink.push(args));
+    onUpdated(bare, seenBare);
+    onUpdated(host, seenHost);
+    /* Title-only change: changeInfo has no url; the tab's current url
+       is https://example.com/ which bare cannot see. */
+    TABS.syncFromUi([tab(50, "https://example.com/", { active: true, title: "new title" })]);
+    expect(seenBare).toHaveLength(0);
+    expect(seenHost).toHaveLength(1);
+    expect(seenHost[0][1]).toMatchObject({ title: "new title" });
+  });
+});
+
+/* #286: query supports title glob patterns (string or array). */
+describe("tabs.query title patterns (#286)", () => {
+  it("filters by title glob", async () => {
+    TABS.setDispatch(() => undefined);
+    TABS.syncFromUi([
+      tab(60, "https://a.example/", { title: "GitHub - Repo" }),
+      tab(61, "https://b.example/", { title: "News Site" }),
+    ]);
+    const withPerm = await apiFor("Tabsy286", ["tabs"]);
+    const q = (withPerm.api.browser.tabs as Record<string, unknown>).query as (q?: unknown) => Promise<Record<string, unknown>[]>;
+    expect((await q({ title: "GitHub*" })).map((t) => t.id)).toEqual([60]);
+    expect((await q({ title: ["Nope*", "News*"] })).map((t) => t.id)).toEqual([61]);
+    expect(await q({ title: "Nothing matches" })).toEqual([]);
+  });
+});
+
+/* #283: create/update/remove ops settle on a deadline even with no
+   UI acknowledgement, and a closed tab rejects its pending updates. */
+describe("tabs op deadlines (#283)", () => {
+  afterEach(() => { vi.useRealTimers(); TABS.setDispatch(null); });
+
+  it("create and update reject after the op deadline", async () => {
+    vi.useFakeTimers();
+    TABS.setDispatch(() => undefined);
+    TABS.syncFromUi([tab(70, "https://a.example/", { active: true })]);
+    const pCreate = TABS.create({ url: "https://new.example/" });
+    const pUpdate = TABS.update(70, { url: "https://renamed.example/" });
+    const createErr = pCreate.catch((e: Error) => e.message);
+    const updateErr = pUpdate.catch((e: Error) => e.message);
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(await createErr).toMatch(/timed out/);
+    expect(await updateErr).toMatch(/timed out/);
+  });
+
+  it("a removed tab settles pending removes and rejects pending updates", async () => {
+    TABS.setDispatch(() => undefined);
+    TABS.syncFromUi([tab(71, "https://a.example/", { active: true })]);
+    const pRemove = TABS.remove([71]);
+    const pUpdate = TABS.update(71, { url: "https://never.example/" });
+    const removeDone = pRemove.then(() => "done");
+    const updateErr = pUpdate.catch((e: Error) => e.message);
+    TABS.syncFromUi([]);
+    expect(await removeDone).toBe("done");
+    expect(await updateErr).toMatch(/tab closed before the update was observed/);
   });
 });

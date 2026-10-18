@@ -16,6 +16,11 @@ import { ExtensionStorageArea } from "../storage";
 
 const enc = new TextEncoder();
 
+/* Register options helper: live permission view (#282). */
+function opts(hostPatterns: string[], canBlock = false, urls: string[] = []) {
+  return { perm: () => ({ hostPatterns, canBlock }), urls };
+}
+
 function pkg(
   name: string,
   permissions: string[],
@@ -56,17 +61,9 @@ function details(url = "https://example.com/x"): WrDetails {
 describe("WebRequestRegistry", () => {
   it("honors cancel only for blocking extensions", () => {
     WEBREQ.resetForTests();
-    const offNb = WEBREQ.register("ext-nb", "beforeRequest", () => ({ cancel: true }), {
-      hostPatterns: ["<all_urls>"],
-      canBlock: false,
-      urls: [],
-    });
+    const offNb = WEBREQ.register("ext-nb", "beforeRequest", () => ({ cancel: true }), opts(["<all_urls>"], false));
     expect(WEBREQ.beforeRequest(details())).toBe(false);
-    const offB = WEBREQ.register("ext-b", "beforeRequest", () => ({ cancel: true }), {
-      hostPatterns: ["<all_urls>"],
-      canBlock: true,
-      urls: [],
-    });
+    const offB = WEBREQ.register("ext-b", "beforeRequest", () => ({ cancel: true }), opts(["<all_urls>"], true));
     expect(WEBREQ.beforeRequest(details())).toBe(true);
     offB();
     expect(WEBREQ.beforeRequest(details())).toBe(false);
@@ -76,11 +73,8 @@ describe("WebRequestRegistry", () => {
   it("gates delivery on host permissions and listener url filters", () => {
     WEBREQ.resetForTests();
     const seen: string[] = [];
-    const off = WEBREQ.register("ext-host", "beforeRequest", (d: WrDetails) => { seen.push(d.url); }, {
-      hostPatterns: ["https://allowed.example/*"],
-      canBlock: true,
-      urls: ["*://allowed.example/*"],
-    });
+    const off = WEBREQ.register("ext-host", "beforeRequest", (d: WrDetails) => { seen.push(d.url); },
+      opts(["https://allowed.example/*"], true, ["*://allowed.example/*"]));
     WEBREQ.beforeRequest(details("https://allowed.example/a"));
     WEBREQ.beforeRequest(details("https://other.example/a"));
     expect(seen).toEqual(["https://allowed.example/a"]);
@@ -93,7 +87,7 @@ describe("WebRequestRegistry", () => {
     const off = WEBREQ.register("ext-h", "beforeSendHeaders", (d: WrSendDetails) => {
       expect(d.requestHeaders.length).toBeGreaterThan(0);
       return { requestHeaders: [{ name: "x-zl-test", value: "1" } as WrHeaderPair] };
-    }, { hostPatterns: ["<all_urls>"], canBlock: true, urls: [] });
+    }, opts(["<all_urls>"], true));
     const h = new Headers();
     h.set("accept", "text/html");
     const out = WEBREQ.beforeSendHeaders(details(), h);
@@ -110,7 +104,7 @@ describe("WebRequestRegistry", () => {
       expect(d.statusCode).toBe(200);
       const pairs = d.responseHeaders.filter((p) => p.name !== "x-drop-me");
       return { responseHeaders: pairs };
-    }, { hostPatterns: ["<all_urls>"], canBlock: true, urls: [] });
+    }, opts(["<all_urls>"], true));
     const h = new Headers();
     h.set("content-type", "text/html");
     h.set("x-drop-me", "1");
@@ -152,18 +146,92 @@ describe("WebRequestRegistry", () => {
     WEBREQ.resetForTests();
     const done: number[] = [];
     const errs: string[] = [];
-    const offC = WEBREQ.register("ext-c", "completed", (d: WrCompletedDetails) => { done.push(d.statusCode); }, {
-      hostPatterns: ["<all_urls>"], canBlock: false, urls: [],
-    });
-    const offE = WEBREQ.register("ext-c", "errorOccurred", (d: WrErrorDetails) => { errs.push(d.error); }, {
-      hostPatterns: ["<all_urls>"], canBlock: false, urls: [],
-    });
+    const offC = WEBREQ.register("ext-c", "completed", (d: WrCompletedDetails) => { done.push(d.statusCode); }, opts(["<all_urls>"]));
+    const offE = WEBREQ.register("ext-c", "errorOccurred", (d: WrErrorDetails) => { errs.push(d.error); }, opts(["<all_urls>"]));
     WEBREQ.completed({ ...details(), statusCode: 200 });
     WEBREQ.errorOccurred({ ...details(), error: "boom" });
     expect(done).toEqual([200]);
     expect(errs).toEqual(["boom"]);
     offC();
     offE();
+    WEBREQ.resetForTests();
+  });
+});
+
+/* #272: one listener mutating shared details must not affect others. */
+describe("webRequest listener isolation (#272)", () => {
+  it("beforeRequest gives each listener its own details copy", () => {
+    WEBREQ.resetForTests();
+    const seen: (WrDetails | null)[] = [];
+    const off1 = WEBREQ.register("ext-1", "beforeRequest", (d: WrDetails) => {
+      (d as Record<string, unknown>).url = "https://mutated.example/";
+      seen.push(d);
+      return undefined;
+    }, opts(["<all_urls>"], true));
+    const off2 = WEBREQ.register("ext-2", "beforeRequest", (d: WrDetails) => {
+      seen.push(d);
+      return undefined;
+    }, opts(["<all_urls>"], true));
+    const r = WEBREQ.beforeRequest(details("https://original.example/a"));
+    expect(r).toBe(false); /* neither cancelled */
+    expect(seen[0]!.url).toBe("https://mutated.example/");
+    expect(seen[1]!.url).toBe("https://original.example/a");
+    off1(); off2();
+    WEBREQ.resetForTests();
+  });
+
+  it("completed and errorOccurred deliver copies", () => {
+    WEBREQ.resetForTests();
+    const got: WrCompletedDetails[] = [];
+    const errs: WrErrorDetails[] = [];
+    let first = true;
+    const off1 = WEBREQ.register("ext-1", "completed", (d: WrCompletedDetails) => {
+      if (first) { (d as Record<string, unknown>).url = "https://mutated.example/"; first = false; }
+      got.push(d);
+    }, opts(["<all_urls>"]));
+    const off2 = WEBREQ.register("ext-2", "completed", (d: WrCompletedDetails) => { got.push(d); }, opts(["<all_urls>"]));
+    const offE = WEBREQ.register("ext-2", "errorOccurred", (d: WrErrorDetails) => { (d as Record<string, unknown>).error = "clobbered"; errs.push(d); }, opts(["<all_urls>"]));
+    WEBREQ.completed({ ...details(), statusCode: 200 });
+    WEBREQ.errorOccurred({ ...details(), error: "boom" });
+    expect(got[0].url).toBe("https://mutated.example/");
+    expect(got[1].url).toBe("https://example.com/x");
+    /* errorOccurred has a single listener; the engine's own detail
+       object must survive the listener's mutation. */
+    WEBREQ.errorOccurred({ ...details(), error: "boom2" });
+    expect(errs[1].error).toBe("boom2");
+    off1(); off2(); offE();
+    WEBREQ.resetForTests();
+  });
+});
+
+/* #282: permissions are re-read at delivery, not snapshot at registration. */
+describe("webRequest live permissions (#282)", () => {
+  it("revoking host permissions stops delivery and blocking", () => {
+    WEBREQ.resetForTests();
+    const hosts = ["<all_urls>"];
+    const seen: string[] = [];
+    const off = WEBREQ.register("ext-r", "beforeRequest", (d: WrDetails) => {
+      seen.push(d.url);
+      return { cancel: true };
+    }, opts(hosts, true));
+    expect(WEBREQ.beforeRequest(details("https://a.example/"))).toBe(true);
+    expect(seen).toHaveLength(1);
+    /* Advanced-permissions backend mutates the array in place. */
+    hosts.length = 0;
+    hosts.push("https://other.example/*");
+    expect(WEBREQ.beforeRequest(details("https://a.example/"))).toBe(false);
+    expect(seen).toHaveLength(1);
+    /* canBlock flip: cancel result must be ignored when blocking was
+       revoked even on a permitted host. */
+    hosts.length = 0;
+    hosts.push("<all_urls>");
+    const off2 = WEBREQ.register("ext-r", "beforeRequest", () => ({ cancel: true }), {
+      perm: () => ({ hostPatterns: ["<all_urls>"], canBlock: false }),
+      urls: [],
+    });
+    expect(WEBREQ.beforeRequest(details("https://a.example/"))).toBe(false);
+    off2();
+    off();
     WEBREQ.resetForTests();
   });
 });
