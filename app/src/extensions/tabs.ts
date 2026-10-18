@@ -223,29 +223,15 @@ export class TabRegistry {
     return null;
   }
 
-/* #286: WebExtension title patterns are glob-style (a "*" matches any
-   run of characters); a pattern without "*" is an exact match. */
-function titleMatch(pat: string, title: string): boolean {
-  if (!pat.includes("*")) return pat === title;
-  const re = new RegExp(
-    "^" + pat.split("*").map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\  query(q: Record<string, unknown>): UiTab[] {
-    const out: UiTab[] = [];
-    for (const t of this.tabs.values()) {
-      if (q.active !== undefined && t.active !== !!q.active) continue;
-      if (q.pinned !== undefined && !!(t.pinned ?? false) !== !!q.pinned) continue;
-      if (q.windowId !== undefined && (t.windowId ?? 1) !== q.windowId) continue;
-      if (q.index !== undefined && t.index !== q.index) continue;
-      if (q.url !== undefined) {
-        const pats = (Array.isArray(q.url) ? q.url : [q.url]).map(String);
-        if (!hostPatternsMatch(pats, t.url)) continue;
-      }
-      out.push(cloneTab(t));
-    }
-    return out.sort((a, b) => a.index - b.index);
-  }")).join(".*") + "$",
-  );
-  return re.test(title);
-}
+  /* #286: WebExtension title patterns are glob-style (a "*" matches any
+     run of characters); a pattern without "*" is an exact match. */
+  private titleMatch(pat: string, title: string): boolean {
+    if (!pat.includes("*")) return pat === title;
+    const re = new RegExp(
+      "^" + pat.split("*").map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$",
+    );
+    return re.test(title);
+  }
 
   query(q: Record<string, unknown>): UiTab[] {
     /* #286: title filtering (string or array of patterns). */
@@ -263,7 +249,7 @@ function titleMatch(pat: string, title: string): boolean {
         const pats = (Array.isArray(q.url) ? q.url : [q.url]).map(String);
         if (!hostPatternsMatch(pats, t.url)) continue;
       }
-      if (titlePats && !titlePats.some((p) => titleMatch(p, t.title ?? ""))) continue;
+      if (titlePats && !titlePats.some((p) => this.titleMatch(p, t.title ?? ""))) continue;
       out.push(cloneTab(t));
     }
     return out.sort((a, b) => a.index - b.index);
