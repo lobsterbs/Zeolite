@@ -303,6 +303,45 @@ Remaining work, unscheduled:
   plaintext-destination init leak, the exact class the CI pageload
   tests forbid.
 
+## Majors 4.0 to 10.0: proposed program (not yet approved)
+
+Status: proposal. Names, order and themes below are a draft for the
+maintainer to accept or change. Nothing here is scheduled until an
+owner signs off. Each entry is a MAJOR (breaks compatibility), so each
+one picks a new substance family per docs/versioning.md. The family
+chosen here is the alkane series, because every name is a real chemical
+substance, none is used by 1.x to 3.x, and it has exactly seven members.
+
+| Version | Substance | Theme (open items it would carry) |
+|---|---|---|
+| 4.0 | Methane | JS and location correctness: parser-based JS rewriting (import(), import.meta, new URL, location reads, document.baseURI, fetch/XHR URL arguments); location/document.URL virtualization decision; WebSocket URL forms (#325, #279); Google basejs chunk URLs (#296, open); Google /sorry external script (#290, open); location-form gaps (#331) |
+| 5.0 | Ethane | Transport honesty: abort the upstream transfer when a body is canceled (#348); bounded backpressure instead of whole-response buffering (#347); bounded upstream work after a Wisp TTFB timeout (#255); retries only where they are safe for streamed or side-effecting requests (#251); cookie write-behind that survives service-worker termination (#254) |
+| 6.0 | Propane | Isolation: scope cookie-jar profile state to the requesting host client (#267); scope SharedWorker identity to each virtual site (#260); design phase 2 of virtual service-worker compatibility (#257); a service-worker-safe loader for the plugin API (#256) |
+| 7.0 | Butane | Extensions and cache: WebExtension match-pattern path semantics (#280); file URL match patterns and <all_urls> (#277); derive extension identity from the package (#287); cache Vary beyond Cookie so User-Agent and Accept-Language variants never cross (#346) |
+| 8.0 | Pentane | Unscoped. Reserved for whatever the 4.0 to 7.0 gates reveal. |
+| 9.0 | Hexane | Unscoped. |
+| 10.0 | Heptane | Unscoped. Reserved as the last name in the family; a 10.0 plan needs its own review. |
+
+Rules that apply to every entry above:
+
+- The 3.x and older deliverables stay where they are. Nothing in this table
+  renames shipped work.
+- A major is cut only when its own gates are green and no page-load
+  regression is open (cross-cutting gates below).
+- Minor releases inside a major take further names from the same family
+  (for example 4.1 takes the next unused alkane after the family is
+  agreed), following the never-reuse rule in docs/versioning.md.
+
+Open questions for the owner before this table is accepted:
+
+1. Approve the alkane family, or pick another family for the 4.x line.
+2. The 3.1 release is planned as Onyx. Onyx is a variety of chalcedony
+   (a mineral), not a chemical substance, which docs/versioning.md
+   requires. Rename it before the cut, or record a deliberate exception.
+3. Several issue numbers in the Unscheduled follow-up section are stale.
+   #146 and #144 now point at unrelated closed issues (see the
+   Unscheduled section). Re-point them before the 4.0 plan is scheduled.
+
 ## Cross-cutting gates (every phase)
 
 - Architecture: LobsterBrowse -> Zeolite public API -> Zeolite runtime ->
