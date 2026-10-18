@@ -44,32 +44,44 @@ export function siteRules(): Promise<SiteRules> {
       try {
         const resp = await fetch("/siteconfig.kdl", { cache: "no-cache" });
         if (!resp.ok) return {};
-        const rules: SiteRules = {};
-        for (const node of parseKdl(await resp.text())) {
-          const host = node.args[0];
-          if (node.name !== "site" || typeof host !== "string" || host.length === 0) {
-            continue;
-          }
-          const rule: SiteRule = {};
-          for (const child of node.children) {
-            const strs = child.args.filter((a): a is string => typeof a === "string");
-            if (child.name === "inject") rule.inject = strs;
-            else if (child.name === "block") rule.block = strs;
-            else if (child.name === "plugins") rule.plugins = strs;
-            else if (child.name === "fingerprint") {
-              const v = kdlNodeValue(child);
-              if (v !== null) rule.fingerprint = v;
-            }
-          }
-          rules[host] = rule;
-        }
-        return rules;
+        return rulesFromNodes(parseKdl(await resp.text()));
       } catch {
         return {};
       }
     })();
   }
   return cached;
+}
+
+/** KDL site nodes -> rules map (#265: host keys are normalized to
+    lowercase at parse time - DNS names are case-insensitive, and
+    ruleFor matches against the lowercased URL hostname, so a
+    mixed-case key would silently never match). Empty/garbage hosts
+    are skipped; a key that is not a bare hostname never matches the
+    suffix rule and is dropped at parse rather than lingering. */
+export function rulesFromNodes(nodes: KdlNode[]): SiteRules {
+  const rules: SiteRules = {};
+  for (const node of nodes) {
+    const host = node.args[0];
+    if (node.name !== "site" || typeof host !== "string" || host.length === 0) {
+      continue;
+    }
+    const key = host.toLowerCase();
+    if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(key)) continue;
+    const rule: SiteRule = {};
+    for (const child of node.children) {
+      const strs = child.args.filter((a): a is string => typeof a === "string");
+      if (child.name === "inject") rule.inject = strs;
+      else if (child.name === "block") rule.block = strs;
+      else if (child.name === "plugins") rule.plugins = strs;
+      else if (child.name === "fingerprint") {
+        const v = kdlNodeValue(child);
+        if (v !== null) rule.fingerprint = v;
+      }
+    }
+    rules[key] = rule;
+  }
+  return rules;
 }
 
 /** Host of a target URL, lowercase; null for unparseable input. */
@@ -123,3 +135,4 @@ function kdlNodeValue(node: KdlNode): unknown {
   if (node.args.length === 1) return node.args[0] ?? null;
   return node.args.length > 0 ? node.args : null;
 }
+

@@ -96,11 +96,20 @@ function siteKeys(store: Storage): string[] {
  };
  if (typeof IDB.cmp === "function") {
  const CMP = IDB.cmp.bind(IDB);
- shim.cmp = (a: string, b: string) => CMP(pre(a), pre(b));
+ /* #263: cmp() compares IndexedDB KEYS, not database names - prefixing
+    the arguments would string-coerce numbers/dates/arrays and change
+    the required key ordering. Database isolation lives in
+    open/deleteDatabase only. */
+ shim.cmp = (a: unknown, b: unknown) => CMP(a, b);
  }
  try {
  Object.defineProperty(w, "indexedDB", { value: shim, configurable: true });
- } catch { /* read-only: stays unscoped */ }
+ } catch {
+ /* #262: a failed install must not look like scoped storage:
+    the page keeps native unscoped IndexedDB, so isolation is
+    incomplete and the status says so. */
+ st.installed = false;
+ }
  }
 }
 
@@ -118,6 +127,14 @@ function siteKeys(store: Storage): string[] {
  has: (n: string) => HAS(pre(n)),
  keys: () => KEYS().then((ks) => ks.filter(own).map((n) => n.slice(P.length))),
  match: async (rq: Request | string, o?: CacheQueryOptions) => {
+ /* #264: an explicit cacheName searches only that site-owned cache;
+    a nonexistent one answers undefined (native CacheStorage never
+    creates a cache from match). */
+ if (o && typeof o.cacheName === "string") {
+ const n = pre(o.cacheName);
+ if (!(await HAS(n))) return undefined;
+ return (await CA.open(n)).match(rq, o);
+ }
  for (const n of await KEYS()) {
  if (!own(n)) continue;
  const hit = await (await CA.open(n)).match(rq, o);
@@ -128,10 +145,14 @@ function siteKeys(store: Storage): string[] {
  };
  try {
  Object.defineProperty(w, "caches", { value: shim, configurable: true });
- } catch { /* read-only: stays unscoped */ }
+ } catch {
+ /* #262: same honest-failure rule as IndexedDB above. */
+ st.installed = false;
+ }
  }
 }
 
 
 return st;
 }
+

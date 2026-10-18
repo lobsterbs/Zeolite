@@ -26,6 +26,7 @@ import { encodeDest } from "./codec";
 import { DIAG } from "./diag";
 import { traceDecision } from "./tracing";
 import { openDb, idbGet, idbPut, STORE_COOKIES } from "./extensions/idb";
+import { fnv1a } from "./bootstrap/siteid";
 import { getDomain, getPublicSuffix } from "tldts";
 
 export type SameSite = "strict" | "lax" | "none";
@@ -105,14 +106,9 @@ const registry = new Map<string, VirtualOrigin>();
    can tell jarEnumeration whose cookies a jar key holds. */
 const originById = new Map<string, string>();
 
-function fnv1a(s: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = (h * 0x01000193) >>> 0;
-  }
-  return h.toString(36);
-}
+/* #270: the FNV-1a site hash lives once in bootstrap/siteid.ts; the
+   old local copy used double-precision multiplication and collided
+   for distinct origins (same bug the page-side token had). */
 
 /** Register (memoized) a target origin and its internal representation. */
 export function registerOrigin(origin: string): VirtualOrigin {
@@ -767,9 +763,15 @@ export async function jarPersist(): Promise<void> {
   for (const [k, v] of jars) if (!k.includes(SEP)) entries.push([k, v]);
   await idbPut(db, STORE_COOKIES, "jar", entries);
   /* #41: the id -> origin map rides along as its own record so
-     enumeration can name origins after a restart. */
+     enumeration can name origins after a restart.
+     #289: only origins actually referenced by durable default-profile
+     jars persist. registerOrigin() admits temporary (incognito) profile
+     visits too, but their cookie jars are in-memory only - writing
+     their origin metadata to IndexedDB would leak which hosts an
+     incognito session visited even though its cookies stayed out. */
+  const durable = new Set(entries.map(([k]) => k));
   const ids: Array<[string, string]> = [];
-  for (const [id, o] of originById) ids.push([id, o]);
+  for (const [id, o] of originById) if (durable.has(id)) ids.push([id, o]);
   await idbPut(db, STORE_COOKIES, "origins", ids);
 }
 
@@ -807,6 +809,17 @@ export async function jarLoad(): Promise<void> {
         }
       }
     }
+    /* #270 migration: records persisted before the Math.imul fnv1a fix
+       are keyed by the old double-precision hash. The origins record
+       maps those old ids back to real origins, so rekey every jar
+       under the corrected id; an originless (id-only) record keeps its
+       key as-is. The same remap applies to the in-memory originById
+       view so enumeration names origins under the new ids. */
+    const oldOrigins = new Map(originById);
+    const migrated = new Map<string, string>();
+    for (const [id, o] of oldOrigins) migrated.set(fnv1a(o), o);
+    originById.clear();
+    for (const [k, v] of migrated) originById.set(k, v);
     if (Array.isArray(rec)) {
       for (const entry of rec) {
         if (Array.isArray(entry) && typeof entry[0] === "string" && Array.isArray(entry[1])) {
@@ -814,7 +827,13 @@ export async function jarLoad(): Promise<void> {
              hand-edited record must never reach the matching code (a
              non-string domain would throw mid-request). */
           const list = entry[1].filter(isStoredCookie);
-          if (list.length) jars.set(entry[0], list);
+          if (!list.length) continue;
+          const sep = entry[0].indexOf(SEP);
+          const pid = sep < 0 ? "" : entry[0].slice(0, sep);
+          const id = sep < 0 ? entry[0] : entry[0].slice(sep + SEP.length);
+          const origin = oldOrigins.get(id);
+          const newId = origin ? fnv1a(origin) : id;
+          jars.set(pid === "" ? newId : pid + SEP + newId, list);
         }
       }
     }
@@ -921,3 +940,4 @@ export function isPassChallenge(dest: string): boolean {
     return false;
   }
 }
+

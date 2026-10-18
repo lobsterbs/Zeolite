@@ -6,7 +6,11 @@ export function fnv1a(s: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
-    h = (h * 0x01000193) >>> 0;
+    /* #270: Math.imul is the real 32-bit FNV multiply. The old
+       h * 0x01000193 in double precision loses low bits past 2^53
+       inputs and produced an actual collision: two distinct origins
+       hashed to the same token (sgb2js). */
+    h = Math.imul(h, 0x01000193) >>> 0;
   }
   return h.toString(36);
 }
@@ -29,3 +33,4 @@ export function swc(): ServiceWorker | undefined {
     .serviceWorker;
   return sw && sw.controller;
 }
+

@@ -15,6 +15,7 @@ import {
   registerOrigin,
   setJarProfile,
 } from "../cookies";
+import { openDb, idbGet, STORE_COOKIES } from "../extensions/idb";
 
 /* Jar profiles (zl:jarProfile): the host app switches the whole jar
    between the durable default profile and a throwaway session profile
@@ -200,5 +201,22 @@ describe("jar enumeration + scoped clear (#41)", () => {
     expect(jarClearScope("bad\u0000sep", undefined).ok).toBe(false);
     expect(jarClearScope(undefined, "not an origin").ok).toBe(false);
     expect(cookieHeaderFor("https://a.example/")).toBe("keep=1");
+  });
+});
+
+/* #289: a session (incognito) profile visit registers its origin in
+   the in-memory id -> origin map, but the persisted "origins" record
+   must only ever contain origins with durable default-profile jars. */
+describe("persisted origin metadata (#289)", () => {
+  it("keeps incognito-only origins out of the persisted origins record", async () => {
+    applySetCookie("https://public.example/", resp(["pub=1"]));
+    setJarProfile("inc-meta");
+    applySetCookie("https://secret.example/", resp(["sec=1"]));
+    await jarPersist();
+    const db = await openDb();
+    const ids = (await idbGet(db, STORE_COOKIES, "origins")) as Array<[string, string]>;
+    const origins = ids.map(([, o]) => o);
+    expect(origins).toContain("https://public.example");
+    expect(origins).not.toContain("https://secret.example");
   });
 });
