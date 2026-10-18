@@ -1,4 +1,4 @@
-# AGENTS.md — Zeolite
+# AGENTS.md â Zeolite
 
 Guidance for AI agents and human contributors. Read this before changing code, architecture, CI, or public documentation.
 
@@ -29,25 +29,25 @@ honest no-listener errors. This pass adds runtime.alarms (in-memory timers in th
 **Do not implement Gecko-specific architecture, dependencies, WASM, or adapters as part of NativeTransit.**
 
 ## Repository layout
-- `crates/rewriter/` — streaming Rust/WASM rewriter.
-- `crates/wisp-core/` — Wisp v2.1 protocol.
-- `crates/wisp-extensions/` — auth/lifecycle/server extensions.
-- `crates/zeolite-server/` — standalone Wisp/static server and destination protection.
-- `crates/wisp-wasm/` — WASM Wisp bindings.
-- `app/src/sw.ts` — service-worker entrypoint and composition root: runtime boot (jar, download registry, extension startup), transport/transform init, event wiring (issue #82).
-- `app/src/request.ts` — request engine: the proxied request lifecycle (route decode/resolution, page cache, upstream hop chain, header surgery, rewrite branches, navigation strands) behind `handleFetch` (issue #82).
-- `app/src/control.ts` — control plane: zl: message dispatch, sender gates, session recording state.
-- `app/src/extensions/control.ts` — extension control facade: extension message dispatch + content-script bridge handler.
-- `app/src/transform.ts` — response transformation: wasm rewriter lifecycle, worker prelude, streaming HTML/CSS rewrite pipelines (issue #86).
-- `app/src/transport.ts` — upstream transport seam: wisp/libcurl client lifecycle behind the Transport interface (issue #84).
-- `app/src/extensions/` — WebExtension compatibility runtime.
-- `app/src/diag.ts` — bounded diagnostics.
+- `crates/rewriter/` â streaming Rust/WASM rewriter.
+- `crates/wisp-core/` â Wisp v2.1 protocol.
+- `crates/wisp-extensions/` â auth/lifecycle/server extensions.
+- `crates/zeolite-server/` â standalone Wisp/static server and destination protection.
+- `crates/wisp-wasm/` â WASM Wisp bindings.
+- `app/src/sw.ts` â service-worker entrypoint and composition root: runtime boot (jar, download registry, extension startup), transport/transform init, event wiring (issue #82).
+- `app/src/request.ts` â request engine: the proxied request lifecycle (route decode/resolution, page cache, upstream hop chain, header surgery, rewrite branches, navigation strands) behind `handleFetch` (issue #82).
+- `app/src/control.ts` â control plane: zl: message dispatch, sender gates, session recording state; `messageListener` keeps the message event alive for the whole handler and answers a failed dispatch with a structured error instead of an unhandled rejection (#250).
+- `app/src/extensions/control.ts` â extension control facade: extension message dispatch + content-script bridge handler.
+- `app/src/transform.ts` â response transformation: wasm rewriter lifecycle, worker prelude, streaming HTML/CSS rewrite pipelines (issue #86).
+- `app/src/transport.ts` â upstream transport seam: wisp/libcurl client lifecycle behind the Transport interface (issue #84).
+- `app/src/extensions/` â WebExtension compatibility runtime.
+- `app/src/diag.ts` â bounded diagnostics.
 - `app/src/rules.ts` - interception rules engine (block/allow/rewrite/modify, compiled from /rules.kdl).
 - `app/src/policy.ts` - compatibility policy engine (#135/#136): validated KDL rules from /policy.kdl that upgrade default native transit decisions onto the rewrite path for scoped compatibility cases (reason POLICY_REWRITE, rule id on the fallback ring and in diagnostics); rewrite is the only settable route, native is the default and required rewrites cannot be demoted. Grammar and precedence: docs/policy.md.
 - `app/src/intercept.ts` - public interception API (Phase 1).
-- `app/src/transit.ts` — NativeTransit transport-mode decision layer + fallback record.
-- `suite/` — compatibility probes.
-- `docs/` — architecture, roadmap, versioning and adapter docs.
+- `app/src/transit.ts` â NativeTransit transport-mode decision layer + fallback record.
+- `suite/` â compatibility probes.
+- `docs/` â architecture, roadmap, versioning and adapter docs.
 
 ## Interception API + rules engine (Phase 1, 1.1 Oxide)
 **Implemented** in `app/src/intercept.ts` (public `intercept(kind, handler)`: request/response plus navigation/worker/websocket/fetch filtered dispatch; block, URL rewrite, header merge; opt-in response body transforms behind the 512 KiB BODY_LIMIT gate, never for documents/stylesheets) and `app/src/rules.ts` (block/allow/rewrite/modify lists with resource-type filters, compiled once from `app/public/rules.kdl`, which ships the ad/tracker host lists migrated from the browser app's server-side engine plu
