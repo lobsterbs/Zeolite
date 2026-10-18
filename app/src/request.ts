@@ -356,10 +356,17 @@ export async function pageCacheMatch(
 /** Issue #18: slice a single-range request out of a stored full 200.
     206 + content-range on success, 416 when unsatisfiable, null to
     bypass (multi-range, compressed or oversized entries). */
-async function rangeFromEntry(hit: Response, rangeHeader: string): Promise<Response | null> {
+export async function rangeFromEntry(hit: Response, rangeHeader: string): Promise<Response | null> {
   /* A compressed body cannot be sliced: the range would cut the
      encoded stream, not the resource. */
   if (hit.headers.get("content-encoding")) return null;
+  /* #314: an entry that announces more than the range cap is refused
+     BEFORE its body is buffered: a huge stored body must not be
+     copied into memory only to be rejected. An uncompressed entry's
+     content-length matches its stored body, so this can only refuse
+     sooner, never differently; without the header, measure as before. */
+  const announced = Number(hit.headers.get("content-length") ?? "");
+  if (Number.isFinite(announced) && announced > ZL_RANGE_MAX) return null;
   const body = new Uint8Array(await hit.arrayBuffer());
   if (body.byteLength > ZL_RANGE_MAX) return null;
   const plan = planRange(rangeHeader, body.byteLength);

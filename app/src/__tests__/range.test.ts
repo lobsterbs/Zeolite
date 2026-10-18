@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { planRange } from "../range";
+import { planRange, ZL_RANGE_MAX } from "../range";
+import { rangeFromEntry } from "../request";
 
 const TOTAL = 2097152; // the compat fixture's /large body
 
@@ -38,5 +39,42 @@ describe("planRange (issue #18)", () => {
     expect(planRange("bytes=-", TOTAL).kind).toBe("bypass");
     expect(planRange("chunks=1-2", TOTAL).kind).toBe("bypass");
     expect(planRange("bytes=5-2", 100).kind).toBe("bypass");
+  });
+});
+
+
+describe("rangeFromEntry (#314)", () => {
+  it("refuses an oversized announced entry without buffering its body", async () => {
+    /* #314: undici background-pulls a constructor stream body, so a
+       pull flag cannot prove laziness; spy on arrayBuffer instead. */
+    let buffered = false;
+    const hit = new Response(new ReadableStream<Uint8Array>(), {
+      headers: { "content-length": String(ZL_RANGE_MAX + 1) },
+    });
+    hit.arrayBuffer = async () => {
+      buffered = true;
+      return new Uint8Array().buffer;
+    };
+    await expect(rangeFromEntry(hit, "bytes=0-1")).resolves.toBeNull();
+    expect(buffered).toBe(false);
+  });
+
+  it("still slices a small uncompressed entry: 206 + content-range", async () => {
+    const hit = new Response(new Uint8Array([1, 2, 3, 4]), {
+      headers: { "content-length": "4", "accept-ranges": "bytes" },
+    });
+    const out = await rangeFromEntry(hit, "bytes=1-2");
+    expect(out).not.toBeNull();
+    expect(out!.status).toBe(206);
+    expect(out!.headers.get("content-range")).toBe("bytes 1-2/4");
+    expect(new Uint8Array(await out!.arrayBuffer())).toEqual(new Uint8Array([2, 3]));
+  });
+
+  it("measures when content-length is absent: 416 past the end", async () => {
+    const hit = new Response(new Uint8Array([1, 2, 3, 4]), { headers: {} });
+    const out = await rangeFromEntry(hit, "bytes=9-");
+    expect(out).not.toBeNull();
+    expect(out!.status).toBe(416);
+    expect(out!.headers.get("content-range")).toBe("bytes */4");
   });
 });
