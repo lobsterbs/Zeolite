@@ -53,7 +53,7 @@ import { bootExtensionSubsystem, installLifecycle, raceBoot, wireDispatchers } f
 import { getFpScript, getRouteKey, isImageLazy, setEngineDegraded, siteProfileFor, ZEOLITE_VERSION } from "./swstate";
 import { ALARMS, MGMT, TABS, SCRIPTING, DOWNLOADS, NOTIFY, PERMS, bootEnabled, extensions, wakeExtension } from "./extensions";
 
-import { handleControlEvent } from "./control";
+import { messageListener } from "./control";
 /* #82: the request engine (route decode, page cache, upstream hop
    chain, header surgery, rewrite branches, navigation strands) lives
    in ./request.ts; this module is the entrypoint and composition
@@ -210,8 +210,12 @@ self.addEventListener("fetch", handleFetch);
 /* ---- Control plane ----------------------------------------------- */
 // Core zl: dispatch lives in ./control.ts; the extension facade lives in
 // ./extensions/control.ts. This listener only wires them up (#85, #91).
-self.addEventListener("message", (e: ExtendableMessageEvent) => {
-  void handleControlEvent(e, {
+self.addEventListener(
+  "message",
+  /* #250: the whole handler (boot gate included) extends the
+     message event lifetime, and a handler failure is answered
+     instead of surfacing as an unhandled rejection. */
+  messageListener({
     ready: (async () => {
       await routeReady;
       /* #249: bounded - a hung boot step must not wedge the control
@@ -219,5 +223,5 @@ self.addEventListener("message", (e: ExtendableMessageEvent) => {
       await raceBoot(initReady, "control-plane boot");
     })(),
     persistRoute,
-  });
-});
+  }),
+);

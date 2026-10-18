@@ -21,6 +21,7 @@ import {
   CORE_CONTROL_TYPES,
   dispatchCore,
   handleControlEvent,
+  messageListener,
   type ControlMessage,
 } from "../control";
 import { EXT_CONTROL_TYPES, dispatchExtControl } from "../extensions/control";
@@ -303,5 +304,43 @@ describe("zl:wispRegister persists the route shape (#168 idle-kill)", () => {
     });
     expect(bad.replies).toEqual([{ ok: false, error: "wisp registration needs a ws(s):// url or an empty string" }]);
     expect(persist).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("messageListener lifecycle (#250)", () => {
+  function fakeEvent(waitUntil: ReturnType<typeof vi.fn>) {
+    const posted: unknown[] = [];
+    const port = { postMessage: (m: unknown) => posted.push(m) };
+    const e = {
+      data: { type: "zl:getNetLog" },
+      ports: [port],
+      source: null,
+      waitUntil,
+    };
+    return { e, posted };
+  }
+
+  it("keeps the message event alive for the whole handler, not just the listener call", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const waitUntil = vi.fn();
+    const { e } = fakeEvent(waitUntil);
+    messageListener({ ready: gate, persistRoute: () => {} })(e as unknown as ExtendableMessageEvent);
+    expect(waitUntil).toHaveBeenCalledTimes(1);
+    const held = waitUntil.mock.calls[0][0] as Promise<unknown>;
+    release();
+    await held;
+  });
+
+  it("a failed handler answers a structured error and never rejects the event promise", async () => {
+    const waitUntil = vi.fn();
+    const { e, posted } = fakeEvent(waitUntil);
+    messageListener({
+      ready: Promise.reject(new Error("boot wedge")),
+      persistRoute: () => {},
+    })(e as unknown as ExtendableMessageEvent);
+    const held = waitUntil.mock.calls[0][0] as Promise<unknown>;
+    await expect(held).resolves.toBeUndefined();
+    expect(posted[0]).toMatchObject({ ok: false, error: "control handler failed" });
   });
 });

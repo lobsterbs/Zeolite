@@ -909,3 +909,30 @@ export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
   "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister", "zl:wispRegister",
 ]);
 
+
+/** #250: the message listener that keeps the event alive for the
+    whole handler. waitUntil is called synchronously inside the
+    listener (the browser only honors a lifetime extension made
+    there); a handler error is caught so it can never surface as an
+    unhandled rejection: recorded as a RUNTIME diag and, when the
+    message carried a reply port, answered with a structured
+    error. */
+export function messageListener(deps: ControlDeps) {
+  return (e: ExtendableMessageEvent): void => {
+    e.waitUntil(
+      handleControlEvent(e, deps).catch((err) => {
+        DIAG.failure({
+          category: "RUNTIME",
+          cause: "failure",
+          message: "control-plane message handler failed",
+          technicalReason: String(err),
+        });
+        try {
+          (e.ports[0] as PortLike | undefined)?.postMessage({ ok: false, error: "control handler failed" });
+        } catch {
+          /* reply port already dead: nothing to answer */
+        }
+      }),
+    );
+  };
+}

@@ -72,8 +72,12 @@ export class ZeoliteEngine {
       // fail visibly - init() reports the missing control honestly.
       return false;
     }
-    await this.post({ type: "zl:config", prefix: this.config.pathPrefix, httpsUpgrade: this.config.httpsUpgrade });
-    return true;
+    /* #252: an acknowledged config is part of success: the worker can
+       refuse (bad prefix) or never answer (message dropped at
+       suspension); reporting success then would leave the host
+       riding the default prefix while believing its own applied. */
+    const ack = await this.post({ type: "zl:config", prefix: this.config.pathPrefix, httpsUpgrade: this.config.httpsUpgrade });
+    return ack.ok === true;
   }
 
   /** Engine-local route for a destination (usable as an iframe src). */
@@ -96,7 +100,13 @@ export class ZeoliteEngine {
 
   /** Enable/disable interception for one site. */
   async setSiteRoute(site: string, enabled: boolean): Promise<void> {
-    await this.post({ type: "zl:siteRoute", site, enabled });
+    /* #252: persist only after the worker acknowledged the toggle - a
+       durable record of a setting the engine never applied would
+       survive restarts as a lie. */
+    const ack = await this.post({ type: "zl:siteRoute", site, enabled });
+    if (!ack.ok) {
+      throw new Error("engine rejected zl:siteRoute: " + (ack.error ?? "not acknowledged"));
+    }
     // Persist across SW restarts (the SW is ephemeral; the adapter is
     // the durable brain).
     const key = "zl:disabled-sites";
@@ -128,9 +138,21 @@ export class ZeoliteEngine {
     if (!ctl) return Promise.resolve({ ok: false, error: "no controller" });
     return new Promise((resolve) => {
       const ch = new MessageChannel();
-      ch.port1.onmessage = (e) => resolve(e.data as { ok: boolean; error?: string });
+      /* #252: exactly one settlement - the reply and the 5s timeout
+         race, the loser is dropped (settled flag + clearTimeout), and
+         the reply port is closed once the answer is in. */
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (v: { ok: boolean; error?: string }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ch.port1.close();
+        resolve(v);
+      };
+      ch.port1.onmessage = (e) => settle(e.data as { ok: boolean; error?: string });
       ctl.postMessage(msg, [ch.port2]);
-      setTimeout(() => resolve({ ok: false, error: "timeout" }), 5000);
+      timer = setTimeout(() => settle({ ok: false, error: "timeout" }), 5000);
     });
   }
 }

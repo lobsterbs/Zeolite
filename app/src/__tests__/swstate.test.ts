@@ -240,3 +240,37 @@ describe("shared instances", () => {
     expect(ZEOLITE_VERSION.length).toBeGreaterThan(0);
   });
 });
+
+describe("docCookie per-client port cap (#253)", () => {
+  function fakePort() {
+    const messages: unknown[] = [];
+    const port = {
+      postMessage: (m: unknown) => messages.push(m),
+      close: () => {},
+    };
+    return { port: port as unknown as MessagePort, messages };
+  }
+
+  it("bounds one client list: only the newest registrations stay live", () => {
+    const ports: { messages: unknown[] }[] = [];
+    for (let i = 0; i < 40; i++) {
+      const f = fakePort();
+      ports.push(f);
+      registerDocCookiePort("noisy253", f.port, "https://example.com/");
+    }
+    pushDocCookieView("noisy253");
+    const delivered = ports.reduce((n, f) => n + (f.messages.length > 0 ? 1 : 0), 0);
+    expect(delivered).toBe(16);
+    expect(ports[0].messages.length).toBe(0);
+  });
+
+  it("evicted ports are closed", () => {
+    let closed = 0;
+    const mk = () =>
+      ({ postMessage: () => {}, close: () => { closed++; } }) as unknown as MessagePort;
+    for (let i = 0; i < 20; i++) {
+      registerDocCookiePort("evict253", mk(), "https://example.com/");
+    }
+    expect(closed).toBe(4);
+  });
+});

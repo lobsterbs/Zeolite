@@ -289,6 +289,14 @@ export async function siteProfileFor(target: string): Promise<SiteFp> {
    demand). */
 const docCookiePorts = new Map<string, Array<{ port: MessagePort; page: string }>>();
 const DOC_COOKIE_PORTS_CAP = 128;
+/* #253: one noisy page could grow its own port list without bound
+   while staying under the distinct-client cap; the per-client cap
+   evicts that client oldest port (closed, so the page channel
+   reports dead instead of silently going quiet). 16 covers every
+   real multi-document shape. */
+/* ponytail: raise only with a real page that legitimately holds more
+   live docCookie channels for one client. */
+const DOC_COOKIE_PORTS_PER_CLIENT = 16;
 
 export function pushDocCookieView(clientId: string): void {
   const list = clientId ? docCookiePorts.get(clientId) : undefined;
@@ -320,6 +328,18 @@ export function registerDocCookiePort(clientId: string, port: MessagePort, page:
     }
     list = [];
     docCookiePorts.set(clientId, list);
+  }
+  /* #253: per-client cap; the eviction is this client oldest
+     registration, not another client. */
+  if (list.length >= DOC_COOKIE_PORTS_PER_CLIENT) {
+    const evicted = list.shift();
+    if (evicted) {
+      try {
+        evicted.port.close();
+      } catch {
+        /* already closed */
+      }
+    }
   }
   list.push({ port, page });
 }
