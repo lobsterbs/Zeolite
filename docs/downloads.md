@@ -102,3 +102,7 @@ same honest-restart rule as `zl:adblock`).
   through `zl:saveDownload` in the same worker lifetime; a restart
   clears a done entry's buffer.
 
+
+## Filename sources
+
+`downloadFilename` honors RFC 6266/5987 `filename*` ext-values (charset'lang' prefix stripped, percent-decoded, taking precedence over a plain `filename`); malformed ext-values fall back to the plain `filename`. (#292)
