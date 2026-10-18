@@ -199,6 +199,15 @@ const ZL_PAGES = "zeolite-pages-v1";
 const ZL_CACHED_AT = "x-zl-cached-at";
 /* #184: the final URL after redirect hops rides stored entries. */
 const ZL_FINAL_URL = "x-zl-final-url";
+/* #338: internal bookkeeping headers never reach the page. They stay
+   on the stored entry (TTL checks and final-URL recovery read them)
+   and are stripped from every served copy. */
+function stripInternalHeaders(h: Headers): Headers {
+  const out = new Headers(h);
+  out.delete(ZL_CACHED_AT);
+  out.delete(ZL_FINAL_URL);
+  return out;
+}
 const ZL_DEFAULT_TTL = 10 * 60 * 1000;
 const ZL_PAGE_LIMIT = 60;
 /* #195: bodies above this size never enter the page cache (the
@@ -348,6 +357,19 @@ export async function pageCacheMatch(
      the page unrewritten bytes. The origin owns range semantics. */
   if (rangeHeader) {
     if (isHtml(hit) || isCss(hit) || isJs(hit)) return null;
+    /* #341: If-Range gates the slice on the stored validator. A
+       mismatch means the client's view may be newer than the entry,
+       so the origin owns the range semantics. Strong-compare etags (a
+       W/ tag mismatches) and exact Last-Modified strings; anything
+       else fails closed to a bypass. */
+    const ifRange = req.headers.get("if-range");
+    if (ifRange) {
+      const etag = hit.headers.get("etag");
+      const lm = hit.headers.get("last-modified");
+      const strong = ifRange.replace(/^W\//, "");
+      const ok = (!!etag && strong === etag) || (!!lm && ifRange === lm);
+      if (!ok) return null;
+    }
     return await rangeFromEntry(hit, rangeHeader);
   }
   return hit;
@@ -371,7 +393,8 @@ export async function rangeFromEntry(hit: Response, rangeHeader: string): Promis
   if (body.byteLength > ZL_RANGE_MAX) return null;
   const plan = planRange(rangeHeader, body.byteLength);
   if (plan.kind === "bypass") return null;
-  const headers = new Headers(hit.headers);
+  /* #338: the slice view serves without internal headers. */
+  const headers = stripInternalHeaders(hit.headers);
   if (plan.kind === "unsatisfiable") {
     headers.set("content-range", `bytes */${body.byteLength}`);
     return new Response(null, { status: 416, headers });
@@ -509,7 +532,8 @@ export async function pageCacheStore(
     body, the preserved validator headers, and an x-zl-not-modified
     marker consumers can check. */
 export function surfaceNotModified(h: Headers): Response {
-  const out = new Headers(h);
+  /* #338: the served 304 view carries no internal headers. */
+  const out = stripInternalHeaders(h);
   out.set("x-zl-not-modified", "1");
   return new Response(null, { status: 200, headers: out });
 }
@@ -2001,7 +2025,13 @@ export function handleFetch(e: FetchEvent): void {
                entries), serve it through the same marked-200
                conversion instead of hanging the page. */
             if (hit.status === 304) return surfaceNotModified(hit.headers);
-            if (hit.status !== 200) return hit;
+            if (hit.status !== 200) {
+              /* #338: served without internal bookkeeping headers. */
+              const kept = stripInternalHeaders(hit.headers);
+              return hit.body
+                ? new Response(hit.body, { status: hit.status, headers: kept })
+                : new Response(null, { status: hit.status, headers: kept });
+            }
             /* #158/#159 same honesty as the fresh path: a script or
                worker destination cached with an HTML or CSS body (the
                SPA catch-all class) serves the JS-typed comment, never
@@ -2015,7 +2045,7 @@ export function handleFetch(e: FetchEvent): void {
                carry a stale upstream encoding over a decoded body:
                fetch() consumers would decode plaintext a second time.
                The served view is always identity. */
-            const hitHeaders = new Headers(hit.headers);
+            const hitHeaders = stripInternalHeaders(hit.headers);
             hitHeaders.delete("content-encoding");
             hitHeaders.delete("content-length");
             /* A stored document/stylesheet is the raw upstream body: a

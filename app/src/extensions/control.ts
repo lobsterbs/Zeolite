@@ -384,7 +384,10 @@ async function handleExtMessage(
   if (msg && typeof msg === "object" && typeof msg.__zlDomLoaded === "string") {
     /* Page-world bridge reports DOM readiness: the only honest
        onDOMContentLoaded source (see ./bridge). */
-    WEBNAV.domContentLoaded(String(msg.__zlDomLoaded));
+    /* #344: the URL is the decoded sender, never the message
+       field - a page must not forge DOMContentLoaded events for
+       another open tab. */
+    WEBNAV.domContentLoaded(dest);
     return { ok: true };
   }
   if (msg && typeof msg === "object" && typeof msg.__zlStorage === "string") {

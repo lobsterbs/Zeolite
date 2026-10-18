@@ -328,7 +328,7 @@ export function parseCookieDate(s: string): number | null {
     Rejects (hard gate) any cookie whose Domain does not scope the
     response host. Deletion follows max-age<=0 or an already-past
     expiry. */
-function admitCookie(responseUrl: string, header: string): SetCookieResult {
+function admitCookie(responseUrl: string, header: string, fromScript = false): SetCookieResult {
   const u = parseUrl(responseUrl);
   const semi = header.indexOf(";");
   const pair = (semi < 0 ? header : header.slice(0, semi)).trim();
@@ -339,6 +339,15 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
     return { name: "", stored: false, deleted: false, rejected: "malformed" };
   }
   const value = eq > 0 ? pair.slice(eq + 1).trim() : "";
+  /* #349: control characters never enter the jar. A CR/LF in a
+     stored value poisons every later Cookie header built from it
+     (fetch Headers reject the whole header), so one cookie can make
+     every later request to the domain fail. RFC 6265 cookie-octets
+     exclude CTLs outright. */
+  if (/[\x00-\x1F\x7F]/.test(name) || /[\x00-\x1F\x7F]/.test(value)) {
+    DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: control character in name or value" });
+    return { name: "", stored: false, deleted: false, rejected: "control character" };
+  }
 
   let domain = "";
   let hostOnly = true;
@@ -458,7 +467,9 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
 
   if (isDeletion) {
     const before = jar.length;
-    const kept = jar.filter((c) => !sameCookie(c));
+    /* #337: a document.cookie write never deletes an HttpOnly
+       cookie; only a server response retires one. */
+    const kept = jar.filter((c) => !sameCookie(c) || (fromScript && c.httpOnly));
     if (kept.length !== before) {
       if (kept.length) jars.set(key, kept);
       else jars.delete(key);
@@ -470,6 +481,13 @@ function admitCookie(responseUrl: string, header: string): SetCookieResult {
   }
 
   const idx = jar.findIndex(sameCookie);
+  /* #337: a document.cookie write never replaces an HttpOnly cookie
+     (RFC 6265 5.5: the storage step ignores a script write over an
+     HttpOnly cookie of the same identity). */
+  if (fromScript && idx >= 0 && jar[idx].httpOnly) {
+    DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "document.cookie write refused: HttpOnly cookie" });
+    return { name, stored: false, deleted: false, rejected: "httponly" };
+  }
   const fresh: Cookie = {
     name,
     value,
@@ -584,7 +602,7 @@ export function documentCookieRead(pageUrl: string): string {
     URL. A script cannot mint an HttpOnly cookie, so the attribute is
     stripped before admission (spec: ignore it). */
 export function documentCookieWrite(pageUrl: string, cookie: string): SetCookieResult {
-  return admitCookie(pageUrl, cookie.replace(/;\s*httponly\b/gi, ""));
+  return admitCookie(pageUrl, cookie.replace(/;\s*httponly\b/gi, ""), true);
 }
 
 /** #49 (browser.cookies.remove): delete cookie identities from every

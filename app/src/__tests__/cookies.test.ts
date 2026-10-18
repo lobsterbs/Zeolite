@@ -123,6 +123,50 @@ describe("set-cookie admission", () => {
   });
 });
 
+describe("document.cookie vs HttpOnly (#337)", () => {
+  it("a script write never overwrites an HttpOnly cookie", () => {
+    applySetCookie("https://a.example/", resp(["sid=server; HttpOnly"]));
+    const r = documentCookieWrite("https://a.example/", "sid=attacker; Path=/");
+    expect(r.rejected).toBe("httponly");
+    expect(cookieHeaderFor("https://a.example/")).toBe("sid=server");
+  });
+
+  it("a script deletion never removes an HttpOnly cookie", () => {
+    applySetCookie("https://a.example/", resp(["sid=server; HttpOnly"]));
+    const r = documentCookieWrite("https://a.example/", "sid=x; Max-Age=0");
+    expect(r.deleted).toBe(false);
+    expect(cookieHeaderFor("https://a.example/")).toBe("sid=server");
+  });
+
+  it("a server response still replaces the HttpOnly cookie", () => {
+    applySetCookie("https://a.example/", resp(["sid=old; HttpOnly"]));
+    const r = applySetCookie("https://a.example/", resp(["sid=new"]));
+    expect(r[0].stored).toBe(true);
+    expect(cookieHeaderFor("https://a.example/")).toBe("sid=new");
+  });
+
+  it("a script write still replaces a non-HttpOnly cookie", () => {
+    applySetCookie("https://a.example/", resp(["sid=server"]));
+    const r = documentCookieWrite("https://a.example/", "sid=script; Path=/");
+    expect(r.stored).toBe(true);
+    expect(cookieHeaderFor("https://a.example/")).toBe("sid=script");
+  });
+});
+
+describe("control characters never enter the jar (#349)", () => {
+  it("rejects a CR/LF in the value", () => {
+    const r = documentCookieWrite("https://a.example/", "a=x\r\ny; Domain=a.example; Path=/");
+    expect(r.rejected).toBe("control character");
+    expect(cookieHeaderFor("https://a.example/")).toBeNull();
+  });
+
+  it("still admits clean values", () => {
+    const r = documentCookieWrite("https://a.example/", "b=1");
+    expect(r.stored).toBe(true);
+    expect(cookieHeaderFor("https://a.example/")).toBe("b=1");
+  });
+});
+
 describe("jar persistence", () => {
   it("persists to IndexedDB and reloads", async () => {
     applySetCookie("https://a.example/", resp(["keep=1"]));

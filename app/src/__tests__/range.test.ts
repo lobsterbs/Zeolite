@@ -77,4 +77,18 @@ describe("rangeFromEntry (#314)", () => {
     expect(out!.status).toBe(416);
     expect(out!.headers.get("content-range")).toBe("bytes */4");
   });
+
+  it("serves the slice without x-zl-* bookkeeping headers (#338)", async () => {
+    const hit = new Response(new Uint8Array([1, 2, 3, 4]), {
+      headers: {
+        "content-length": "4",
+        "x-zl-cached-at": "1",
+        "x-zl-final-url": "https://real.example/x",
+      },
+    });
+    const out = await rangeFromEntry(hit, "bytes=0-1");
+    expect(out!.status).toBe(206);
+    expect(out!.headers.get("x-zl-cached-at")).toBeNull();
+    expect(out!.headers.get("x-zl-final-url")).toBeNull();
+  });
 });

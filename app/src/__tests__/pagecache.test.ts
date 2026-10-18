@@ -457,3 +457,46 @@ describe("page cache scope, final URL and size cap (#179, #184, #195)", () => {
   });
 });
 
+
+describe("pageCacheMatch If-Range (#341)", () => {
+  afterEach(() => {
+    delete (globalThis as { caches?: unknown }).caches;
+    delete (globalThis as { self?: unknown }).self;
+  });
+
+  const seed = (etag: string) => {
+    const stored = new Response("abcdef", {
+      headers: {
+        "content-type": "text/plain",
+        "cache-control": "max-age=60",
+        "x-zl-cached-at": String(Date.now()),
+        etag,
+      },
+    });
+    const fake = {
+      match: async () => stored,
+      delete: async () => true,
+      put: async () => {},
+      keys: async () => [] as Request[],
+    };
+    (globalThis as { caches?: unknown }).caches = { open: async () => fake };
+    (globalThis as { self?: unknown }).self = { location: { origin: "https://zl.test" } };
+  };
+
+  it("bypasses the cache when If-Range does not match the stored validator", async () => {
+    seed('"v1"');
+    const out = await pageCacheMatch(
+      new Request("https://e.example/p", { headers: { range: "bytes=0-1", "if-range": '"v2"' } }),
+    );
+    expect(out).toBeNull();
+  });
+
+  it("slices when If-Range matches the stored validator", async () => {
+    seed('"v1"');
+    const out = await pageCacheMatch(
+      new Request("https://e.example/p", { headers: { range: "bytes=0-1", "if-range": '"v1"' } }),
+    );
+    expect(out).not.toBeNull();
+    expect(out!.status).toBe(206);
+  });
+});
