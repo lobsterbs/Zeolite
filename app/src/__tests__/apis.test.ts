@@ -79,8 +79,8 @@ describe("optional API module detachment (LB #76)", () => {
 describe("cookies.onChanged (LB #76)", () => {
   it("fires for extension-driven set and remove", async () => {
     const changes: unknown[] = [];
-    const off = onCookieChanged((c) => changes.push(c));
     const ext = mkExt(["cookies"]);
+    const off = onCookieChanged(ext, (c) => changes.push(c));
     const set = await cookiesSet(ext, { url: "http://changed.example/a", name: "k", value: "v" });
     expect(set && (set as Record<string, unknown>).value).toBe("v");
     const removed = await cookiesRemove(ext, { url: "http://changed.example/a", name: "k" });

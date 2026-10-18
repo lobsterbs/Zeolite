@@ -153,6 +153,11 @@ export class WebRequestRegistry {
         filters: new Map(),
       };
       this.exts.set(id, r);
+    } else {
+      /* #282: refresh the live-permission getter on every
+         registration; an existing record must not stay pinned to
+         the first registration's grant view. */
+      r.perm = perm;
     }
     return r;
   }

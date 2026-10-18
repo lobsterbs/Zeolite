@@ -109,6 +109,9 @@ function makeTabsEvent(
       offs.set(l, TABS.subscribe((ev) => {
         const args = tabsEventArgs(ext, kind, ev);
         if (!args) return;
+        /* #271: if permission gating stripped every changeInfo field,
+           the extension must not see the event at all. */
+        if (kind === "updated" && args[1] && typeof args[1] === "object" && Object.keys(args[1]).length === 0) return;
         try {
           l(...args);
         } catch {

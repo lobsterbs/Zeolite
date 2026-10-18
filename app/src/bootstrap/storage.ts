@@ -126,7 +126,7 @@ function siteKeys(store: Storage): string[] {
  delete: (n: string) => DEL(pre(n)),
  has: (n: string) => HAS(pre(n)),
  keys: () => KEYS().then((ks) => ks.filter(own).map((n) => n.slice(P.length))),
- match: async (rq: Request | string, o?: CacheQueryOptions) => {
+ match: async (rq: Request | string, o?: CacheQueryOptions & { cacheName?: string }) => {
  /* #264: an explicit cacheName searches only that site-owned cache;
     a nonexistent one answers undefined (native CacheStorage never
     creates a cache from match). */

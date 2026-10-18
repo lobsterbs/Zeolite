@@ -215,7 +215,7 @@ describe("cookies.onChanged scoping (#281)", () => {
     (a.rec.permissions as string[]).splice(idx, 1);
     const setA = (a.api.browser.cookies as { set: (d: Record<string, unknown>) => Promise<unknown> })
       .set;
-    await setA({ url: "https://a.example/", name: "zl_rev", value: "v" });
+    await expect(setA({ url: "https://a.example/", name: "zl_rev", value: "v" })).rejects.toThrow(/permission 'cookies' not granted/);
     expect(seen).toHaveLength(0);
   });
 });

@@ -101,9 +101,7 @@ describe("TabRegistry", () => {
     const up = r.update(2, { active: true });
     r.syncFromUi([tab(1, "https://a.example/", { active: true })]);
     await rm;
-    r.setDispatch(() => undefined);
-    r.syncFromUi([tab(1, "https://a.example/"), tab(2, "https://b.example/", { active: true })]);
-    await up;
+    await expect(up).rejects.toThrow(/closed before the update was observed/);
   });
 });
 

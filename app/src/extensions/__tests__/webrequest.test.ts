@@ -164,7 +164,7 @@ describe("webRequest listener isolation (#272)", () => {
     WEBREQ.resetForTests();
     const seen: (WrDetails | null)[] = [];
     const off1 = WEBREQ.register("ext-1", "beforeRequest", (d: WrDetails) => {
-      (d as Record<string, unknown>).url = "https://mutated.example/";
+      (d as unknown as Record<string, unknown>).url = "https://mutated.example/";
       seen.push(d);
       return undefined;
     }, opts(["<all_urls>"], true));
@@ -186,11 +186,12 @@ describe("webRequest listener isolation (#272)", () => {
     const errs: WrErrorDetails[] = [];
     let first = true;
     const off1 = WEBREQ.register("ext-1", "completed", (d: WrCompletedDetails) => {
-      if (first) { (d as Record<string, unknown>).url = "https://mutated.example/"; first = false; }
+      if (first) { (d as unknown as Record<string, unknown>).url = "https://mutated.example/"; first = false; }
       got.push(d);
     }, opts(["<all_urls>"]));
     const off2 = WEBREQ.register("ext-2", "completed", (d: WrCompletedDetails) => { got.push(d); }, opts(["<all_urls>"]));
-    const offE = WEBREQ.register("ext-2", "errorOccurred", (d: WrErrorDetails) => { (d as Record<string, unknown>).error = "clobbered"; errs.push(d); }, opts(["<all_urls>"]));
+    let firstErr = true;
+    const offE = WEBREQ.register("ext-2", "errorOccurred", (d: WrErrorDetails) => { if (firstErr) { (d as unknown as Record<string, unknown>).error = "clobbered"; firstErr = false; } errs.push(d); }, opts(["<all_urls>"]));
     WEBREQ.completed({ ...details(), statusCode: 200 });
     WEBREQ.errorOccurred({ ...details(), error: "boom" });
     expect(got[0].url).toBe("https://mutated.example/");
