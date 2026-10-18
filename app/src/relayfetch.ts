@@ -42,10 +42,61 @@ let hostPort: MessagePort | null = null;
 let ridSeq = 0;
 const waiters = new Map<number, (m: RelayMsg) => void>();
 
+/* #354: a plain idle restart of the service worker drops the stored
+   port, and controllerchange does not fire for it, so the embedder
+   never learns. A relay-routed fetch that finds no channel now asks
+   every window client to re-register (zl:relayLost broadcast) and
+   waits once, bounded; the fallback stays honest when no embedder
+   answers in time, and a 30s backoff keeps embedder-less realms
+   from paying the wait on every fetch. */
+let reRegisterWaiters: Array<() => void> = [];
+let reRegisterBackoffUntil = 0;
+
+/** Ask the embedder to re-register its relay port, then wait once,
+    bounded. True when a port is registered (possibly by a concurrent
+    wait), false on the deadline or during the backoff window. */
+export async function requestRelayReRegister(deadlineMs: number, traceId: string, dest: string): Promise<boolean> {
+  if (hostPort) return true;
+  if (Date.now() < reRegisterBackoffUntil) return false;
+  DIAG.emit({
+    traceId,
+    requestId: traceId,
+    category: "TRANSPORT",
+    cause: "proxy",
+    severity: "warning",
+    stage: "UPSTREAM_REQUEST",
+    message: "relay channel lost (worker restart?): asking the embedder to re-register",
+    url: dest,
+  });
+  try {
+    const scope: {
+      clients?: { matchAll(o: { type: string }): Promise<Array<{ postMessage(m: unknown): void }>> };
+    } = typeof self !== "undefined" ? (self as unknown as typeof scope) : (globalThis as unknown as typeof scope);
+    const cs = (await scope.clients?.matchAll({ type: "window" })) ?? [];
+    for (const c of cs) c.postMessage({ type: "zl:relayLost" });
+  } catch {
+    /* no clients API in this realm: the bounded wait below still applies */
+  }
+  const got = await new Promise<boolean>((resolve) => {
+    const t = setTimeout(() => resolve(hostPort !== null), deadlineMs);
+    reRegisterWaiters.push(() => {
+      clearTimeout(t);
+      resolve(true);
+    });
+  });
+  if (!got) reRegisterBackoffUntil = Date.now() + 30_000;
+  return got;
+}
+
 /** Control-plane half of zl:relayRegister: remember the embedder's
     port and route its answers to the pending fetches. */
 export function relayRegister(port: MessagePort): void {
   hostPort = port;
+  /* #354: a pending channel-less relay fetch may be waiting for
+     exactly this registration; wake it (bounded wait resolves true). */
+  const ws = reRegisterWaiters;
+  reRegisterWaiters = [];
+  ws.forEach((w) => w());
   port.onmessage = (ev: MessageEvent) => {
     const m = ev.data as RelayMsg;
     if (!m || typeof m.rid !== "number") return;
