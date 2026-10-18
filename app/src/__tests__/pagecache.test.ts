@@ -354,7 +354,11 @@ describe("page cache scope, final URL and size cap (#179, #184, #195)", () => {
     expect(cacheStorable(new Headers({ "cache-control": "private" }))).toBe(false);
     expect(cacheStorable(new Headers({ "cache-control": "max-age=60, private" }))).toBe(false);
     expect(cacheStorable(new Headers({ vary: "Cookie" }))).toBe(false);
-    expect(cacheStorable(new Headers({ vary: "Accept-Encoding" }))).toBe(true);
+    expect(cacheStorable(new Headers({ vary: "Accept-Encoding" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "User-Agent" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "Accept-Language, Origin" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "*" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "" }))).toBe(true);
   });
 
   it("rewrites a redirected entry against its stored final URL (#184)", () => {
