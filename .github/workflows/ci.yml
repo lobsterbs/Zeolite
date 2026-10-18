@@ -206,15 +206,15 @@ jobs:
         # listener, #128 legacy WebKit postMessage, #130/#132 frame
         # identity relabel races, #236 virtual location, #248 the
         # route-shaped vloc decode (prel-of-prel stack prevention).
-        # Raised 27648 -> 28672 for #248; measured 27678.
+        # Raised 28672 -> 29696 for the #268/#269/#273/#274/#275/#284
+        # bootstrap compat wave (listener-object relabel + tap
+        # filter, BroadcastChannel subclass, Storage named-property
+        # Proxy, EventSource listener registry, Worker subclasses);
+        # measured 29383.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          # #248: route-shaped vloc inputs decode via fromNative
-          # instead of re-wrapping (a prel-of-prel mint served the
-          # engine markers upstream as a Google 404). Measured 27678,
-          # decided with the feature, same class as every raise above.
-          if [ "$SIZE" -ge 28672 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 28672)"; exit 1; fi
+          if [ "$SIZE" -ge 29696 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 29696)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
