@@ -843,11 +843,29 @@ export function classifyRtype(destHeader: string, contentType: string): string {
     matching declared script set (each carries its own js/css/run_at).
     Zero installed extensions means an empty array: no added work on
     the hot path beyond one array scan. */
-function csInjectUrls(target: string, req: Request): string[] {
+export function csInjectUrls(target: string, req: Request, parentUrl?: string): string[] {
   const exts = extensions.list();
   if (exts.length === 0) return [];
   const dest = reqDest(req);
-  const subframe = dest === "iframe" || dest === "object";
+  let subframe = dest === "iframe" || dest === "object";
+  /* An engine document embedded by the host app is the browsing
+     pane main surface, not a genuine in-page subframe: declared
+     scripts without all_frames must run there. The frame keeps
+     subframe semantics unless its parent is a parseable non-about
+     URL on neither a NAVH route nor an engine route (a host page);
+     absent or unparseable parents fail closed. */
+  if (subframe && parentUrl) {
+    try {
+      const pu = new URL(parentUrl);
+      const hostParent =
+        pu.protocol !== "about:" &&
+        !pu.pathname.startsWith(NAVH + "/") &&
+        !isEnginePath(pu.pathname);
+      if (hostParent) subframe = false;
+    } catch {
+      /* ponytail: unparseable parent keeps subframe semantics */
+    }
+  }
   const urls: string[] = [];
   for (const r of resolveContentScripts(exts, target, subframe)) {
     if (r.js.length === 0 && r.css.length === 0) continue;
@@ -2001,7 +2019,7 @@ export function handleFetch(e: FetchEvent): void {
             if (isHtml(hit) && hit.body) {
               const chRules = await siteRules();
               const chRule = ruleFor(chRules, target);
-              const csInject = csInjectUrls(target, e.request);
+              const csInject = csInjectUrls(target, e.request, e.request.referrer);
               const hitCt = hit.headers.get("content-type") ?? "text/html";
               /* Issue B: the served copy is re-encoded UTF-8. */
               hitHeaders.set("content-type", utf8ContentType(hitCt));
@@ -2625,7 +2643,7 @@ export function handleFetch(e: FetchEvent): void {
             /* Main-frame document loads feed the webNavigation bridge;
                subresource fetches do not arrive in navigate mode. */
             if (e.request.mode === "navigate") WEBNAV.committed(target);
-            const csInject = csInjectUrls(target, e.request);
+            const csInject = csInjectUrls(target, e.request, e.request.referrer);
             const rewriteDone = () => {
               /* webNavigation.onCompleted + webRequest.onCompleted:
                  the document stream (and with it the navigation) is
