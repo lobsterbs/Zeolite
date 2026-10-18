@@ -122,6 +122,28 @@ describe("applyVirtualOrigin (#130)", () => {
     expect(listeners.get("message")).toHaveLength(0);
   });
 
+  it("re-labels and removes EventListener-object listeners like functions (#268)", () => {
+    const { w, listeners } = fakeWindow();
+    stubController();
+    applyVirtualOrigin(w);
+    const seen: unknown[] = [];
+    const obj = { handleEvent: vi.fn((ev: unknown) => seen.push(ev)) };
+    (w.addEventListener as unknown as (t: string, f: unknown) => void)("message", obj);
+    const fwd = listeners.get("message")?.[0] as Listener;
+    expect(fwd).toBeDefined();
+    expect(fwd).not.toBe(obj); // the object is wrapped too
+    const ev = {
+      origin: "https://engine.example",
+      source: mkSender("https://site.example"),
+      data: "x",
+    };
+    (fwd as Listener)(ev);
+    expect(obj.handleEvent).toHaveBeenCalledTimes(1);
+    expect(obj.handleEvent.mock.calls[0][0]).toBe(ev); // same event object
+    (w.removeEventListener as unknown as (t: string, f: unknown) => void)("message", obj);
+    expect(listeners.get("message")).toHaveLength(0);
+  });
+
   it("passes non-message registrations through unchanged", () => {
     const { w, listeners } = fakeWindow();
     stubController();

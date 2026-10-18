@@ -35,6 +35,32 @@ describe("applyStorage scoped shims (#262 #263 #264)", () => {
     expect(scoped.length).toBe(0);
   });
 
+  it("named properties persist, delete and enumerate like native Storage (#273)", () => {
+    const w: Record<string, unknown> = {};
+    const ls = fakeStorage();
+    const ss = fakeStorage();
+    w.localStorage = ls;
+    w.sessionStorage = ss;
+    const st = applyStorage(w, "p1");
+    const scoped = st.scopedLocal!;
+    const s = scoped as unknown as Record<string, unknown>;
+    s.theme = "dark";
+    expect(scoped.getItem("theme")).toBe("dark");
+    expect(ls.getItem("p1theme")).toBe("dark");
+    expect(s.theme).toBe("dark");
+    expect("theme" in scoped).toBe(true);
+    expect(Object.keys(scoped)).toEqual(["theme"]);
+    expect(scoped.length).toBe(1);
+    expect(scoped.key(0)).toBe("theme");
+    delete s.theme;
+    expect(scoped.getItem("theme")).toBe(null);
+    expect(s.theme).toBe(undefined);
+    expect(Object.keys(scoped)).toEqual([]);
+    /* methods still resolve, absent names read undefined */
+    expect(typeof s.getItem).toBe("function");
+    expect(s.absent).toBe(undefined);
+  });
+
   it("prefixes db and cache names but not cmp keys (#263)", () => {
     const w: Record<string, unknown> = {};
     const opened: string[] = [];

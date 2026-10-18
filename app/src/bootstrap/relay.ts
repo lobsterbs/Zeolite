@@ -51,12 +51,21 @@ export const tapChannel = (t: Worker | MessagePort): void => {
    }
   },
  });
+ /* #284: filter both listener shapes - an object listener must not see
+    wrapper envelopes any more than a function one does. */
+ const isListener = (l: unknown): l is object =>
+  typeof l === "function" ||
+  (!!l && typeof (l as { handleEvent?: unknown }).handleEvent === "function");
+ const call = (l: object, ev: Event) =>
+  typeof l === "function"
+   ? (l as EventListener).call(t, ev)
+   : (l as { handleEvent: (e: Event) => void }).handleEvent(ev);
  t.addEventListener = function (this: Worker | MessagePort, ...a: unknown[]) {
-  if (a[0] === "message" && typeof a[1] === "function") {
-   const orig = a[1] as EventListener;
+  if (a[0] === "message" && isListener(a[1])) {
+   const orig = a[1] as object;
    const fwd: EventListener = (ev: Event) => {
     if (isWrapper((ev as MessageEvent).data)) return;
-    orig.call(t, ev);
+    call(orig, ev);
    };
    wrapped.set(orig, fwd);
    return nativeAdd(a[0], fwd, a[2]);
@@ -64,8 +73,7 @@ export const tapChannel = (t: Worker | MessagePort): void => {
   return nativeAdd(...a);
  } as unknown as (...a: unknown[]) => void;
  t.removeEventListener = function (this: Worker | MessagePort, ...a: unknown[]) {
-  const fwd =
-   a[0] === "message" && typeof a[1] === "function" ? wrapped.get(a[1] as object) : undefined;
+  const fwd = a[0] === "message" && isListener(a[1]) ? wrapped.get(a[1] as object) : undefined;
   return nativeRemove(a[0], fwd ?? a[1], a[2]);
  } as unknown as (...a: unknown[]) => void;
 };
@@ -127,16 +135,23 @@ addEventListener("message", windowRelay);
  code never sees the traffic; a read-only SharedWorker property
  keeps the native ctor (no relay, documented limit). */
 {
- const OSW = w.SharedWorker as (new (u: string, o?: string) => SharedWorker) | undefined;
+ /* #275: subclass the real ctors so instances keep instanceof and
+    new-only construction semantics while the relay hooks run.
+    ponytail: inline SharedWorker arg union - this lib set lacks
+    SharedWorkerOptions (name/type/credentials members only). */
+ type SWArg = string | { name?: string; type?: string; credentials?: string };
+ const OSW = w.SharedWorker as (new (u: string, o?: SWArg) => SharedWorker) | undefined;
  if (OSW) {
- const wrap = function (u: string, o?: string) {
- const s = new OSW(u, o);
- s.port.addEventListener("message", relay);
- tapChannel(s.port);
- return s;
- };
+ const SWC: new (u: string, o?: SWArg) => SharedWorker = OSW;
+ class ZlSharedWorker extends SWC {
+  constructor(u: string, o?: SWArg) {
+   super(u, o);
+   this.port.addEventListener("message", relay);
+   tapChannel(this.port);
+  }
+ }
  try {
- w.SharedWorker = wrap;
+ w.SharedWorker = ZlSharedWorker;
  } catch { /* read-only: shared workers stay unrelayed */ }
  }
 }
@@ -150,14 +165,16 @@ addEventListener("message", windowRelay);
 {
  const OW = w.Worker as (new (u: string, o?: WorkerOptions) => Worker) | undefined;
  if (OW) {
- const wrap = function (u: string, o?: WorkerOptions) {
- const wk = new OW(u, o);
- wk.addEventListener("message", relay);
- tapChannel(wk);
- return wk;
- };
+ const WC: new (u: string, o?: WorkerOptions) => Worker = OW;
+ class ZlWorker extends WC {
+  constructor(u: string, o?: WorkerOptions) {
+   super(u, o);
+   this.addEventListener("message", relay);
+   tapChannel(this);
+  }
+ }
  try {
- w.Worker = wrap;
+ w.Worker = ZlWorker;
  } catch { /* read-only: dedicated workers stay unrelayed */ }
  }
 }

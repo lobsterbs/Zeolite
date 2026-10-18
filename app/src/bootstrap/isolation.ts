@@ -259,32 +259,23 @@ export function applyIsolation(
       /* Narrowing does not survive into the hoisted ScopedChannel body;
          pin the non-optional type once. */
       const BCtor: new (name: string) => RealChannel = BC;
-      function ScopedChannel(this: unknown, name: string): RealChannel & {
-        name: string;
-      } {
-        const real = new BCtor(P + name);
-        return {
-          name,
-          get onmessage() {
-            return real.onmessage;
-          },
-          set onmessage(fn) {
-            real.onmessage = fn;
-          },
-          get onmessageerror() {
-            return real.onmessageerror;
-          },
-          set onmessageerror(fn) {
-            real.onmessageerror = fn;
-          },
-          postMessage: (m: unknown) => real.postMessage(m),
-          close: () => real.close(),
-          addEventListener: (t: string, l: unknown, o?: unknown) =>
-            real.addEventListener(t, l, o),
-          removeEventListener: (t: string, l: unknown, o?: unknown) =>
-            real.removeEventListener(t, l, o),
-          dispatchEvent: (ev: Event) => real.dispatchEvent(ev),
-        };
+      /* #269: subclass the real ctor - instances keep the native
+         EventTarget/BroadcastChannel surface (instanceof, new-only
+         construction, listener this) while the constructor maps the
+         visible name onto the site-prefixed internal channel. */
+      class ScopedChannel extends BCtor {
+        private readonly visible: string;
+        constructor(name: string) {
+          super(P + name);
+          this.visible = name;
+          /* ponytail: own getter because a base ctor may plant an own
+             name (the test realm's fake does); native's is a
+             prototype accessor, the shadowing is unobservable. */
+          Object.defineProperty(this, "name", {
+            configurable: true,
+            get: () => this.visible,
+          });
+        }
       }
       try {
         Object.defineProperty(w, "BroadcastChannel", {

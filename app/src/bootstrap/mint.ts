@@ -292,7 +292,17 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
     const SHIM = function (this: AnyRecord, target0: string, o?: { withCredentials?: boolean }) {
       const es = new EventTarget() as AnyRecord;
       const on: Record<string, ((e: unknown) => unknown) | undefined> = {};
-      const listen: Record<string, Array<(e: unknown) => void>> = {};
+      /* #274: a removable registry maps every shim listener (function or
+         EventListener object, keyed by type+listener+capture like the
+         native list) to one native wrapper on the real source. */
+      type Reg = {
+        type: string;
+        l: EventListenerOrEventListenerObject;
+        o?: unknown;
+        cap: boolean;
+        w: (e: unknown) => void;
+      };
+      const regs: Reg[] = [];
       let real: EventSource | null = null;
       let closed = false;
       const creds = !!(o && o.withCredentials);
@@ -310,17 +320,10 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
         real = new CES(u, { withCredentials: creds });
         for (const type of Object.keys(on)) bindOn(type);
         if (typeof (real as AnyRecord).addEventListener === "function")
-          for (const type of Object.keys(listen))
-            for (const cb of listen[type])
-              (real as AnyRecord).addEventListener(type, (e: unknown) => {
-                try {
-                  cb.call(es, e);
-                } catch {
-                  /* contained */
-                }
-              });
+          for (const r of regs) (real as AnyRecord).addEventListener(r.type, r.w, r.o);
       };
       const nativeAdd = es.addEventListener.bind(es) as (...a: unknown[]) => void;
+      const nativeRemove = es.removeEventListener.bind(es) as (...a: unknown[]) => void;
       /* instanceof parity: the EventTarget keeps its internal slots
          and adopts the real prototype (SHIM.prototype is that same
          prototype); the own on-handler, readyState, url and close
@@ -331,20 +334,57 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
          prototype need not extend EventTarget (the test realm's
          does not). */
       Object.setPrototypeOf(es, CES.prototype);
+      const isListener = (l: unknown): l is EventListenerOrEventListenerObject =>
+        typeof l === "function" ||
+        (!!l && typeof (l as { handleEvent?: unknown }).handleEvent === "function");
+      const capOf = (o: unknown) =>
+        !!(o === true || (o && typeof o === "object" && (o as AnyRecord).capture));
+      const run = (l: EventListenerOrEventListenerObject, e: unknown) => {
+        try {
+          if (typeof l === "function") (l as (ev: unknown) => void).call(es, e);
+          else (l as { handleEvent: (ev: unknown) => void }).handleEvent(e);
+        } catch {
+          /* contained */
+        }
+      };
+      const drop = (r: Reg) => {
+        const i = regs.indexOf(r);
+        if (i >= 0) regs.splice(i, 1);
+        if (real && typeof (real as AnyRecord).removeEventListener === "function")
+          (real as AnyRecord).removeEventListener(r.type, r.w, r.o);
+      };
       es.addEventListener = function (this: AnyRecord, ...a: unknown[]) {
         const type = String(a[0]);
-        if (typeof a[1] === "function") {
-          (listen[type] ?? (listen[type] = [])).push(a[1] as (e: unknown) => void);
-          if (real && typeof (real as AnyRecord).addEventListener === "function")
-            (real as AnyRecord).addEventListener(type, (e: unknown) => {
-              try {
-                (a[1] as (e: unknown) => void).call(es, e);
-              } catch {
-                /* contained */
-              }
-            });
+        if (isListener(a[1])) {
+          const o = a[2];
+          const once = !!(o && typeof o === "object" && (o as AnyRecord).once);
+          const sig = o && typeof o === "object" ? (o as AnyRecord).signal : undefined;
+          if (sig && (sig as AbortSignal).aborted) return nativeAdd(...a);
+          if (!regs.some((r) => r.type === type && r.l === a[1] && r.cap === capOf(o))) {
+            const l = a[1] as EventListenerOrEventListenerObject;
+            const r: Reg = { type, l, o, cap: capOf(o), w: (e) => run(l, e) };
+            if (once) r.w = (e) => { run(l, e); drop(r); };
+            if (sig) (sig as AbortSignal).addEventListener("abort", () => drop(r), { once: true });
+            regs.push(r);
+            if (real && typeof (real as AnyRecord).addEventListener === "function")
+              (real as AnyRecord).addEventListener(type, r.w, o);
+          }
         }
         return nativeAdd(...a);
+      };
+      es.removeEventListener = function (this: AnyRecord, ...a: unknown[]) {
+        const type = String(a[0]);
+        if (isListener(a[1])) {
+          const i = regs.findIndex(
+            (r) => r.type === type && r.l === a[1] && r.cap === capOf(a[2]),
+          );
+          if (i >= 0) {
+            const [r] = regs.splice(i, 1);
+            if (real && typeof (real as AnyRecord).removeEventListener === "function")
+              (real as AnyRecord).removeEventListener(r.type, r.w, r.o);
+          }
+        }
+        return nativeRemove(...a);
       };
       for (const type of ["open", "message", "error"]) {
         Object.defineProperty(es, "on" + type, {

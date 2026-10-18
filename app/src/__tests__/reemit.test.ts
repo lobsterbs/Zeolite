@@ -70,14 +70,28 @@ function fakeWindow() {
         xhrLog.push("send");
       }
     },
-    EventSource: class FakeES {
+    /* native EventSource extends EventTarget; the shim adopts this
+       prototype, and node's brand check needs the chain intact */
+    EventSource: class FakeES extends EventTarget {
       static CONNECTING = 0;
       static OPEN = 1;
       static CLOSED = 2;
       url: string;
+      added: Array<[string, unknown, unknown?]> = [];
       constructor(url: string, o?: unknown) {
+        super();
         this.url = url;
         esMade.push(this as unknown as Record<string, any>);
+      }
+      addEventListener(type: string, l: unknown, o?: unknown) {
+        this.added.push([type, l, o]);
+      }
+      removeEventListener(type: string, l: unknown, o?: unknown) {
+        const i = this.added.findIndex((r) => r[0] === type && r[1] === l);
+        if (i >= 0) this.added.splice(i, 1);
+      }
+      emit(type: string, ev: unknown) {
+        for (const r of [...this.added]) if (r[0] === type) (r[1] as (e: unknown) => void)(ev);
       }
     },
   };
@@ -278,6 +292,60 @@ describe("re-emission seams (#54 residual 2)", () => {
     const es = new e.w.EventSource(LOC);
     expect(e.esMade.length).toBe(1);
     expect(e.esMade[0].url).toBe(LOC);
+  });
+
+  it("listener registry: dedupe, object listeners, removal, once and abort (#274)", async () => {
+    stubMint("/j/e274");
+    const e = fakeWindow();
+    applyReemit(e.w);
+    const es = new e.w.EventSource("https://sse.example/stream?t=274");
+    const fnSeen: unknown[] = [];
+    const fn = (ev: unknown) => fnSeen.push(ev);
+    es.addEventListener("message", fn);
+    es.addEventListener("message", fn); /* dedupe: same type+listener+capture */
+    const objSeen: unknown[] = [];
+    const obj = { handleEvent: (ev: unknown) => objSeen.push(ev) };
+    es.addEventListener("open", obj);
+    await settle();
+    expect(e.esMade.length).toBe(1);
+    const real = e.esMade[0] as unknown as {
+      added: Array<[string, unknown, unknown?]>;
+      emit(type: string, ev: unknown): void;
+    };
+    expect(real.added.filter((r) => r[0] === "message")).toHaveLength(1);
+    expect(real.added.filter((r) => r[0] === "open")).toHaveLength(1);
+    real.emit("message", "m1");
+    expect(fnSeen).toEqual(["m1"]); /* one wrapper, one delivery */
+    real.emit("open", "o1");
+    expect(objSeen).toEqual(["o1"]); /* the object listener rides the real source */
+    es.removeEventListener("message", fn);
+    expect(real.added.filter((r) => r[0] === "message")).toHaveLength(0);
+    real.emit("message", "m2");
+    expect(fnSeen).toEqual(["m1"]);
+    /* capture-keyed: a capture registration is a second listener */
+    es.addEventListener("message", fn, true);
+    es.removeEventListener("message", fn); /* must not remove the capture one */
+    expect(real.added.filter((r) => r[0] === "message")).toHaveLength(1);
+    es.removeEventListener("message", fn, true);
+    expect(real.added.filter((r) => r[0] === "message")).toHaveLength(0);
+    /* once drops the registry entry after the first delivery */
+    const onceSeen: unknown[] = [];
+    es.addEventListener("error", (ev: unknown) => onceSeen.push(ev), { once: true });
+    real.emit("error", "e1");
+    real.emit("error", "e2");
+    expect(onceSeen).toEqual(["e1"]);
+    /* an aborted signal removes the registration from the real source */
+    const ac = new AbortController();
+    const sigSeen: unknown[] = [];
+    es.addEventListener("message", (ev: unknown) => sigSeen.push(ev), { signal: ac.signal });
+    ac.abort();
+    real.emit("message", "s1");
+    expect(sigSeen).toEqual([]);
+    /* a listener added after the mint lands on the real source directly */
+    const lateSeen: unknown[] = [];
+    es.addEventListener("message", (ev: unknown) => lateSeen.push(ev));
+    real.emit("message", "late");
+    expect(lateSeen).toEqual(["late"]);
   });
 });
 

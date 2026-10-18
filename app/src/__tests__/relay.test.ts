@@ -69,6 +69,76 @@ describe("tapChannel (#54 dedicated-Worker hook)", () => {
     };
     expect(() => ch.dispatchEvent(msg({ ok: 1 }))).not.toThrow();
   });
+
+  it("hides wrapper shapes from object listeners too, and removes them (#284)", () => {
+    const ch = new FakeChannel();
+    const relaySeen: unknown[] = [];
+    ch.addEventListener("message", (e) => relaySeen.push((e as MessageEvent).data));
+    tapChannel(ch as unknown as MessagePort);
+    const appSeen: unknown[] = [];
+    const obj = { handleEvent: (e: MessageEvent) => appSeen.push(e.data) };
+    ch.addEventListener("message", obj);
+    ch.dispatchEvent(msg({ zl: "ws" }));
+    ch.dispatchEvent(msg({ ok: 1 }));
+    expect(appSeen).toEqual([{ ok: 1 }]); // wrapper shapes stay hidden
+    expect(relaySeen).toEqual([{ zl: "ws" }, { ok: 1 }]);
+    ch.removeEventListener("message", obj);
+    ch.dispatchEvent(msg({ ok: 2 }));
+    expect(appSeen).toEqual([{ ok: 1 }]);
+  });
+});
+
+describe("worker ctor wrappers (#275 native semantics)", () => {
+  class FakeWorker extends EventTarget {
+    constructor(public u: string, public o?: unknown) {
+      super();
+    }
+  }
+  class FakeSharedWorker {
+    port: FakeChannel;
+    constructor(public u: string, public o?: unknown) {
+      this.port = new FakeChannel();
+    }
+  }
+  const inst = (x: unknown, ctor: unknown) =>
+    x instanceof (ctor as unknown as abstract new (...a: unknown[]) => unknown);
+  it("instances pass instanceof, bare calls throw, relay hooks still run", () => {
+    const G = globalThis as unknown as Record<string, unknown>;
+    const nativeAdd = G.addEventListener;
+    G.addEventListener = () => {};
+    G.location = { origin: "http://engine.example" };
+    const w: Record<string, unknown> = {
+      Worker: FakeWorker,
+      SharedWorker: FakeSharedWorker,
+    };
+    try {
+      applyRelay(w, "s", "https://engine.example/page");
+    } finally {
+      G.addEventListener = nativeAdd;
+      delete G.location;
+    }
+    const W = w.Worker as unknown as (u: string, o?: unknown) => unknown;
+    const wk = new (W as unknown as new (u: string, o?: unknown) => unknown)("u.js");
+    expect(inst(wk, w.Worker)).toBe(true);
+    expect(inst(wk, FakeWorker)).toBe(true);
+    expect(() => W("u.js")).toThrow(); // new-only, like the native ctor
+    const S = w.SharedWorker as unknown as (
+      u: string,
+      o?: string | { name?: string },
+    ) => unknown;
+    const sw = new (S as unknown as new (
+      u: string,
+      o?: string | { name?: string },
+    ) => unknown)("u.js", { name: "n" }); // options object form
+    expect(inst(sw, w.SharedWorker)).toBe(true);
+    expect(() => S("u.js")).toThrow();
+    /* the relay hooks still ran: both channels are tapped */
+    expect(
+      Object.prototype.hasOwnProperty.call(wk, "onmessage"),
+    ).toBe(true);
+    const port = (sw as unknown as { port: unknown }).port as unknown;
+    expect(Object.prototype.hasOwnProperty.call(port, "onmessage")).toBe(true);
+  });
 });
 
 

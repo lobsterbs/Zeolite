@@ -101,11 +101,18 @@ export function applyVirtualOrigin(w: Record<string, unknown>): void {
   const nativeAdd = (w.addEventListener as (...a: unknown[]) => unknown).bind(w);
   const nativeRemove = (w.removeEventListener as (...a: unknown[]) => unknown).bind(w);
   const fwd = new WeakMap<object, (this: unknown, ev: unknown) => unknown>();
+  /* #268: relabel both listener shapes - a callback function and an
+     EventListener object with handleEvent. */
+  const isListener = (l: unknown): l is object =>
+    typeof l === "function" ||
+    (!!l && typeof (l as { handleEvent?: unknown }).handleEvent === "function");
   const addWrap = function (...a: unknown[]): unknown {
-    if (a[0] === "message" && typeof a[1] === "function") {
-      const orig = a[1] as (ev: unknown) => unknown;
+    if (a[0] === "message" && isListener(a[1])) {
+      const orig = a[1] as object;
       const f = function (this: unknown, ev: unknown) {
-        orig.call(this, relabel(ev));
+        const r = relabel(ev);
+        if (typeof orig === "function") (orig as (e: unknown) => unknown).call(this, r);
+        else (orig as { handleEvent: (e: unknown) => unknown }).handleEvent(r);
       };
       fwd.set(orig, f);
       return nativeAdd(a[0], f, a[2]);
@@ -113,10 +120,7 @@ export function applyVirtualOrigin(w: Record<string, unknown>): void {
     return nativeAdd(...a);
   };
   const remWrap = function (...a: unknown[]): unknown {
-    const f =
-      a[0] === "message" && typeof a[1] === "function"
-        ? fwd.get(a[1] as object)
-        : undefined;
+    const f = a[0] === "message" && isListener(a[1]) ? fwd.get(a[1] as object) : undefined;
     return nativeRemove(a[0], f ?? a[1], a[2]);
   };
   /* ponytail: no half-install restore - addEventListener and

@@ -41,11 +41,15 @@ function fakeWindow(local?: Storage, session?: Storage) {
     static sent: unknown[][] = [];
     onmessage: Fn | null = null;
     onmessageerror: Fn | null = null;
-    constructor(public name: string) {
+    /* #269: the shim subclasses this ctor and shadows .name with the
+       page-visible spelling; record the internal identity instead. */
+    private readonly chan: string;
+    constructor(name: string) {
+      this.chan = name;
       FakeBC.built.push(name);
     }
     postMessage(m: unknown) {
-      FakeBC.sent.push([this.name, m]);
+      FakeBC.sent.push([this.chan, m]);
     }
     close() {}
     addEventListener() {}
@@ -243,6 +247,20 @@ describe("#37 isolation", () => {
     expect(BCb.built[BCb.built.length - 1]).toBe("zl:bbb:chan");
     ca.postMessage("m");
     expect(BCa.sent[BCa.sent.length - 1]).toEqual(["zl:aaa:chan", "m"]);
+  });
+
+  it("channels are real instances, new-only, and keep the visible name (#269)", () => {
+    const a = fakeWindow();
+    isolate(a.w, "zl:aaa:");
+    const BC = a.w.BroadcastChannel as unknown as {
+      new (n: string): { name: string };
+    };
+    const ch = new BC("c");
+    expect(ch instanceof BC).toBe(true);
+    expect(ch.name).toBe("c");
+    expect(() => (BC as unknown as (n: string) => unknown)("c")).toThrow();
+    /* the internal channel got the prefixed name */
+    expect(a.FakeBC.built[a.FakeBC.built.length - 1]).toBe("zl:aaa:c");
   });
 
   it("cookieStore is removed, not faked", () => {

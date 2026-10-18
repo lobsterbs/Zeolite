@@ -38,18 +38,55 @@ function siteKeys(store: Storage): string[] {
  for (const name of ["localStorage", "sessionStorage"] as const) {
  const LS = w[name] as Storage | undefined;
  if (!LS) { st.installed = false; continue; }
- const scoped = {
+ const base = {
  getItem: (k: string) => LS.getItem(pre(k)),
  setItem: (k: string, v: string) => LS.setItem(pre(k), v),
  removeItem: (k: string) => LS.removeItem(pre(k)),
  clear: () => {
  siteKeys(LS).forEach((k) => LS.removeItem(k));
  },
- key: (i: number) => siteKeys(LS)[i] ?? null,
+ key: (i: number) => {
+ const k = siteKeys(LS)[i];
+ return k ? k.slice(P.length) : null;
+ },
  get length() {
  return siteKeys(LS).length;
  },
- } as Storage;
+ };
+ /* #273: named props forward to the prefixed backing store like the
+    native Storage surface. ponytail: keys colliding with plain-object
+    names (methods, prototype members) resolve to the object side -
+    native Storage is LegacyOverrideBuiltIns; adopt per-key shadowing
+    only if a site ever needs it. */
+ const scoped = new Proxy(base, {
+ get: (t, p) =>
+  typeof p === "symbol" || p in t
+   ? (t as Record<string | symbol, unknown>)[p]
+   : LS.getItem(pre(p)) ?? undefined,
+ set: (t, p, v) => {
+  if (typeof p !== "symbol" && !(p in t)) LS.setItem(pre(p), String(v));
+  else (t as Record<string | symbol, unknown>)[p] = v;
+  return true;
+ },
+ deleteProperty: (t, p) => {
+  if (typeof p !== "symbol" && !(p in t)) LS.removeItem(pre(p));
+  return true;
+ },
+ has: (t, p) =>
+  typeof p === "symbol" ? p in t : p in t || LS.getItem(pre(p)) !== null,
+ ownKeys: () => siteKeys(LS).map((k) => k.slice(P.length)),
+ getOwnPropertyDescriptor: (t, p) =>
+  typeof p === "symbol"
+   ? Object.getOwnPropertyDescriptor(t, p)
+   : LS.getItem(pre(p)) === null
+    ? undefined
+    : {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: LS.getItem(pre(p)),
+     },
+ }) as Storage;
  try {
  Object.defineProperty(w, name, { value: scoped, configurable: true });
  } catch {
