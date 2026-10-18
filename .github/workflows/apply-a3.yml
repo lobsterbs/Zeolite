@@ -5,6 +5,7 @@ on:
     paths: ['.github/workflows/apply-a3.yml']
 permissions:
   contents: write
+  workflows: write
 jobs:
   apply:
     runs-on: ubuntu-latest
