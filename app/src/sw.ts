@@ -19,7 +19,7 @@
      zl:getJars | zl:clearJar profile origin
      zl:downloadState id status | zl:listMenus extId
      zl:loadState host (loading indicator poll)
-     zl:relayRegister port (embedder fetch relay, #137)
+     zl:relayRegister port (embedder fetch relay, #137); #354: zl:relayLost broadcast asks the embedder to re-register after an idle restart
      zl:wispRegister url (public wisp endpoint for route "wisp", #168)
 
    Host-only gate (#41): proxied pages are SW clients too, so

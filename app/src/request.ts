@@ -28,7 +28,7 @@ import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
 import { loadPolicy, policyMatch, type CompiledPolicy } from "./policy";
-import { relayAvailable, relayFetch } from "./relayfetch";
+import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
@@ -571,6 +571,10 @@ export function surfaceNotModified(h: Headers): Response {
    the cap fails honestly instead of sending a truncated body. */
 const REPLAY_BODY_CAP = 32 * 1024 * 1024;
 
+/* #354: how long a channel-less relay-routed fetch waits for the
+   embedder to re-register after the SW broadcast zl:relayLost. */
+const RELAY_RE_REGISTER_MS = 3_000;
+
 /* #155 + the 2026-10-14 report: how often the replay cap tripped
    (announced bodies too big to buffer, unannounced overflow mid-read).
    A counter, not silence: the streaming tradeoff is visible. */
@@ -657,6 +661,13 @@ async function upstreamFetch(
      path can actually fire for this request (a relay rule with a
      registered channel, or an announced body the single retry can
      replay); otherwise it streams one-shot. */
+  /* #354: an idle worker restart drops the registered relay port and
+     controllerchange never fires, so relay-routed hosts degraded to
+     the wasm transport (the SSL error 35 class). Before falling back,
+     ask the embedder to re-register once and wait, bounded. */
+  if (rule && rule.route === "relay" && !relayAvailable()) {
+    await requestRelayReRegister(RELAY_RE_REGISTER_MS, traceId, dest);
+  }
   const relayPossible = !!rule && rule.route === "relay" && relayAvailable();
   /* #168: a wisp rule rides the secondary wasm client when the
      embedder announced a public endpoint; its bodies are
