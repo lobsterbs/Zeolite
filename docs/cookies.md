@@ -137,7 +137,9 @@ equivalent of the server engine's per-sid `lb_inc` jar):
   label, so equal labels do not merge windows' cookies. The page cache
   remains shared, and any request in a non-default profile bypasses it.
   The first request after this upgrade removes the pre-isolation page
-  cache, since its entries had no reliable client-profile context.
+  cache, since its entries had no reliable client-profile context. The discard itself is
+  best-effort: a context without a deletable caches surface skips it
+  and never fails the fetch.
 
 ## Session import modes (2.2 Arsenide)
 
