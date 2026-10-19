@@ -4,8 +4,8 @@
 
 import { buildNavHandleUrl, currentPrefix, decodeClientUrl, encodeDest, mintableDest, setScheme } from "./codec";
 import type { JarConflictRule } from "./cookies";
-import { documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy } from "./cookies";
-import { PAGE_MESSAGES, senderIsHostPage } from "./cpgate";
+import { documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
+import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
 import { DIAG } from "./diag";
 /* #90: the download registry instance lives in ./downloads; the
    control plane lists and cancels entries through the subsystem. */
@@ -236,6 +236,21 @@ export interface CoreCtx {
 
 export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<void> {
   const { e, reply, port, persistRoute } = ctx;
+  const sourceClient = e.source as Client | null;
+  const sourceClientId = sourceClient?.id;
+  if (sourceClient?.id && sourceClient.url && !jarClientHasRoot(sourceClient.id)) {
+    inheritJarClient(sourceClient.id, undefined, sourceClient.url);
+    try {
+      const sourceUrl = new URL(sourceClient.url);
+      if (
+        sourceUrl.origin === self.location.origin &&
+        senderIsProxiedPath(sourceUrl.pathname) &&
+        !jarClientHasRoot(sourceClient.id)
+      ) markJarClientUnbound(sourceClient.id);
+    } catch {
+      /* An opaque/unparseable message source has no recoverable jar. */
+    }
+  }
   switch (msg?.type) {
     case "zl:relayRegister": {
       /* #137: the embedder registers its relay port. Host-only by the
@@ -350,11 +365,12 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          pathname-routed SPAs can route; the host stays opaque to the
          browser, history and extensions (decision recorded in
          docs/security.md). */
-      const url = buildNavHandleUrl(msg.dest);
+      const url = buildNavHandleUrl(msg.dest, undefined, sourceClientId);
       if (url === null) {
         reply({ ok: false, error: "navHandle unavailable: no route key (storage degraded); keep the legacy ?url= embed" });
         break;
       }
+      registerJarNavHandle(url, sourceClientId);
       reply({ ok: true, url });
       break;
     }
@@ -549,6 +565,7 @@ case "zl:tracing":
       }
       const wsHeaders = wsIdentityHeaders(wsOrigin, wsUrl, {
         profile: getFpProfile(),
+        clientId: sourceClientId,
       });
       wsBridge.open(port as unknown as PortLike, wsUrl, Array.isArray(msg.protocols) ? msg.protocols : [], wsHeaders);
       break;

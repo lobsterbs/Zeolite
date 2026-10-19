@@ -22,7 +22,7 @@
    debounced rewrites. Jar profiles (zl:jarProfile) switch to a
    throwaway in-memory session jar (incognito). */
 
-import { encodeDest } from "./codec";
+import { decodeNavHandleRoot, encodeDest } from "./codec";
 import { DIAG } from "./diag";
 import { traceDecision } from "./tracing";
 import { openDb, idbGet, idbPut, STORE_COOKIES } from "./extensions/idb";
@@ -137,30 +137,156 @@ const jars = new Map<string, Cookie[]>();
    jar with lb_inc. */
 
 const PROFILE_DEFAULT = "default";
+/* A frame recovered from an authenticated handle may beat its host
+   window's profile re-push after a worker restart. Keep that request
+   cookie-free until the host re-establishes its profile. */
+const PROFILE_UNBOUND = "\u0000unbound";
 const SEP = "\u0000";
 let profile = PROFILE_DEFAULT;
 
-/* #267: per-client profile overrides (one host window normal, one
-   incognito). A client that never sent zl:jarProfile keeps the
-   legacy global behavior. In-memory only: a SW restart forgets
-   client profiles, so no session state revives. */
-const clientProfiles = new Map<string, string>();
+/* #267/#361: profile selection starts at the host app client, while
+   proxied requests arrive under iframe client ids. Keep an in-memory
+   root association for every controlled child and scope temporary jar
+   keys by both root id and profile label. */
+const clientRoots = new Map<string, string>();
+const rootProfiles = new Map<string, string>();
+const unboundClients = new Set<string>();
 
-/** Internal jar map key for the given profile. */
-function jarKey(originId: string, pid: string = profile): string {
-  return pid === PROFILE_DEFAULT ? originId : pid + SEP + originId;
+function rootOf(clientId?: string): string | null {
+  if (!clientId) return null;
+  return clientRoots.get(clientId) ?? (rootProfiles.has(clientId) ? clientId : null);
 }
 
-/** True when a stored jar-map key belongs to the given profile
-    (default-profile keys are bare origin ids, predating profiles). */
-function inProfile(key: string, pid: string = profile): boolean {
-  return pid === PROFILE_DEFAULT ? !key.includes(SEP) : key.startsWith(pid + SEP);
-}
-
-/** #267: the profile a request runs in: the requesting client's own
-    profile when it set one, else the legacy global. */
 function activeProfile(clientId?: string): string {
-  return clientId ? clientProfiles.get(clientId) ?? profile : profile;
+  const root = rootOf(clientId);
+  if (root) return rootProfiles.get(root) ?? PROFILE_UNBOUND;
+  if (clientId && unboundClients.has(clientId)) return PROFILE_UNBOUND;
+  return profile;
+}
+
+function namespaceForProfile(pid: string, root: string | null): string {
+  if (pid === PROFILE_DEFAULT) return PROFILE_DEFAULT;
+  return root ? `client:${encodeURIComponent(root)}:${encodeURIComponent(pid)}` : `legacy:${encodeURIComponent(pid)}`;
+}
+
+function namespaceForClient(clientId?: string): string {
+  return namespaceForProfile(activeProfile(clientId), rootOf(clientId));
+}
+
+function profileNameForNamespace(namespace: string): string {
+  if (namespace === PROFILE_DEFAULT) return PROFILE_DEFAULT;
+  const clientNamespace = namespace.startsWith("client:");
+  const rest = clientNamespace ? namespace.slice("client:".length) : namespace;
+  const value = clientNamespace
+    ? rest.slice(rest.lastIndexOf(":") + 1)
+    : rest.startsWith("legacy:")
+      ? rest.slice("legacy:".length)
+      : rest;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/** Internal jar-map key for the selected namespace. */
+function jarKey(originId: string, namespace = PROFILE_DEFAULT): string {
+  return namespace === PROFILE_DEFAULT ? originId : namespace + SEP + originId;
+}
+
+/** True when a stored jar-map key belongs to the selected namespace
+    (default-profile keys are bare origin ids, predating profiles). */
+function inProfile(key: string, namespace = PROFILE_DEFAULT): boolean {
+  return namespace === PROFILE_DEFAULT ? !key.includes(SEP) : key.startsWith(namespace + SEP);
+}
+
+function clearNamespace(namespace: string): void {
+  for (const key of [...jars.keys()]) if (key.startsWith(namespace + SEP)) jars.delete(key);
+}
+
+/* The initial opaque navigation may have an empty FetchEvent.clientId.
+   This short-lived mapping carries the host identity to its resulting
+   proxied document without accepting page-supplied client ids. */
+const navHandleRoots = new Map<string, { root: string; expires: number }>();
+
+function navHandleToken(routeUrl: string | undefined): string | null {
+  if (!routeUrl) return null;
+  try {
+    const path = routeUrl.startsWith("/") ? routeUrl.split(/[?#]/, 1)[0] : new URL(routeUrl).pathname;
+    return /^\/__zl_navh__\/([^/]+)/.exec(path)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function registerJarNavHandle(routeUrl: string, clientId?: string): void {
+  const root = rootOf(clientId) ?? clientId ?? null;
+  const token = navHandleToken(routeUrl);
+  if (!root || !rootProfiles.has(root) || !token) return;
+  const now = Date.now();
+  for (const [key, value] of navHandleRoots) if (value.expires <= now) navHandleRoots.delete(key);
+  navHandleRoots.set(token, { root, expires: now + 120_000 });
+  while (navHandleRoots.size > 256) {
+    const oldest = navHandleRoots.keys().next().value;
+    if (oldest === undefined) break;
+    navHandleRoots.delete(oldest);
+  }
+}
+
+export function inheritJarClient(
+  sourceId: string | undefined,
+  resultingId: string | undefined,
+  routeUrl?: string,
+): string | undefined {
+  const token = navHandleToken(routeUrl);
+  const pending = token ? navHandleRoots.get(token) : undefined;
+  if (token && pending) navHandleRoots.delete(token);
+  const root = rootOf(sourceId) ?? (
+    pending && pending.expires > Date.now() && rootProfiles.has(pending.root) ? pending.root : null
+  ) ?? (token ? decodeNavHandleRoot(token) : null);
+  if (sourceId && root) {
+    clientRoots.set(sourceId, root);
+    unboundClients.delete(sourceId);
+  }
+  if (resultingId) {
+    if (root) {
+      clientRoots.set(resultingId, root);
+      unboundClients.delete(resultingId);
+    } else {
+      clientRoots.delete(resultingId);
+      unboundClients.delete(resultingId);
+    }
+  }
+  return root ?? sourceId;
+}
+
+/** Fail closed for an existing proxied client whose authenticated
+    host-root token is unavailable (for example an old legacy route). */
+export function markJarClientUnbound(clientId?: string): void {
+  if (clientId && !rootOf(clientId)) unboundClients.add(clientId);
+}
+
+export function pruneJarClients(activeClientIds: ReadonlySet<string>): void {
+  const liveRoots = new Set<string>();
+  for (const [id, root] of clientRoots) if (activeClientIds.has(id)) liveRoots.add(root);
+  for (const [root, pid] of rootProfiles) {
+    if (!activeClientIds.has(root) && !liveRoots.has(root)) {
+      rootProfiles.delete(root);
+      if (pid !== PROFILE_DEFAULT) clearNamespace(namespaceForProfile(pid, root));
+    }
+  }
+  for (const [id, root] of clientRoots) {
+    if (!activeClientIds.has(id)) {
+      clientRoots.delete(id);
+    } else if (!rootProfiles.has(root)) {
+      clientRoots.delete(id);
+      unboundClients.add(id);
+    }
+  }
+  for (const id of unboundClients) if (!activeClientIds.has(id)) unboundClients.delete(id);
+  for (const [token, entry] of navHandleRoots) {
+    if (entry.expires <= Date.now() || !rootProfiles.has(entry.root)) navHandleRoots.delete(token);
+  }
 }
 
 /** Switch the active jar profile (zl:jarProfile control message). A
@@ -174,18 +300,18 @@ export function setJarProfile(p: unknown, clientId?: string): { ok: boolean; pro
       ? p
       : PROFILE_DEFAULT;
   if (clientId) {
-    /* #267: scoped to the requesting client; leaving a session
-       profile drops only THAT client's throwaway jars. */
-    const prev = clientProfiles.get(clientId) ?? PROFILE_DEFAULT;
+    const root = rootOf(clientId) ?? clientId;
+    const prev = rootProfiles.get(root) ?? PROFILE_DEFAULT;
+    rootProfiles.set(root, next);
+    clientRoots.set(clientId, root);
     if (prev !== PROFILE_DEFAULT && prev !== next) {
-      for (const key of [...jars.keys()]) if (key.startsWith(prev + SEP)) jars.delete(key);
+      clearNamespace(namespaceForProfile(prev, root));
     }
-    clientProfiles.set(clientId, next);
     return { ok: true, profile: next };
   }
   const prev = profile;
   if (prev !== PROFILE_DEFAULT && prev !== next) {
-    for (const key of [...jars.keys()]) if (key.startsWith(prev + SEP)) jars.delete(key);
+    clearNamespace(namespaceForProfile(prev, null));
   }
   profile = next;
   return { ok: true, profile };
@@ -195,6 +321,12 @@ export function setJarProfile(p: unknown, clientId?: string): { ok: boolean; pro
     requesting client's own when known, else the legacy global. */
 export function jarProfileState(clientId?: string): string {
   return activeProfile(clientId);
+}
+
+/** True when a FetchEvent client is already associated with a host
+    root, allowing request handling to avoid an async Client lookup. */
+export function jarClientHasRoot(clientId?: string): boolean {
+  return !!rootOf(clientId);
 }
 
 interface ParsedUrl {
@@ -353,7 +485,12 @@ export function parseCookieDate(s: string): number | null {
     Rejects (hard gate) any cookie whose Domain does not scope the
     response host. Deletion follows max-age<=0 or an already-past
     expiry. */
-function admitCookie(responseUrl: string, header: string, fromScript = false, pid: string = profile): SetCookieResult {
+function admitCookie(
+  responseUrl: string,
+  header: string,
+  fromScript = false,
+  namespace = PROFILE_DEFAULT,
+): SetCookieResult {
   const u = parseUrl(responseUrl);
   const semi = header.indexOf(";");
   const pair = (semi < 0 ? header : header.slice(0, semi)).trim();
@@ -486,7 +623,7 @@ function admitCookie(responseUrl: string, header: string, fromScript = false, pi
   const isDeletion = (maxAge !== null && maxAge <= 0) || (hasExpires && expires <= now);
   const expiry = maxAge !== null ? now + maxAge * 1000 : expires;
 
-  const key = jarKey(registerOrigin(u.origin).id, pid);
+  const key = jarKey(registerOrigin(u.origin).id, namespace);
   const jar = jars.get(key) ?? [];
   const sameCookie = (c: Cookie) => c.name === name && c.domain === domain && c.hostOnly === hostOnly && c.path === path;
 
@@ -556,7 +693,7 @@ export function applySetCookie(responseUrl: string, headers: Headers, clientId?:
   const getSetCookie = (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
   const raw = typeof getSetCookie === "function" ? getSetCookie.call(headers) : [];
   const list = raw.length > 0 ? raw : headers.has("set-cookie") ? [headers.get("set-cookie")!] : [];
-  return list.map((h) => admitCookie(responseUrl, h, false, activeProfile(clientId)));
+  return list.map((h) => admitCookie(responseUrl, h, false, namespaceForClient(clientId)));
 }
 
 /** Assemble the Cookie header value for a request URL, or null when
@@ -578,10 +715,10 @@ export function cookieHeaderFor(requestUrl: string, ctx?: CookieRequestContext):
   }
   if (purged) schedulePersist();
   /* #267: the Cookie header rides the requesting client's profile. */
-  const pid = activeProfile(ctx?.clientId);
+  const namespace = namespaceForClient(ctx?.clientId);
   const matched: Cookie[] = [];
   for (const [key, list] of jars) {
-    if (!inProfile(key, pid)) continue;
+    if (!inProfile(key, namespace)) continue;
     for (const c of list) {
       const domainOk = c.hostOnly ? u.host === c.domain : domainMatch(u.host, c.domain);
       /* #191 pinned deviation: the jar honors Secure strictly - Secure
@@ -607,10 +744,10 @@ export function documentCookieRead(pageUrl: string, clientId?: string): string {
   const u = parseUrl(pageUrl);
   if (!u) return "";
   const now = Date.now();
-  const pid = activeProfile(clientId);
+  const namespace = namespaceForClient(clientId);
   const matched: Cookie[] = [];
   for (const [key, list] of jars) {
-    if (!inProfile(key, pid)) continue;
+    if (!inProfile(key, namespace)) continue;
     for (const c of list) {
       if (c.httpOnly || (c.expires !== 0 && c.expires <= now)) continue;
       const domainOk = c.hostOnly ? u.host === c.domain : domainMatch(u.host, c.domain);
@@ -630,7 +767,7 @@ export function documentCookieRead(pageUrl: string, clientId?: string): string {
     URL. A script cannot mint an HttpOnly cookie, so the attribute is
     stripped before admission (spec: ignore it). */
 export function documentCookieWrite(pageUrl: string, cookie: string, clientId?: string): SetCookieResult {
-  return admitCookie(pageUrl, cookie.replace(/;\s*httponly\b/gi, ""), true, activeProfile(clientId));
+  return admitCookie(pageUrl, cookie.replace(/;\s*httponly\b/gi, ""), true, namespaceForClient(clientId));
 }
 
 /** #49 (browser.cookies.remove): delete cookie identities from every
@@ -642,14 +779,16 @@ export function documentCookieWrite(pageUrl: string, cookie: string, clientId?: 
     many cookies were removed. */
 export function jarRemoveIdentities(
   ids: Array<{ name: string; domain: string; hostOnly: boolean; path: string }>,
+  clientId?: string,
 ): number {
   const sameIdentity = (c: Cookie) =>
     ids.some(
       (i) => i.name === c.name && i.domain === c.domain && i.hostOnly === c.hostOnly && i.path === c.path,
     );
   let removed = 0;
+  const namespace = clientId ? namespaceForClient(clientId) : PROFILE_DEFAULT;
   for (const [key, list] of jars) {
-    if (!inProfile(key)) continue;
+    if (!inProfile(key, namespace)) continue;
     const keep = list.filter((c) => !sameIdentity(c));
     if (keep.length === list.length) continue;
     removed += list.length - keep.length;
@@ -670,9 +809,9 @@ export function jarRemoveIdentities(
     session-export format is unchanged by profiles). */
 export function jarSnapshot(clientId?: string): Map<string, Cookie[]> {
   const out = new Map<string, Cookie[]>();
-  const pid = activeProfile(clientId);
+  const namespace = namespaceForClient(clientId);
   for (const [k, v] of jars) {
-    if (!inProfile(k, pid)) continue;
+    if (!inProfile(k, namespace)) continue;
     const id = k.includes(SEP) ? k.slice(k.indexOf(SEP) + 1) : k;
     out.set(id, v.map((c) => ({ ...c })));
   }
@@ -710,9 +849,12 @@ export interface JarProfileView {
     always present, empty or not. */
 export function jarEnumeration(clientId?: string): JarProfileView[] {
   const byProfile = new Map<string, Map<string, Cookie[]>>();
+  const activeNamespace = namespaceForClient(clientId);
   for (const [k, list] of jars) {
     const sep = k.indexOf(SEP);
-    const pid = sep < 0 ? PROFILE_DEFAULT : k.slice(0, sep);
+    const namespace = sep < 0 ? PROFILE_DEFAULT : k.slice(0, sep);
+    if (clientId && namespace !== activeNamespace) continue;
+    const pid = profileNameForNamespace(namespace);
     const id = sep < 0 ? k : k.slice(sep + 1);
     let m = byProfile.get(pid);
     if (!m) {
@@ -735,6 +877,24 @@ export function jarEnumeration(clientId?: string): JarProfileView[] {
     out.push({ profile: pid, active: pid === active, cookies: count, origins });
   }
   return out;
+}
+
+/** Extension background contexts do not carry a trustworthy window
+    client id, so browser.cookies sees only the durable shared jar. */
+export function jarDefaultEnumeration(): JarProfileView[] {
+  const origins = new Map<string, Cookie[]>();
+  for (const [key, list] of jars) {
+    if (!inProfile(key, PROFILE_DEFAULT)) continue;
+    origins.set(key, list);
+  }
+  const views: JarOriginView[] = [];
+  let count = 0;
+  for (const [id, list] of origins) {
+    count += list.length;
+    views.push({ origin: originById.get(id) ?? null, id, cookies: list.map((c) => ({ ...c })) });
+  }
+  views.sort((a, b) => (a.origin ?? a.id).localeCompare(b.origin ?? b.id));
+  return [{ profile: PROFILE_DEFAULT, active: true, cookies: count, origins: views }];
 }
 
 /** zl:clearJar: clear the whole active (or named) jar profile, or one
@@ -768,9 +928,9 @@ export function jarClearScope(
   }
   let jarsCleared = 0;
   let cookiesCleared = 0;
+  const namespace = namespaceForProfile(pid, rootOf(clientId));
   if (id === null) {
-    const scoped = (k: string) =>
-      pid === PROFILE_DEFAULT ? !k.includes(SEP) : k.startsWith(pid + SEP);
+    const scoped = (k: string) => inProfile(k, namespace);
     for (const k of [...jars.keys()]) {
       if (!scoped(k)) continue;
       const list = jars.get(k);
@@ -779,7 +939,7 @@ export function jarClearScope(
       jarsCleared++;
     }
   } else {
-    const k = pid === PROFILE_DEFAULT ? id : pid + SEP + id;
+    const k = jarKey(id, namespace);
     const list = jars.get(k);
     if (list) {
       cookiesCleared = list.length;
@@ -931,14 +1091,14 @@ export async function jarLoad(): Promise<void> {
     untouched). Malformed records are dropped, never admitted. The jar
     is persisted right away. */
 export function jarReplace(entries: Array<[string, unknown[]]>, clientId?: string): void {
-  const pid = activeProfile(clientId);
-  for (const key of [...jars.keys()]) if (inProfile(key, pid)) jars.delete(key);
+  const namespace = namespaceForClient(clientId);
+  for (const key of [...jars.keys()]) if (inProfile(key, namespace)) jars.delete(key);
   for (const entry of entries) {
     if (Array.isArray(entry) && typeof entry[0] === "string" && Array.isArray(entry[1])) {
       /* The doc comment says malformed records are dropped: hold that
          promise per cookie, the same shape check jarLoad uses. */
       const list = entry[1].filter(isStoredCookie);
-      if (list.length) jars.set(jarKey(entry[0], pid), list);
+      if (list.length) jars.set(jarKey(entry[0], namespace), list);
     }
   }
   runPersist().catch(persistDiag);
@@ -957,11 +1117,11 @@ export function jarMerge(
   let jarsTouched = 0;
   let cookies = 0;
   let conflicts = 0;
-  const pid = activeProfile(clientId);
+  const namespace = namespaceForClient(clientId);
   for (const entry of entries) {
     if (!Array.isArray(entry) || typeof entry[0] !== "string" || !Array.isArray(entry[1])) continue;
     const key = entry[0];
-    const jar = jars.get(jarKey(key, pid)) ?? [];
+    const jar = jars.get(jarKey(key, namespace)) ?? [];
     let touched = false;
     for (const raw of entry[1]) {
       /* 2026-10-11 audit: the same stored-cookie shape gate jarLoad
@@ -987,7 +1147,7 @@ export function jarMerge(
       touched = true;
     }
     if (touched) {
-      jars.set(jarKey(key, pid), jar);
+      jars.set(jarKey(key, namespace), jar);
       jarsTouched++;
     }
   }
@@ -1000,6 +1160,11 @@ export function jarClear(): void {
   jars.clear();
   registry.clear();
   originById.clear();
+  clientRoots.clear();
+  rootProfiles.clear();
+  navHandleRoots.clear();
+  unboundClients.clear();
+  profile = PROFILE_DEFAULT;
   runPersist().catch(persistDiag);
 }
 
@@ -1014,7 +1179,10 @@ export function cookiesResetForTests(): void {
   originById.clear();
   sameSitePolicy = "off";
   profile = PROFILE_DEFAULT;
-  clientProfiles.clear();
+  clientRoots.clear();
+  rootProfiles.clear();
+  navHandleRoots.clear();
+  unboundClients.clear();
   persistChain = Promise.resolve();
 }
 

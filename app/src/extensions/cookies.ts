@@ -17,7 +17,7 @@
 
 import type { ExtensionRecord } from "./types";
 import { hostPatternsMatch } from "./permissions";
-import { documentCookieWrite, jarEnumeration, jarRemoveIdentities } from "../cookies";
+import { documentCookieWrite, jarDefaultEnumeration, jarRemoveIdentities } from "../cookies";
 import type { Cookie } from "../cookies";
 
 interface UrlFacts {
@@ -76,7 +76,7 @@ function view(c: Cookie): Record<string, unknown> {
 
 /** Active-profile jar with real origin strings. */
 function activeOrigins(): Array<{ origin: string; cookies: Cookie[] }> {
-  const p = jarEnumeration().find((x) => x.active);
+  const p = jarDefaultEnumeration().find((x) => x.active);
   const out: Array<{ origin: string; cookies: Cookie[] }> = [];
   if (!p) return out;
   for (const o of p.origins) {
