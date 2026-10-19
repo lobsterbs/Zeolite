@@ -327,9 +327,23 @@ const NAVH_TAG = "zl:navh:";
     the initial load only. */
 export const NAVH_TTL_MS = 120_000;
 
+/* Two windows can mint the same destination in one millisecond. The
+   random suffix keeps their one-use cookie-context associations apart. */
+let navHandleNonceFallback = 0;
+function newNavHandleNonce(): string {
+  const bytes = new Uint8Array(12);
+  try {
+    crypto.getRandomValues(bytes);
+    return b64uEncode(bytes);
+  } catch {
+    return Date.now().toString(36) + "-" + (++navHandleNonceFallback).toString(36);
+  }
+}
+
 /** Mint an opaque navigation handle for an absolute http(s)
-    destination: b64u of a keyed token whose payload is
-    NAVH_TAG || expiry || ":" || origin. #144: the origin is the
+    destination: b64u of a keyed token whose payload starts with
+    NAVH_TAG || expiry || ":" || origin and carries authenticated
+    nonce / optional host-root metadata. #144: the origin is the
     destination's scheme://host only - the real path and query ride
     as the visible handle-URL suffix (buildNavHandleUrl), so
     pathname-routed SPAs see a routable location while the host stays
@@ -337,14 +351,21 @@ export const NAVH_TTL_MS = 120_000;
     decode. Stateless by construction -
     nothing to persist, so a SW restart cannot strand it - and decode
     walks the full route-key history, so a minted handle survives a
-    key rotation too. TTL-only, not single-use: the issue allows
+    key rotation too. The optional host-root binding lets an already
+    open proxied frame recover its cookie profile after a worker
+    restart, without exposing the host client id in the URL. TTL-only,
+    not single-use: the issue allows
     either, and single-use would need SW-side state that a restart
     could strand (the exact cold-start hazard it warns about). Null =
     no route key (storage degraded) or a non-mintable destination:
     the SW refuses instead of answering a legacy-shape handle, which
     would carry the destination decodably - the leak #63 exists to
     stop. */
-export function encodeNavHandle(dest: string, ttlMs: number = NAVH_TTL_MS): string | null {
+export function encodeNavHandle(
+  dest: string,
+  ttlMs: number = NAVH_TTL_MS,
+  rootClientId?: string,
+): string | null {
   if (!routeKey || !mintableDest(dest)) return null;
   /* #144: the payload names the origin, never the full destination;
      the real path and query are the visible handle-URL suffix. */
@@ -354,12 +375,27 @@ export function encodeNavHandle(dest: string, ttlMs: number = NAVH_TTL_MS): stri
   } catch {
     return null;
   }
-  return b64uEncode(keyedToken(routeKey, NAVH_TAG + String(Date.now() + ttlMs) + ":" + origin));
+  const validRoot =
+    typeof rootClientId === "string" &&
+    rootClientId.length > 0 &&
+    rootClientId.length <= 256 &&
+    !/[\u0000-\u001f\u007f]/.test(rootClientId)
+      ? rootClientId
+      : null;
+  const binding = validRoot ? "\nroot:" + b64uEncode(ENC.encode(validRoot)) : "";
+  return b64uEncode(keyedToken(
+    routeKey,
+    NAVH_TAG + String(Date.now() + ttlMs) + ":" + origin + "\nnonce:" + newNavHandleNonce() + binding,
+  ));
 }
 
-/** Handle tail -> destination, or null (bad tail, no key held, wrong
-    tag, non-mintable destination, or expired). */
-export function decodeNavHandle(token: string): string | null {
+interface NavHandleInfo {
+  destination: string;
+  rootClientId?: string;
+  expires: number;
+}
+
+function decodeNavHandlePayload(token: string): NavHandleInfo | null {
   const bytes = b64uDecode(token);
   if (!bytes) return null;
   for (const k of routeKeys) {
@@ -369,11 +405,48 @@ export function decodeNavHandle(token: string): string | null {
     const colon = rest.indexOf(":");
     if (colon < 0) continue;
     const exp = Number(rest.slice(0, colon));
-    if (!Number.isFinite(exp) || Date.now() > exp) return null;
-    const dest = rest.slice(colon + 1);
-    if (mintableDest(dest)) return dest;
+    if (!Number.isFinite(exp)) return null;
+    const fields = rest.slice(colon + 1).split("\n");
+    const dest = fields[0];
+    let rootClientId: string | undefined;
+    const rootField = fields.find((field) => field.startsWith("root:"));
+    if (rootField) {
+      const rootBytes = b64uDecode(rootField.slice("root:".length));
+      if (!rootBytes) continue;
+      try {
+        const candidate = DEC_STRICT.decode(rootBytes);
+        if (
+          candidate.length > 0 &&
+          candidate.length <= 256 &&
+          !/[\u0000-\u001f\u007f]/.test(candidate)
+        ) rootClientId = candidate;
+      } catch {
+        continue;
+      }
+    }
+    if (mintableDest(dest)) return { destination: dest, rootClientId, expires: exp };
   }
   return null;
+}
+
+function decodeNavHandleInfo(token: string): NavHandleInfo | null {
+  const info = decodeNavHandlePayload(token);
+  return info && Date.now() <= info.expires ? info : null;
+}
+
+/** Handle tail -> destination, or null (bad tail, no key held, wrong
+    tag, non-mintable destination, or expired). */
+export function decodeNavHandle(token: string): string | null {
+  return decodeNavHandleInfo(token)?.destination ?? null;
+}
+
+/** Recover the authenticated host-client binding from an opaque
+    navigation route after a service-worker restart. */
+export function decodeNavHandleRoot(token: string): string | null {
+  /* The opaque route expiry limits navigation. Its authenticated host
+     binding also serves an already-open document after a worker
+     restart, so that binding remains readable after the route expires. */
+  return decodeNavHandlePayload(token)?.rootClientId ?? null;
 }
 
 /** #144: resolve a full NAVH route tail - <token>, or <token>/
@@ -465,8 +538,12 @@ export function decodeClientUrl(u: URL): string | null {
     browser, history and extensions. A bare "/" destination omits
     the suffix. Null = no route key or a non-mintable destination;
     the caller keeps the legacy ?url= embed. */
-export function buildNavHandleUrl(dest: string, ttlMs: number = NAVH_TTL_MS): string | null {
-  const token = encodeNavHandle(dest, ttlMs);
+export function buildNavHandleUrl(
+  dest: string,
+  ttlMs: number = NAVH_TTL_MS,
+  rootClientId?: string,
+): string | null {
+  const token = encodeNavHandle(dest, ttlMs, rootClientId);
   if (token === null) return null;
   let u: URL;
   try {

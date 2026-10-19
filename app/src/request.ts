@@ -54,7 +54,7 @@ import { raceBoot } from "./lifecycle";
 import {PROXY_INJECTED_HEADERS, acceptLanguageValue, applyChUa, navigationAccept, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript } from "./assetbases";
-import { applySetCookie, cookieHeaderFor, flushJarPersist, isPassChallenge, jarHeaders, type CookieRequestContext } from "./cookies";
+import { applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
@@ -195,7 +195,19 @@ export function withDeadline<T>(
    eviction. x-zl-cached-at carries the stored-at time. */
 
 
-const ZL_PAGES = "zeolite-pages-v1";
+const ZL_PAGES = "zeolite-pages-v2";
+/* v1 may contain responses cached by the old worker without per-client
+   credential context. Never reuse those entries after profile isolation. */
+const ZL_PAGES_PRE_CLIENT_ISOLATION = "zeolite-pages-v1";
+let legacyPageCacheCleanup: Promise<void> | null = null;
+
+function discardLegacyPageCache(): Promise<void> {
+  legacyPageCacheCleanup ??= caches
+    .delete(ZL_PAGES_PRE_CLIENT_ISOLATION)
+    .then(() => undefined)
+    .catch(() => undefined);
+  return legacyPageCacheCleanup;
+}
 const ZL_CACHED_AT = "x-zl-cached-at";
 /* #184: the final URL after redirect hops rides stored entries. */
 const ZL_FINAL_URL = "x-zl-final-url";
@@ -419,9 +431,10 @@ let pageCacheStoreWarned = false;
 /** #179: the page cache is shared across jar profiles and sessions, so
     a request carrying credentials (an Authorization header or a jar
     cookie for the target) bypasses it in both directions. */
-function requestHasCredentials(req: Request, dest: string): boolean {
+function requestHasCredentials(req: Request, dest: string, clientId?: string): boolean {
+  if (clientId && jarProfileState(clientId) !== "default") return true;
   if (req.headers.has("authorization")) return true;
-  return !!cookieHeaderFor(dest);
+  return !!cookieHeaderFor(dest, { clientId });
 }
 
 /** A route search replaces the decoded destination's own query - the
@@ -452,6 +465,7 @@ export async function pageCacheStore(
   resp: Response,
   keepView = false,
   finalUrl?: string,
+  clientId?: string,
 ): Promise<Response | null> {
   /* #115: no-cache entries are stored too - cacheTtl gives them a zero
      TTL, so every use revalidates - and only no-store is never stored. */
@@ -461,7 +475,7 @@ export async function pageCacheStore(
   {
     const su = new URL(req.url);
     const sroute = decodePath(su.pathname);
-    if (requestHasCredentials(req, sroute ? mergeRouteSearch(sroute, su.search) : su.href)) return null;
+    if (requestHasCredentials(req, sroute ? mergeRouteSearch(sroute, su.search) : su.href, clientId)) return null;
   }
   /* #195: big bodies never enter the page cache - the clone() tee
      buffers them whole in memory while the cache write trails the page
@@ -741,6 +755,7 @@ async function upstreamFetch(
     never surface for another. */
 export async function pageCacheClear(): Promise<void> {
   try {
+    await discardLegacyPageCache();
     const cache = await caches.open(ZL_PAGES);
     for (const k of await cache.keys()) await cache.delete(k);
   } catch {
@@ -1138,8 +1153,52 @@ function navOutcome(
    synchronous passthrough checks (opaque schemes, the wisp
    endpoint, extension routes) run before respondWith is armed -
    the old listener's exact shape, one module away. */
+let jarPruneTicks = 0;
+let jarPruneInFlight = false;
+
+function scheduleJarClientPrune(): void {
+  if (++jarPruneTicks % 128 !== 0 || jarPruneInFlight) return;
+  jarPruneInFlight = true;
+  void self.clients
+    .matchAll({ includeUncontrolled: true })
+    .then((clients) => pruneJarClients(new Set(clients.map((client) => client.id))))
+    .catch(() => undefined)
+    .finally(() => { jarPruneInFlight = false; });
+}
+
 export function handleFetch(e: FetchEvent): void {
   const url = new URL(e.request.url);
+  let cookieClientId = inheritJarClient(
+    e.clientId || undefined,
+    e.resultingClientId || undefined,
+    url.href,
+  );
+  async function recoverJarClientRoot(): Promise<void> {
+    if (!e.clientId || jarClientHasRoot(e.clientId)) return;
+    try {
+      const sourceClient = await self.clients.get(e.clientId);
+      if (sourceClient) {
+        cookieClientId = inheritJarClient(
+          e.clientId,
+          e.resultingClientId || undefined,
+          sourceClient.url,
+        );
+        try {
+          const sourceUrl = new URL(sourceClient.url);
+          if (
+            !jarClientHasRoot(e.clientId) &&
+            (isEnginePath(sourceUrl.pathname) || sourceUrl.pathname.startsWith(NAVH + "/"))
+          ) markJarClientUnbound(e.clientId);
+        } catch {
+          /* An unparseable client URL cannot establish a proxied root. */
+        }
+      }
+    } catch {
+      /* No client URL means no recoverable NAVH root; the jar seam
+         keeps the existing default-profile behavior for that client. */
+    }
+  }
+  scheduleJarClientPrune();
   /* 1.5 Silicide: opaque schemes (blob:, data:, about:) are browser-native
      and never engine routes: createObjectURL media, blob workers and
      generated downloads pass through untouched. Checked before the
@@ -1261,6 +1320,16 @@ export function handleFetch(e: FetchEvent): void {
   e.respondWith(
     (async () => {
       await routeReady;
+      /* Route-key restoration is needed to authenticate the NAVH host
+         binding. Re-run this after the cold-start gate before any
+         cookie or cache decision. */
+      cookieClientId = inheritJarClient(
+        e.clientId || undefined,
+        e.resultingClientId || undefined,
+        url.href,
+      );
+      await recoverJarClientRoot();
+      await discardLegacyPageCache();
       /* #249: a wedged boot step (storage, extension boot) must not
          hang the whole fetch path; serve degraded past the
          deadline. */
@@ -1995,7 +2064,7 @@ export function handleFetch(e: FetchEvent): void {
         /* Cache-first for proxied GETs. #179: a credential-bearing
            request (Authorization or a jar cookie for the target)
            never serves from the shared page cache. */
-        if (e.request.method === "GET" && !requestHasCredentials(e.request, target)) {
+        if (e.request.method === "GET" && !requestHasCredentials(e.request, target, cookieClientId)) {
           const hit = await pageCacheMatch(e.request, (p) => e.waitUntil(p));
           if (hit) {
             let dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
@@ -2147,7 +2216,7 @@ export function handleFetch(e: FetchEvent): void {
               }
               hitHeaders.set("content-type", utf8ContentType(jsCt));
               const out = new Response(src, { status: hit.status, headers: hitHeaders });
-              if (src !== raw0) void pageCacheStore(e.request, out.clone());
+              if (src !== raw0) void pageCacheStore(e.request, out.clone(), false, undefined, cookieClientId);
               return out;
             }
             return new Response(hit.body, { status: hit.status, headers: hitHeaders });
@@ -2208,7 +2277,7 @@ export function handleFetch(e: FetchEvent): void {
           const initCtx = contextOf(VCTX, e.clientId);
           const reqCtx: CookieRequestContext = {
             /* #267: the jar profile follows the requesting client. */
-            clientId: e.clientId || undefined,
+            clientId: cookieClientId,
             /* Issue #34: a foreign-origin request's initiator is the
                requesting page itself; the same-origin referrer fallback
                (path resolved against the page home) must not be applied
@@ -2297,7 +2366,7 @@ export function handleFetch(e: FetchEvent): void {
                #35: any admission also pushes the jar view to the
                requesting client's docCookie port (see the main capture
                below). */
-            const hopAdmitted = credsEligible(hopUrl) ? applySetCookie(hopUrl, jarHeaders(resp), e.clientId || undefined) : [];
+            const hopAdmitted = credsEligible(hopUrl) ? applySetCookie(hopUrl, jarHeaders(resp), cookieClientId) : [];
             if (hopAdmitted.some((r) => r.stored || r.deleted)) {
               void pushDocCookieView(e.clientId);
               /* #254: keep the jar write alive past this fetch event. */
@@ -2557,7 +2626,7 @@ export function handleFetch(e: FetchEvent): void {
              hostile-header surgery strips it from the page view. A 3xx
              that surfaced (hop cap, unresolvable or unreplayable hop)
              still lands here, captured against its own hop URL. */
-          const admitted = credsEligible(finalDest ?? hopUrl) ? applySetCookie(finalDest ?? hopUrl, jarHeaders(resp), e.clientId || undefined) : [];
+          const admitted = credsEligible(finalDest ?? hopUrl) ? applySetCookie(finalDest ?? hopUrl, jarHeaders(resp), cookieClientId) : [];
           /* #35 (browser E2E): the page's document.cookie getter is
              synchronous, so the bootstrap keeps an optimistic copy; a
              Set-Cookie admitted on this fetch/XHR response was invisible
@@ -2718,7 +2787,7 @@ export function handleFetch(e: FetchEvent): void {
             !scriptServe &&
             !(DOC_DESTS.has(dest) && respCt === "")
           ) {
-            void pageCacheStore(e.request, resp.clone(), false, finalDest);
+            void pageCacheStore(e.request, resp.clone(), false, finalDest, cookieClientId);
           }
           /* #158/#159: script and worker destinations must never
              receive an HTML or CSS body: module scripts hard-fail the
@@ -2845,7 +2914,7 @@ export function handleFetch(e: FetchEvent): void {
             outHeaders.set("content-type", utf8ContentType(respCt));
             const out = new Response(head + src, { status: resp.status, headers: outHeaders });
             if (e.request.method === "GET")
-              void pageCacheStore(e.request, out.clone(), false, finalDest);
+              void pageCacheStore(e.request, out.clone(), false, finalDest, cookieClientId);
             return out;
           }
           if (isWorkerDestination(e.request.destination) && resp.body) {
@@ -2900,7 +2969,7 @@ export function handleFetch(e: FetchEvent): void {
                other fork. */
             const out = new Response(body, { status: resp.status, headers: outHeaders });
             if (e.request.method === "GET")
-              void pageCacheStore(e.request, out.clone(), false, finalDest);
+              void pageCacheStore(e.request, out.clone(), false, finalDest, cookieClientId);
             return out;
           }
           /* #35 (browser E2E): page <script type="module"> bodies. An
@@ -2944,7 +3013,7 @@ export function handleFetch(e: FetchEvent): void {
             outHeaders.set("content-type", utf8ContentType(respCt));
             const out = new Response(src, { status: resp.status, headers: outHeaders });
             if (e.request.method === "GET")
-              void pageCacheStore(e.request, out.clone(), false, finalDest);
+              void pageCacheStore(e.request, out.clone(), false, finalDest, cookieClientId);
             return out;
           }
           WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });

@@ -39,6 +39,8 @@ export interface WsIdentityOpts {
   profile?: WsIdentityProfile | null;
   /** Test seam: UA lookup (defaults to the zl:rules overrides). */
   uaFor?: (url: string) => string | null;
+  /** SW-observed requester id for the matching per-window jar. */
+  clientId?: string;
   /** Test seam: jar Cookie lookup (defaults to the per-origin jar). */
   cookieFor?: (url: string) => string | null;
 }
@@ -93,8 +95,9 @@ export function wsIdentityHeaders(
   /* Cookie: the jar is the authoritative Cookie source for every
      engine-initiated request; a cookie-authenticated WS upgrade
      behaves like a native one. */
-  const cookieFor = opts?.cookieFor ?? cookieHeaderFor;
-  const cookie = cookieFor(lookupUrl);
+  const cookie = opts?.cookieFor
+    ? opts.cookieFor(lookupUrl)
+    : cookieHeaderFor(lookupUrl, { clientId: opts?.clientId });
   if (cookie) out.push(["cookie", cookie]);
   return out;
 }
