@@ -1534,15 +1534,26 @@ export function handleFetch(e: FetchEvent): void {
              the path alone cannot tell them apart, so the diag event
              names the honest cause: unknown. Tail length recorded -
              a truncation or a mis-appended literal shows up there. */
-          if (looksKeyedToken(url.pathname))
+          if (looksKeyedToken(url.pathname)) {
+            /* #290: the failed route alone cannot name the page that
+               minted it, so a live miss (the /sorry bot-wall script
+               class) was unattributable from one capture. Record the
+               requesting page's virtual URL when the worker knows the
+               client, alongside the opaque route; nothing is guessed. */
+            const pageCtx = contextOf(VCTX, e.clientId);
             DIAG.emit({
               category: "REWRITE",
               severity: "warning",
               cause: "unknown",
               message: "keyed route decode failed (route key rotated?)",
               technicalReason:
-                "tail " + url.pathname.slice(currentPrefix().length).split(/[?#]/)[0].length + " chars",
+                "tail " +
+                url.pathname.slice(currentPrefix().length).split(/[?#]/)[0].length +
+                " chars" +
+                (pageCtx ? "; requesting page " + pageCtx.currentUrl : ""),
+              url: url.href,
             });
+          }
           return navOutcome(
             e,
             url,
