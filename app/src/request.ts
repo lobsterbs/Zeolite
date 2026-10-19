@@ -202,8 +202,12 @@ const ZL_PAGES_PRE_CLIENT_ISOLATION = "zeolite-pages-v1";
 let legacyPageCacheCleanup: Promise<void> | null = null;
 
 function discardLegacyPageCache(): Promise<void> {
-  legacyPageCacheCleanup ??= caches
-    .delete(ZL_PAGES_PRE_CLIENT_ISOLATION)
+  /* Best-effort cleanup: a context whose caches surface is missing
+     or partial (the test harness stubs caches without delete) must
+     never turn the fetch path into a synchronous failure. The call
+     rides a then callback so any throw becomes a caught rejection. */
+  legacyPageCacheCleanup ??= Promise.resolve()
+    .then(() => caches?.delete?.(ZL_PAGES_PRE_CLIENT_ISOLATION))
     .then(() => undefined)
     .catch(() => undefined);
   return legacyPageCacheCleanup;
