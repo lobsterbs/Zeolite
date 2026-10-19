@@ -15,7 +15,10 @@
 //! - bare 'location' in read position, scope-resolved (a shadowed
 //!   local is never renamed) -> __zl
 //! - <window|self|globalThis|document|top|parent>.location reads
-//!   -> __zl
+//!   -> __zl; the bracket form with a string literal key
+//!   (window['location']) renames too (#331); a computed
+//!   non-literal (window[x]) is unknowable at rewrite time and
+//!   stays native
 //! - document.URL / document.documentURI reads (receiver
 //!   'document' only; window.URL is the URL constructor) ->
 //!   __zl.href (#238): SvelteKit's start() compares document.URL
@@ -32,8 +35,10 @@
 //! - eval/new Function source is NOT rewritten (a documented
 //!   limit, same as the reference engine).
 //! - shorthand { location } stays native: renaming the value
-//!   would change the key.
-//! - scripts over MAX_BYTES or without the token "location" skip
+//!   would change the key. Destructuring FROM the receiver
+//!   (const { location } = window) stays native for the same
+//!   reason: the pattern key is a binding name, not a reference.
+//! - scripts over MAX_BYTES or without the location or URL tokens skip
 //!   the parse entirely; a parse failure falls back to the
 //!   unrenamed body (never broken JS) and is counted for
 //!   diagnostics.
@@ -86,9 +91,15 @@ pub fn stats_string() -> String {
 /// unchanged: broken JS is worse than a missed rewrite, and the
 /// runtime paths still own the residual class.
 pub fn rewrite_globals(js: &str) -> String {
-    // Fast path: nothing to rename without the tokens.
+    // Fast path: nothing to rename without the tokens. The document
+    // URL reflection reaches the DOC_URL arm through the static form
+    // (document.URL) and the #331 bracket form (document["URL"]);
+    // a bare URL token is too common (new URL(), url.searchParams),
+    // so the bracket check requires the document token too.
     if js.len() > MAX_BYTES
-        || !(js.contains("location") || js.contains("document.URL") || js.contains("documentURI"))
+        || !(js.contains("location")
+            || js.contains("documentURI")
+            || (js.contains("document") && js.contains("URL")))
     {
         return js.to_string();
     }
@@ -215,6 +226,55 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                     {
                         self.edits
                             .push((m.span.start as usize, m.span.end as usize, DOC_URL));
+                    }
+                }
+            }
+            // #331: a computed property read with a STRING LITERAL
+            // key carries the same meaning as the static form;
+            // minified and obfuscated bundles reach for brackets.
+            // Only literal keys rename. A computed non-literal
+            // (window[x]) is unknowable at rewrite time and stays
+            // native. The write/delete tail peeks are the same ones
+            // the static form runs, so assignments and deletes keep
+            // their native receiver.
+            AstKind::ComputedMemberExpression(m) => {
+                if let Expression::StringLiteral(lit) = &m.expression {
+                    match lit.value.as_str() {
+                        "location" => {
+                            if let Expression::Identifier(obj) = &m.object {
+                                if RECEIVERS.contains(&obj.name.as_str())
+                                    && obj.reference_id.get().is_some_and(|rid| {
+                                        self.sem.scoping().get_reference(rid).symbol_id().is_none()
+                                    })
+                                    && !self.is_write_target(m.span)
+                                    && !self.is_delete_target(m.span)
+                                {
+                                    self.edits.push((
+                                        m.span.start as usize,
+                                        m.span.end as usize,
+                                        VLOC,
+                                    ));
+                                }
+                            }
+                        }
+                        "URL" | "documentURI" => {
+                            if let Expression::Identifier(obj) = &m.object {
+                                if obj.name.as_str() == "document"
+                                    && obj.reference_id.get().is_some_and(|rid| {
+                                        self.sem.scoping().get_reference(rid).symbol_id().is_none()
+                                    })
+                                    && !self.is_write_target(m.span)
+                                    && !self.is_delete_target(m.span)
+                                {
+                                    self.edits.push((
+                                        m.span.start as usize,
+                                        m.span.end as usize,
+                                        DOC_URL,
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -427,9 +487,74 @@ mod tests {
     }
 
     #[test]
-    fn other_receivers_and_computed_stay_native() {
-        let js = "var p = x.location.pathname; var q = window['location'];";
+    fn other_receivers_stay_native() {
+        // a non-receiver object keeps its own location property.
+        let js = "var p = x.location.pathname;";
         assert_eq!(rw(js), js);
+    }
+
+    #[test]
+    fn computed_non_literal_stays_native() {
+        // #331: a computed key that is not a string literal is
+        // unknowable at rewrite time.
+        let js = "var q = window[key]; var r = window[0];";
+        assert_eq!(rw(js), js);
+    }
+
+    #[test]
+    fn computed_string_literal_renames() {
+        // #331: bracket reads with a literal key carry the same
+        // meaning as the static form.
+        assert_eq!(rw("var q = window['location'];"), "var q = __zl;");
+        assert_eq!(rw("var q = window[\"location\"];"), "var q = __zl;");
+        assert_eq!(rw("var q = globalThis['location'];"), "var q = __zl;");
+        assert_eq!(rw("var u = document['URL'];"), "var u = __zl.href;");
+        assert_eq!(rw("var u = document['documentURI'];"), "var u = __zl.href;");
+        // writes and deletes keep the native receiver.
+        assert_eq!(
+            rw("window['location'] = '/x';"),
+            "window['location'] = '/x';"
+        );
+        assert_eq!(
+            rw("delete window['location'];"),
+            "delete window['location'];"
+        );
+        // a shadowed local document is not the global.
+        let js = "function f(document) { return document['URL']; }";
+        assert_eq!(rw(js), js);
+    }
+
+    #[test]
+    fn optional_chaining_renames() {
+        // #331: chains reach the same arms; the replaced span keeps
+        // the rest of the chain intact.
+        assert_eq!(rw("var p = window?.location;"), "var p = __zl;");
+        assert_eq!(rw("var p = location?.pathname;"), "var p = __zl?.pathname;");
+        assert_eq!(rw("var p = window?.location?.href;"), "var p = __zl?.href;");
+    }
+
+    #[test]
+    fn destructuring_nested_and_calls_rename() {
+        // #331: the initializer read renames; the pattern keys
+        // are bindings and never change.
+        assert_eq!(
+            rw("const { pathname } = location;"),
+            "const { pathname } = __zl;"
+        );
+        assert_eq!(
+            rw("var n = location.pathname.substring(0, 1);"),
+            "var n = __zl.pathname.substring(0, 1);"
+        );
+        assert_eq!(
+            rw("var s = location.toString();"),
+            "var s = __zl.toString();"
+        );
+        // destructuring FROM the receiver is the shorthand limit:
+        // the pattern key is a binding name, not a reference.
+        assert_eq!(
+            rw("const { location } = window;"),
+            "const { location } = window;"
+        );
     }
 
     #[test]
