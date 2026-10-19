@@ -1,7 +1,12 @@
-/* Plugin API (Phase 4). A plugin is an ES module served at
-   /plugins/<name>.js on the engine origin and listed in a site's
-   "plugins" rule in siteconfig.json. It default-exports (or named
-   -exports) a register(hooks) function:
+/* Plugin API contract (Phase 4). Plugin loading is currently disabled
+   in the service worker because Chromium does not support the dynamic
+   module import this API previously relied on. See docs/plugins.md.
+   Keep the hook types here for the planned static-registry loader. */
+
+import { DIAG } from "./diag";
+
+/* A plugin would default-export (or named-export) a register(hooks)
+   function:
 
      export function register(hooks) {
        hooks.onRequest({ url, headers })  -> { headers } | void
@@ -9,9 +14,7 @@
      }
 
    Hooks may not block or rewrite the body: they observe and adjust
-   headers only. Failures in a plugin are logged and never break the
-   request path (a broken plugin degrades to a no-op). See
-   docs/plugins.md for the full contract. */
+   headers only. */
 
 export interface RequestCtx {
   /** Real destination URL. */
@@ -31,51 +34,29 @@ export interface PluginHooks {
   onResponse?: (ctx: ResponseCtx) => void;
 }
 
-interface PluginModule {
-  register?: (hooks: PluginHooks) => void;
-  default?: { register?: (hooks: PluginHooks) => void };
-}
+let unsupportedWarningSent = false;
 
-const loaded = new Map<string, Promise<PluginHooks | null>>();
-
-/** #97: the name is interpolated into a dynamic import that
-    @vite-ignore exempts from static analysis, and it arrives from
-    siteconfig rules (untrusted-shaped input). Anything outside
-    [A-Za-z0-9_-] is refused before the import is ever attempted, so
-    traversal ("../") and absolute-URL names cannot smuggle a
-    cross-origin or off-root module in. Exported for tests. */
+/** Siteconfig plugin names use a narrow identifier grammar. */
 export function pluginNameOk(name: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(name);
 }
 
-/** Load one plugin module by name. Successful loads are memoized;
-    a failed load is dropped from the cache (#97: a transient import
-    failure used to be memoized as a sticky null until the whole
-    worker restarted, so a plugin that failed once never came back). */
+/** Dynamic module imports are not supported in the Chromium service
+    worker runtime Zeolite targets. Until a reviewed static registry is
+    shipped, configured plugin names are refused explicitly instead of
+    attempting a runtime import that always fails. */
 export function loadPlugin(name: string): Promise<PluginHooks | null> {
   if (!pluginNameOk(name)) return Promise.resolve(null);
-  let p = loaded.get(name);
-  if (!p) {
-    p = (async () => {
-      try {
-        const mod = (await import(/* @vite-ignore */ `/plugins/${name}.js`)) as PluginModule;
-        const hooks: PluginHooks = {};
-        const reg = mod.register ?? mod.default?.register;
-        if (typeof reg === "function") reg(hooks);
-        return hooks;
-      } catch {
-        // Missing or broken plugin: no-op, never break a request.
-        return null;
-      }
-    })();
-    loaded.set(name, p);
-    // Only a successful load is sticky; drop a failure so the next
-    // call retries the import instead of caching the null forever.
-    void p.then((hooks) => {
-      if (hooks === null) loaded.delete(name);
+  if (!unsupportedWarningSent) {
+    unsupportedWarningSent = true;
+    DIAG.emit({
+      category: "UNSUPPORTED",
+      cause: "unsupported",
+      severity: "warning",
+      message: "site plugins are configured, but service-worker plugin loading is unavailable",
     });
   }
-  return p;
+  return Promise.resolve(null);
 }
 
 /** Resolve the plugin list for a site rule into hook sets. */
