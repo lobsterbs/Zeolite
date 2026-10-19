@@ -17,6 +17,17 @@ vi.mock("../transport", () => ({
   altRegister: () => {},
 }));
 
+/* #279: capture wsBridge.open destinations for the retarget tests. */
+const wsOpenUrls = vi.hoisted(() => [] as string[]);
+vi.mock("../ws-runtime", () => ({
+  wsBridge: {
+    open: (_port: unknown, url: string) => {
+      wsOpenUrls.push(url);
+    },
+    closeAll: () => {},
+  },
+}));
+
 import {
   CORE_CONTROL_TYPES,
   dispatchCore,
@@ -342,5 +353,40 @@ describe("messageListener lifecycle (#250)", () => {
     const held = waitUntil.mock.calls[0][0] as Promise<unknown>;
     await expect(held).resolves.toBeUndefined();
     expect(posted[0]).toMatchObject({ ok: false, error: "control handler failed" });
+  });
+});
+
+describe("zl:wsOpen engine-local retarget (#279)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org", host: "w.example.org" } });
+    wsOpenUrls.length = 0;
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("retargets an engine-host ws URL through the sender decoded route", async () => {
+    const minted = mkEvent("https://w.example.org/", { type: "zl:mint", dest: "https://target.example.org/" });
+    await handleControlEvent(minted.ev, deps);
+    const route = (minted.posted[0] as { ok: boolean; route: string }).route;
+    wsOpenUrls.length = 0;
+    const { ev, posted } = mkEvent("https://w.example.org" + route, {
+      type: "zl:wsOpen",
+      url: "wss://w.example.org/socket",
+      protocols: [],
+    });
+    await handleControlEvent(ev, deps);
+    expect(wsOpenUrls).toEqual(["wss://target.example.org/socket"]);
+    expect(posted).toEqual([]);
+  });
+
+  it("passes a cross-origin ws URL through unchanged", async () => {
+    const { ev } = mkEvent("https://w.example.org/", {
+      type: "zl:wsOpen",
+      url: "wss://other.example/chat",
+      protocols: [],
+    });
+    await handleControlEvent(ev, deps);
+    expect(wsOpenUrls).toEqual(["wss://other.example/chat"]);
   });
 });

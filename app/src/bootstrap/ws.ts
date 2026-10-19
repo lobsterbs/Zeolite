@@ -25,13 +25,27 @@ export function applyWs(w: Record<string, unknown>): void {
   if (OWS) {
     const LJWS = function (url: string, protocols?: string | string[]) {
       let u: URL;
+      /* #279: resolve what the page wrote against the calling
+         realm base (the native constructor demands an absolute
+         URL; the engine accepts the relative references
+         same-origin apps use), then apply the native URL
+         semantics: http maps to ws, https to wss, a fragment or
+         any other scheme fails exactly like native. */
+      const base =
+        (w.document as { baseURI?: string } | undefined)?.baseURI ||
+        (w.location as { href?: string } | undefined)?.href;
       try {
-        u = new URL(url);
+        u = new URL(url, base);
       } catch {
         throw new DOMException(url, "SyntaxError");
       }
+      if (u.protocol === "http:") u.protocol = "ws:";
+      else if (u.protocol === "https:") u.protocol = "wss:";
       if (!/^wss?:$/.test(u.protocol)) {
         return new OWS(url, protocols);
+      }
+      if (u.href.includes("#")) {
+        throw new DOMException(url, "SyntaxError");
       }
       const es = new EventTarget() as unknown as WebSocket;
       /* instanceof parity: the EventTarget keeps its internal slots
