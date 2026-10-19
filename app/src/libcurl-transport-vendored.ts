@@ -454,11 +454,44 @@ function patchedStreamResponse(
   let aborted = false;
   let headers_received = false;
   let raw_header_text = "";
-  const stream = new ReadableStream({
-    start(controller) {
-      stream_controller = controller;
+  /* #347: the wasm exposes no pause API, so backpressure is
+     queue-level: while the consumer is full (desiredSize <= 0)
+     chunks park here and flush on pull. ponytail: the pending
+     buffer bounds the stream queue, not the wire transfer - a true
+     pause needs an upstream pause hook in the wasm. */
+  const pending: Uint8Array[] = [];
+  const flushPending = (all: boolean) => {
+    while (pending.length > 0 && (all || (stream_controller?.desiredSize ?? 1) > 0)) {
+      const chunk = pending.shift() as Uint8Array;
+      try {
+        stream_controller?.enqueue(chunk);
+      } catch {
+        pending.length = 0;
+        return;
+      }
+    }
+  };
+  const stream = new ReadableStream(
+    {
+      start(controller) {
+        stream_controller = controller;
+      },
+      pull() {
+        flushPending(false);
+      },
+      /* #348: consumer cancel aborts the upstream transfer instead
+         of leaving it running to completion with its answer
+         dropped: end_callback(-1) is the upstream cancel signal
+         (same as the enqueue-TypeError path below). */
+      cancel() {
+        if (aborted) return;
+        aborted = true;
+        pending.length = 0;
+        end_callback(-1);
+      },
     },
-  });
+    new ByteLengthQueuingStrategy({ highWaterMark: 65536 }),
+  );
   /* The request method is not an argument here: request_async hands it
      to the wasm only after this call (via _http_set_options), so the
      request_async wrapper in applyTransportEOF stashes it on the
@@ -550,6 +583,12 @@ function patchedStreamResponse(
       headers_received = true;
       headers_callback(stream);
     }
+    /* #347: park the chunk while the consumer queue is full; the
+       stream's pull flushes it once the reader catches up. */
+    if (pending.length > 0 || (stream_controller?.desiredSize ?? 1) <= 0) {
+      pending.push(new_data);
+      return;
+    }
     try {
       stream_controller?.enqueue(new_data);
     } catch (e) {
@@ -608,6 +647,8 @@ function patchedStreamResponse(
         /* already closed or errored */
       }
     } else {
+      /* #347: nothing parked may be lost on the clean close */
+      flushPending(true);
       try {
         stream_controller?.close();
       } catch {

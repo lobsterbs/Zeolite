@@ -469,3 +469,53 @@ describe("applyTransportEOF", () => {
     expect(ends).toEqual([56]);
   });
 });
+
+
+describe("body stream backpressure and cancel (#347/#348)", () => {
+  it("chunks park while the consumer is full and flush on pull (#347)", async () => {
+    const seam = makeSeam();
+    applyTransportEOF(seam.session);
+    let stream: ReadableStream | undefined;
+    start(seam, (st) => { stream = st; }, () => {});
+    const cb = seam.captured[0];
+    /* 80KB through a 64KB high-water mark: the tail parks in the
+       pending buffer and must still arrive once the reader drains */
+    const chunk = new Uint8Array(1024);
+    for (let i = 0; i < 80; i++) cb.data(chunk);
+    const reader = stream!.getReader();
+    let received = 0;
+    for (;;) {
+      const r = await reader.read();
+      if (r.done) break;
+      received += r.value.length;
+      if (received >= 80 * 1024) break;
+    }
+    expect(received).toBe(80 * 1024);
+    await reader.cancel();
+  });
+
+  it("parked chunks are delivered on the clean end, not lost (#347)", async () => {
+    const seam = makeSeam();
+    applyTransportEOF(seam.session);
+    let stream: ReadableStream | undefined;
+    start(seam, (st) => { stream = st; }, () => {});
+    const cb = seam.captured[0];
+    const chunk = new Uint8Array(1024);
+    for (let i = 0; i < 80; i++) cb.data(chunk);
+    cb.end(0);
+    const bytes = await readAll(stream!);
+    expect(bytes.length).toBe(80 * 1024);
+  });
+
+  it("consumer cancel aborts the upstream transfer (#348)", async () => {
+    const seam = makeSeam();
+    applyTransportEOF(seam.session);
+    let stream: ReadableStream | undefined;
+    let upstreamEnd: number | undefined;
+    start(seam, (st) => { stream = st; }, (err) => { upstreamEnd = err; });
+    seam.captured[0].data(enc.encode("hello"));
+    expect(stream).toBeDefined();
+    await stream!.cancel();
+    expect(upstreamEnd).toBe(-1);
+  });
+});
