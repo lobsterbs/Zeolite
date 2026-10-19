@@ -46,6 +46,25 @@ describe("ExtensionManager", () => {
     bad.set("manifest.json", enc.encode("{ nope"));
     await expect(m.installFiles(bad)).rejects.toThrow(/valid JSON/);
   });
+  it("derives identity from package contents, not the manifest alone (#287)", async () => {
+    const m = new ExtensionManager();
+    await m.startup();
+    const a = await m.installFiles(packageFiles("Omega"));
+    const sameManifest = packageFiles("Omega");
+    sameManifest.set("cs.js", enc.encode("// cs v2"));
+    const b = await m.installFiles(sameManifest);
+    expect(b.id).not.toBe(a.id);
+    /* fake-indexeddb state is shared file-wide, so earlier tests'
+       extensions may be loaded too; assert ours are both present. */
+    const ids = m.list().map((e: { id: string }) => e.id);
+    expect(ids).toContain(a.id);
+    expect(ids).toContain(b.id);
+    /* byte-identical contents in a different insertion order are still
+       the same package: duplicate detection holds. */
+    const reordered = new Map([...packageFiles("Alpha").entries()].reverse());
+    await expect(m.installFiles(reordered)).rejects.toThrow(/already installed/);
+  });
+
   it("gates resources on enabled state and web_accessible_resources", async () => {
     const m = new ExtensionManager();
     await m.startup();

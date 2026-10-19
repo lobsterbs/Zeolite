@@ -2,9 +2,12 @@
 
    Named permissions are validated against the Firefox permission set.
    Host patterns follow the Firefox match-pattern grammar:
-   <all_urls> or scheme://host/path, where host may be *, *.domain, or a
-   plain host, and path may contain one leading/trailing *. The
-   PermissionGate is consulted before any privileged API executes. */
+   <all_urls> or scheme://host/path, where host may be *, *.domain, or
+   a plain host. #277: file patterns carry no host (file:///*). #280:
+   the path pattern may use wildcards in any position and is matched
+   against the URL path PLUS query string, per the WebExtension
+   contract. The PermissionGate is consulted before any privileged
+   API executes. */
 
 export const KNOWN_PERMISSIONS: ReadonlySet<string> = new Set([
   "storage", "tabs", "scripting", "cookies", "webRequest",
@@ -39,9 +42,13 @@ export function parseHostPattern(p: string): HostPattern | null {
   const m = /^(\*|https?|wss?|ftp|file|moz-extension|extension):\/\/([^\/]*)(\/.*)?$/.exec(p);
   if (!m) return null;
   const scheme = m[1] ?? "*";
-  const host = m[2] ?? "";
+  /* #280: URL.hostname is lowercased by the URL parser; match patterns
+     compare case-insensitively, so normalize at parse time. */
+  const host = (m[2] ?? "").toLowerCase();
   const path = m[3] ?? "/*";
-  if (host === "") return null;
+  /* #277: a file pattern intentionally has an empty host (file:///...);
+     every other scheme requires one. */
+  if (host === "" && scheme !== "file") return null;
   if (scheme !== "*" && scheme !== "http" && scheme !== "https" &&
       scheme !== "ws" && scheme !== "wss" && scheme !== "ftp" &&
       scheme !== "file") {
@@ -50,15 +57,29 @@ export function parseHostPattern(p: string): HostPattern | null {
   return { scheme, host, path, all: false };
 }
 
-function pathMatches(pat: string, p: string): boolean {
-  if (pat === "*" || pat === "/*") return true;
-  if (pat.startsWith("*") && pat.endsWith("*") && pat.length > 1) {
-    return p.includes(pat.slice(1, -1));
+/* #280: compile a path pattern into an anchored matcher. Wildcards
+   are allowed in any position and any count; every other character is
+   a literal, regex specials escaped. The pattern is evaluated against
+   pathname + search (the query string), per the WebExtension spec. */
+const PATH_SPECIAL = /[^\w\s]/g;
+function pathMatcher(pat: string): (p: string) => boolean {
+  if (pat === "*" || pat === "/*") return () => true;
+  let src = "^";
+  for (const c of pat) {
+    if (c === "*") src += "[\\s\\S]*";
+    else src += c.replace(PATH_SPECIAL, "\\$&");
   }
-  if (pat.startsWith("*")) return p.endsWith(pat.slice(1));
-  if (pat.endsWith("*")) return p.startsWith(pat.slice(0, -1));
-  return pat === p;
+  const re = new RegExp(src + "$");
+  return (p: string) => re.test(p);
 }
+
+/* #277/#280: the documented scheme sets. <all_urls> covers every
+   supported scheme including file; the wildcard scheme stays on the
+   web + WebSocket schemes and never matches ftp or file. */
+const ALL_URLS_SCHEMES: ReadonlySet<string> =
+  new Set(["http:", "https:", "ws:", "wss:", "ftp:", "file:"]);
+const WILDCARD_SCHEMES: ReadonlySet<string> =
+  new Set(["http:", "https:", "ws:", "wss:"]);
 
 export function hostPatternMatches(pat: HostPattern, url: string): boolean {
   let u: URL;
@@ -68,25 +89,23 @@ export function hostPatternMatches(pat: HostPattern, url: string): boolean {
     return false;
   }
   if (pat.all) {
-    return u.protocol === "http:" || u.protocol === "https:" ||
-      u.protocol === "ws:" || u.protocol === "wss:" || u.protocol === "ftp:";
+    return ALL_URLS_SCHEMES.has(u.protocol);
   }
-  /* "*" covers http/https/ws/wss/ftp; anything else must be exact. */
   if (pat.scheme === "*") {
-    const ok =
-      u.protocol === "http:" || u.protocol === "https:" ||
-      u.protocol === "ws:" || u.protocol === "wss:" || u.protocol === "ftp:";
-    if (!ok) return false;
+    if (!WILDCARD_SCHEMES.has(u.protocol)) return false;
   } else if (pat.scheme + ":" !== u.protocol) {
     return false;
   }
-  const hostOk =
-    pat.host === "*" ||
-    u.hostname === pat.host ||
-    (pat.host.startsWith("*.") &&
-      (u.hostname === pat.host.slice(2) || u.hostname.endsWith(pat.host.slice(1))));
-  if (!hostOk) return false;
-  return pathMatches(pat.path, u.pathname);
+  /* #277: file patterns carry no host, so no host check applies. */
+  if (pat.scheme !== "file") {
+    const hostOk =
+      pat.host === "*" ||
+      u.hostname === pat.host ||
+      (pat.host.startsWith("*.") &&
+        (u.hostname === pat.host.slice(2) || u.hostname.endsWith(pat.host.slice(1))));
+    if (!hostOk) return false;
+  }
+  return pathMatcher(pat.path)(u.pathname + u.search);
 }
 
 export function hostPatternsMatch(patterns: string[], url: string): boolean {
