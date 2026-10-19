@@ -1,0 +1,140 @@
+# Virtual service workers, phase 2 (design)
+
+Issue #257. A design document, not shipped behavior: no target
+worker code execution work starts before this model is reviewed.
+
+## Where phase 1 stands
+
+The 1.6 shim (app/src/swshim.ts, wired by bootstrap/relay.ts)
+virtualizes navigator.serviceWorker as per-origin records: register
+stores one record per site storage partition, the fake worker
+settles installing to activated across microtasks, getRegistration
+and unregister are shape-compatible, and ready never hangs. No
+worker script is fetched or executed, no fetch or message events
+exist, and the page's controller stays the engine's real worker.
+Covered by the shim suite in app/src/__tests__/worker.test.ts.
+
+The cost of that honesty is compatibility: apps that rely on a
+service worker for offline caching, lifecycle events, messaging or
+update handling stay broken. Phase 2 specifies how far the
+emulation can be extended without lying about what it is.
+
+## The honest boundary
+
+A browser allows exactly one real service worker per scope, and
+the engine owns the engine scope. Phase 2 does not claim
+native-equivalent origin security; everything below is an
+emulation boundary and is documented as one. Two consequences
+drive the whole design:
+
+- registration identity is namespaced by virtual site, never by a
+  shared-origin URL prefix, so one site can never capture another
+  site's requests through scope shapes;
+- the page's controller cannot honestly change: the real
+  controller of every engine page is the engine worker itself.
+
+## Registration identity and scope mapping
+
+Registration key: (site id, canonical scope). The site id is the
+same per-site partition identity (zl:<sitehash>:) that storage and
+cookie jars already use. The canonical scope resolves against the
+registering page's virtual URL and clamps to that page's virtual
+origin, exactly as phase 1 scopeFor does today.
+
+Matching rule: a request or a page carries its virtual context
+(site id plus URL); a registration matches only when the site id is
+equal and the canonical scope is a path prefix. Two sites can
+register the same scope path and never see each other, because the
+site id is part of the key: a cross-site URL-prefix match is
+structurally impossible, not merely filtered.
+
+Phase 1's defense in depth (a record that scopes a foreign origin
+is ignored even if it lands in this store) is kept and extended to
+the full key.
+
+## Phase 2 feature matrix
+
+Stage column: S1 = non-execution semantics, shippable first; S2 =
+sandboxed execution, gated on review of this document; N = not
+supported, kept honest.
+
+| Feature | Stage | Notes and limits |
+| --- | --- | --- |
+| register / getRegistration(s) / unregister | S1 | Already virtual since 1.6; S1 keys the store by (site, scope) so multiple scopes per origin work. |
+| registration.update() | S1 | Re-fetches the script URL through the transport and compares stored validators and length; updatefound fires on a real change, never fabricated. |
+| state machine and statechange | S1 | Native-shaped installing / installed / waiting / activating / activated with real waiting periods instead of the microtask settle; statechange events fire on transitions. |
+| ready | S1 | Already resolves; S1 keeps it pending while a registration for the scope is installing, matching native. |
+| controller / controllerchange | N | The real controller is the engine worker. A virtual claim would mislead page code into trusting a controller that does not exist. |
+| page to worker messaging | S2 | A MessageChannel relay to the sandbox. Without executed code there is no receiver, so S1 ships no fake message events. |
+| fetch event routing | S2 | Longest-prefix match over (site id, scope) inside the sandbox request path; a virtual fetch handler sees only requests of its own site. |
+| install / activate / skipWaiting / clients | S2 | Emulated with hard budgets: waitUntil is bounded, clients.claim reaches only pages of its own site. |
+| Cache API (caches) | S2 | Per (site, scope) partition inside the site storage partition, quota-bounded, separate from the engine page cache. |
+| push / BackgroundSync / PeriodicSync | N | Requires real browser infrastructure the engine cannot emulate honestly. |
+
+## Execution sandbox model (stage 2)
+
+- The virtual worker executes as a plain dedicated Worker on the
+  engine origin, created from an engine-owned bootstrap blob. It
+  is never registered as a real service worker against the shared
+  engine scope.
+- Globals exposed: a virtual self.registration, an emulated
+  clients surface, the partitioned caches, and a fetch that rides
+  the same transport and policy pipeline (SSRF policy, header
+  surgery, cookie jar, netLog) as page traffic, carrying the
+  site's identity.
+- Never exposed: engine control messages (the zl: channel is
+  filtered at the relay), engine storage, other virtual origins,
+  host client APIs.
+- Budgets: install, activation and per-event deadlines. A budget
+  overrun or an event-loop stall terminates the worker and marks
+  the registration broken; the state stays honest, no fake
+  activated.
+- Teardown: unregister and incognito teardown terminate the
+  worker and drop the (site, scope) cache partition.
+
+## Threat model
+
+- Cross-site scope confusion: impossible by key construction. A
+  hostile site registering a scope that prefixes another site's
+  paths gains nothing: requests match only within their own site
+  id, and canonical scopes never cross the registering virtual
+  origin.
+- Privilege escalation: worker code sees only the virtual
+  surface. The engine's own fetch, credential and control seams
+  are not reachable from the sandbox; worker fetches never bypass
+  the policy pipeline.
+- Cache and storage leakage: virtual caches live in the per-site
+  storage partition, never in the engine page cache or host
+  storage; quotas bound one site's footprint.
+- Hostile worker code: CPU and memory (budget termination of the
+  isolated worker), message flooding (bounded queues), fetch-based
+  exfiltration (same policy as page traffic, so nothing
+  engine-internal is reachable), denial of service against the
+  engine (site code runs in its own Worker thread, never inline
+  in the engine's service worker).
+
+## Staged plan
+
+1. Stage 1, non-execution: the S1 rows above, with deterministic
+   browser tests extending the worker.test.ts shim suite
+   (registration, update compare, state transitions, ready
+   semantics) and a suite/e2e run for the bootstrap wiring.
+2. Review gate: this document and the sandbox routing model.
+3. Stage 2, execution: the sandbox, fetch routing, caches and
+   messaging, behind the budgets listed above.
+4. Stage 3, lifecycle parity: skipWaiting, clients, quotas and
+   teardown polish.
+
+## Explicitly unsupported semantics
+
+- controllerchange and a site-owned navigator.serviceWorker
+  controller: the engine worker is the controller of every page
+  it serves.
+- Any claim of native-equivalent origin security inside one
+  shared engine origin.
+- One real registration per scope shared across virtual sites:
+  impossible by browser design and not emulated.
+- push notifications, BackgroundSync and PeriodicSync.
+
+The emulation boundary is the contract: what is not listed as
+supported stays visibly absent rather than silently faked.
