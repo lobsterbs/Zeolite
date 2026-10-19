@@ -2,7 +2,8 @@
    block / allow / rewrite / modify lists with optional resource-type
    filters, compiled once per SW lifetime. The default /rules.kdl
    ships the ad + tracker host lists migrated from the browser app's
-   server-side engine, so client-side mode blocks the same hosts.
+   server-side engine; Ghostery adds EasyList-compatible network
+   matches alongside those local host rules.
 
    Grammar (KDL v2 subset, parser in kdl.ts):
      block   "doubleclick.net"                  // every type
@@ -13,12 +14,13 @@
 
    Host matching follows the siteconfig grammar: exact hostname or
    any parent domain. allow beats block (captcha hosts must never be
-   stripped). The host app toggles the compiled data via the
+   stripped). The host app toggles both block sources via the
    zl:adblock control message and pushes per-site overrides (host,
    adblock, user-agent) via zl:rules; disabled rules are a no-op, the
-   data stays loaded. See docs/interception.md. */
+   matcher stays in service-worker memory. See docs/interception.md. */
 
 import { parseKdl, type KdlNode } from "./kdl";
+import { ghosteryBlock, type GhosteryRedirect } from "./ghostery";
 
 export type ResourceType =
   | "document"
@@ -66,8 +68,10 @@ export interface RuleDecision {
   url?: string;
   /** Header modifications to merge into the outgoing request. */
   headers?: Record<string, string>;
-  /** Matched block/allow host, for diagnostics. */
+  /** Matched block/allow host or filter label, for diagnostics. */
   matched?: string;
+  /** Local response for a Ghostery $redirect rule. */
+  ghosteryRedirect?: GhosteryRedirect;
 }
 
 interface CompiledHost {
@@ -143,7 +147,13 @@ export function setRulesEnabled(enabled: boolean): void {
 
 /** Evaluate all lists against one request. Deterministic order: allow
     beats block; rewrite and modify accumulate. */
-export function applyRules(r: CompiledRules, url: string, rtype: ResourceType): RuleDecision {
+export function applyRules(
+  r: CompiledRules,
+  url: string,
+  rtype: ResourceType,
+  sourceUrl?: string,
+  destination?: string,
+): RuleDecision {
   const dec: RuleDecision = { action: "pass" };
   if (!rulesEnabled) return dec;
   const host = hostOf(url);
@@ -164,6 +174,14 @@ export function applyRules(r: CompiledRules, url: string, rtype: ResourceType): 
         dec.action = "block";
         dec.matched = e.host;
         break;
+      }
+    }
+    if (dec.action === "pass") {
+      const ghosteryDecision = ghosteryBlock(url, rtype, sourceUrl, destination);
+      if (ghosteryDecision) {
+        dec.action = "block";
+        dec.matched = "Ghostery: " + ghosteryDecision.host;
+        dec.ghosteryRedirect = ghosteryDecision.redirect;
       }
     }
   }
