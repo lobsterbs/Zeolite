@@ -16,10 +16,12 @@ jobs:
       - name: Delete merged branches
         run: |
           set -e
+          W=$(mktemp -d)
+          git init -q "$W"
           REPO="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/lobsterbs/Zeolite.git"
           for b in fix/vary-cache-key docs/roadmap-4-to-10 fix/zeolite-client-lineage fix/zeolite-open-issues; do
             if git ls-remote --exit-code "$REPO" "refs/heads/$b" >/dev/null 2>&1; then
-              git push "$REPO" --delete "$b"
+              git -C "$W" push "$REPO" --delete "$b"
               echo "deleted $b"
             else
               echo "branch $b already gone"
