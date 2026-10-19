@@ -1,0 +1,27 @@
+name: Branch cleanup 2026-10-19
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/branch-cleanup-20261019.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete merged branches
+        run: |
+          set -e
+          REPO="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/lobsterbs/Zeolite.git"
+          for b in fix/vary-cache-key docs/roadmap-4-to-10 fix/zeolite-client-lineage fix/zeolite-open-issues; do
+            if git ls-remote --exit-code "$REPO" "refs/heads/$b" >/dev/null 2>&1; then
+              git push "$REPO" --delete "$b"
+              echo "deleted $b"
+            else
+              echo "branch $b already gone"
+            fi
+          done
