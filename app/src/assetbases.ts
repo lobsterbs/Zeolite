@@ -206,22 +206,30 @@ export function recordScriptUrl(initiator: string, url: string): void {
   }
 }
 
-const FLAG_SEG = /^[a-z][a-z0-9_-]{0,30}=/i;
+const FLAG_SEG = /^([a-z][a-z0-9_-]{0,30})=/i;
+const GOOGLE_FLAG_KEYS = new Set(["httpd", "exm", "ed", "cb", "m", "udm", "sxsrf", "sca_esv"]);
+const MIN_GOOGLE_FLAGS = 2;
+const FLAG_RECOVERY_REQUESTS_PER_CALL = 4;
+const FLAG_RECOVERY_REQUESTS_PER_ORIGIN = 8;
+const FLAG_RECOVERY_ORIGINS = 128;
+const flagRecoveryRequests = new Map<string, number>();
 
-/** A flag-surgery path carries >= 2 key=value path segments: the loader
-    minted its chunk flags as literal path segments. */
+/** A Google flag-surgery path carries multiple known Google flag names.
+    Generic key=value path segments are common in unrelated applications. */
 export function isFlagSurgeryPath(pathname: string): boolean {
   const segs = pathname.split("/").filter(Boolean);
-  let flags = 0;
-  for (const s of segs) if (FLAG_SEG.test(s)) flags++;
-  return flags >= 2;
+  const keys = segs.flatMap((s) => {
+    const match = FLAG_SEG.exec(s);
+    return match ? [match[1].toLowerCase()] : [];
+  });
+  return keys.filter((key) => GOOGLE_FLAG_KEYS.has(key)).length >= MIN_GOOGLE_FLAGS;
 }
 
-/** Retry a flag-shaped script miss against bases derived from the page's
-    successfully served scripts: the recorded URL truncated at its first
-    flag segment (the google xjs base keeps its directory prefix), else its
-    directory; the observed flag tail rides along verbatim with its query.
-    Gate: 200 + a JS content type. Cookie/origin/referer never ride along. */
+/** Retry a known Google flag-shaped script miss against bases derived
+    from the page's successfully served scripts. Attempts are bounded
+    both per call and per page origin; failed response bodies are
+    cancelled. Gate: 200 + JS content type. Cookie/origin/referer never
+    ride along. */
 export async function recoverFlagSurgeryScript(
   initiator: string,
   target: string,
@@ -231,6 +239,8 @@ export async function recoverFlagSurgeryScript(
   if (!initiator) return null;
   const cands = scriptUrls.get(originOf(initiator)) ?? [];
   if (cands.length === 0) return null;
+  const pageOrigin = originOf(initiator);
+  if (!pageOrigin || (flagRecoveryRequests.get(pageOrigin) ?? 0) >= FLAG_RECOVERY_REQUESTS_PER_ORIGIN) return null;
   let u: URL;
   try {
     u = new URL(target);
@@ -243,7 +253,7 @@ export async function recoverFlagSurgeryScript(
     const v = reqHeaders.get(h);
     if (v) safe.set(h, v);
   }
-  const tried: string[] = [];
+  const tried = new Set<string>();
   for (const c of cands.slice(0, 3)) {
     let cu: URL;
     try {
@@ -266,11 +276,21 @@ export async function recoverFlagSurgeryScript(
     for (const b of bases) {
       for (const tail of tails) {
         const candUrl = cu.origin + b + tail + (u.search || "");
-        if (tried.includes(candUrl)) continue;
-        tried.push(candUrl);
+        if (tried.has(candUrl)) continue;
+        if (tried.size >= FLAG_RECOVERY_REQUESTS_PER_CALL) return null;
+        if ((flagRecoveryRequests.get(pageOrigin) ?? 0) >= FLAG_RECOVERY_REQUESTS_PER_ORIGIN) return null;
+        tried.add(candUrl);
+        const attempts = (flagRecoveryRequests.get(pageOrigin) ?? 0) + 1;
+        flagRecoveryRequests.delete(pageOrigin);
+        flagRecoveryRequests.set(pageOrigin, attempts);
+        if (flagRecoveryRequests.size > FLAG_RECOVERY_ORIGINS) {
+          const oldest = flagRecoveryRequests.keys().next();
+          if (!oldest.done) flagRecoveryRequests.delete(oldest.value);
+        }
         try {
           const r = await fetchUpstream(candUrl, { method: "GET", headers: safe });
           if (r.ok && mimeOkFor("script", r.headers.get("content-type") ?? "")) return { url: candUrl, resp: r };
+          await r.body?.cancel().catch(() => undefined);
         } catch {
           /* try the next candidate */
         }
@@ -284,4 +304,5 @@ export async function recoverFlagSurgeryScript(
 export function resetAssetBases(): void {
   assetBases.clear();
   scriptUrls.clear();
+  flagRecoveryRequests.clear();
 }

@@ -1,5 +1,13 @@
 # Zeolite plugin API (Phase 4)
 
+**Current status: Planned.** Plugin modules are not loaded by the
+service worker. Chromium does not support the dynamic `import()` path
+the prototype used, so a `plugins` entry in `siteconfig.kdl` is ignored
+and emits one `UNSUPPORTED` warning per worker lifetime. Do not ship
+site rules that depend on plugin hooks. A future implementation must
+use a reviewed static registry or another service-worker-safe loader;
+it must not evaluate fetched source text.
+
 A plugin is an ES module served at `/plugins/<name>.js` on the engine
 origin. It is listed in a site's `plugins` child node in
 `siteconfig.kdl`:
@@ -34,10 +42,8 @@ export function register(hooks) {
   are ignored. It runs after hostile headers were stripped.
 - Hooks may not read or rewrite the body. Plugins are header/decision
   points; body rewriting is the rewriter's job.
-- Failures are swallowed and logged. A broken plugin degrades to a
-  no-op and never breaks a request.
-- Plugins are loaded once per SW lifetime (memoized per name) and run
-  inside the SW: they have no DOM and no page globals.
+- This hook contract is design documentation until the loader is
+  implemented and verified in a real Chromium service worker.
 - Plugin code must not touch engine storage, the wisp connection, or the
   rewriter: those are not part of the API surface.
 
@@ -50,14 +56,6 @@ scripts (use the `inject` rule for that).
 
 ## Deployment
 
-Drop the built module at `app/dist/plugins/<name>.js`. Nothing in the
-engine source needs to change: loading is fully data-driven from
-siteconfig.kdl, which is how a third party can ship a plugin without
-touching engine source (the Phase 4 done-when).
-
-Known gap: `app/src/plugins.ts` loads plugin modules with dynamic
-`import()`, which Chromium does not support on
-`ServiceWorkerGlobalScope`. A plugin listed in siteconfig therefore
-fails to load (honestly, logged) inside the service worker until the
-loader gains a SW-safe path (fetch + evaluate, as the libcurl transport
-seam does). No site currently ships plugins, so nothing regresses.
+Adding a plugin file under `app/dist/plugins/` does not make it
+loadable yet. Implement and verify the service-worker-safe loader before
+enabling plugin rules.
