@@ -303,7 +303,7 @@ export function pushDocCookieView(clientId: string): void {
   if (!list) return;
   for (let i = list.length - 1; i >= 0; i--) {
     try {
-      list[i].port.postMessage({ ok: true, cookie: documentCookieRead(list[i].page) });
+      list[i].port.postMessage({ ok: true, cookie: documentCookieRead(list[i].page, clientId) });
     } catch {
       /* port closed: that document is gone; drop its entry, the
          client's other documents keep receiving pushes */
