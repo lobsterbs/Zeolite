@@ -1,0 +1,25 @@
+name: branch-cleanup-356
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/branch-cleanup-356.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: delete broken branches and remove the runner
+        run: |
+          set -e
+          git config user.name 'lobsterbs'
+          git config user.email 'dev@lobsterbs.dev'
+          git push origin --delete bugfix/critical-security-fixes bugfix/high-priority
+          git rm -q .github/workflows/branch-cleanup-356.yml
+          git add -A
+          git commit -q -m 'chore: remove the one-shot branch cleanup runner (#356)'
+          git push
