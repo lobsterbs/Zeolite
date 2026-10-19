@@ -111,3 +111,67 @@ describe("page WebSocket shim bufferedAmount (#293)", () => {
     expect(es.bufferedAmount).toBe(0); /* queue drained at open */
   });
 });
+
+describe("page WebSocket shim relative URLs (#279)", () => {
+  it("resolves relative references against the page base and maps http(s) to ws(s)", () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return;
+    vi.stubGlobal("CloseEvent", FakeCloseEvent);
+    const posted: unknown[] = [];
+    ctlState.ctl = { postMessage(msg: unknown) { posted.push(msg); } };
+    const w: Record<string, unknown> = {
+      WebSocket: Real,
+      document: { baseURI: "https://engine.example/app/dir/page.html" },
+      location: { href: "https://engine.example/app/dir/page.html" },
+    };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    const urlOf = (i: number) => (posted[i] as { url: string }).url;
+    /* root-relative: the engine origin, the path the page named */
+    const root = new WS("/socket");
+    expect(urlOf(0)).toBe("wss://engine.example/socket");
+    expect(root.url).toBe("wss://engine.example/socket");
+    /* path-relative: resolved against the base directory */
+    new WS("api/ws");
+    expect(urlOf(1)).toBe("wss://engine.example/app/dir/api/ws");
+    /* query-bearing */
+    new WS("/socket?rooms=2");
+    expect(urlOf(2)).toBe("wss://engine.example/socket?rooms=2");
+    /* http/https map to ws/wss (WHATWG constructor semantics) */
+    new WS("http://engine.example/socket");
+    expect(urlOf(3)).toBe("ws://engine.example/socket");
+    /* absolute ws/wss keep current behavior */
+    new WS("wss://relay.example/ws");
+    expect(urlOf(4)).toBe("wss://relay.example/ws");
+  });
+
+  it("rejects fragments and non-web schemes like the native constructor", () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return;
+    vi.stubGlobal("CloseEvent", FakeCloseEvent);
+    ctlState.ctl = { postMessage() { /* unused */ } };
+    const w: Record<string, unknown> = {
+      WebSocket: Real,
+      document: { baseURI: "https://engine.example/page.html" },
+    };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    for (const bad of ["/socket#frag", "wss://relay.example/ws#f"]) {
+      let err: unknown = null;
+      try {
+        new WS(bad);
+      } catch (e) {
+        err = e;
+      }
+      expect((err as DOMException).name).toBe("SyntaxError");
+    }
+    /* non-web schemes fall through to the native constructor, which refuses them */
+    let nativeErr: unknown = null;
+    try {
+      new WS("ftp://example.com/x");
+    } catch (e) {
+      nativeErr = e;
+    }
+    expect(nativeErr).not.toBeNull();
+  });
+});

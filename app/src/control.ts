@@ -507,7 +507,11 @@ case "zl:tracing":
       let wsUrl = msg.url;
       try {
         const u = new URL(msg.url);
-        if (u.origin === self.location.origin) {
+        /* #279: engine-local ws URLs arrive with the ws/wss scheme
+           and u.origin carries it, so it can never equal the
+           worker https origin - the engine-local test is host
+           equality. */
+        if (u.host === self.location.host) {
           let home = contextOf(VCTX, (e.source as { id?: string } | null)?.id)?.targetOrigin ?? null;
           if (!home) {
             const client = e.source;
@@ -520,7 +524,13 @@ case "zl:tracing":
             port.close();
             break;
           }
-          const t = new URL(u.pathname + u.search, home);
+          /* #279: a handle (NAVH) ws route carries the real path
+             visibly and a routed ws literal decodes to its true
+             destination, so the full client decode resolves the
+             path exactly; everything else keeps the origin-level
+             retarget (root-relative paths, opaque legacy tails). */
+          const full = decodeClientUrl(u);
+          const t = new URL(full ?? u.pathname + u.search, home);
           t.protocol = u.protocol;
           wsUrl = t.href;
         }
