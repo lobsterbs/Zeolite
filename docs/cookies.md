@@ -96,9 +96,10 @@ Location mapped to an engine route (its Set-Cookie is still captured).
 
 ## Jar profiles (zl:jarProfile)
 
-The host app can switch the whole jar between the durable `default`
-profile and a throwaway session profile (incognito isolation, the
-client-side equivalent of the server engine's per-sid `lb_inc` jar):
+The host app selects a profile for its own service-worker client and
+proxied frames. It can use the durable shared `default` profile or a
+throwaway session profile (incognito isolation, the client-side
+equivalent of the server engine's per-sid `lb_inc` jar):
 
 ```
 { type: "zl:jarProfile", profile: "inc:<session-id>" }   // switch
@@ -112,20 +113,31 @@ client-side equivalent of the server engine's per-sid `lb_inc` jar):
   session-export snapshot and import (replace and merge) all operate
   on the active profile only; the export format is unchanged (records
   stay keyed by bare origin id).
-- The profile is SW runtime state: it resets to `default` on SW
-  restart, and `zl:ping` echoes it (`profile`) so the host can detect
-  a revert and re-push. A restart while a session profile is active
-  can briefly admit cookies into the default jar until the host's
-  re-push lands — the host re-sends on boot, on the incognito toggle
-  and on `controllerchange`.
+- The host profile is bound to its service-worker client id. Proxied
+  frame clients inherit that host root from `FetchEvent.clientId` and
+  `resultingClientId`; the opaque handle carries an authenticated,
+  encrypted host-root binding for recovery after a worker restart.
+  The first navigation also has a short-lived, one-use association in
+  case the browser supplies an empty `clientId`. Random handle suffixes
+  keep simultaneous windows from colliding.
+- Root/profile bindings are SW runtime state. They reset on worker
+  restart; temporary cookies are intentionally not restored. An
+  already-open frame recovers its root from the authenticated handle
+  after restart, even after the navigation TTL expires. Until the host
+  re-sends its profile, that frame fails closed without cookies. Old
+  handles minted before this binding was added, and legacy routes
+  without a binding, remain cookie-free after restart until
+  re-navigation. The host re-sends its profile on boot, on the
+  incognito toggle and on `controllerchange`.
 - Malformed profile input (non-string, empty, over 64 chars, or
   containing the key separator) falls back to `default`, and the
   reply reports the effective profile.
-- One engine origin serves one host app instance: the profile is
-  global SW state, so two app windows in different incognito states
-  cannot hold different profiles at the same time (last push wins).
-  The engine's page cache is also shared across profiles (cookies
-  never are).
+- Two app windows may hold different profiles at the same time. A
+  non-default jar namespace includes both the host root id and profile
+  label, so equal labels do not merge windows' cookies. The page cache
+  remains shared, and any request in a non-default profile bypasses it.
+  The first request after this upgrade removes the pre-isolation page
+  cache, since its entries had no reliable client-profile context.
 
 ## Session import modes (2.2 Arsenide)
 
@@ -139,8 +151,8 @@ carries honest counts: `{ jars, cookies, conflicts }`.
 
 ## Jar enumeration + scoped clear (#41)
 
-`zl:getJars` enumerates every jar profile that exists, each with its
-per-origin cookie records:
+`zl:getJars` enumerates only the requesting host window's active jar
+profile, with its per-origin cookie records:
 
 ```
 { type: "zl:getJars" }
@@ -150,8 +162,8 @@ The reply carries `{ ok, active, profiles }`; each profile is
 `{ profile, active, cookies, origins: [{ origin, id, cookies }] }`.
 `origin` is the real target origin when the engine knows it (the
 registry plus an id -> origin record persisted alongside the jar);
-`null` when only the internal id survived. Enumeration spans every
-profile, not just the active one, and the active profile is always
+`null` when only the internal id survived. The caller cannot enumerate
+another host window's temporary profile. Its active profile is always
 present, empty or not.
 
 `zl:clearJar` clears the active profile (or a named one), or one
@@ -165,8 +177,9 @@ origin inside it:
 
 The reply carries honest counts (`{ ok, jars, cookies }`). Malformed
 input is refused, not coerced: unlike `zl:jarProfile`, a destructive
-clear never falls back to the default profile on garbage. Clearing
-the default jar persists (debounced like every jar write);
+clear never falls back to the default profile on garbage. A named
+session profile is resolved only inside the requesting window's root.
+Clearing the default jar persists (debounced like every jar write);
 session-profile clears touch memory only.
 
 Both messages are host-only, and so is the rest of the control plane
@@ -204,11 +217,13 @@ it: cookies do not survive an engine switch.
 ## Extension cookies API (#42)
 
 `browser.cookies.*` inside an extension (get/getAll/set/remove) reads
-and writes this same jar, not a parallel store. The `cookies`
+and writes the durable shared `default` jar, not a parallel store.
+The shared extension background does not carry a trustworthy host
+window identity, so it cannot read a private-window jar. The `cookies`
 permission mounts the namespace; every call additionally requires a
 host permission matching the target URL (the webRequest gate). Reads
-see the ACTIVE jar profile with RFC 6265 domain/path/secure/expiry
-matching and return Firefox-shaped Cookie views. Writes go through
+use RFC 6265 domain/path/secure/expiry matching and return Firefox-
+shaped Cookie views. Writes go through
 `documentCookieWrite`, so the isolation, domain and SameSite gates
 apply once, centrally; a rejected set resolves `null`. Honest gaps:
 HttpOnly is visible to reads but cannot be minted by `set` (a script
