@@ -78,15 +78,40 @@ export class ExtensionManager {
     }
   }
 
-  private async deriveId(manifestBytes: Uint8Array): Promise<ExtensionId> {
-    const copy = manifestBytes.slice();
-    const digest = await crypto.subtle.digest("SHA-256", copy.buffer as ArrayBuffer);
+  /* #287: identity derives from the canonical package contents, not
+     the manifest alone - two packages with identical manifests but
+     different scripts/resources are different extensions, and a
+     script-only change produces a new identity. Root-relative paths
+     are sorted so file order never changes the digest; each entry is
+     [path, byteLength, content] so concatenation cannot collide. */
+  private async deriveId(
+    files: Map<string, Uint8Array>,
+    rel: (p: string) => string,
+  ): Promise<ExtensionId> {
+    const enc = new TextEncoder();
+    const parts = [...files.entries()].map(([p, d]) => [rel(p), d] as const);
+    parts.sort((a, b) => (a[0] < b[0] ? -1 : 1));
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (const [p, d] of parts) {
+      const pb = enc.encode(p);
+      const len = new Uint8Array(4);
+      new DataView(len.buffer).setUint32(0, d.byteLength);
+      chunks.push(pb, len, d);
+      total += pb.byteLength + 4 + d.byteLength;
+    }
+    const buf = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      buf.set(c, off);
+      off += c.byteLength;
+    }
+    const digest = await crypto.subtle.digest("SHA-256", buf.buffer as ArrayBuffer);
     const hex = Array.from(new Uint8Array(digest))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
     return hex.slice(0, 32);
   }
-
   async installFromZip(bytes: Uint8Array): Promise<InstallResult> {
     const files = await readZip(bytes, DEFAULT_ZIP_LIMITS);
     return this.installFiles(files);
@@ -108,7 +133,9 @@ export class ExtensionManager {
     if (!ok || parsed === null) {
       throw new Error("zeolite: manifest invalid: " + diags.errors.join("; "));
     }
-    const id = await this.deriveId(mbytes);
+    const relOf = (p: string) =>
+      loc.root !== "" && p.startsWith(loc.root) ? p.slice(loc.root.length) : p;
+    const id = await this.deriveId(files, relOf);
     if (this.exts.has(id)) {
       throw new Error("zeolite: extension already installed (" + parsed.name + ")");
     }
@@ -124,8 +151,7 @@ export class ExtensionManager {
     try {
       await idbPut(db, STORE_META, id, rec);
       for (const [p, data] of files) {
-        const rel = loc.root !== "" && p.startsWith(loc.root) ? p.slice(loc.root.length) : p;
-        await idbPut(db, STORE_FILES, id + ":" + rel, data);
+        await idbPut(db, STORE_FILES, id + ":" + relOf(p), data);
       }
     } catch (e) {
       rec.state = "error";
