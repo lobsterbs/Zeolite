@@ -48,6 +48,8 @@ export interface CookieRequestContext {
   initiator?: string;
   /** True for top-level navigations (sec-fetch-dest: document). */
   navigation?: boolean;
+  /** #267: SW client id of the requester; scopes the jar profile. */
+  clientId?: string;
 }
 
 let sameSitePolicy: SameSitePolicy = "off";
@@ -138,15 +140,27 @@ const PROFILE_DEFAULT = "default";
 const SEP = "\u0000";
 let profile = PROFILE_DEFAULT;
 
-/** Internal jar map key for the active profile. */
-function jarKey(originId: string): string {
-  return profile === PROFILE_DEFAULT ? originId : profile + SEP + originId;
+/* #267: per-client profile overrides (one host window normal, one
+   incognito). A client that never sent zl:jarProfile keeps the
+   legacy global behavior. In-memory only: a SW restart forgets
+   client profiles, so no session state revives. */
+const clientProfiles = new Map<string, string>();
+
+/** Internal jar map key for the given profile. */
+function jarKey(originId: string, pid: string = profile): string {
+  return pid === PROFILE_DEFAULT ? originId : pid + SEP + originId;
 }
 
-/** True when a stored jar-map key belongs to the active profile
+/** True when a stored jar-map key belongs to the given profile
     (default-profile keys are bare origin ids, predating profiles). */
-function inProfile(key: string): boolean {
-  return profile === PROFILE_DEFAULT ? !key.includes(SEP) : key.startsWith(profile + SEP);
+function inProfile(key: string, pid: string = profile): boolean {
+  return pid === PROFILE_DEFAULT ? !key.includes(SEP) : key.startsWith(pid + SEP);
+}
+
+/** #267: the profile a request runs in: the requesting client's own
+    profile when it set one, else the legacy global. */
+function activeProfile(clientId?: string): string {
+  return clientId ? clientProfiles.get(clientId) ?? profile : profile;
 }
 
 /** Switch the active jar profile (zl:jarProfile control message). A
@@ -154,11 +168,21 @@ function inProfile(key: string): boolean {
     session profile drops its cookies immediately (incognito
     semantics). The effective profile is returned so the caller can
     report it. */
-export function setJarProfile(p: unknown): { ok: boolean; profile: string } {
+export function setJarProfile(p: unknown, clientId?: string): { ok: boolean; profile: string } {
   const next =
     typeof p === "string" && p.length > 0 && p.length <= 64 && !p.includes(SEP)
       ? p
       : PROFILE_DEFAULT;
+  if (clientId) {
+    /* #267: scoped to the requesting client; leaving a session
+       profile drops only THAT client's throwaway jars. */
+    const prev = clientProfiles.get(clientId) ?? PROFILE_DEFAULT;
+    if (prev !== PROFILE_DEFAULT && prev !== next) {
+      for (const key of [...jars.keys()]) if (key.startsWith(prev + SEP)) jars.delete(key);
+    }
+    clientProfiles.set(clientId, next);
+    return { ok: true, profile: next };
+  }
   const prev = profile;
   if (prev !== PROFILE_DEFAULT && prev !== next) {
     for (const key of [...jars.keys()]) if (key.startsWith(prev + SEP)) jars.delete(key);
@@ -167,9 +191,10 @@ export function setJarProfile(p: unknown): { ok: boolean; profile: string } {
   return { ok: true, profile };
 }
 
-/** Active profile name (zl:ping echo, drift detection). */
-export function jarProfileState(): string {
-  return profile;
+/** Active profile name (zl:ping echo, drift detection): the
+    requesting client's own when known, else the legacy global. */
+export function jarProfileState(clientId?: string): string {
+  return activeProfile(clientId);
 }
 
 interface ParsedUrl {
@@ -328,7 +353,7 @@ export function parseCookieDate(s: string): number | null {
     Rejects (hard gate) any cookie whose Domain does not scope the
     response host. Deletion follows max-age<=0 or an already-past
     expiry. */
-function admitCookie(responseUrl: string, header: string, fromScript = false): SetCookieResult {
+function admitCookie(responseUrl: string, header: string, fromScript = false, pid: string = profile): SetCookieResult {
   const u = parseUrl(responseUrl);
   const semi = header.indexOf(";");
   const pair = (semi < 0 ? header : header.slice(0, semi)).trim();
@@ -461,7 +486,7 @@ function admitCookie(responseUrl: string, header: string, fromScript = false): S
   const isDeletion = (maxAge !== null && maxAge <= 0) || (hasExpires && expires <= now);
   const expiry = maxAge !== null ? now + maxAge * 1000 : expires;
 
-  const key = jarKey(registerOrigin(u.origin).id);
+  const key = jarKey(registerOrigin(u.origin).id, pid);
   const jar = jars.get(key) ?? [];
   const sameCookie = (c: Cookie) => c.name === name && c.domain === domain && c.hostOnly === hostOnly && c.path === path;
 
@@ -527,11 +552,11 @@ export function jarHeaders(resp: Response): Headers {
 /** Capture every Set-Cookie header of a response into the jar. This is
     the SW seam: called on every proxied response, before hostile-header
     surgery strips set-cookie from what the page sees. */
-export function applySetCookie(responseUrl: string, headers: Headers): SetCookieResult[] {
+export function applySetCookie(responseUrl: string, headers: Headers, clientId?: string): SetCookieResult[] {
   const getSetCookie = (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
   const raw = typeof getSetCookie === "function" ? getSetCookie.call(headers) : [];
   const list = raw.length > 0 ? raw : headers.has("set-cookie") ? [headers.get("set-cookie")!] : [];
-  return list.map((h) => admitCookie(responseUrl, h));
+  return list.map((h) => admitCookie(responseUrl, h, false, activeProfile(clientId)));
 }
 
 /** Assemble the Cookie header value for a request URL, or null when
@@ -552,9 +577,11 @@ export function cookieHeaderFor(requestUrl: string, ctx?: CookieRequestContext):
     }
   }
   if (purged) schedulePersist();
+  /* #267: the Cookie header rides the requesting client's profile. */
+  const pid = activeProfile(ctx?.clientId);
   const matched: Cookie[] = [];
   for (const [key, list] of jars) {
-    if (!inProfile(key)) continue;
+    if (!inProfile(key, pid)) continue;
     for (const c of list) {
       const domainOk = c.hostOnly ? u.host === c.domain : domainMatch(u.host, c.domain);
       /* #191 pinned deviation: the jar honors Secure strictly - Secure
@@ -576,13 +603,14 @@ export function cookieHeaderFor(requestUrl: string, ctx?: CookieRequestContext):
     Expired cookies are filtered out here.
     The page keeps an eventually-consistent cache because the getter
     is synchronous while this jar lives in the SW. */
-export function documentCookieRead(pageUrl: string): string {
+export function documentCookieRead(pageUrl: string, clientId?: string): string {
   const u = parseUrl(pageUrl);
   if (!u) return "";
   const now = Date.now();
+  const pid = activeProfile(clientId);
   const matched: Cookie[] = [];
   for (const [key, list] of jars) {
-    if (!inProfile(key)) continue;
+    if (!inProfile(key, pid)) continue;
     for (const c of list) {
       if (c.httpOnly || (c.expires !== 0 && c.expires <= now)) continue;
       const domainOk = c.hostOnly ? u.host === c.domain : domainMatch(u.host, c.domain);
@@ -601,8 +629,8 @@ export function documentCookieRead(pageUrl: string): string {
 /** document.cookie write (RFC 6265 5.6): admission against the page
     URL. A script cannot mint an HttpOnly cookie, so the attribute is
     stripped before admission (spec: ignore it). */
-export function documentCookieWrite(pageUrl: string, cookie: string): SetCookieResult {
-  return admitCookie(pageUrl, cookie.replace(/;\s*httponly\b/gi, ""), true);
+export function documentCookieWrite(pageUrl: string, cookie: string, clientId?: string): SetCookieResult {
+  return admitCookie(pageUrl, cookie.replace(/;\s*httponly\b/gi, ""), true, activeProfile(clientId));
 }
 
 /** #49 (browser.cookies.remove): delete cookie identities from every
@@ -640,10 +668,11 @@ export function jarRemoveIdentities(
 /** Jar contents per virtual-origin id, for tests and inspection. The
     view is the active profile only, keyed by the bare origin id (the
     session-export format is unchanged by profiles). */
-export function jarSnapshot(): Map<string, Cookie[]> {
+export function jarSnapshot(clientId?: string): Map<string, Cookie[]> {
   const out = new Map<string, Cookie[]>();
+  const pid = activeProfile(clientId);
   for (const [k, v] of jars) {
-    if (!inProfile(k)) continue;
+    if (!inProfile(k, pid)) continue;
     const id = k.includes(SEP) ? k.slice(k.indexOf(SEP) + 1) : k;
     out.set(id, v.map((c) => ({ ...c })));
   }
@@ -679,7 +708,7 @@ export interface JarProfileView {
 /** Enumerate every jar that exists, across ALL profiles, each origin's
     cookies copied out (zl:getJars reply body). The active profile is
     always present, empty or not. */
-export function jarEnumeration(): JarProfileView[] {
+export function jarEnumeration(clientId?: string): JarProfileView[] {
   const byProfile = new Map<string, Map<string, Cookie[]>>();
   for (const [k, list] of jars) {
     const sep = k.indexOf(SEP);
@@ -692,7 +721,8 @@ export function jarEnumeration(): JarProfileView[] {
     }
     m.set(id, list);
   }
-  if (!byProfile.has(profile)) byProfile.set(profile, new Map<string, Cookie[]>());
+  const active = activeProfile(clientId);
+  if (!byProfile.has(active)) byProfile.set(active, new Map<string, Cookie[]>());
   const out: JarProfileView[] = [];
   for (const [pid, m] of byProfile) {
     const origins: JarOriginView[] = [];
@@ -702,7 +732,7 @@ export function jarEnumeration(): JarProfileView[] {
       origins.push({ origin: originById.get(id) ?? null, id, cookies: list.map((c) => ({ ...c })) });
     }
     origins.sort((a, b) => (a.origin ?? a.id).localeCompare(b.origin ?? b.id));
-    out.push({ profile: pid, active: pid === profile, cookies: count, origins });
+    out.push({ profile: pid, active: pid === active, cookies: count, origins });
   }
   return out;
 }
@@ -714,10 +744,11 @@ export function jarEnumeration(): JarProfileView[] {
 export function jarClearScope(
   profileId: unknown,
   origin: unknown,
+  clientId?: string,
 ): { ok: boolean; error?: string; jars: number; cookies: number } {
   let pid: string;
   if (profileId === undefined || profileId === null) {
-    pid = profile;
+    pid = activeProfile(clientId);
   } else if (
     typeof profileId === "string" &&
     profileId.length > 0 &&
@@ -764,11 +795,46 @@ export function jarClearScope(
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+/* #254: writes serialize on one chain, so an older snapshot can
+   never land after a newer one; each write snapshots the live jars
+   when its turn arrives, and a rejected write never wedges the
+   chain. */
+let persistChain: Promise<void> = Promise.resolve();
+
+function persistDiag(err: unknown): void {
+  DIAG.failure({
+    category: "STORAGE",
+    cause: "failure",
+    message: "cookie-jar persistence failed",
+    technicalReason: String(err),
+  });
+}
+
+function runPersist(): Promise<void> {
+  persistChain = persistChain.then(jarPersist, jarPersist);
+  return persistChain;
+}
+
+/** #254: durable-before-ack flush for extendable events: cancels the
+    pending debounce and awaits one serialized write. Storage errors
+    surface as a STORAGE diag and never throw to the caller. */
+export async function flushJarPersist(): Promise<void> {
+  if (saveTimer !== null) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  try {
+    await runPersist();
+  } catch (err) {
+    persistDiag(err);
+  }
+}
+
 function schedulePersist(): void {
   if (saveTimer !== null) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    jarPersist().catch(() => undefined);
+    runPersist().catch(persistDiag);
   }, 1000);
 }
 
@@ -864,17 +930,18 @@ export async function jarLoad(): Promise<void> {
     with the given records after shape checks (other profiles are
     untouched). Malformed records are dropped, never admitted. The jar
     is persisted right away. */
-export function jarReplace(entries: Array<[string, unknown[]]>): void {
-  for (const key of [...jars.keys()]) if (inProfile(key)) jars.delete(key);
+export function jarReplace(entries: Array<[string, unknown[]]>, clientId?: string): void {
+  const pid = activeProfile(clientId);
+  for (const key of [...jars.keys()]) if (inProfile(key, pid)) jars.delete(key);
   for (const entry of entries) {
     if (Array.isArray(entry) && typeof entry[0] === "string" && Array.isArray(entry[1])) {
       /* The doc comment says malformed records are dropped: hold that
          promise per cookie, the same shape check jarLoad uses. */
       const list = entry[1].filter(isStoredCookie);
-      if (list.length) jars.set(jarKey(entry[0]), list);
+      if (list.length) jars.set(jarKey(entry[0], pid), list);
     }
   }
-  jarPersist().catch(() => undefined);
+  runPersist().catch(persistDiag);
 }
 
 /** Session import merge mode (2.2 Arsenide): merge records into the
@@ -885,14 +952,16 @@ export function jarReplace(entries: Array<[string, unknown[]]>): void {
 export function jarMerge(
   entries: Array<[string, unknown[]]>,
   rule: JarConflictRule,
+  clientId?: string,
 ): { jars: number; cookies: number; conflicts: number } {
   let jarsTouched = 0;
   let cookies = 0;
   let conflicts = 0;
+  const pid = activeProfile(clientId);
   for (const entry of entries) {
     if (!Array.isArray(entry) || typeof entry[0] !== "string" || !Array.isArray(entry[1])) continue;
     const key = entry[0];
-    const jar = jars.get(jarKey(key)) ?? [];
+    const jar = jars.get(jarKey(key, pid)) ?? [];
     let touched = false;
     for (const raw of entry[1]) {
       /* 2026-10-11 audit: the same stored-cookie shape gate jarLoad
@@ -918,11 +987,11 @@ export function jarMerge(
       touched = true;
     }
     if (touched) {
-      jars.set(jarKey(key), jar);
+      jars.set(jarKey(key, pid), jar);
       jarsTouched++;
     }
   }
-  jarPersist().catch(() => undefined);
+  runPersist().catch(persistDiag);
   return { jars: jarsTouched, cookies, conflicts };
 }
 
@@ -931,7 +1000,7 @@ export function jarClear(): void {
   jars.clear();
   registry.clear();
   originById.clear();
-  jarPersist().catch(() => undefined);
+  runPersist().catch(persistDiag);
 }
 
 /** Tests only: drop all state (pending persist timer included). */
@@ -945,6 +1014,8 @@ export function cookiesResetForTests(): void {
   originById.clear();
   sameSitePolicy = "off";
   profile = PROFILE_DEFAULT;
+  clientProfiles.clear();
+  persistChain = Promise.resolve();
 }
 
 /* #52 detect-only: recognize an Anubis pass-challenge endpoint so the

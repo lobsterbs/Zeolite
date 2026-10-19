@@ -54,7 +54,7 @@ import { raceBoot } from "./lifecycle";
 import {PROXY_INJECTED_HEADERS, acceptLanguageValue, applyChUa, navigationAccept, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript } from "./assetbases";
-import { applySetCookie, cookieHeaderFor, isPassChallenge, jarHeaders, type CookieRequestContext } from "./cookies";
+import { applySetCookie, cookieHeaderFor, flushJarPersist, isPassChallenge, jarHeaders, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
@@ -2196,6 +2196,8 @@ export function handleFetch(e: FetchEvent): void {
              Navigations are top-level for lax purposes. */
           const initCtx = contextOf(VCTX, e.clientId);
           const reqCtx: CookieRequestContext = {
+            /* #267: the jar profile follows the requesting client. */
+            clientId: e.clientId || undefined,
             /* Issue #34: a foreign-origin request's initiator is the
                requesting page itself; the same-origin referrer fallback
                (path resolved against the page home) must not be applied
@@ -2284,8 +2286,12 @@ export function handleFetch(e: FetchEvent): void {
                #35: any admission also pushes the jar view to the
                requesting client's docCookie port (see the main capture
                below). */
-            const hopAdmitted = credsEligible(hopUrl) ? applySetCookie(hopUrl, jarHeaders(resp)) : [];
-            if (hopAdmitted.some((r) => r.stored || r.deleted)) void pushDocCookieView(e.clientId);
+            const hopAdmitted = credsEligible(hopUrl) ? applySetCookie(hopUrl, jarHeaders(resp), e.clientId || undefined) : [];
+            if (hopAdmitted.some((r) => r.stored || r.deleted)) {
+              void pushDocCookieView(e.clientId);
+              /* #254: keep the jar write alive past this fetch event. */
+              e.waitUntil(flushJarPersist());
+            }
             const loc = resp.headers.get("location");
             if (!loc) break; /* 3xx without Location: surface as-is */
             let next: string;
@@ -2540,7 +2546,7 @@ export function handleFetch(e: FetchEvent): void {
              hostile-header surgery strips it from the page view. A 3xx
              that surfaced (hop cap, unresolvable or unreplayable hop)
              still lands here, captured against its own hop URL. */
-          const admitted = credsEligible(finalDest ?? hopUrl) ? applySetCookie(finalDest ?? hopUrl, jarHeaders(resp)) : [];
+          const admitted = credsEligible(finalDest ?? hopUrl) ? applySetCookie(finalDest ?? hopUrl, jarHeaders(resp), e.clientId || undefined) : [];
           /* #35 (browser E2E): the page's document.cookie getter is
              synchronous, so the bootstrap keeps an optimistic copy; a
              Set-Cookie admitted on this fetch/XHR response was invisible
@@ -2548,7 +2554,11 @@ export function handleFetch(e: FetchEvent): void {
              the requesting client's docCookie port right after
              admission, so the copy corrects itself. Unknown client
              (SW-initiated fetch, navigation) is a no-op inside. */
-          if (admitted.some((r) => r.stored || r.deleted)) void pushDocCookieView(e.clientId);
+          if (admitted.some((r) => r.stored || r.deleted)) {
+            void pushDocCookieView(e.clientId);
+            /* #254: keep the jar write alive past this fetch event. */
+            e.waitUntil(flushJarPersist());
+          }
           /* #52: a solved Anubis challenge hands its cookies back through
              the ordinary jar admission above; flag the handoff so hosts
              can react (detect-only, never a solve). */

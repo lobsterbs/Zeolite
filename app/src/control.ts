@@ -4,7 +4,7 @@
 
 import { buildNavHandleUrl, currentPrefix, decodeClientUrl, encodeDest, mintableDest, setScheme } from "./codec";
 import type { JarConflictRule } from "./cookies";
-import { documentCookieRead, documentCookieWrite, jarClear, jarClearScope, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy } from "./cookies";
+import { documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, setJarProfile, setSameSitePolicy } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage } from "./cpgate";
 import { DIAG } from "./diag";
 /* #90: the download registry instance lives in ./downloads; the
@@ -286,7 +286,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         /* #63: the live ?url= refusal choice, so an embedder detects a
            revert to defaults and re-pushes its config. */
         navHandles: navHandlesEnabled(),
-        profile: jarProfileState(),
+        profile: jarProfileState((e.source as { id?: string } | null)?.id),
       });
       break;
     case "zl:config": {
@@ -379,7 +379,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          are dropped on the switch back (cookies.ts). Resets to
          default on SW restart; the host re-sends on boot, on the
          incognito toggle, and on controllerchange. */
-      reply(setJarProfile(msg.profile));
+      reply(setJarProfile(msg.profile, (e.source as { id?: string } | null)?.id));
       /* #179: the page cache spans jar profiles; a profile switch
          drops it so one profile's cached pages never surface for
          another. */
@@ -389,16 +389,26 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       /* #41: jar enumeration for the host (the host settings UI
          renders and manages cookie-jar state). Host-only: the
          proxied-sender gate above refuses target-site pages. */
-      reply({ ok: true, active: jarProfileState(), profiles: jarEnumeration() });
+      /* #267: the enumeration and the active flag are the requesting
+         client's own, not the legacy global. */
+      const jarViews = jarEnumeration((e.source as { id?: string } | null)?.id);
+      reply({ ok: true, active: jarViews.find((p) => p.active)?.profile ?? jarProfileState(), profiles: jarViews });
       break;
     case "zl:clearJar": {
       /* #41: clear the active (or named) jar profile, or one origin
          inside it. Refuses malformed input instead of coercing. */
-      const r = jarClearScope(msg.profile, msg.origin);
+      const r = jarClearScope(msg.profile, msg.origin, (e.source as { id?: string } | null)?.id);
       /* #179: a cleared jar means the cached pages may be another
          session's; drop the page cache with it. */
       if (r.ok) void pageCacheClear();
-      reply(r.ok ? { ok: true, jars: r.jars, cookies: r.cookies } : { ok: false, error: r.error });
+      e.waitUntil(
+        (async () => {
+          /* #254: durable before the ack, so a worker death between
+             the clear and the write cannot resurrect the cookies. */
+          await flushJarPersist();
+          reply(r.ok ? { ok: true, jars: r.jars, cookies: r.cookies } : { ok: false, error: r.error });
+        })(),
+      );
       break;
     }
         case "zl:transport": {
@@ -559,8 +569,10 @@ case "zl:tracing":
         break;
       }
       const handle = (set?: unknown) => {
-        if (typeof set === "string") documentCookieWrite(origin, set);
-        port.postMessage({ ok: true, cookie: documentCookieRead(origin) });
+        /* #267: the port's own client scopes the jar view. */
+        const cid = (e.source as { id?: string } | null)?.id;
+        if (typeof set === "string") documentCookieWrite(origin, set, cid);
+        port.postMessage({ ok: true, cookie: documentCookieRead(origin, cid) });
       };
       handle(msg.set);
       port.onmessage = (ev: MessageEvent) => handle((ev.data as { set?: unknown }).set);
@@ -782,7 +794,7 @@ case "zl:tracing":
               blob: await encryptSession(pass, {
                 version: ZEOLITE_VERSION,
                 created: Date.now(),
-                cookies: [...jarSnapshot()],
+                cookies: [...jarSnapshot((e.source as { id?: string } | null)?.id)],
                 tabs: TABS.list(),
                 extra: msg.extra ?? null,
               }),
@@ -811,13 +823,18 @@ case "zl:tracing":
             /* 2.2 Arsenide: merge mode with a per-cookie conflict rule;
                replace stays the default so existing callers are
                unchanged. */
+            const cid = (e.source as { id?: string } | null)?.id;
             if (msg.mode === "merge") {
               const rule: JarConflictRule =
                 msg.rule === "import-wins" || msg.rule === "keep-newest" ? msg.rule : "keep-existing";
-              const counts = jarMerge(data.cookies, rule);
+              const counts = jarMerge(data.cookies, rule, cid);
+              /* #254: the imported session is durable before the ack. */
+              await flushJarPersist();
               reply({ ok: true, extra: data.extra ?? null, merged: counts });
             } else {
-              jarReplace(data.cookies);
+              jarReplace(data.cookies, cid);
+              /* #254: the imported session is durable before the ack. */
+              await flushJarPersist();
               reply({ ok: true, extra: data.extra ?? null });
             }
           } catch (err) {
@@ -840,6 +857,8 @@ case "zl:tracing":
           wsBridge.closeAll();
           // 1.4 Boride: cookies do not survive an engine switch.
           jarClear();
+          // #254: the empty jar is durable before the ack.
+          await flushJarPersist();
           // Drop every cache this SW owns, then unregister. Existing
           // pages lose their controller on next navigation; the adapter
           // also reloads them.
@@ -942,7 +961,10 @@ export function messageListener(deps: ControlDeps) {
         } catch {
           /* reply port already dead: nothing to answer */
         }
-      }),
+      })
+        /* #254: keep jar persistence alive for the whole message
+           event; flushJarPersist never throws. */
+        .then(() => flushJarPersist()),
     );
   };
 }
