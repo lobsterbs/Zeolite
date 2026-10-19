@@ -195,6 +195,10 @@ export function recordScriptUrl(initiator: string, url: string): void {
   if (i >= 0) list.splice(i, 1);
   list.unshift(clean);
   if (list.length > SCRIPT_URLS_PER_ORIGIN) list.length = SCRIPT_URLS_PER_ORIGIN;
+  /* #358: Map ordering must reflect recency, so re-set an
+     existing origin by delete-then-set; otherwise keys().next()
+     evicts the first-INSERTED origin, not the least-recently-used. */
+  scriptUrls.delete(page);
   scriptUrls.set(page, list);
   if (scriptUrls.size > SCRIPT_URLS_TOTAL) {
     const oldest = scriptUrls.keys().next();

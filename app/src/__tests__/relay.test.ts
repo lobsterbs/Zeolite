@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import relaySrc from "../bootstrap/relay.ts?raw";
 import { applyRelay, tapChannel } from "../bootstrap/relay";
 
 /* The Worker/SharedWorker channel tap (#54 dedicated-Worker hook):
@@ -238,5 +239,12 @@ describe("SharedWorker identity scoping (#260)", () => {
     a.mk("/s.js", "n");
     a.mk("/s.js", "n");
     expect(a.seen[0].o).toBe(a.seen[1].o);
+  });
+});
+describe("source files contain no NUL bytes (#357)", () => {
+  it("the bootstrap relay source stays text, never binary", () => {
+    /* #357: a literal NUL in a .ts source makes git treat the file as
+       binary (unreviewable diffs, tooling silently skips it). */
+    expect(relaySrc.includes("\u0000"), "relay.ts contains a literal NUL byte").toBe(false);
   });
 });

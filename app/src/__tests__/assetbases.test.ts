@@ -381,3 +381,25 @@ describe("flag-surgery script recovery (#296)", () => {
     ).toBeNull();
   });
 });
+
+describe("script URL registry keeps the hottest origin under churn (#358)", () => {
+  beforeEach(() => resetAssetBases());
+
+  it("a re-touched origin survives the next eviction, a cold one goes first", async () => {
+    const jsUrl = "https://a.example/x/httpd=1/cb=1/m=x.js";
+    recordScriptUrl("https://a.example/p", jsUrl);
+    for (let i = 0; i < 63; i++) recordScriptUrl(`https://o${i}.example/`, "https://o.example/x.js");
+    /* re-touch the hot origin: its recency must refresh (delete-then-set) */
+    recordScriptUrl("https://a.example/p", jsUrl);
+    /* one more origin trips the cap: the cold o0 must be evicted, not a.example */
+    recordScriptUrl("https://new.example/", "https://new.example/y.js");
+    const rec = await recoverFlagSurgeryScript(
+      "https://a.example/p",
+      "https://a.example/httpd=1/cb=1/m=x.js",
+      new Headers(),
+      async () => mkResp(200, "application/javascript"),
+    );
+    expect(rec?.url).toBe("https://a.example/x/httpd=1/cb=1/m=x.js");
+  });
+});
+
