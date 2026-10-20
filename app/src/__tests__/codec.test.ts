@@ -336,4 +336,26 @@ describe("recoverPath (concatenated tails)", () => {
     const token = encodeDest("https://example.com/a/b.png").slice(R.length);
     expect(recoverPath(R + token + "/more/path.gif")).toBe("https://example.com/a/b.png/more/path.gif");
   });
+
+  it("decodes the script-src split route (origin token + visible path, #296 class)", () => {
+    /* The HTML rewriter mints script src/href attrs as
+       /zl/<keyed-token(origin)><real path> - pages validate the SHAPE
+       of their loader src path (YouTube ytembeds requires "/_/js/" and
+       "/k=" before defining writeEmbed). decodePath rejects the tail
+       (the "/" after the token is not b64u); recoverPath must own the
+       decode at every fetch seam. */
+    setScheme(R);
+    setRouteKeys([KEY]);
+    const token = encodeDest("https://www.youtube.com").slice(R.length);
+    const path = "/s/_/ytembeds/_/js/k=ytembeds.base.en_US.x.2021.O/am=A/d=1/rs=R/m=root,base";
+    const route = R + token + path;
+    expect(decodePath(route)).toBeNull();
+    expect(recoverPath(route)).toBe("https://www.youtube.com" + path);
+    /* The query rides in the route search; the fetch seam composes
+       it with mergeRouteSearch (request.ts), which appends to a
+       query-free decode. */
+    expect(recoverPath(route) + "?cb=42").toBe(
+      "https://www.youtube.com" + path + "?cb=42",
+    );
+  });
 });
