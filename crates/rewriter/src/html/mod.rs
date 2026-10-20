@@ -56,6 +56,8 @@ pub struct Rewriter {
     buf: String,
     /// Lowercase name of the current tag while in Tag/Raw state.
     cur_tag: String,
+    /// #369: the current <script> is executable JavaScript by its type.
+    cur_script_js: bool,
     /// The element being entered was dropped (blocked host): its raw
     /// content and close tag must be swallowed, not emitted.
     drop_raw: bool,
@@ -77,6 +79,7 @@ impl Rewriter {
             st: St::Text,
             buf: String::new(),
             cur_tag: String::new(),
+            cur_script_js: false,
             drop_raw: false,
             injected: false,
             base_seen: false,
@@ -422,6 +425,7 @@ impl Rewriter {
                             let open = !buf.starts_with("</");
                             if open {
                                 self.cur_tag = elem_name(&buf[..end]);
+                                self.cur_script_js = script_type_is_js(&buf[..end]);
                             } else {
                                 self.cur_tag.clear();
                             }
@@ -483,7 +487,10 @@ impl Rewriter {
                         let raw = self.buf[..ci].to_string();
                         if self.cur_tag == "style" && self.cfg.rewrite_css {
                             out.push_str(&css::rewrite_stylesheet(&raw, &|u| self.enc(u)));
-                        } else if self.cur_tag == "script" && self.cfg.rewrite_js_literals {
+                        } else if self.cur_tag == "script"
+                            && self.cfg.rewrite_js_literals
+                            && self.cur_script_js
+                        {
                             // Frame-buster neutralization runs AFTER the
                             // URL-literal pass (same order as the server
                             // engine's pipeline) so folded guards and
@@ -831,6 +838,61 @@ fn classify_open(buf: &str) -> Option<(St, String)> {
 /// leading '/' of close tags. #187: cur_tag must be derived from
 /// the COMPLETED tag, not the partial text classify_open saw when
 /// the tag split across chunks ("<scr" + "ipt>").
+/// #369: whether a <script> open tag carries executable JavaScript.
+/// No `type`, an empty one, or a JavaScript MIME type (parameters like
+/// `;charset=` ignored) is executable; anything else (application/json,
+/// application/ld+json, text/template, importmap, ...) is data.
+fn script_type_is_js(tag: &str) -> bool {
+    let lower = tag.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    let mut i = 0usize;
+    while i + 4 <= b.len() {
+        let at_attr = i > 0 && b[i - 1].is_ascii_whitespace() && &b[i..i + 4] == b"type";
+        let after = b.get(i + 4).copied();
+        if at_attr && matches!(after, Some(c) if c == b'=' || c.is_ascii_whitespace()) {
+            let mut k = i + 4;
+            while k < b.len() && b[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            if k >= b.len() || b[k] != b'=' {
+                return true;
+            }
+            k += 1;
+            while k < b.len() && b[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            let (start, end) = match b.get(k) {
+                Some(&q) if q == b'"' || q == b'\'' => {
+                    let rest = &b[k + 1..];
+                    let len = rest.iter().position(|&c| c == q).unwrap_or(rest.len());
+                    (k + 1, k + 1 + len)
+                }
+                _ => {
+                    let len = b[k..]
+                        .iter()
+                        .position(|c| c.is_ascii_whitespace() || *c == b'>')
+                        .unwrap_or(b.len() - k);
+                    (k, k + len)
+                }
+            };
+            let value = lower[start..end].split(';').next().unwrap_or("").trim();
+            return matches!(
+                value,
+                "" | "module"
+                    | "text/javascript"
+                    | "application/javascript"
+                    | "application/x-javascript"
+                    | "text/ecmascript"
+                    | "application/ecmascript"
+                    | "text/jscript"
+                    | "text/livescript"
+            );
+        }
+        i += 1;
+    }
+    true
+}
+
 fn elem_name(tag: &str) -> String {
     let t = tag.strip_prefix('<').unwrap_or(tag);
     let t = t.strip_prefix('/').unwrap_or(t);
@@ -1422,6 +1484,35 @@ mod tests {
             inject_bootstrap: false,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn json_script_body_is_not_rewritten() {
+        // #369: a data script is passed through byte-for-byte.
+        let base = "https://demo.example/app.html";
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let json = r#"{"api":"https://api.example/v1"}"#;
+        let html = format!(
+            r#"<html><head><script type="application/json">{}</script></head></html>"#,
+            json
+        );
+        let out = r.process(&html);
+        assert!(out.contains(json), "JSON body changed: {}", out);
+    }
+
+    #[test]
+    fn module_script_body_still_rewritten() {
+        let base = "https://demo.example/app.html";
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let html = r#"<html><head><script type="module">const a = "https://api.example/v1";</script></head></html>"#;
+        let out = r.process(html);
+        assert!(
+            !out.contains(r#""https://api.example/v1""#),
+            "module literal not rewritten: {}",
+            out
+        );
     }
 
     #[test]
