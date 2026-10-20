@@ -173,6 +173,23 @@ function namespaceForClient(clientId?: string): string {
   return namespaceForProfile(activeProfile(clientId), rootOf(clientId));
 }
 
+/* #366: the shared unbound namespace (no root, no authenticated
+   profile) is never a legitimate cookie home: requests from unbound
+   clients stay cookie-free and their responses admit nothing, so
+   unrelated unbound clients cannot observe each other's cookies and
+   nothing unreachable is persisted. */
+const UNBOUND_GLOBAL_NAMESPACE = namespaceForProfile(PROFILE_UNBOUND, null);
+
+/** #366: true when any session (non-default) jar profile is active
+    anywhere (global or on a bound host root): unattributable worker
+    clients fail closed instead of reading or writing the shared
+    default jar. */
+export function anySessionProfileActive(): boolean {
+  if (profile !== PROFILE_DEFAULT) return true;
+  for (const pid of rootProfiles.values()) if (pid !== PROFILE_DEFAULT) return true;
+  return false;
+}
+
 function profileNameForNamespace(namespace: string): string {
   if (namespace === PROFILE_DEFAULT) return PROFILE_DEFAULT;
   const clientNamespace = namespace.startsWith("client:");
@@ -693,6 +710,9 @@ export function applySetCookie(responseUrl: string, headers: Headers, clientId?:
   const getSetCookie = (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie;
   const raw = typeof getSetCookie === "function" ? getSetCookie.call(headers) : [];
   const list = raw.length > 0 ? raw : headers.has("set-cookie") ? [headers.get("set-cookie")!] : [];
+  /* #366: the shared unbound namespace admits nothing, so unrelated
+     unattributable clients can never observe each other's cookies. */
+  if (namespaceForClient(clientId) === UNBOUND_GLOBAL_NAMESPACE) return [];
   return list.map((h) => admitCookie(responseUrl, h, false, namespaceForClient(clientId)));
 }
 
@@ -714,8 +734,10 @@ export function cookieHeaderFor(requestUrl: string, ctx?: CookieRequestContext):
     }
   }
   if (purged) schedulePersist();
-  /* #267: the Cookie header rides the requesting client's profile. */
+  /* #267: the Cookie header rides the requesting client's profile.
+     #366: an unbound client's namespace is cookie-free by design. */
   const namespace = namespaceForClient(ctx?.clientId);
+  if (namespace === UNBOUND_GLOBAL_NAMESPACE) return null;
   const matched: Cookie[] = [];
   for (const [key, list] of jars) {
     if (!inProfile(key, namespace)) continue;
@@ -1077,7 +1099,26 @@ export async function jarLoad(): Promise<void> {
           const id = sep < 0 ? entry[0] : entry[0].slice(sep + SEP.length);
           const origin = oldOrigins.get(id);
           const newId = origin ? fnv1a(origin) : id;
-          jars.set(pid === "" ? newId : pid + SEP + newId, list);
+          if (pid === "") {
+            /* default-profile records are bare origin ids, predating
+               profiles; they keep that shape. */
+            jars.set(newId, list);
+          } else if (pid.startsWith("client:") || pid.startsWith("legacy:")) {
+            /* #267/#361 namespaced record: the SEP split leaves the
+               namespace prefix intact, so reassembly is verbatim. */
+            jars.set(pid + SEP + newId, list);
+          } else {
+            /* #365: records persisted before client isolation are keyed
+               by the raw profile name, which matches no namespace the
+               new code computes - they were unreachable from every
+               profile path (header, enumeration, clear, replace) and
+               re-persisted forever. Rekey under the legacy namespace
+               so the pre-isolation sessions load readable. Residual:
+               a pre-isolation profile literally named "client:..." or
+               "legacy:..." still orphans, because a raw name is
+               indistinguishable from a namespace prefix. */
+            jars.set(namespaceForProfile(pid, null) + SEP + newId, list);
+          }
         }
       }
     }
