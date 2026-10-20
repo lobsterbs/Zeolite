@@ -23,7 +23,9 @@ export interface SiteRule {
   inject?: string[];
   /** Hosts whose subresource tags are dropped at rewrite time. */
   block?: string[];
-  /** Plugin names are parsed but currently unsupported by the SW loader. */
+  /** Plugin names, resolved through the build-time static registry
+      (app/src/plugins/registry.ts, #256). Unknown names fail safely
+      with one bounded warning. */
   plugins?: string[];
   /** #80: per-site FingerprintProfile, siteconfig DATA (the same
       object zl:fingerprint accepts). Resolved by the SW into the

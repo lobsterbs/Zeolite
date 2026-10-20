@@ -1,12 +1,15 @@
-/* Plugin API contract (Phase 4). Plugin loading is currently disabled
-   in the service worker because Chromium does not support the dynamic
-   module import this API previously relied on. See docs/plugins.md.
-   Keep the hook types here for the planned static-registry loader. */
+/* Plugin API contract (Phase 4), #256: service-worker-safe loading
+   through the build-time static registry (./plugins/registry.ts).
+   Chromium does not support dynamic import() in the targeted service
+   worker, so plugins are compiled into the bundle via static imports.
+   A configured name that is not in the registry fails safely to null
+   with ONE bounded diagnostic per name per worker lifetime; no code
+   is fetched or evaluated at runtime. */
 
 import { DIAG } from "./diag";
+import { REGISTRY } from "./plugins/registry";
 
-/* A plugin would default-export (or named-export) a register(hooks)
-   function:
+/* A plugin module exports a register(hooks) function:
 
      export function register(hooks) {
        hooks.onRequest({ url, headers })  -> { headers } | void
@@ -14,7 +17,8 @@ import { DIAG } from "./diag";
      }
 
    Hooks may not block or rewrite the body: they observe and adjust
-   headers only. */
+   headers only. register(hooks) runs once per plugin per worker
+   lifetime; the resolved hook set is memoized. */
 
 export interface RequestCtx {
   /** Real destination URL. */
@@ -34,29 +38,50 @@ export interface PluginHooks {
   onResponse?: (ctx: ResponseCtx) => void;
 }
 
-let unsupportedWarningSent = false;
-
 /** Siteconfig plugin names use a narrow identifier grammar. */
 export function pluginNameOk(name: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(name);
 }
 
-/** Dynamic module imports are not supported in the Chromium service
-    worker runtime Zeolite targets. Until a reviewed static registry is
-    shipped, configured plugin names are refused explicitly instead of
-    attempting a runtime import that always fails. */
+const hooksByName = new Map<string, PluginHooks | null>();
+const warnedUnknown = new Set<string>();
+
+/** Resolve a plugin name to its hook set through the static registry
+    (#256). Unknown or invalid names fail safely to null; unknown
+    names emit one bounded UNSUPPORTED warning each. register() errors
+    are isolated: the plugin degrades to null and never breaks the
+    request path. */
 export function loadPlugin(name: string): Promise<PluginHooks | null> {
   if (!pluginNameOk(name)) return Promise.resolve(null);
-  if (!unsupportedWarningSent) {
-    unsupportedWarningSent = true;
+  if (hooksByName.has(name)) return Promise.resolve(hooksByName.get(name) ?? null);
+  let hooks: PluginHooks | null = null;
+  const register = REGISTRY[name];
+  if (register) {
+    const h: PluginHooks = {};
+    try {
+      register(h);
+      hooks = h;
+    } catch (err) {
+      DIAG.emit({
+        category: "RUNTIME",
+        cause: "failure",
+        severity: "warning",
+        message: "plugin failed to register: " + name,
+        technicalReason: String(err),
+      });
+      hooks = null;
+    }
+  } else if (!warnedUnknown.has(name)) {
+    warnedUnknown.add(name);
     DIAG.emit({
       category: "UNSUPPORTED",
       cause: "unsupported",
       severity: "warning",
-      message: "site plugins are configured, but service-worker plugin loading is unavailable",
+      message: "site plugin is not in the build registry: " + name,
     });
   }
-  return Promise.resolve(null);
+  hooksByName.set(name, hooks);
+  return Promise.resolve(hooks);
 }
 
 /** Resolve the plugin list for a site rule into hook sets. */
@@ -66,7 +91,9 @@ async function hooksFor(names: string[] | undefined): Promise<PluginHooks[]> {
   return hooks.filter((h): h is PluginHooks => h !== null);
 }
 
-/** Apply every plugin's onRequest hook; last write wins per header. */
+/** Apply every plugin's onRequest hook; last write wins per header.
+    Awaited by the request engine before the upstream send: a returned
+    header map replaces the outgoing set for that request. */
 export async function applyOnRequest(
   names: string[] | undefined,
   url: string,
@@ -86,7 +113,12 @@ export async function applyOnRequest(
   }
 }
 
-/** Fire every plugin's onResponse hook. */
+/** Fire every plugin's onResponse hook. Contract (#256): onResponse
+    hooks are BEST-EFFORT OBSERVERS. They run synchronously on the
+    response path, header edits are ignored, and a throwing hook is
+    isolated inside this function - the request engine fires them
+    without awaiting (request.ts) precisely because they cannot
+    affect the response, and they can never delay it indefinitely. */
 export async function applyOnResponse(
   names: string[] | undefined,
   url: string,

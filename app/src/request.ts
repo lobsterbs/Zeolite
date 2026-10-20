@@ -2694,6 +2694,8 @@ export function handleFetch(e: FetchEvent): void {
              a delayed refresh must stay inside the engine. Same-page
              refresh (no url=) carries no destination and passes. */
           mapRefreshHeader(outHeaders, finalDest ?? target);
+          /* #256 contract: onResponse hooks are best-effort observers,
+             fired without awaiting (edits ignored, throws isolated). */
           void applyOnResponse(plugins, target, resp.status, outHeaders);
           let dec = refineWithContent(decision, resp.headers.get("content-type") ?? "", dest);
           /* #138: a policy rule with route "native" demotes the JS
