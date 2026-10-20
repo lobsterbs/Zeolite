@@ -32,7 +32,8 @@ import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
-import { applyRules, loadRules, siteUaFor, type ResourceType } from "./rules";
+import { applyRules, loadRules, siteUaFor, type GhosteryRedirect, type ResourceType } from "./rules";
+import { ghosteryLoadInProgress } from "./ghostery";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
 import { DIAG, classifyStageFailure, type DiagStage } from "./diag";
 /* #90: the adoptResponse seam lives in ./downloads; the downloads
@@ -1228,6 +1229,23 @@ function navOutcome(
   return new Response(text, { status, headers: { "content-type": "text/plain" } });
 }
 
+function ghosteryRedirectResponse(
+  redirect: GhosteryRedirect,
+  credentials: string,
+  method: string,
+): Response {
+  const rawType = redirect.contentType;
+  const validType =
+    rawType.length <= 256 &&
+    /^[\w!#$&^_.+-]+\/[\w!#$&^_.+-]+(?:\s*;\s*[\w!#$&^_.+-]+=(?:[\w!#$&^_.+-]+|"[^"\r\n]*"))*$/.test(rawType);
+  const headers = new Headers({
+    "content-type": validType ? rawType : "text/plain; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  applyEngineCors(headers, self.location.origin, credentials);
+  return new Response(method === "HEAD" ? null : redirect.body, { status: 200, headers });
+}
+
 /* #82: the engine's fetch entry point. The entrypoint (sw.ts)
    registers this directly on the fetch event. respondWith is armed
    here, not in the entrypoint, because the lifecycle needs
@@ -1414,11 +1432,23 @@ export function handleFetch(e: FetchEvent): void {
   }
   /* Issue #17: the route classification below depends on the restored
      route shape, so it runs after routeReady. respondWith is armed
-     synchronously first: a cold-start fetch (restore still pending)
+     synchronously before route classification: a cold-start fetch (restore still pending)
      must still be intercepted, not fall through to the origin with the
      default route shape. */
-  e.respondWith(
-    (async () => {
+  let releaseGhosteryHold!: () => void;
+  const ghosteryHold = new Promise<void>((resolve) => {
+    releaseGhosteryHold = resolve;
+  });
+  /* The first matching request starts Ghostery's lazy Wisp list fetch,
+     while continuing immediately under the local rules. Keep that
+     background initialization alive after this response is returned. */
+  e.waitUntil(ghosteryHold);
+  const finishGhosteryHold = () => {
+    const pending = ghosteryLoadInProgress();
+    if (pending) void pending.then(releaseGhosteryHold, releaseGhosteryHold);
+    else releaseGhosteryHold();
+  };
+  const responsePromise = (async () => {
       await routeReady;
       /* Route-key restoration is needed to authenticate the NAVH host
          binding. Re-run this after the cold-start gate before any
@@ -2129,7 +2159,7 @@ export function handleFetch(e: FetchEvent): void {
             traceId,
           });
         }
-        const ruleDec = applyRules(engineRules, target, rtype);
+        const ruleDec = applyRules(engineRules, target, rtype, initiator, e.request.destination);
         const kinds: Exclude<InterceptKind, "response">[] = ["request"];
         if (e.request.mode === "navigate") kinds.push("navigation");
         if (rtype === "worker") kinds.push("worker");
@@ -2150,7 +2180,7 @@ export function handleFetch(e: FetchEvent): void {
         /* 1.2 Halide: opt-in rewrite tracing at the decision seams.
            Zero allocation while tracing is off. */
         if (ruleDec.action === "block")
-          traceDecision({ subsystem: "rules", rule: ruleDec.matched, original: target, result: "blocked", resource: rtype, traceId });
+          traceDecision({ subsystem: "rules", rule: ruleDec.matched, original: target, result: ruleDec.ghosteryRedirect ? "redirected" : "blocked", resource: rtype, traceId });
         if (ic.block)
           traceDecision({ subsystem: "intercept", original: target, result: "blocked", resource: rtype, traceId });
         if (ruleDec.url)
@@ -2158,15 +2188,21 @@ export function handleFetch(e: FetchEvent): void {
         if (ic.url)
           traceDecision({ subsystem: "intercept", original: target, result: ic.url, resource: rtype, traceId });
         if (ruleDec.action === "block" || ic.block) {
+          const ghosteryResponse =
+            ruleDec.ghosteryRedirect && !ic.block
+              ? ghosteryRedirectResponse(ruleDec.ghosteryRedirect, e.request.credentials, e.request.method)
+              : null;
           DIAG.emit({
             category: "BLOCKED",
             cause: "blocked",
             severity: "info",
             message:
-              "request blocked by " +
-              (ruleDec.action === "block"
-                ? "rules (" + (ruleDec.matched ?? "") + ")"
-                : "intercept handler"),
+              ghosteryResponse
+                ? "request fulfilled by Ghostery redirect (" + (ruleDec.matched ?? "") + ")"
+                : "request blocked by " +
+                  (ruleDec.action === "block"
+                    ? "rules (" + (ruleDec.matched ?? "") + ")"
+                    : "intercept handler"),
             stage: "REQUEST_INTERCEPTED",
             url: target,
             traceId,
@@ -2181,15 +2217,27 @@ export function handleFetch(e: FetchEvent): void {
             method: e.request.method, traceId,
             path: internalUrl,
             dest: target,
-            status: 403,
+            status: ghosteryResponse ? 200 : 403,
             rtype: rtype.toUpperCase(),
             ms: Date.now() - t0,
             bytes: -1,
-            verdict: ruleDec.action === "block" ? "blocked:rules" : "blocked:intercept",
-            transport: blockDecision.mode,
-            fallbackReason: reasonOf(blockDecision),
-            detail: mkDetail(),
+            verdict: ghosteryResponse
+              ? "redirect:ghostery"
+              : ruleDec.action === "block"
+                ? "blocked:rules"
+                : "blocked:intercept",
+            transport: ghosteryResponse ? "engine" : blockDecision.mode,
+            fallbackReason: ghosteryResponse ? undefined : reasonOf(blockDecision),
+            detail: mkDetail(ghosteryResponse ?? undefined),
           });
+          if (ghosteryResponse) {
+            WEBREQ.completed({ ...wrDetails, statusCode: 200 });
+            if (e.request.mode === "navigate") {
+              WEBNAV.committed(target);
+              WEBNAV.completed(target);
+            }
+            return ghosteryResponse;
+          }
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
         }
         if (ruleDec.url || ic.url) target = destUpgraded(ic.url ?? ruleDec.url ?? target);
@@ -2556,20 +2604,27 @@ export function handleFetch(e: FetchEvent): void {
                smuggle a rules-blocked, webRequest-cancelled,
                intercepted or disabled host past the checks the first
                URL already passed. */
-            const hopRule = applyRules(engineRules, hopUrl, rtype);
+            const hopRule = applyRules(engineRules, hopUrl, rtype, initiator, e.request.destination);
             /* The reason names the gate that fired (netLog carries it). */
             let hopBlockReason: "BLOCKED_RULES" | "BLOCKED_INTERCEPT" | "BLOCKED_WEBREQUEST" | null = null;
-            if (siteDisabled(hopUrl)) hopBlockReason = "BLOCKED_RULES";
+            const hopDisabled = siteDisabled(hopUrl);
+            if (hopDisabled) hopBlockReason = "BLOCKED_RULES";
             else if (hopRule.action === "block") hopBlockReason = "BLOCKED_RULES";
             else if (WEBREQ.beforeRequest({ ...wrDetails, url: hopUrl })) hopBlockReason = "BLOCKED_WEBREQUEST";
             else if (runRequestInterception(kinds, { url: hopRule.url ?? hopUrl, method: hopMethod, rtype, headers: flatReq }).block) hopBlockReason = "BLOCKED_INTERCEPT";
             if (hopBlockReason) {
+              const ghosteryResponse =
+                hopBlockReason === "BLOCKED_RULES" && !hopDisabled && hopRule.ghosteryRedirect
+                  ? ghosteryRedirectResponse(hopRule.ghosteryRedirect, e.request.credentials, hopMethod)
+                  : null;
               DIAG.emit({
                 category: "BLOCKED",
                 cause: "blocked",
                 severity: "info",
                 stage: "REDIRECT_HOP",
-                message: "redirect hop blocked by request gates",
+                message: ghosteryResponse
+                  ? "redirect hop fulfilled by Ghostery redirect (" + (hopRule.matched ?? "") + ")"
+                  : "redirect hop blocked by request gates",
                 url: hopUrl,
                 traceId,
                 requestId: traceId,
@@ -2580,15 +2635,20 @@ export function handleFetch(e: FetchEvent): void {
                 traceId,
                 path: internalUrl,
                 dest: hopUrl,
-                status: 403,
+                status: ghosteryResponse ? 200 : 403,
                 rtype,
                 ms: Date.now() - t0,
                 bytes: -1,
-                verdict: "blocked",
-                transport: hopDecision.mode,
-                fallbackReason: reasonOf(hopDecision),
-                detail: mkDetail(),
+                verdict: ghosteryResponse ? "redirect:ghostery" : "blocked",
+                transport: ghosteryResponse ? "engine" : hopDecision.mode,
+                fallbackReason: ghosteryResponse ? undefined : reasonOf(hopDecision),
+                detail: mkDetail(ghosteryResponse ?? undefined),
               });
+              if (ghosteryResponse) {
+                WEBREQ.completed({ ...wrDetails, url: hopUrl, statusCode: 200 });
+                if (e.request.mode === "navigate") WEBNAV.completed(hopUrl);
+                return ghosteryResponse;
+              }
               return navOutcome(e, url, 403, "blocked", "zeolite: redirect hop blocked");
             }
             /* #186: per-host rule headers apply to the hop target and
@@ -3242,8 +3302,9 @@ export function handleFetch(e: FetchEvent): void {
           });
         }
       })();
-    })(),
-  );
+  })();
+  e.respondWith(responsePromise);
+  void responsePromise.then(finishGhosteryHold, finishGhosteryHold);
 }
 
 /** #112 follow-up: dereference a route token embedded in an UPSTREAM

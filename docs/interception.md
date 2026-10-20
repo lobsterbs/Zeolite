@@ -30,7 +30,23 @@ modify  "news.example" { types "fetch"; header "x-rule" "1" }
 
 The shipped /rules.kdl contains the ad + tracker host lists migrated
 from the browser app's server-side engine, plus the captcha-host
-allowlist, so client-side mode blocks the same hosts.
+allowlist. Ghostery's `@ghostery/adblocker` network matcher adds
+EasyList-compatible ads and tracking subscriptions. It evaluates the
+real upstream URL and the request initiator. The matcher lives in
+service-worker memory and loads lazily over Zeolite's Wisp transport;
+requests during initial loading use the local host rules until the
+matcher is ready. It refreshes after seven days while the worker
+remains active. A worker restart reloads it on the next matching
+request. If subscription loading fails, local host rules remain active
+and Ghostery retries after a short cooldown. Cosmetic selectors and
+scriptlets are not applied by this integration. List downloads are
+limited to Ghostery's HTTPS asset directory; redirects and unsuccessful
+responses fail initialization rather than being followed elsewhere.
+
+Local allow entries take precedence over Ghostery. A per-site
+`adblock: false` override and the global zl:adblock toggle disable both
+the local block list and Ghostery network matches for that site or
+session.
 
 The host toggles the compiled data with the zl:adblock control message
 ({ type: "zl:adblock", enabled: boolean }). Disabled rules are a
@@ -115,7 +131,8 @@ SW: no DOM, no page globals.
 ## Status
 
 Implemented (1.1 Oxide; zl:rules per-site overrides added on the
-deep-integration line). Honest limits: rules.kdl stays global
+deep-integration line; Ghostery network matching added on the
+Ghostery integration line). Honest limits: rules.kdl stays global
 (per-site compatibility stays in siteconfig.kdl; per-site adblock and
-UA arrive at runtime via zl:rules); transformed responses are not
-page-cached.
+UA arrive at runtime via zl:rules); Ghostery cosmetic filters are not
+applied; transformed responses are not page-cached.

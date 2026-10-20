@@ -22,16 +22,27 @@ global browser would hand the page the extension's API object
 compat.ts with that reason. Vendoring the polyfill itself would add
 no capability beyond this.
 
+## Ghostery adblocker (MPL-2.0) - adopted for network filters
+
+`@ghostery/adblocker` 2.20.1 now supplies EasyList-compatible ads and
+tracking network matches inside the service worker. Its list downloads
+ride Wisp, its compiled engine stays in service-worker memory and is
+refreshed after seven days while the worker is active. The existing
+local host rules stay active during load and if initialization fails.
+This avoids a second filter grammar for network requests while
+preserving the existing host-list allow and per-site override semantics.
+
+The integration does not inject cosmetic selectors or scriptlets.
+Those require an explicit document-rewrite design that preserves
+streaming bounds and handles site CSP; no such path is claimed here.
+
 ## adblock-rust (Brave, MPL-2.0) - not adopted
 
-The blocker use cases today are host-list filtering (the embedder's
-own adblock crate) plus the engine's rules host lists. adblock-rust's
-value is full filter syntax (network rules, cosmetic filters,
-procedural snippets); that is a wasm build plus a rule pipeline for
-capability the host lists do not need yet. Cosmetic filtering in
-particular is element hiding at rewrite time, a different pipeline,
-not a bigger matcher. Revisit when a shipped rules format requires
-network-rule syntax beyond hosts.
+The Zeolite engine now uses Ghostery's network filter engine. Adding a
+second matcher in the host's Rust server would duplicate network-rule
+behavior and would not reach Zeolite's client-side request seam.
+Cosmetic filtering remains an independent rewrite problem, not a reason
+to add a second network matcher.
 
 ## rustls-based wasm TLS - deferred behind the relay
 

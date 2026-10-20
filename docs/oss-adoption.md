@@ -1,8 +1,8 @@
 # Adopted open-source components
 
-Record of the 2026-10-11 OSS scan adoption pass. Two rules: nothing is
-shipped without a reason, and every divergence from a reference is
-written down, not papered over.
+Record of the 2026-10-11 OSS scan adoption pass and later additions.
+Two rules: nothing is shipped without a reason, and every divergence
+from a reference is written down, not papered over.
 
 ## Runtime (shipped inside the service worker bundle)
 
@@ -16,6 +16,18 @@ written down, not papered over.
     Domain is itself a public suffix (com, co.uk, github.io) is
     refused, the rule browsers apply. Replaces the old last-two-labels
     and dotless-only approximations.
+- @ghostery/adblocker 2.20.1 (MPL-2.0). The engine's compiled
+  network matcher applies Ghostery's prebuilt ads-and-tracking
+  subscriptions at the same request seam as `/rules.kdl`. List fetches
+  use Zeolite's Wisp transport and are restricted to Ghostery's HTTPS
+  asset directory; redirects and unsuccessful statuses are rejected.
+  The matcher stays in service-worker memory, refreshes
+  after seven days while the worker is active, and is loaded again on
+  the next matching request after a worker restart. Local host rules
+  remain active while it loads or retries after a failure. This integration
+  supports network decisions only; cosmetic selectors and scriptlets
+  remain a separate rewrite feature. The MPL-2.0 text is included at
+  `docs/licenses/MPL-2.0.txt`.
 - fake-indexeddb (Apache-2.0): IndexedDB in Node for the jar and
   extension tests. Pre-existing.
 
