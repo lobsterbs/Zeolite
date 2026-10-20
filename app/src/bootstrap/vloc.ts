@@ -172,7 +172,7 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
        as a same-origin path. */
     const lead = s.replace(/^[\u0000-\u0020]+/, "");
     if (
-      (/^[a-z][a-z0-9+.-]*:/i.test(lead) || lead.startsWith("//")) &&
+      (/^[a-z][a-z0-9+.-]*:/i.test(lead) || /^[\\/][\\/]/.test(lead)) &&
       u.origin !== origin
     ) {
       return null;

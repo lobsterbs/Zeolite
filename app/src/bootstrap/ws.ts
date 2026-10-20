@@ -29,8 +29,11 @@ export function applyWs(w: Record<string, unknown>): void {
          realm base (the native constructor demands an absolute
          URL; the engine accepts the relative references
          same-origin apps use), then apply the native URL
-         semantics: http maps to ws, https to wss, a fragment or
-         any other scheme fails exactly like native. */
+         semantics (#364): an explicit non-ws scheme throws
+         SyntaxError like native (the throw is explicit, not
+         delegated: Node's native ctor silently upgrades http(s));
+         only scheme-less relative references map http(s) to ws(s),
+         and a fragment fails like native. */
       const base =
         (w.document as { baseURI?: string } | undefined)?.baseURI ||
         (w.location as { href?: string } | undefined)?.href;
@@ -39,7 +42,12 @@ export function applyWs(w: Record<string, unknown>): void {
       } catch {
         throw new DOMException(url, "SyntaxError");
       }
-      if (u.protocol === "http:") u.protocol = "ws:";
+      const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(url);
+      if (hasScheme) {
+        if (!/^wss?:$/.test(u.protocol)) {
+          throw new DOMException(url, "SyntaxError");
+        }
+      } else if (u.protocol === "http:") u.protocol = "ws:";
       else if (u.protocol === "https:") u.protocol = "wss:";
       if (!/^wss?:$/.test(u.protocol)) {
         return new OWS(url, protocols);

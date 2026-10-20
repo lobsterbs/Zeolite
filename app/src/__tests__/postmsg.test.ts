@@ -462,3 +462,23 @@ describe("mintChildProxy (#132 identity race)", () => {
     expect(mintChildProxy("https://engine.example", {})).toBeUndefined();
   });
 });
+
+describe("child proxy postMessage options form (#375)", () => {
+  it("rewrites a foreign targetOrigin and keeps the transfer list", () => {
+    const calls: { m: unknown; t: unknown }[] = [];
+    const child: Record<string, unknown> = {};
+    Object.defineProperty(child, "__zlNativePM", {
+      value: (m: unknown, t: unknown) => calls.push({ m, t }),
+      configurable: true,
+    });
+    const proxy = mintChildProxy("https://engine.example", child) as unknown as {
+      postMessage: (m: unknown, o: unknown) => void;
+    };
+    const port = { kind: "port" };
+    proxy.postMessage({ a: 1 }, { targetOrigin: "https://www.google.com", transfer: [port] });
+    expect(calls).toHaveLength(1);
+    const opts = calls[0].t as { targetOrigin: string; transfer: unknown[] };
+    expect(opts.targetOrigin).toBe("https://engine.example");
+    expect(opts.transfer).toEqual([port]);
+  });
+});

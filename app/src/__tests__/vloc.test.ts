@@ -231,3 +231,16 @@ describe("route-shaped inputs decode, never stack (prel-of-prel mint)", () => {
     expect(state.href).toBe(href);
   });
 });
+
+describe("backslash-form absolute URLs are cross-origin (#373)", () => {
+  it("never resolves a \\\\host form to a same-site virtual path", () => {
+    const { w, state } = makeWin(ENGINE + ENTRY);
+    applyVloc(w);
+    const nav = w.location as unknown as { assign: (u: string) => void };
+    void nav;
+    (w.history as unknown as { pushState: (s: unknown, t: string, u: string) => void }).pushState(null, "", "\\\\evil.example/x");
+    // Cross-origin: handed to the native location as-is, never folded
+    // into a virtual path on this page's origin.
+    expect(state.href).toBe("https://evil.example/x");
+  });
+});

@@ -124,13 +124,13 @@ function senderPm(
   native: (...a: unknown[]) => void,
   real: string,
 ): (msg: unknown, a2: unknown, a3: unknown) => void {
-  return function (msg, a2, a3) {
-    const origin = typeof a2 === "string" ? a2 : typeof a3 === "string" ? a3 : undefined;
+  /* The targetOrigin to deliver against, or null to drop the message. */
+  const resolve = (origin: string | undefined, hasPorts: boolean): string | undefined | null => {
     let to = origin;
     /* #130 residual: the bare legacy port call carries no
        targetOrigin anywhere, so deliver against the real origin or
        Chromium's legacy overload drops the ports. */
-    if (typeof origin !== "string" && Array.isArray(a2)) to = real;
+    if (typeof origin !== "string" && hasPorts) to = real;
     if (typeof origin === "string" && origin !== "*" && origin !== "/" && origin !== real) {
       let want = "";
       try {
@@ -140,10 +140,26 @@ function senderPm(
       }
       if (want && want !== real) {
         const vo = target.__zlVO;
-        if (typeof vo === "string" && vo && want !== vo) return; /* #132 parity: the real web drops this */
+        if (typeof vo === "string" && vo && want !== vo) return null; /* #132 parity: the real web drops this */
         to = real;
       }
     }
+    return to;
+  };
+  return function (msg, a2, a3) {
+    /* Options form: postMessage(msg, { targetOrigin, transfer }). The
+       transfer list lives in the options object, so keep it intact. */
+    if (a2 && typeof a2 === "object" && !Array.isArray(a2)) {
+      const opts = a2 as { targetOrigin?: unknown };
+      const origin = typeof opts.targetOrigin === "string" ? opts.targetOrigin : undefined;
+      const to = resolve(origin, false);
+      if (to === null) return;
+      native.call(target, msg, { ...opts, targetOrigin: to ?? "/" });
+      return;
+    }
+    const origin = typeof a2 === "string" ? a2 : typeof a3 === "string" ? a3 : undefined;
+    const to = resolve(origin, Array.isArray(a2));
+    if (to === null) return;
     const ports = typeof a2 === "string" ? a3 : a2;
     if (Array.isArray(ports)) native.call(target, msg, to, ports);
     else native.call(target, msg, to);
