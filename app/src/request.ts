@@ -478,7 +478,10 @@ export async function pageCacheStore(
      cache (Authorization header or a jar cookie for the target). */
   {
     const su = new URL(req.url);
-    const sroute = decodePath(su.pathname);
+    let sroute = decodePath(su.pathname);
+    /* #296 class: script-src split routes decode only via recoverPath
+       (token prefix + visible path tail). */
+    if (!sroute) sroute = recoverPath(su.pathname);
     if (requestHasCredentials(req, sroute ? mergeRouteSearch(sroute, su.search) : su.href, clientId)) return null;
   }
   /* #195: big bodies never enter the page cache - the clone() tee
@@ -794,7 +797,9 @@ async function wispFetchCacheBypass(
      its final URL and refreshes there; the fetch follows hops so the
      refresh can actually update the entry. */
   const u = new URL(req.url);
-  const route = decodePath(u.pathname);
+  let route = decodePath(u.pathname);
+  /* #296 class: script-src split routes decode only via recoverPath. */
+  if (!route) route = recoverPath(u.pathname);
   let dest = destOverride ?? (route ? mergeRouteSearch(route, u.search) : u.href);
   let finalUrl = dest;
   /* ponytail: five hops, the same practical ceiling as the live hop

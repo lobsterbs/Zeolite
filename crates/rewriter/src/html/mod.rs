@@ -138,7 +138,7 @@ impl Rewriter {
     }
 
     fn enc(&self, url: &str) -> String {
-        self.enc_route(url, false)
+        self.enc_route(url, false, false)
     }
 
     /// JS string-literal routing (#112): like enc(), but a keyed
@@ -153,10 +153,22 @@ impl Rewriter {
     /// legacy tails, so a split legacy route would 404 instead of
     /// decoding.
     fn enc_literal(&self, url: &str) -> String {
-        self.enc_route(url, true)
+        self.enc_route(url, true, false)
     }
 
-    fn enc_route(&self, url: &str, literal: bool) -> String {
+    /// Script src/href attr routing (#296 class, the YouTube ytembeds
+    /// "base-js" strand): pages locate and validate their own loader
+    /// script by the SHAPE of its src path (the ytembeds bootstrap
+    /// requires "/_/js/" and "/k=" in the path before it defines
+    /// writeEmbed; Google basejs builds chunk URLs by surgery on the
+    /// src path). An opaque /zl/<token> route fails every such check,
+    /// so the script mint keeps the real path visible:
+    /// see enc_script_final.
+    fn enc_script(&self, url: &str) -> String {
+        self.enc_route(url, false, true)
+    }
+
+    fn enc_route(&self, url: &str, literal: bool, script: bool) -> String {
         // Already engine-local (nested rewriting): keep as-is. An empty
         // origin matches every URL, so it must not take this branch.
         if !self.cfg.origin.is_empty() && url.starts_with(&self.cfg.origin) {
@@ -188,7 +200,7 @@ impl Rewriter {
                     Some((b, f)) => (b.to_string(), format!("#{}", f)),
                     None => (innermost, String::new()),
                 };
-                let mut out = self.enc_final(&bare, literal);
+                let mut out = self.enc_final(&bare, literal, script);
                 out.push_str(&frag);
                 return out;
             }
@@ -227,7 +239,7 @@ impl Rewriter {
             Some((b, f)) => (b.to_string(), format!("#{}", f)),
             None => (abs, String::new()),
         };
-        let mut out = self.enc_final(&bare, literal);
+        let mut out = self.enc_final(&bare, literal, script);
         out.push_str(&frag);
         out
     }
@@ -235,7 +247,15 @@ impl Rewriter {
     /// Final encode of a bare destination. JS literals under the
     /// keyed codec keep the last path segment of a directory-shaped
     /// destination visible (#112): see enc_literal.
-    fn enc_final(&self, bare: &str, literal: bool) -> String {
+    fn enc_final(&self, bare: &str, literal: bool, script: bool) -> String {
+        if script {
+            if let Some(split) = self.enc_script_final(bare) {
+                return split;
+            }
+            // Legacy codec, bare origin, or a path past the
+            // recoverPath cap: the opaque route stays (an honest
+            // residual - there is no decodeable split form).
+        }
         if literal && matches!(self.cfg.codec, crate::encode::Codec::Keyed { .. }) {
             if let Some((parent, seg)) = Self::split_dir_dest(bare) {
                 let mut o = self.cfg.encode_url(parent);
@@ -246,6 +266,40 @@ impl Rewriter {
             }
         }
         self.cfg.encode_url(bare)
+    }
+
+    /// Path-preserving split route for script src/href attributes
+    /// (#296 class): the keyed token carries ONLY the origin and the
+    /// real path and query ride verbatim after it:
+    /// <origin>/zl/<origin-token>/real/path?real=query. The SW decodes
+    /// it with recoverPath (token prefix MAC-verified, remainder
+    /// appended to the decoded origin) and the fetch merge seam
+    /// re-attaches the route search, so no SW-side change is needed;
+    /// the same decode already serves the #112 directory-split
+    /// literal routes. Keyed codec only: recoverPath refuses legacy
+    /// split tails. recoverPath rejects tails over 2048 chars, so a
+    /// longer path keeps the opaque route; a destination without a
+    /// path keeps it too (no shape to preserve).
+    fn enc_script_final(&self, bare: &str) -> Option<String> {
+        let (prefix, key) = match &self.cfg.codec {
+            crate::encode::Codec::Keyed { prefix, key } => (prefix, key),
+            _ => return None,
+        };
+        let scheme_end = bare.find("://")? + 3;
+        let host_end = bare[scheme_end..]
+            .find(['/', '?'])
+            .map(|i| i + scheme_end)?;
+        let origin = &bare[..host_end];
+        let rest = &bare[host_end..];
+        if !rest.starts_with('/') {
+            return None;
+        }
+        let token = crate::encode::b64u_encode(&crate::encode::keyed_token(key, origin.as_bytes()));
+        let path_len = rest.find('?').unwrap_or(rest.len());
+        if token.len() + path_len > 2000 {
+            return None; // recoverPath cap is 2048; keep headroom
+        }
+        Some(format!("{}{}{}{}", self.cfg.origin, prefix, token, rest))
     }
 
     /// Split a directory-shaped destination (path ending in "/") into
@@ -690,7 +744,12 @@ impl Rewriter {
                         {
                             None
                         } else {
-                            let mut e = self.enc(&v);
+                            let mut e =
+                                if name == "script" && matches!(lower.as_str(), "src" | "href") {
+                                    self.enc_script(&v)
+                                } else {
+                                    self.enc(&v)
+                                };
                             // #161-class self-location: pages find their
                             // own stub <script> by substring on the
                             // ORIGINAL src (OneTrust:
@@ -2689,6 +2748,113 @@ mod tests {
             .and_then(|b| String::from_utf8(b).ok())
             .unwrap_or_default();
         assert_eq!(decoded, "https://cdn.cmp.example/sdk/otBannerSdk.js");
+    }
+
+    fn keyed_cfg() -> RewriteConfig {
+        let mut c = cfg();
+        c.codec = Codec::Keyed {
+            prefix: "/zl/".into(),
+            key: core::array::from_fn(|i| i as u8),
+        };
+        c
+    }
+
+    /// #296-class (YouTube ytembeds "base-js"): pages validate their
+    /// own loader script by the SHAPE of its src path (the ytembeds
+    /// bootstrap requires "/_/js/" and "/k=" in the path before it
+    /// defines writeEmbed; Google basejs builds chunk URLs by surgery
+    /// on the src path). Under the keyed codec the script src mint
+    /// keeps the real path and query visible after an origin-only
+    /// token, which the SW decodes via recoverPath exactly like the
+    /// #112 split literals.
+    #[test]
+    fn keyed_script_src_mints_path_preserving_route() {
+        let c = keyed_cfg();
+        let mut r = Rewriter::new(c.clone());
+        r.set_base("https://www.youtube.com/embed/aqz-KE-bpKQ");
+        let html = "<script src=\"https://www.youtube.com/s/_/ytembeds/_/js/k=ytembeds.base.en_US.x.2021.O/am=A/d=1/rs=R/m=root,base?cb=42\" id=\"base-js\"></script>";
+        let out = format!("{}{}", r.process(html), r.finish());
+        let token = crate::encode::b64u_encode(&crate::encode::keyed_token(
+            &core::array::from_fn(|i| i as u8),
+            b"https://www.youtube.com",
+        ));
+        let expected = format!(
+            "/zl/{}{}",
+            token,
+            "/s/_/ytembeds/_/js/k=ytembeds.base.en_US.x.2021.O/am=A/d=1/rs=R/m=root,base?cb=42"
+        );
+        assert!(
+            out.contains(&expected),
+            "origin-only token + visible path/query: {}",
+            out
+        );
+    }
+
+    /// Legacy codec: the script mint falls back to the opaque route,
+    /// same as every other attribute (recoverPath refuses legacy
+    /// split tails).
+    #[test]
+    fn legacy_script_src_keeps_opaque_route() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://site.example/page.html");
+        let out = format!(
+            "{}{}",
+            r.process("<script src=\"https://cdn.example/sdk/app.js\"></script>"),
+            r.finish()
+        );
+        let route = cfg().encode_url("https://cdn.example/sdk/app.js");
+        assert!(
+            out.contains(&format!("src=\"{}#app.js\"", route)),
+            "legacy stays opaque + fragment: {}",
+            out
+        );
+    }
+
+    /// A path past the recoverPath cap keeps the opaque route: a
+    /// split tail the SW would refuse is never minted.
+    #[test]
+    fn keyed_script_src_long_path_keeps_opaque_route() {
+        let c = keyed_cfg();
+        let long_seg = "a".repeat(2100);
+        let src = format!("https://cdn.example/{}/x.js", long_seg);
+        let mut r = Rewriter::new(c.clone());
+        r.set_base("https://site.example/");
+        let out = format!(
+            "{}{}",
+            r.process(&format!("<script src=\"{}\"></script>", src)),
+            r.finish()
+        );
+        let opaque = c.encode_url(&src);
+        assert!(
+            out.contains(&opaque),
+            "long path falls back to the opaque route: {}",
+            out
+        );
+        assert!(
+            !out.contains(&long_seg),
+            "no visible tail beyond the recoverPath cap: {}",
+            out
+        );
+    }
+
+    /// A src that already carries a fragment keeps its own fragment
+    /// on the split form; the #161 filename fragment is not doubled.
+    #[test]
+    fn keyed_script_src_with_own_fragment_keeps_it() {
+        let c = keyed_cfg();
+        let mut r = Rewriter::new(c.clone());
+        r.set_base("https://site.example/");
+        let out = format!(
+            "{}{}",
+            r.process("<script src=\"https://cdn.example/b.js#own\"></script>"),
+            r.finish()
+        );
+        assert!(
+            out.contains("/b.js#own"),
+            "visible path and own fragment: {}",
+            out
+        );
+        assert!(!out.contains("#own#"), "no doubled fragment: {}", out);
     }
 
     #[test]
