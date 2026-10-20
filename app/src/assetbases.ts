@@ -7,6 +7,8 @@
    requests against them. Global by construction: everything comes
    from observed loads, never a per-site table. */
 
+import { DIAG } from "./diag";
+
 export type FlatFetch = (url: string, init: { method: string; headers: Headers }) => Promise<Response>;
 
 const ASSET_BASES_PER_ORIGIN = 4;
@@ -165,6 +167,7 @@ export async function recoverFlatAsset(
     try {
       const r = await fetchUpstream(cand.href, { method: "GET", headers: safe });
       if (r.ok && mimeOkFor(dest, r.headers.get("content-type") ?? "")) return { url: cand.href, resp: r };
+      await r.body?.cancel().catch(() => undefined);
     } catch {
       /* try the next base */
     }
@@ -235,12 +238,36 @@ export async function recoverFlagSurgeryScript(
   target: string,
   reqHeaders: Headers,
   fetchUpstream: FlatFetch,
+  traceId = "",
 ): Promise<{ url: string; resp: Response } | null> {
+  /* 2026-10-20 sorry-page report: a silent null hid whether recovery
+     had zero recorded script URLs, had spent its budget, or tried
+     candidates that answered badly. One warning per bail, emitted
+     only for traced in-flight fetches, keeps sorry-chunk debugging
+     honest without polluting unit-test runs. */
+  const miss = (reason: string) => {
+    if (!traceId) return;
+    DIAG.emit({
+      traceId,
+      requestId: traceId,
+      category: "REWRITE",
+      severity: "warning",
+      stage: "UPSTREAM_RESPONSE",
+      message: "flag-surgery script recovery miss: " + reason,
+      url: target,
+    });
+  };
   if (!initiator) return null;
   const cands = scriptUrls.get(originOf(initiator)) ?? [];
-  if (cands.length === 0) return null;
+  if (cands.length === 0) {
+    miss("no recorded script URLs for this origin");
+    return null;
+  }
   const pageOrigin = originOf(initiator);
-  if (!pageOrigin || (flagRecoveryRequests.get(pageOrigin) ?? 0) >= FLAG_RECOVERY_REQUESTS_PER_ORIGIN) return null;
+  if (!pageOrigin || (flagRecoveryRequests.get(pageOrigin) ?? 0) >= FLAG_RECOVERY_REQUESTS_PER_ORIGIN) {
+    miss("per-origin recovery budget already exhausted");
+    return null;
+  }
   let u: URL;
   try {
     u = new URL(target);
@@ -277,8 +304,14 @@ export async function recoverFlagSurgeryScript(
       for (const tail of tails) {
         const candUrl = cu.origin + b + tail + (u.search || "");
         if (tried.has(candUrl)) continue;
-        if (tried.size >= FLAG_RECOVERY_REQUESTS_PER_CALL) return null;
-        if ((flagRecoveryRequests.get(pageOrigin) ?? 0) >= FLAG_RECOVERY_REQUESTS_PER_ORIGIN) return null;
+        if (tried.size >= FLAG_RECOVERY_REQUESTS_PER_CALL) {
+          miss("stopped at the per-call cap after " + tried.size + " candidates");
+          return null;
+        }
+        if ((flagRecoveryRequests.get(pageOrigin) ?? 0) >= FLAG_RECOVERY_REQUESTS_PER_ORIGIN) {
+          miss("stopped at the per-origin cap after " + tried.size + " candidates");
+          return null;
+        }
         tried.add(candUrl);
         const attempts = (flagRecoveryRequests.get(pageOrigin) ?? 0) + 1;
         flagRecoveryRequests.delete(pageOrigin);
@@ -297,6 +330,7 @@ export async function recoverFlagSurgeryScript(
       }
     }
   }
+  miss(tried.size + " candidate URLs tried, none answered 200 + javascript");
   return null;
 }
 

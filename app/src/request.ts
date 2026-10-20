@@ -53,7 +53,7 @@ import { raceBoot } from "./lifecycle";
 
 import {PROXY_INJECTED_HEADERS, acceptLanguageValue, applyChUa, navigationAccept, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
-import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript } from "./assetbases";
+import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
 import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
@@ -752,6 +752,20 @@ async function upstreamFetch(
   /* #226: thread the trace id so cooldown relay failures are
      attributed in the diagnostics ring. */
   return wispTransport.fetch(dest, init, traceId);
+}
+
+/** #290 residual (2026-10-20 sorry-page report): recovery candidates
+    are upstream fetches and must ride the same relay/wisp transport
+    decision as the page's own subresources. A lambda over the raw
+    wisp client here died on relay-only embedders (their password-
+    authed /wisp/ endpoint) and took the whole flag-surgery and
+    flat-asset retry path down with it. */
+export function recoveryUpstream(
+  policy: CompiledPolicy,
+  rtype: ResourceType,
+  traceId: string,
+): FlatFetch {
+  return (u, init) => upstreamFetch(u, init, policy, rtype, traceId);
 }
 
 /** #179: the page cache spans jar profiles and sessions; clearing the
@@ -2535,7 +2549,7 @@ export function handleFetch(e: FetchEvent): void {
             /* #296 first: a flag-shaped script miss is the src-surgery class,
              whose recovery owns the flag path shape; the flat-asset gate would
              reject it and log a miss without ever trying the script bases. */
-            let rec = dest === "script" ? await recoverFlagSurgeryScript(initiator ?? "", target, e.request.headers, (u2, init2) => wispTransport.fetch(u2, init2, traceId)) : null;
+            let rec = dest === "script" ? await recoverFlagSurgeryScript(initiator ?? "", target, e.request.headers, recoveryUpstream(policy, rtype, traceId), traceId) : null;
             if (rec) {
               DIAG.emit({
                 traceId,
@@ -2547,8 +2561,8 @@ export function handleFetch(e: FetchEvent): void {
                 url: target,
               });
             } else {
-              rec = await recoverFlatAsset(initiator ?? "", target, dest, e.request.headers, (u2, init2) =>
-                wispTransport.fetch(u2, init2, traceId));
+              rec = await recoverFlatAsset(initiator ?? "", target, dest, e.request.headers,
+                recoveryUpstream(policy, rtype, traceId));
             }
             if (rec) {
               DIAG.emit({

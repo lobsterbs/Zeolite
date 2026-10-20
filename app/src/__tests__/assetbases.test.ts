@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { assetBaseCount, isFlagSurgeryPath, isFlatPath, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, resetAssetBases } from "../assetbases";
+import { DIAG } from "../diag";
 
 const mkResp = (status: number, ct: string) =>
   new Response("body", { status, headers: { "content-type": ct } });
@@ -24,6 +25,48 @@ describe("asset base registry (#134)", () => {
     expect(rec?.url).toBe("https://github.githubassets.com/assets/xy4.86babbfb1b89d634.module.css");
     expect(seen).toEqual(["https://github.githubassets.com/assets/xy4.86babbfb1b89d634.module.css"]);
     expect(rec?.resp.status).toBe(200);
+  });
+
+  it("cancels a rejected candidate body before trying the next base (#347 class)", async () => {
+    recordAssetBase("https://a.example/", "https://cdn2.example/assets/x.js");
+    recordAssetBase("https://a.example/", "https://cdn.example/assets/x.js");
+    let cancelled = 0;
+    const tracked = (ct: string) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new TextEncoder().encode("b"));
+            c.close();
+          },
+          cancel() {
+            cancelled++;
+          },
+        }),
+        { status: 200, headers: { "content-type": ct } },
+      );
+    const rec = await recoverFlatAsset(
+      "https://a.example/",
+      "https://a.example/flat.module.css",
+      "style",
+      new Headers(),
+      async (u: string) => tracked(u.includes("cdn2") ? "text/css" : "text/html"),
+    );
+    expect(rec?.url).toBe("https://cdn2.example/assets/flat.module.css");
+    expect(cancelled).toBe(1);
+  });
+
+  it("logs the bail reason for a traced flag-surgery miss (#296 visibility)", async () => {
+    const since = DIAG.snapshot(0).lastSeq;
+    const rec = await recoverFlagSurgeryScript(
+      "https://a.example/",
+      "https://a.example/httpd=1/cb=loaded_undefined_1/m=x",
+      new Headers(),
+      async () => mkResp(200, "text/javascript"),
+      "t-fsmiss",
+    );
+    expect(rec).toBeNull();
+    const ev = DIAG.snapshot(since).events.find((e) => (e.message ?? "").includes("flag-surgery script recovery miss"));
+    expect(ev?.message).toContain("no recorded script URLs for this origin");
   });
 
   it("ignores same-origin, empty, and malformed entries", async () => {
