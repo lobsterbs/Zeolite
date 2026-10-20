@@ -110,6 +110,9 @@ export function relayAvailable(): boolean {
 
 /** One relayed fetch, or null when the relay cannot carry it (no
     channel, untransportable body) so the caller falls back to wisp. */
+/** Longest wait for the embedder's first answer on a relayed fetch. */
+export const RELAY_HEADER_DEADLINE_MS = 60_000;
+
 export async function relayFetch(
   dest: string,
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
@@ -176,12 +179,29 @@ export async function relayFetch(
     headers: Array.from(init.headers.entries()),
     body,
   });
+  /* Header deadline for every relayed fetch, subresources included.
+     Without it a silent embedder (or a port it dropped without a close
+     event) parks the request until the page gives up. A timeout cancels
+     the embedder's upstream like a caller abort does. */
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  const headerDeadline = new Promise<never>((_, reject) => {
+    deadline = setTimeout(() => {
+      /* Reject before aborting: onAbort wakes take(), and the first
+         settled promise decides the error the caller sees. */
+      const e = new Error("relay header deadline exceeded");
+      e.name = "TimeoutError";
+      reject(e);
+      onAbort();
+    }, RELAY_HEADER_DEADLINE_MS);
+  });
   let first: RelayMsg;
   try {
-    first = await take();
+    first = await Promise.race([take(), headerDeadline]);
   } catch (err) {
     cleanup();
     throw err;
+  } finally {
+    clearTimeout(deadline);
   }
   if (first.type === "zl:relayError") {
     cleanup();

@@ -242,9 +242,13 @@ export function loadRules(): Promise<CompiledRules> {
     cached = (async () => {
       try {
         const resp = await fetch("/rules.kdl", { cache: "no-cache" });
+        /* 5xx is transient: forget the memo so the next call retries.
+           A 404 (no rules file) stays memoized. */
+        if (resp.status >= 500) cached = null;
         if (!resp.ok) return compileRules(null);
         return compileRules(parseRulesKdl(parseKdl(await resp.text())));
       } catch {
+        cached = null;
         return compileRules(null);
       }
     })();

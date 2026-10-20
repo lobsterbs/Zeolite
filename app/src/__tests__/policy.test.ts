@@ -152,6 +152,19 @@ describe("loadPolicy", () => {
     globalThis.fetch = orig;
   });
 
+  it("retries after a 5xx, but keeps a 404 memoized", async () => {
+    const orig = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return calls === 1 ? new Response("down", { status: 503 }) : new Response(K, { status: 200 });
+    }) as typeof fetch;
+    expect((await loadPolicy()).rules).toEqual([]);
+    expect((await loadPolicy()).rules).toHaveLength(1);
+    expect(calls).toBe(2);
+    globalThis.fetch = orig;
+  });
+
   it("loads and memoizes a valid file", async () => {
     const orig = globalThis.fetch;
     let calls = 0;

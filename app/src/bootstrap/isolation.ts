@@ -290,6 +290,12 @@ export function applyIsolation(
 
   /* ---- cookieStore ----------------------------------------------------- */
   try {
+    /* Delete when configurable, so "cookieStore" in window is false. */
+    delete (w as unknown as Record<string, unknown>).cookieStore;
+  } catch {
+    /* not configurable: the undefined shim below applies */
+  }
+  try {
     if (w.cookieStore !== undefined) {
       Object.defineProperty(w, "cookieStore", {
         value: undefined,
