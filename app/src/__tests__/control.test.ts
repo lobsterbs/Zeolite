@@ -28,6 +28,19 @@ vi.mock("../ws-runtime", () => ({
   },
 }));
 
+/* #377: count page-cache clears; the rest of the request module
+   surface stays real. */
+const cacheClears = vi.hoisted(() => ({ count: 0 }));
+vi.mock("../request", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../request")>();
+  return {
+    ...mod,
+    pageCacheClear: async () => {
+      cacheClears.count++;
+    },
+  };
+});
+
 import {
   CORE_CONTROL_TYPES,
   dispatchCore,
@@ -132,6 +145,31 @@ describe("dispatch seams", () => {
       persistRoute: async () => {},
     });
     expect(replies).toEqual([{ ok: false, error: "unknown message" }]);
+  });
+
+  it("clears the page cache when the fingerprint profile or the UA changes (#377)", async () => {
+    cacheClears.count = 0;
+    const { reply } = mkReplies();
+    const ctx = {
+      e: {} as ExtendableMessageEvent,
+      reply,
+      port: {},
+      persistRoute: async () => {},
+    };
+    await dispatchCore(
+      { type: "zl:fingerprint", profile: { persona: "a" } } as unknown as ControlMessage,
+      ctx,
+    );
+    expect(cacheClears.count).toBe(1); /* null -> profile: persona change */
+    await dispatchCore(
+      { type: "zl:fingerprint", profile: { persona: "a" } } as unknown as ControlMessage,
+      ctx,
+    );
+    expect(cacheClears.count).toBe(1); /* same profile: no clear */
+    await dispatchCore({ type: "zl:rules", rules: [], ua: "UA/1" } as unknown as ControlMessage, ctx);
+    expect(cacheClears.count).toBe(2); /* UA change */
+    await dispatchCore({ type: "zl:rules", rules: [], ua: "UA/1" } as unknown as ControlMessage, ctx);
+    expect(cacheClears.count).toBe(2); /* same UA: no clear */
   });
 
   it("dispatchExtControl serves zl:listExt with the installed summary", async () => {
