@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyNavGuard, navEncode, NAV, NAVP } from "../bootstrap/navguard";
+import { applyNavGuard, makeRel, navEncode, NAV, NAVP } from "../bootstrap/navguard";
 import { b64uDecode } from "../codec";
 
 const LOC = "https://engine.host/j/abc";
@@ -539,6 +539,15 @@ describe("parser-inserted iframe guard", () => {
     expect(f._attrs.srcdoc).toBe("<a href=\"" + navEncode(REAL) + "\">x</a>");
   });
 
+  it("leaves a src= assignment inside a script body alone in srcdoc (#371)", () => {
+    const e = makeParserEnv();
+    const body = "<script>var src = '" + REAL + "';</script>";
+    const f = frame({ srcdoc: body });
+    e.fire([{ type: "childList", addedNodes: [f] }]);
+    // The script text is code: its string must survive untouched.
+    expect(f._attrs.srcdoc).toBe(body);
+  });
+
   it("observes the document element with subtree childList", () => {
     const e = makeParserEnv();
     expect(e.observers.length).toBe(1);
@@ -903,6 +912,22 @@ describe("navguard mint seams (#54 residual 3)", () => {
     expect(e.opened[0][0]).toBe("");
     await settle();
     expect(e.wins[0]._hrefs).toEqual(["/j/m5"]);
+  });
+
+  it("window.open with noopener opens the minted route directly (#372)", async () => {
+    stubMint("/j/m8");
+    const e = makeEnv();
+    const ret = e.w.open("https://mint8.site/x", "_blank", "noopener");
+    expect(ret).toBe(null); /* the native noopener contract */
+    await settle();
+    expect(e.opened[0][0]).toBe("/j/m8");
+  });
+
+  it("makeRel accepts URL objects from mint callers (#374)", () => {
+    const rel = makeRel("/j/abc", ENGINE);
+    expect(rel(new URL("https://engine.host/sse/stream") as unknown as string)).toBe(
+      "/j/abc" + NAVP + "/" + encodeURIComponent("/sse/stream"),
+    );
   });
 
   it("parser-inserted frames ride the minted route", async () => {

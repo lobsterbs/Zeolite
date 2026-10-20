@@ -107,7 +107,10 @@ export function makeRel(
 ): (v: string) => string | null {
   const engPrefix = routePath?.match(/^\/[^\/]+\//)?.[0];
   return (v: string): string | null => {
-    const p = ownOriginPath(v, origin) ?? v;
+    /* Callers may pass a URL object (EventSource, Request); normalize
+       before any string method runs on it. */
+    const s = String(v);
+    const p = ownOriginPath(s, origin) ?? s;
     if (!routePath || !engPrefix || navExcluded(p, engPrefix) || tokenShaped(p))
       return null;
     return routePath + NAVP + "/" + encodeURIComponent(p);
@@ -333,7 +336,7 @@ export function applyNavGuard(
      residual 3: unquoted values end at the first whitespace, so the
      URL inside them carries no spaces and rewrites safely; quoted
      values keep their quotes. */
-  const rewireSrcdoc = (v: string): string =>
+  const rewireSrcdocText = (v: string): string =>
     v.replace(
       /(\s(?:href|src|action|formaction|poster|background|cite|data)\s*=\s*)("[^"]*"|'[^']*'|[^\s"'>]+)/gi,
       (_m: string, p: string, val: string) => {
@@ -342,6 +345,21 @@ export function applyNavGuard(
         return p + rewire(val);
       },
     );
+  /* Script bodies are code, not markup: a `src = '...'` inside one is a
+     JS assignment and must not be rewritten. Only the opening tag of a
+     <script> carries navigable attributes. */
+  const rewireSrcdoc = (v: string): string => {
+    let out = "";
+    let last = 0;
+    for (const m of v.matchAll(/(<script\b[^>]*>)[\s\S]*?<\/script\s*>/gi)) {
+      const at = m.index ?? 0;
+      out += rewireSrcdocText(v.slice(last, at));
+      const open = m[1];
+      out += rewireSrcdocText(open) + m[0].slice(open.length);
+      last = at + m[0].length;
+    }
+    return out + rewireSrcdocText(v.slice(last));
+  };
   const IFR = w.HTMLIFrameElement as AnyRecord | undefined;
   if (IFR) {
     safe(() => guardProp(IFR.prototype, "srcdoc", "sync", false, (_el, v) => rewireSrcdoc(v)));
@@ -442,6 +460,19 @@ export function applyNavGuard(
         if (s == null) return (OW as AnyRecord).call(this, u, t, f);
         const d = destAbs(s);
         if (!d) return (OW as AnyRecord).call(this, rewire(s), t, f);
+        /* With noopener or noreferrer the native open returns null, so
+           there is no window to drive. Mint first, then open the route
+           directly: the plaintext target still never reaches a request. */
+        if (/(^|[\s,])(noopener|noreferrer)(?=$|[\s,=])/i.test(f ?? "")) {
+          mintRoute(d).then((route) => {
+            try {
+              (OW as AnyRecord).call(this, route ?? navEncode(d), t, f);
+            } catch {
+              /* a blocked popup stays contained */
+            }
+          });
+          return null;
+        }
         /* #54: open the popup on a blank engine-origin document,
            then drive it to the minted route - the plaintext target
            never reaches the popup request. A closed popup stays

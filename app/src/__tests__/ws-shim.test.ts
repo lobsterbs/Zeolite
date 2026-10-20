@@ -113,7 +113,7 @@ describe("page WebSocket shim bufferedAmount (#293)", () => {
 });
 
 describe("page WebSocket shim relative URLs (#279)", () => {
-  it("resolves relative references against the page base and maps http(s) to ws(s)", () => {
+  it("resolves relative references against the page base (#279)", () => {
     const Real = globalThis.WebSocket;
     if (!Real) return;
     vi.stubGlobal("CloseEvent", FakeCloseEvent);
@@ -137,12 +137,31 @@ describe("page WebSocket shim relative URLs (#279)", () => {
     /* query-bearing */
     new WS("/socket?rooms=2");
     expect(urlOf(2)).toBe("wss://engine.example/socket?rooms=2");
-    /* http/https map to ws/wss (WHATWG constructor semantics) */
-    new WS("http://engine.example/socket");
-    expect(urlOf(3)).toBe("ws://engine.example/socket");
     /* absolute ws/wss keep current behavior */
     new WS("wss://relay.example/ws");
-    expect(urlOf(4)).toBe("wss://relay.example/ws");
+    expect(urlOf(3)).toBe("wss://relay.example/ws");
+  });
+
+  it("throws SyntaxError for explicit http(s) schemes like the native constructor (#364)", () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return;
+    vi.stubGlobal("CloseEvent", FakeCloseEvent);
+    ctlState.ctl = { postMessage() { /* unused */ } };
+    const w: Record<string, unknown> = {
+      WebSocket: Real,
+      document: { baseURI: "https://engine.example/page.html" },
+    };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    for (const bad of ["http://engine.example/socket", "https://engine.example/socket", "HTTP://engine.example/socket"]) {
+      let err: unknown = null;
+      try {
+        new WS(bad);
+      } catch (e) {
+        err = e;
+      }
+      expect((err as DOMException).name).toBe("SyntaxError");
+    }
   });
 
   it("rejects fragments and non-web schemes like the native constructor", () => {
@@ -165,7 +184,7 @@ describe("page WebSocket shim relative URLs (#279)", () => {
       }
       expect((err as DOMException).name).toBe("SyntaxError");
     }
-    /* non-web schemes fall through to the native constructor, which refuses them */
+    /* non-web schemes are refused with the same SyntaxError (#364) */
     let nativeErr: unknown = null;
     try {
       new WS("ftp://example.com/x");
