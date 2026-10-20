@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { relayFetch, relayRegister } from "../relayfetch";
+import { describe, expect, it, vi } from "vitest";
+import { relayFetch, relayRegister, RELAY_HEADER_DEADLINE_MS } from "../relayfetch";
 
 /* #137: the embedder relay over a fake port. The port contract:
    zl:fetchRelay out, head/chunk/end/error frames back per rid. */
@@ -147,3 +147,26 @@ describe("relayFetch (#137)", () => {
     expect(p.posted.some((m) => (m as { type: string }).type === "zl:relayCancel")).toBe(true);
   });
 });
+
+describe("relayFetch header deadline", () => {
+  it("rejects a silent embedder after the deadline and cancels upstream", async () => {
+    const p = reg();
+    vi.useFakeTimers();
+    try {
+      const pending = relayFetch(
+        "https://cdn.example.com/a.js",
+        { method: "GET", headers: new Headers() },
+        "t1",
+      );
+      const settled = pending.catch((e: Error) => e);
+      await vi.advanceTimersByTimeAsync(RELAY_HEADER_DEADLINE_MS + 1);
+      const err = await settled;
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).name).toBe("TimeoutError");
+      expect(p.posted.some((m) => (m as { type?: string }).type === "zl:relayCancel")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+

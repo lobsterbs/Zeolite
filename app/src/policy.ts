@@ -198,9 +198,13 @@ export function loadPolicy(): Promise<CompiledPolicy> {
     cached = (async () => {
       try {
         const resp = await fetch("/policy.kdl", { cache: "no-cache" });
+        /* A 5xx is a transient failure, not a missing file: forget the
+           memo so the next request retries. A 404 stays memoized. */
+        if (resp.status >= 500) cached = null;
         if (!resp.ok) return { rules: [] };
         return compilePolicy(await resp.text());
       } catch (e) {
+        cached = null;
         DIAG.emit({
           category: "TRANSPORT",
           cause: "proxy",
