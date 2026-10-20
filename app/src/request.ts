@@ -54,7 +54,7 @@ import { raceBoot } from "./lifecycle";
 import {PROXY_INJECTED_HEADERS, acceptLanguageValue, applyChUa, navigationAccept, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript } from "./assetbases";
-import { applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
+import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
@@ -1160,11 +1160,15 @@ function navOutcome(
 let jarPruneTicks = 0;
 let jarPruneInFlight = false;
 
-function scheduleJarClientPrune(): void {
+/* Exported for the #366 prune-options regression test only. */
+export function scheduleJarClientPrune(): void {
   if (++jarPruneTicks % 128 !== 0 || jarPruneInFlight) return;
   jarPruneInFlight = true;
   void self.clients
-    .matchAll({ includeUncontrolled: true })
+    /* #366: the matchAll default type is "window", which would leave
+       worker and shared-worker clients out of the live set and prune
+       their jar-root bindings every 128 fetches; "all" counts them. */
+    .matchAll({ includeUncontrolled: true, type: "all" })
     .then((clients) => pruneJarClients(new Set(clients.map((client) => client.id))))
     .catch(() => undefined)
     .finally(() => { jarPruneInFlight = false; });
@@ -1195,6 +1199,20 @@ export function handleFetch(e: FetchEvent): void {
           ) markJarClientUnbound(e.clientId);
         } catch {
           /* An unparseable client URL cannot establish a proxied root. */
+        }
+        /* #366: a worker client whose owner root cannot be established
+           (an opaque blob worker script carries neither an engine path
+           nor a NAVH handle) would otherwise fall back to the shared
+           default jar and read or write cookies across profiles. Fail
+           closed while any session profile is active: the client rides
+           the cookie-free unbound namespace until its host rebinds it. */
+        const ctype = (sourceClient as { type?: string }).type;
+        if (
+          (ctype === "worker" || ctype === "sharedworker") &&
+          !jarClientHasRoot(e.clientId) &&
+          anySessionProfileActive()
+        ) {
+          markJarClientUnbound(e.clientId);
         }
       }
     } catch {
