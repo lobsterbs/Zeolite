@@ -96,6 +96,16 @@ const MAX_REDIRECT_HOPS = 10;
    answer is dropped, never served. */
 const NAV_TTFB_DEADLINE_MS = 30_000;
 
+/* Wave-32 wedge class (ai117 churn probe): several awaits run BEFORE
+   the navigation deadline arms (boot gate steps, client lookups, the
+   page-cache match), so a HUNG browser API call there - a clients.get()
+   that never settles mid-churn, a wedged Cache Storage open/match/delete -
+   wedges the request with no bound at all: the reload never commits and
+   a hung UI-asset request parks the tab empty. raceBoot (#249) bounds
+   each; past the bound the caller proceeds on the same degraded path an
+   exception already takes, and DIAG names the wedged step. */
+const PRE_DEADLINE_BOUND_MS = 1_500;
+
 /* #140: settle guarantee for page-initiated subresource bodies. A
    transport stream can stall mid-body (live: a lazy image request
    on search.brave.com/videos stayed pending past 30s and held the
@@ -1410,8 +1420,9 @@ export function handleFetch(e: FetchEvent): void {
         e.resultingClientId || undefined,
         url.href,
       );
-      await recoverJarClientRoot();
-      await discardLegacyPageCache();
+      /* Wave-32: bounded - see PRE_DEADLINE_BOUND_MS. */
+      await raceBoot(recoverJarClientRoot(), "jar client root recovery", PRE_DEADLINE_BOUND_MS);
+      await raceBoot(discardLegacyPageCache(), "legacy page cache discard", PRE_DEADLINE_BOUND_MS);
       /* #249: a wedged boot step (storage, extension boot) must not
          hang the whole fetch path; serve degraded past the
          deadline. */
@@ -1448,7 +1459,7 @@ export function handleFetch(e: FetchEvent): void {
         let clientUrl: string | undefined;
         try {
           if (e.clientId) {
-            const client = await self.clients.get(e.clientId);
+            const client = await raceBoot(self.clients.get(e.clientId), "foreign client lookup", PRE_DEADLINE_BOUND_MS);
             if (client) clientUrl = client.url;
           }
         } catch {
@@ -2000,7 +2011,7 @@ export function handleFetch(e: FetchEvent): void {
         if (initiator === undefined) {
           try {
             if (e.clientId) {
-              const client = await self.clients.get(e.clientId);
+              const client = await raceBoot(self.clients.get(e.clientId), "initiator client lookup", PRE_DEADLINE_BOUND_MS);
               if (client) initiator = decodePath(new URL(client.url, self.location.origin).pathname) || undefined;
             }
           } catch {
@@ -2179,7 +2190,7 @@ export function handleFetch(e: FetchEvent): void {
            request (Authorization or a jar cookie for the target)
            never serves from the shared page cache. */
         if (e.request.method === "GET" && !requestHasCredentials(e.request, target, cookieClientId)) {
-          const hit = await pageCacheMatch(e.request, (p) => e.waitUntil(p));
+          const hit = await raceBoot(pageCacheMatch(e.request, (p) => e.waitUntil(p)), "page cache match", PRE_DEADLINE_BOUND_MS);
           if (hit) {
             let dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
             if (
