@@ -1,5 +1,5 @@
-/* Ghostery adapter seams (#363): the list-fetch URL guard and
-   the applyRules integration. The filter engine is mocked; only the
+/* Ghostery adapter seams (#363): the list-fetch URL guard and the
+   applyRules integration. The filter engine is mocked; only the
    adapter's own logic runs. */
 
 import { describe, expect, it, vi } from "vitest";
@@ -58,8 +58,10 @@ describe("applyRules + Ghostery integration", () => {
     await prime();
     const orig = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response('allow "ads.example"
-block "tracker.example"', { status: 200 })) as typeof fetch;
+      new Response(
+        "allow \"ads.example\"" + String.fromCharCode(10) + "block \"tracker.example\"",
+        { status: 200 },
+      )) as typeof fetch;
     try {
       const r = await loadRules();
       const gh = applyRules(r, "https://cdn.other.example/ad.js", "script");
