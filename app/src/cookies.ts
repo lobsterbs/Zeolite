@@ -159,7 +159,14 @@ function rootOf(clientId?: string): string | null {
 
 function activeProfile(clientId?: string): string {
   const root = rootOf(clientId);
-  if (root) return rootProfiles.get(root) ?? PROFILE_UNBOUND;
+  if (root) {
+    /* #366 regression: a bound root with no profile entry is the
+       NORMAL state in a default deployment (the host never pushes
+       zl:jarProfile), so it rides the default jar there. The
+       PROFILE_UNBOUND fallback stays for a session deployment, where
+       a root that lost its profile (worker restart) fails closed. */
+    return rootProfiles.get(root) ?? (anySessionProfileActive() ? PROFILE_UNBOUND : PROFILE_DEFAULT);
+  }
   if (clientId && unboundClients.has(clientId)) return PROFILE_UNBOUND;
   return profile;
 }
@@ -278,9 +285,14 @@ export function inheritJarClient(
 }
 
 /** Fail closed for an existing proxied client whose authenticated
-    host-root token is unavailable (for example an old legacy route). */
+    host-root token is unavailable (for example an old legacy route).
+    #366 regression: only meaningful while a session profile is active
+    somewhere. A default-deployment proxied page arrives at a /j/ route
+    that carries no root binding, so marking it unbound here made every
+    default-mode page cookie-free; with no second jar in existence,
+    riding the default jar is the pre-#366 behavior and leaks nothing. */
 export function markJarClientUnbound(clientId?: string): void {
-  if (clientId && !rootOf(clientId)) unboundClients.add(clientId);
+  if (clientId && !rootOf(clientId) && anySessionProfileActive()) unboundClients.add(clientId);
 }
 
 export function pruneJarClients(activeClientIds: ReadonlySet<string>): void {
@@ -295,7 +307,11 @@ export function pruneJarClients(activeClientIds: ReadonlySet<string>): void {
   for (const [id, root] of clientRoots) {
     if (!activeClientIds.has(id)) {
       clientRoots.delete(id);
-    } else if (!rootProfiles.has(root)) {
+    } else if (!rootProfiles.has(root) && anySessionProfileActive()) {
+      /* #366 regression: with no session profile anywhere, a live
+         never-profiled binding is default-mode, not unattributable;
+         unbinding it here flipped every default-deployment proxied
+         page cookie-free after one prune tick. */
       clientRoots.delete(id);
       unboundClients.add(id);
     }
@@ -767,6 +783,8 @@ export function documentCookieRead(pageUrl: string, clientId?: string): string {
   if (!u) return "";
   const now = Date.now();
   const namespace = namespaceForClient(clientId);
+  /* #366: the shared unbound namespace admits nothing on any seam. */
+  if (namespace === UNBOUND_GLOBAL_NAMESPACE) return "";
   const matched: Cookie[] = [];
   for (const [key, list] of jars) {
     if (!inProfile(key, namespace)) continue;
@@ -789,6 +807,14 @@ export function documentCookieRead(pageUrl: string, clientId?: string): string {
     URL. A script cannot mint an HttpOnly cookie, so the attribute is
     stripped before admission (spec: ignore it). */
 export function documentCookieWrite(pageUrl: string, cookie: string, clientId?: string): SetCookieResult {
+  /* #366: the shared unbound namespace admits nothing on any seam,
+     so an unattributable client cannot seed cookies that another
+     unbound client would then observe. */
+  if (namespaceForClient(clientId) === UNBOUND_GLOBAL_NAMESPACE) {
+    const pair = cookie.replace(/;\s*httponly\b/gi, "").split(";")[0].trim();
+    const eq = pair.indexOf("=");
+    return { name: eq > 0 ? pair.slice(0, eq).trim() : pair, stored: false, deleted: false, rejected: "unbound-client" };
+  }
   return admitCookie(pageUrl, cookie.replace(/;\s*httponly\b/gi, ""), true, namespaceForClient(clientId));
 }
 
