@@ -36,7 +36,7 @@ vi.mock("../transport", () => ({
   },
 }));
 
-import { classifyRtype, forwardedHeaders, handleFetch, mergeRouteSearch, pageCacheMatch, reqDest, stripCrossOriginHopHeaders, withDeadline } from "../request";
+import { classifyRtype, forwardedHeaders, handleFetch, mergeRouteSearch, pageCacheMatch, reqDest, scheduleJarClientPrune, stripCrossOriginHopHeaders, withDeadline } from "../request";
 import { setFingerprint, setSiteEnabled } from "../swstate";
 import { establishContext, resolveRelative } from "../vctx";
 import { VCTX } from "../swstate";
@@ -729,5 +729,31 @@ describe("route search replaces a token-encoded query (Brave Ask strand)", () =>
     expect(mergeRouteSearch("https://s.example/a?b=1", "?c=2")).toBe("https://s.example/a?c=2");
     expect(mergeRouteSearch("https://s.example/a", "?c=2")).toBe("https://s.example/a?c=2");
     expect(mergeRouteSearch("https://s.example/a?b=1", "")).toBe("https://s.example/a?b=1");
+  });
+});
+
+/* #366: the prune matchAll must count worker and shared-worker clients,
+   or their jar-root bindings are pruned every 128 fetches. */
+describe("jar client prune options (#366)", () => {
+  const ORIGIN = "https://pr.example";
+
+  it("prunes with includeUncontrolled and type all", async () => {
+    let seen: Record<string, unknown> | null = null;
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN },
+      registration: { scope: ORIGIN + "/" },
+      clients: {
+        get: async () => null,
+        matchAll: async (o: Record<string, unknown>) => {
+          seen = o;
+          return [];
+        },
+      },
+    });
+    /* scheduleJarClientPrune fires every 128th call; the module counter
+       is shared with the tests above, so drive a full window. */
+    for (let i = 0; i < 128; i++) scheduleJarClientPrune();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(seen).toEqual({ includeUncontrolled: true, type: "all" });
   });
 });
