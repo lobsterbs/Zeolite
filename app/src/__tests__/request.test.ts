@@ -174,6 +174,7 @@ describe("pageCacheMatch stale-while-revalidate dedup", () => {
     "https://e.example/page",
     "https://e.example/other",
     "https://e.example/again",
+    "https://e.example/hop",
   ];
 
   beforeEach(() => {
@@ -230,6 +231,22 @@ describe("pageCacheMatch stale-while-revalidate dedup", () => {
       kept.push(p);
     });
     expect(transportMock.calls).toBe(2);
+  });
+
+  it("runs refresh redirect hops through the live-path upgrade gate (#376)", async () => {
+    transportMock.queue = [
+      new Response(null, { status: 302, headers: { location: "http://tracker.example/x" } }),
+    ];
+    const base = transportMock.urls.length;
+    const kept: Promise<unknown>[] = [];
+    const hit = await pageCacheMatch(new Request(PAGES[3]), (p) => {
+      kept.push(p);
+    });
+    expect(hit?.status).toBe(200);
+    await Promise.all(kept);
+    /* the http: redirect target is upgraded before the next hop, like
+       the live path */
+    expect(transportMock.urls[base + 1]).toBe("https://tracker.example/x");
   });
 });
 
