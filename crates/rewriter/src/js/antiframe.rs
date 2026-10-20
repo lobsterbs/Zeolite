@@ -59,19 +59,20 @@ fn replace_bound(s: &str, pat: &str, rep: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut i = 0usize;
     while i < bytes.len() {
+        if let Some(end) = comment_end(bytes, i) {
+            out.push_str(&s[i..end]);
+            i = end;
+            continue;
+        }
         // #208: string literals are data, never code - fold patterns
-        // inside them would corrupt page strings.
+        // inside them would corrupt page strings. #368: an unterminated
+        // quote is ordinary text (it cannot be valid JS), not a reason
+        // to stop scanning the rest of the body.
         if bytes[i] == b'"' || bytes[i] == b'\'' || bytes[i] == b'`' {
-            match find_str_end(s, i) {
-                Some(end) => {
-                    out.push_str(&s[i..end]);
-                    i = end;
-                    continue;
-                }
-                None => {
-                    out.push_str(&s[i..]);
-                    break;
-                }
+            if let Some(end) = find_str_end(s, i) {
+                out.push_str(&s[i..end]);
+                i = end;
+                continue;
             }
         }
         if bytes[i..].starts_with(pb)
@@ -87,6 +88,30 @@ fn replace_bound(s: &str, pat: &str, rep: &str) -> String {
         i += ch.len_utf8();
     }
     out
+}
+
+/// #368: end offset of a `//` or `/* */` comment starting at s[i], copied
+/// verbatim by the scanners. Quotes inside a comment are text, not string
+/// openers. Regex literals are not lexed (a `//` inside one only hides
+/// folding on that line, it never rewrites code).
+fn comment_end(bytes: &[u8], i: usize) -> Option<usize> {
+    if bytes.get(i) != Some(&b'/') {
+        return None;
+    }
+    match bytes.get(i + 1) {
+        Some(b'/') => Some(bytes[i..].iter().position(|&c| c == b'\n').map_or(bytes.len(), |p| i + p)),
+        Some(b'*') => {
+            let mut k = i + 2;
+            while k + 1 < bytes.len() {
+                if bytes[k] == b'*' && bytes[k + 1] == b'/' {
+                    return Some(k + 2);
+                }
+                k += 1;
+            }
+            Some(bytes.len())
+        }
+        _ => None,
+    }
 }
 
 /// #208: offset just past the closing quote of the string literal
@@ -114,23 +139,38 @@ fn find_str_end(s: &str, start: usize) -> Option<usize> {
 fn antiframe_scan(s: &str) -> String {
     // #208: parent.location is as cross-frame as top.location; the
     // page's own window.location is never touched.
-    const TOKS: [&[u8]; 2] = [b"top.location", b"parent.location"];
+    // #369: the same cross-frame reference through a self./window. hop
+    // or a chained top/parent, all of which reach the real top window.
+    // Longer forms first; the boundary check keeps them from matching
+    // inside a longer chain.
+    const TOKS: [&[u8]; 10] = [
+        b"self.top.location",
+        b"self.parent.location",
+        b"top.window.location",
+        b"top.self.location",
+        b"top.parent.location",
+        b"parent.window.location",
+        b"parent.self.location",
+        b"parent.parent.location",
+        b"top.location",
+        b"parent.location",
+    ];
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len() + 32);
     let mut i = 0usize;
     while i < bytes.len() {
-        // #208: string literals are data, never code.
+        if let Some(end) = comment_end(bytes, i) {
+            out.push_str(&s[i..end]);
+            i = end;
+            continue;
+        }
+        // #208: string literals are data, never code. #368: unterminated
+        // quotes are ordinary text, see replace_bound.
         if bytes[i] == b'"' || bytes[i] == b'\'' || bytes[i] == b'`' {
-            match find_str_end(s, i) {
-                Some(end) => {
-                    out.push_str(&s[i..end]);
-                    i = end;
-                    continue;
-                }
-                None => {
-                    out.push_str(&s[i..]);
-                    break;
-                }
+            if let Some(end) = find_str_end(s, i) {
+                out.push_str(&s[i..end]);
+                i = end;
+                continue;
             }
         }
         let mut tlen = 0usize;
@@ -212,6 +252,35 @@ mod tests {
             out,
             "if (self != self) {\n  self.zl_antiframe = location;\n}\nalert('rest of app');"
         );
+    }
+
+    #[test]
+    fn apostrophe_in_comment_does_not_stop_folding() {
+        // #368: "don't" inside a line comment is text, so the guard
+        // after it still folds and the navigation still sinks.
+        let out = antiframe("// don't touch\nif (top != self) top.location = location;");
+        assert!(out.contains("self.zl_antiframe = location"), "got: {out}");
+        assert!(!out.contains("top.location"), "got: {out}");
+    }
+
+    #[test]
+    fn block_comment_quote_is_skipped() {
+        let out = antiframe("/* it's */ top.location.href = u;");
+        assert!(out.contains("self.zl_antiframe"), "got: {out}");
+    }
+
+    #[test]
+    fn sinks_chained_cross_frame_forms() {
+        // #369: these all reach the real top window and must sink.
+        for src in [
+            "self.top.location = u;",
+            "top.window.location.href = u;",
+            "top.self.location = u;",
+            "parent.parent.location = u;",
+        ] {
+            let out = antiframe(src);
+            assert!(out.contains("self.zl_antiframe"), "{src} -> {out}");
+        }
     }
 
     #[test]

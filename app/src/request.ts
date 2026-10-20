@@ -801,7 +801,16 @@ async function wispFetchCacheBypass(
     if (resp.status >= 300 && resp.status < 400 && loc && hop < 5) {
       /* #201 hygiene: the redirect body is never read - cancel it. */
       if (resp.body) void resp.body.cancel().catch(() => {});
-      finalUrl = new URL(loc, dest).href;
+      /* #375: each refresh hop passes the upgrade and block gates the
+         live hop chain applies (destUpgraded, siteDisabled, rules). A
+         blocked hop throws: the stale copy stays served and nothing
+         unchecked is stored. */
+      const next = destUpgraded(new URL(loc, dest).href);
+      const hopRule = applyRules(await loadRules(), next, classifyRtype(next, "").toLowerCase() as ResourceType);
+      if (siteDisabled(next) || hopRule.action === "block") {
+        throw new Error("cache refresh stopped by a block rule on a redirect hop");
+      }
+      finalUrl = next;
       dest = finalUrl;
       continue;
     }

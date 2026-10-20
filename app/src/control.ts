@@ -174,6 +174,9 @@ export interface ControlMessage {
    handler - and cached in the closure. An unavailable bundle answers
    the find command honestly instead of pretending. */
 let finderSource: Promise<string | null> | null = null;
+/* #376: last profile and UA the host sent; a change clears the page cache. */
+let lastFingerprintKey: string | null = null;
+let lastRulesUa: unknown = undefined;
 function loadFinderSource(): Promise<string | null> {
   finderSource ??= fetch(new URL("finder.js", self.location.href))
     .then((r) => (r.ok ? r.text() : null))
@@ -386,6 +389,11 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          a host-scoped adblock override plus UA strings, evaluated per
          request against the target host (rules.ts). Ephemeral like
          zl:adblock: resets on SW restart, the host re-sends on boot. */
+      /* #376: a UA change alters what upstream sends; drop the cache. */
+      if (msg.ua !== lastRulesUa) {
+        lastRulesUa = msg.ua;
+        void pageCacheClear();
+      }
       reply({ ok: true, count: setSiteOverrides(msg.rules, msg.ua) });
       break;
     case "zl:jarProfile":
@@ -614,6 +622,15 @@ case "zl:tracing":
     case "zl:fingerprint":
       /* 1.8 Telluride: resolve + compile the profile, or drop back to
          fully native surfaces. */
+      /* #376: the cache key is the URL alone, so a persona or UA change
+         must drop what was stored under the old one. */
+      {
+        const fpKey = JSON.stringify(msg.profile ?? null);
+        if (fpKey !== lastFingerprintKey) {
+          lastFingerprintKey = fpKey;
+          void pageCacheClear();
+        }
+      }
       reply(setFingerprint(msg.profile ?? null));
       break;
     case "zl:recordStart": {

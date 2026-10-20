@@ -539,6 +539,15 @@ describe("parser-inserted iframe guard", () => {
     expect(f._attrs.srcdoc).toBe("<a href=\"" + navEncode(REAL) + "\">x</a>");
   });
 
+  it("leaves a src= assignment inside a script body alone in srcdoc (#370)", () => {
+    const e = makeParserEnv();
+    const body = "<script>var src = '" + REAL + "';</script>";
+    const f = frame({ srcdoc: body });
+    e.fire([{ type: "childList", addedNodes: [f] }]);
+    // The script text is code: its string must survive untouched.
+    expect(f._attrs.srcdoc).toBe(body);
+  });
+
   it("observes the document element with subtree childList", () => {
     const e = makeParserEnv();
     expect(e.observers.length).toBe(1);
