@@ -290,11 +290,10 @@ export function applyIsolation(
 
   /* ---- cookieStore ----------------------------------------------------- */
   try {
-    /* Remove it when it is configurable, so "cookieStore" in window is
-       false, the way an absent API reads to feature checks. */
-    if ("cookieStore" in w) delete (w as unknown as Record<string, unknown>).cookieStore;
+    /* Delete when configurable, so "cookieStore" in window is false. */
+    delete (w as unknown as Record<string, unknown>).cookieStore;
   } catch {
-    /* not configurable: fall through to the undefined shim below */
+    /* not configurable: the undefined shim below applies */
   }
   try {
     if (w.cookieStore !== undefined) {
