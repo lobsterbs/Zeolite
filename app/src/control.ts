@@ -391,9 +391,9 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       break;
     }
     case "zl:adblock":
-      /* Host toggle for the compiled rules (the migrated ad/tracker
-         lists in /rules.json). Data stays loaded; decisions become
-         no-ops while disabled. Resets to enabled on SW restart. */
+      /* Host toggle for the local rules and Ghostery network matcher.
+         Decisions become no-ops while disabled. Resets to enabled on
+         SW restart. */
       setRulesEnabled(msg.enabled !== false);
       reply({ ok: true });
       break;

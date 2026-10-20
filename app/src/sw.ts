@@ -39,6 +39,7 @@ import { DL } from "./downloads";
    the generation and the request engine / control plane push rows. */
 import { stampNetGeneration } from "./netlog";
 import { initTransport, wispTransport } from "./transport";
+import { configureGhostery } from "./ghostery";
 /* #86: the streaming rewrite pipelines + wasm rewriter lifecycle
    live in ./transform; this entrypoint wires the state seam and
    prewarms the rewriter wasm on install. */
@@ -83,6 +84,13 @@ declare const self: ServiceWorkerGlobalScope;
    reporting init failures to zl:ping exactly as before (finding 5:
    the flag itself lives in ./swstate). */
 initTransport({ setDegraded: setEngineDegraded });
+/* Ghostery's subscription fetches stay inside the same Wisp transport
+   as proxied page traffic; global fetch here would expose the user's
+   direct network address to the filter-list hosts. */
+configureGhostery((input, init) => {
+  const dest = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  return wispTransport.fetch(dest, init);
+});
 
 /* #86: the streaming rewrite pipelines + wasm rewriter lifecycle
    moved to transform.ts. */
