@@ -10,7 +10,12 @@
 import { DIAG } from "./diag";
 import { loadEnter, loadLeave } from "./loadstate";
 import { transportState, waitForTransportState } from "./transport-lifecycle";
-import { ZL_WISP_URL } from "./config";
+import {
+  normalizeWispUrl,
+  primaryWispOverrideValue,
+  primaryWispUrl,
+  setPrimaryWispOverride,
+} from "./config";
 import {
   fetch as zlCurlFetch,
   init as zlCurlInit,
@@ -53,10 +58,24 @@ export function initTransport(deps: { setDegraded: (reason: string) => void }): 
 
 let setDegradedImpl: (reason: string) => void = () => {};
 
+/* LobsterBrowse Settings: the embedder picks the primary wisp endpoint
+   at runtime. "" restores the build-time endpoint. Returns false for an
+   invalid non-empty URL (nothing changes). A real change drops the live
+   libcurl client so the next request re-initializes on the new URL. */
+export function setPrimaryWisp(url: string): boolean {
+  const next = url === "" ? null : normalizeWispUrl(url);
+  if (url !== "" && next === null) return false;
+  if (next === primaryWispOverrideValue()) return true;
+  setPrimaryWispOverride(next);
+  curlReady = null;
+  zlCurlReset();
+  return true;
+}
+
 let curlReady: Promise<void> | null = null;
 async function ensureCurl(): Promise<void> {
   if (!curlReady) {
-    curlReady = zlCurlInit({ websocket: ZL_WISP_URL }).catch((err) => {
+    curlReady = zlCurlInit({ websocket: primaryWispUrl() }).catch((err) => {
       setDegradedImpl("libcurl transport: " + String(err));
       curlReady = null; // allow retry on next request
       DIAG.emit({
@@ -64,7 +83,7 @@ async function ensureCurl(): Promise<void> {
         severity: "error",
         message: "libcurl transport init failed",
         technicalReason: String(err),
-        url: ZL_WISP_URL,
+        url: primaryWispUrl(),
       });
       throw err;
     });
@@ -134,7 +153,7 @@ function recordStall(): void {
         "s; relay-first cooldown for " +
         COOLDOWN_MS / 1000 +
         "s",
-      url: ZL_WISP_URL,
+      url: primaryWispUrl(),
     });
   }
 }
@@ -323,7 +342,7 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
             ? "transport stall: no first byte within " + WISP_TTFB_DEADLINE_MS + "ms; reset, retrying once"
             : "transport failure; reset, retrying once on a fresh connection",
         technicalReason: String(err),
-        url: ZL_WISP_URL,
+        url: primaryWispUrl(),
       });
       zlCurlReset();
       curlReady = null; // force re-init inside the next ensureCurl()

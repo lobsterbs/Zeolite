@@ -25,7 +25,7 @@ import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade,
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
 import { relayRegister } from "./relayfetch";
-import { altRegister, currentEngine, wispTransport } from "./transport";
+import { altRegister, currentEngine, setPrimaryWisp, wispTransport } from "./transport";
 import { loadInflight } from "./loadstate";
 import { activeStreams } from "./streams-alive";
 import { contextOf } from "./vctx";
@@ -83,6 +83,7 @@ export interface ControlMessage {
     | "zl:sameSite"
     | "zl:relayRegister"
     | "zl:wispRegister"
+    | "zl:wispPrimary"
     | "zl:fingerprint"
     | "zl:recordStart"
     | "zl:recordStop"
@@ -267,6 +268,18 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         reply({ ok: true });
       } else {
         reply({ ok: false, error: "relay registration needs a port" });
+      }
+      break;
+    }
+    case "zl:wispPrimary": {
+      /* LobsterBrowse Settings: the active WISP server carries all
+         traffic. "" restores the build-time endpoint. Persisted with
+         the route shape so a restarted worker keeps the choice. */
+      if (typeof msg.url === "string" && setPrimaryWisp(msg.url)) {
+        void persistRoute(currentPrefix());
+        reply({ ok: true });
+      } else {
+        reply({ ok: false, error: "primary wisp needs a ws(s):// url or an empty string" });
       }
       break;
     }
