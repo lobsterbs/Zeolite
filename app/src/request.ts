@@ -47,6 +47,7 @@ import { traceDecision } from "./tracing";
 import { siteToken } from "./pageload";
 
 import { altConfigured, altEndpoint, altRegister, altWispFetch, wispTransport } from "./transport";
+import { normalizeWispUrl, primaryWispOverrideValue, setPrimaryWispOverride } from "./config";
 import { raceBoot } from "./lifecycle";
 
 
@@ -1025,6 +1026,12 @@ const routeRestore: Promise<void> = (async () => {
            restart; without this the wisp route vanished after the
            first ~30s idle kill. */
         if (typeof node.props["wisp-endpoint"] === "string") altRegister(node.props["wisp-endpoint"]);
+        /* LobsterBrowse primary endpoint choice (zl:wispPrimary). State
+           only: the libcurl client is not up yet at restore time. */
+        if (typeof node.props["wisp-primary"] === "string") {
+          const p = normalizeWispUrl(node.props["wisp-primary"]);
+          if (p) setPrimaryWispOverride(p);
+        }
       }
     } else {
       const legacy = await cache.match(routeKeyUrlLegacy());
@@ -1074,7 +1081,8 @@ export async function persistRoute(prefix: string): Promise<void> {
           (isHttpsUpgrade() ? "#true" : "#false") +
           " nav-handles " +
           (navHandlesEnabled() ? "#true" : "#false") +
-          (altEndpoint() ? " wisp-endpoint " + JSON.stringify(altEndpoint()) : ""),
+          (altEndpoint() ? " wisp-endpoint " + JSON.stringify(altEndpoint()) : "") +
+          (primaryWispOverrideValue() ? " wisp-primary " + JSON.stringify(primaryWispOverrideValue()) : ""),
       ),
     );
   } catch {
