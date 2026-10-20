@@ -22,6 +22,8 @@
 import { parseKdl, type KdlNode } from "./kdl";
 import { ghosteryBlock, type GhosteryRedirect } from "./ghostery";
 
+export type { GhosteryRedirect };
+
 export type ResourceType =
   | "document"
   | "script"
