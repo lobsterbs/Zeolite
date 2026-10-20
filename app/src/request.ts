@@ -1140,6 +1140,38 @@ export function navpResolve(pathname: string, engineOrigin?: string): string | n
     return null;
   }
 }
+/** #290-class URL fidelity (the Google sei reload): a navigation
+    that arrives on a NAVP tail decodes correctly, but the document
+    would then park on an opaque pathname with its real path and
+    query folded inside the prel segment, so every page-side URL
+    re-read (location.search, new URL(location.href)) misparses and
+    self-refresh flows re-trigger. Rebuild the same destination on
+    the visible handle form the initial navigation minted (#144):
+    token + real path + real query. Null = the parent is not a NAVH
+    handle route (scheme routes and NAV markers keep the prel form,
+    documented residual) or the destination does not parse. */
+export function navhCleanFromPrel(pathname: string, dest: string): string | null {
+  const cut = pathname.indexOf(NAVP);
+  if (cut < 0) return null;
+  const parent = pathname.slice(0, cut);
+  if (!parent.startsWith(NAVH + "/")) return null;
+  const token = parent.slice(NAVH.length + 1).split("/")[0];
+  if (!token) return null;
+  let u: URL;
+  try {
+    u = new URL(dest);
+  } catch {
+    return null;
+  }
+  /* #202: surplus leading slashes are percent-escaped in the visible
+     path exactly like buildNavHandleUrl, so the clean form decodes
+     back through the same seam. */
+  const path =
+    u.pathname === "/"
+      ? ""
+      : u.pathname.replace(/^\/(\/+)/, (_s: string, run: string) => "/" + "%2F".repeat(run.length));
+  return NAVH + "/" + token + path + u.search;
+}
 function navOutcome(
   e: FetchEvent,
   url: URL,
@@ -1499,6 +1531,38 @@ export function handleFetch(e: FetchEvent): void {
            routes. A bad route is never guessed. */
         const navpDest = navpResolve(url.pathname);
         if (!navpDest) return navOutcome(e, url, 404, "route", "zeolite: bad route");
+        /* URL fidelity (the Google sei reload class): a GET
+           navigation on a NAVH-parent prel tail resolves correctly,
+           but the reloaded document would park on the opaque prel
+           pathname with its query folded inside it, invisible to
+           location.search, so session-refresh flows that reload once
+           in a real browser re-trigger here and the SPA state breaks.
+           Serve the same destination on the visible handle form: one
+           same-origin 302, then the document owns a URL whose path
+           and query it can read. Fetches and non-GET navigations keep
+           the prel decode (a redirect would strip a POST body);
+           non-NAVH parents keep the prel form (no visible-suffix
+           route exists for them, documented residual). */
+        if (e.request.method === "GET" && e.request.mode === "navigate") {
+          const clean = navhCleanFromPrel(url.pathname, navpDest);
+          if (clean) {
+            const traceId = DIAG.trace();
+            netLogPush({
+              method: e.request.method,
+              traceId,
+              path: url.pathname + url.search,
+              dest: navpDest,
+              status: 302,
+              rtype: classifyRtype(reqDest(e.request), ""),
+              ms: 0,
+              bytes: 0,
+              verdict: "engine: prel navigation redirected to the visible handle form",
+              transport: "engine",
+              detail: { internalUrl: clean, ttfb: 0 },
+            });
+            return new Response(null, { status: 302, headers: { location: clean } });
+          }
+        }
         dest0 = navpDest;
       } else if (url.pathname.startsWith(NAV + "/")) {
         /* Issue #28: the bootstrap nav guard rewrites absolute
