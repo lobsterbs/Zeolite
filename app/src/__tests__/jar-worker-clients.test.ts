@@ -1,10 +1,13 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { b64uEncode, encodeNavHandle, NAVH, setRouteKey } from "../codec";
 import {
   anySessionProfileActive,
   applySetCookie,
   cookieHeaderFor,
   cookiesResetForTests,
+  documentCookieRead,
+  documentCookieWrite,
   inheritJarClient,
   jarClientHasRoot,
   jarEnumeration,
@@ -66,6 +69,7 @@ describe("worker jar clients (#366)", () => {
   });
 
   it("the shared unbound namespace admits nothing, so unbound clients cannot observe each other", () => {
+    setJarProfile("inc", "clientX"); /* the unbound namespace exists only under profiles */
     markJarClientUnbound("u1");
     expect(applySetCookie("https://a.example/", resp(["x=1"]), "u1")).toEqual([]);
     markJarClientUnbound("u2");
@@ -76,5 +80,44 @@ describe("worker jar clients (#366)", () => {
     applySetCookie("https://a.example/", resp(["normal=1"]));
     expect(anySessionProfileActive()).toBe(false);
     expect(cookieHeaderFor("https://a.example/", { clientId: "plainWorker" })).toBe("normal=1");
+  });
+
+  it("a default-deployment page client (bound root, never profiled) keeps cookie capture after a prune tick (#366 regression)", () => {
+    setRouteKey(b64uEncode(crypto.getRandomValues(new Uint8Array(16))));
+    const token = encodeNavHandle("https://a.example/", 60_000, "hostA");
+    expect(token).toBeTruthy();
+    inheritJarClient(undefined, "pageA", NAVH + "/" + token);
+    setRouteKey(null);
+    /* Pre-fix, this prune tick flipped the never-profiled live root
+       unbound, which then dropped every upstream Set-Cookie. */
+    pruneJarClients(new Set(["pageA"]));
+    expect(jarProfileState("pageA")).toBe("default");
+    expect(applySetCookie("https://a.example/", resp(["fx=1"]), "pageA")).toHaveLength(1);
+    expect(cookieHeaderFor("https://a.example/", { clientId: "pageA" })).toBe("fx=1");
+  });
+
+  it("a session profile anywhere keeps a never-profiled bound root fail-closed", () => {
+    applySetCookie("https://a.example/", resp(["normal=1"]));
+    setRouteKey(b64uEncode(crypto.getRandomValues(new Uint8Array(16))));
+    const token = encodeNavHandle("https://a.example/", 60_000, "hostA");
+    inheritJarClient(undefined, "pageA", NAVH + "/" + token);
+    setRouteKey(null);
+    setJarProfile("inc", "clientX");
+    pruneJarClients(new Set(["pageA", "clientX"]));
+    expect(cookieHeaderFor("https://a.example/", { clientId: "pageA" })).toBe(null);
+    expect(applySetCookie("https://a.example/", resp(["x=1"]), "pageA")).toEqual([]);
+    /* fail-closed, not fail-wrong: the default jar is untouched */
+    expect(cookieHeaderFor("https://a.example/")).toBe("normal=1");
+  });
+
+  it("the shared unbound namespace admits nothing on the document.cookie seam either", () => {
+    applySetCookie("https://a.example/", resp(["normal=1"]));
+    setJarProfile("inc", "clientX");
+    markJarClientUnbound("u1");
+    expect(documentCookieWrite("https://a.example/", "leak=1", "u1").stored).toBe(false);
+    expect(documentCookieRead("https://a.example/", "u1")).toBe("");
+    /* nothing seeded for a second unbound client to observe */
+    markJarClientUnbound("u2");
+    expect(documentCookieRead("https://a.example/", "u2")).toBe("");
   });
 });
