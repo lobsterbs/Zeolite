@@ -72,6 +72,8 @@ export interface ControlMessage {
     | "zl:wsOpen"
     | "zl:docCookie"
     | "zl:getVirtualOrigin"
+    | "zl:embedderOrigin"
+    | "zl:getEmbedder"
     | "zl:downloads"
     | "zl:cancelDownload"
     | "zl:pauseDownload"
@@ -237,6 +239,14 @@ export interface CoreCtx {
   port: any;
   persistRoute: (...args: any[]) => any;
 }
+
+/* #107 phase 2 (LobsterBrowse split-origin): the embedder origin the
+   boot page registered via the zlRegAsk handshake. Memory-only, like
+   the relay ports: a worker restart drops it and the boot page
+   re-registers on its zl:relayLost heal. zl:embedderOrigin is
+   host-only by the #41 gate (not in PAGE_MESSAGES), so no proxied
+   page can set it. */
+let embedderOrigin = "";
 
 export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<void> {
   const { e, reply, port, persistRoute } = ctx;
@@ -632,6 +642,39 @@ case "zl:tracing":
       reply({ ok: true, vo: senderOrigin(e) });
       break;
     }
+    case "zl:embedderOrigin": {
+      /* #107 phase 2: the boot page reports the app origin embedding
+         the engine. The stored value is only ever a postMessage
+         targetOrigin, so a forged registration sends nothing to any
+         window not already resident at the claimed origin. */
+      const o = typeof msg.origin === "string" ? msg.origin : "";
+      if (/^https:\/\/[^/]+$/.test(o)) {
+        embedderOrigin = o;
+        reply({ ok: true });
+      } else {
+        reply({ ok: false, error: "bad zl:embedderOrigin" });
+      }
+      break;
+    }
+    case "zl:getEmbedder": {
+      /* #107 phase 2: an embedded proxied frame asks who embedded
+         it. url is THIS client's own virtual URL decoded worker-side
+         from its route (never a page claim); origin is the
+         registered embedder or null (fail closed). Page-facing by
+         design: the payload names only the sender's own state and
+         the public embedder origin. */
+      let url: string | null = null;
+      const src = e.source as Client | null;
+      if (src && src.url) {
+        try {
+          url = decodeClientUrl(new URL(src.url, self.location.origin));
+        } catch {
+          url = null;
+        }
+      }
+      reply({ ok: true, origin: embedderOrigin || null, url });
+      break;
+    }
     case "zl:fingerprint":
       /* 1.8 Telluride: resolve + compile the profile, or drop back to
          fully native surfaces. */
@@ -982,7 +1025,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister", "zl:wispRegister", "zl:wispPrimary",
+  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister", "zl:wispRegister", "zl:wispPrimary",
 ]);
 
 

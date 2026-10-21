@@ -30,6 +30,10 @@ export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
      the sender's route; a page-supplied claim is never read, so this
      grants no cross-site capability. */
   "zl:getVirtualOrigin",
+  /* #107 phase 2: the embedder handshake an embedded frame needs
+     for URL/title sync. Names only the sender's own decoded state
+     and the public embedder origin; grants no cross-site reach. */
+  "zl:getEmbedder",
 ]);
 
 /** Pathname half of the sender classification: true when a client at
