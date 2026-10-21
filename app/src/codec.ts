@@ -440,6 +440,21 @@ export function decodeNavHandle(token: string): string | null {
   return decodeNavHandleInfo(token)?.destination ?? null;
 }
 
+/** #385: an expired token whose MAC still verifies is one this engine
+    minted; navigation re-mint uses this to recover the destination and
+    the host-root binding without widening what a page can reach.
+    Null = a tampered or wrong-key token (fails closed), no key held,
+    or a token that is still live (live paths keep decodeNavHandle). */
+export function decodeExpiredNavHandle(
+  token: string,
+): { destination: string; rootClientId?: string } | null {
+  const info = decodeNavHandlePayload(token);
+  return info && Date.now() > info.expires
+    ? { destination: info.destination, rootClientId: info.rootClientId }
+    : null;
+}
+
+
 /** Recover the authenticated host-client binding from an opaque
     navigation route after a service-worker restart. */
 export function decodeNavHandleRoot(token: string): string | null {

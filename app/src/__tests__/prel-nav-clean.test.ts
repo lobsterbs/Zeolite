@@ -96,7 +96,11 @@ describe("prel navigation redirect to the visible handle form", () => {
     const served = await armed[0]!;
     expect(served.status).toBe(302);
     const loc = served.headers.get("location")!;
-    expect(loc).toBe(parent + "?q=what+is+a+hurricane&sei=SEI1");
+    /* #385: the clean form re-mints, so the token segment is fresh
+       while the visible path and query stay identical */
+    expect(loc.startsWith("/__zl_navh__/")).toBe(true);
+    expect(loc.endsWith("/search?q=what+is+a+hurricane&sei=SEI1")).toBe(true);
+    expect(loc.split("/")[2]).not.toBe(parent.split("/")[2]);
     /* the clean form decodes back to the exact same destination */
     expect(decodeClientUrl(new URL(loc, ORIGIN))).toBe(SEI_DEST);
     /* nothing went upstream on the prel request itself */
@@ -141,17 +145,60 @@ describe("prel navigation redirect to the visible handle form", () => {
   it("escapes surplus leading slashes in the clean form and round-trips them (#202)", () => {
     const base = buildNavHandleUrl("https://www.google.com/dir/page")!;
     const parent = new URL(base, ORIGIN).pathname;
-    const tok = parent.split("/")[2]!;
     const clean = navhCleanFromPrel(
       parent + "/__zl_prel__/" + encodeURIComponent("//b?c=1"),
       "https://www.google.com//b?c=1",
     );
-    expect(clean).toBe("/__zl_navh__/" + tok + "/%2Fb?c=1");
+    /* #385: the token is re-minted; the visible form stays identical */
+    expect(clean!.endsWith("/%2Fb?c=1")).toBe(true);
+    expect(clean!.split("/")[2]).not.toBe(parent.split("/")[2]);
     expect(decodeClientUrl(new URL(clean!, ORIGIN))).toBe("https://www.google.com//b?c=1");
   });
 
   it("returns null for a parent without a NAVH prefix or an unparsable destination", () => {
     expect(navhCleanFromPrel("/not-a-route/__zl_prel__/%2Fx", "https://example.com/x")).toBeNull();
     expect(navhCleanFromPrel("/__zl_navh__/tok/search/__zl_prel__/%2Fx", "::not a url")).toBeNull();
+  });
+});
+
+describe("expired navigation handle re-mint (#385)", () => {
+  it("redirects a GET navigation on an expired handle to a fresh handle", async () => {
+    const expired = buildNavHandleUrl(DEST, -60_000)!;
+    const parent = new URL(expired, ORIGIN).pathname;
+    const { ev, armed } = mkEvent(
+      ORIGIN + parent + "?q=what+is+a+hurricane",
+      "navigate",
+      "document",
+    );
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(302);
+    const loc = served.headers.get("location")!;
+    /* the fresh location decodes back to the exact destination */
+    expect(decodeClientUrl(new URL(loc, ORIGIN))).toBe(DEST);
+    expect(loc.split("/")[2]).not.toBe(parent.split("/")[2]);
+    expect(transportMock.calls).toBe(0);
+  });
+
+  it("fails closed for a tampered token (MAC does not verify, no re-mint)", async () => {
+    const expired = buildNavHandleUrl(DEST, -60_000)!;
+    const parts = new URL(expired, ORIGIN).pathname.split("/");
+    const tok = parts[2]!;
+    parts[2] = tok.slice(0, -1) + (tok.endsWith("A") ? "B" : "A");
+    const { ev, armed } = mkEvent(ORIGIN + parts.join("/") + "?q=x", "navigate", "document");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(404);
+    expect(transportMock.calls).toBe(0);
+  });
+
+  it("keeps the expiry for fetches on an expired handle (no re-mint)", async () => {
+    const expired = buildNavHandleUrl(DEST, -60_000)!;
+    const parent = new URL(expired, ORIGIN).pathname;
+    const { ev, armed } = mkEvent(ORIGIN + parent, "cors", "empty");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(404);
+    expect(transportMock.calls).toBe(0);
   });
 });

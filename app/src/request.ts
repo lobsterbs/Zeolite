@@ -14,7 +14,7 @@
    this module keeps calling decideTransport/refineWithContent at the
    same seams the old handler did. */
 /// <reference lib="webworker" />
-import { b64uDecode, b64uEncode, decodeClientUrl, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { b64uDecode, b64uEncode, buildNavHandleUrl, decodeClientUrl, decodeExpiredNavHandle, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodeNavHandleRoot, decodePath, encodeDest, encodeDestLegacy, encodeNavHandle, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, NAVH_TTL_MS, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
@@ -1182,14 +1182,23 @@ export function navhCleanFromPrel(pathname: string, dest: string): string | null
   } catch {
     return null;
   }
-  /* #202: surplus leading slashes are percent-escaped in the visible
+  /* #385: mint a FRESH handle for the clean form: the parent token
+     can be past its TTL at reload time, and a reused token inherits
+     the expiry, so the redirected navigation would 404 one hop
+     later. The fresh token carries the same destination and the
+     parent's host-root binding; a failed mint (no route key) keeps
+     the parent token - a short-lived clean URL still beats parking
+     on the opaque prel form. */
+  const fresh = encodeNavHandle(dest, NAVH_TTL_MS, decodeNavHandleRoot(token) ?? undefined);
+  const use = fresh ?? token;
+    /* #202: surplus leading slashes are percent-escaped in the visible
      path exactly like buildNavHandleUrl, so the clean form decodes
      back through the same seam. */
   const path =
     u.pathname === "/"
       ? ""
       : u.pathname.replace(/^\/(\/+)/, (_s: string, run: string) => "/" + "%2F".repeat(run.length));
-  return NAVH + "/" + token + path + u.search;
+  return NAVH + "/" + use + path + u.search;
 }
 function navOutcome(
   e: FetchEvent,
@@ -1681,8 +1690,50 @@ export function handleFetch(e: FetchEvent): void {
                   decodeNavHandle,
                 )
               : null;
-          if (!navhNavRec)
+          if (!navhNavRec) {
+            /* #385: an expired token whose MAC still verifies is one
+               this engine minted, so a reload or back/forward to it
+               must not strand the page. GET navigations answer ONE
+               same-origin 302 to a fresh handle for the same
+               destination (same visible path suffix, same route
+               query), so the document owns a route that decodes
+               again. A tampered or wrong-key token decodes to
+               nothing and keeps the honest 404 - the re-mint never
+               widens reach. POST keeps the 404 (a redirect strips
+               the body); fetches keep the expiry (their branch is
+               untouched). */
+            if (e.request.method === "GET") {
+              const navhExpHead = navhNavSlash >= 0 ? navhTail.slice(0, navhNavSlash) : navhTail;
+              const navhExpired = decodeExpiredNavHandle(navhExpHead);
+              if (navhExpired) {
+                const navhFresh = buildNavHandleUrl(
+                  navhExpired.destination,
+                  NAVH_TTL_MS,
+                  navhExpired.rootClientId,
+                );
+                if (navhFresh) {
+                  const navhSuffix = navhNavSlash >= 0 ? navhTail.slice(navhNavSlash) : "";
+                  const clean = navhFresh + navhSuffix + url.search;
+                  const traceId = DIAG.trace();
+                  netLogPush({
+                    method: e.request.method,
+                    traceId,
+                    path: url.pathname + url.search,
+                    dest: navhExpired.destination,
+                    status: 302,
+                    rtype: classifyRtype(reqDest(e.request), ""),
+                    ms: 0,
+                    bytes: 0,
+                    verdict: "engine: expired navigation handle re-minted",
+                    transport: "engine",
+                    detail: { internalUrl: clean, ttfb: 0 },
+                  });
+                  return new Response(null, { status: 302, headers: { location: clean } });
+                }
+              }
+            }
             return navOutcome(e, url, 404, "route", "zeolite: bad or expired navigation handle");
+          }
           dest0 = navhNavRec;
           /* #144: the tail resolution is query-free by construction
              (navhTail strips the search); the real query rides in the
