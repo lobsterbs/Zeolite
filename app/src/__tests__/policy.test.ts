@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { compilePolicy, policyMatch, loadPolicy, policyResetForTests } from "../policy";
+import { compilePolicy, policyMatch, transportMatch, loadPolicy, policyResetForTests } from "../policy";
 import shippedPolicy from "../../public/policy.kdl?raw";
 
 /* KDL nodes terminate at newlines, so every rule child sits on its
@@ -131,6 +131,46 @@ rule "tie-b" priority=5 {
 
   it("bad urls never match", () => {
     expect(policyMatch(p, "not a url", "document")).toBeNull();
+  });
+
+  /* #154: behavior rules (native/rewrite) must not capture the wire. */
+  it("transportMatch skips behavior rules and falls to the transport rule", () => {
+    const tp = compilePolicy(`rule "default-relay" {
+  route "relay"
+}
+rule "gapi-native" priority=10 {
+  match host="apis.google.com"
+  types "script"
+  route "native"
+}`);
+    expect(policyMatch(tp, "https://apis.google.com/js/client.js", "script")?.id).toBe("gapi-native");
+    expect(transportMatch(tp, "https://apis.google.com/js/client.js", "script")?.id).toBe("default-relay");
+  });
+
+  it("transportMatch keeps a host transport rule winning", () => {
+    const tw = compilePolicy(`rule "default-relay" {
+  route "relay"
+}
+rule "brave-wisp" {
+  match host="search.brave.com"
+  route "wisp"
+}`);
+    expect(transportMatch(tw, "https://search.brave.com/s?q=1", "fetch")?.id).toBe("brave-wisp");
+    expect(transportMatch(tw, "https://example.com/", "fetch")?.id).toBe("default-relay");
+  });
+
+  it("transportMatch returns null when only behavior rules exist", () => {
+    const tr = compilePolicy(`rule "r" {
+  match host="example.com"
+  types "script"
+  route "rewrite"
+}`);
+    expect(transportMatch(tr, "https://example.com/x.js", "script")).toBeNull();
+    expect(policyMatch(tr, "https://example.com/x.js", "script")?.id).toBe("r");
+  });
+
+  it("transportMatch empty policy means no transport", () => {
+    expect(transportMatch({ rules: [] }, "https://example.com/", "document")).toBeNull();
   });
 });
 

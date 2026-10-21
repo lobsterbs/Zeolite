@@ -27,7 +27,7 @@ import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
-import { loadPolicy, policyMatch, type CompiledPolicy } from "./policy";
+import { loadPolicy, policyMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
@@ -689,7 +689,10 @@ async function upstreamFetch(
   rtype: ResourceType,
   traceId: string,
 ): Promise<Response> {
-  const rule = policyMatch(policy, dest, rtype);
+  /* #154: the transport-side match. Behavior rules (native, rewrite)
+     must not capture the wire: a native host rule composes with the
+     transport rules instead of falling onto the default wisp stack. */
+  const rule = transportMatch(policy, dest, rtype);
   /* #155 + 2026-10-14 report: buffer a stream body only when a replay
      path can actually fire for this request (a relay rule with a
      registered channel, or an announced body the single retry can
