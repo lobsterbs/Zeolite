@@ -61,7 +61,20 @@ export function senderIsProxiedPath(pathname: string): boolean {
    the adapter (LB's single-page UI lives at "/"), its index, and
    the devtools page. Everything else - unparseable, cross-origin,
    opaque or unknown - is treated as untrusted. */
-const HOST_PATHS = new Set(["/", "/index.html", "/devtools.html"]);
+const HOST_PATHS = new Set([
+  "/",
+  "/index.html",
+  "/devtools.html",
+  /* #107 phase 2: the LB split-origin design embeds its /zlsw-register
+     boot page on the content origin so proxied frames render
+     cross-origin to the app. The boot page owns the content-origin
+     relay and wisp registration plus the embedder handshake - all
+     host-only control traffic; without this entry the fail-closed
+     gate classifies it as a proxied sender and silently refuses
+     every registration. Grants no new capability: "/" is already a
+     host path, so a page can already drive its own SW as host. */
+  "/zlsw-register",
+]);
 
 /** True only when the sender is one of the engine's own host pages:
     the URL must parse against this origin, be same-origin, and name
