@@ -4,15 +4,17 @@
    shim, the navigation guard (#28), the find loader (#29), the
    postMessage sender repair (#128/#130/#131/#132), the virtual-origin
    marker + message-event filter (#130), the cross-site channel
-   isolation (#37), the embedder URL/title sync (#107 phase 2).
+   isolation (#37), the embedder URL/title sync (#107 phase 2), the
+   anchor read virtualization (#180 Injector phase 1).
    URL-level fetch/XHR need no patch: pages navigate
    engine-local paths the SW intercepts.
 
    Source modules under ./bootstrap bundle into one synchronous
    artifact (patches must exist before page scripts run); the CI size
-   gate covers the built artifact. Budget: under 31744 bytes minified
+   gate covers the built artifact. Budget: under 33792 bytes minified
    (raises: 25600 -> 27648 #236 virtual location, -> 30400 the
-   engine-adapter wave, -> 31744 #107 phase 2 embedder sync).
+   engine-adapter wave, -> 31744 #107 phase 2 embedder sync, -> 33792 #180 anchor read
+   virtualization).
 
    Budget raises (each decided with the feature, never creep): 5 KiB
    original; 6.5 #28 nav guard; 8 #35 single file; 10 #37 isolation;
@@ -42,6 +44,7 @@ import { applyPostMessage } from "./bootstrap/postmsg";
 import { applyVirtualOrigin } from "./bootstrap/vorigin";
 import { applyVloc } from "./bootstrap/vloc";
 import { applyEmbedSync } from "./bootstrap/embedsync";
+import { applyAnchorShim } from "./bootstrap/anchorshim";
 
 const w = window as unknown as Record<string, unknown>;
 const loc = w.location as Location;
@@ -63,6 +66,11 @@ applyWs(w);
 applyReemit(w, routeAnchor(loc.href));
 applyIsolation(w, P, st);
 applyNavGuard(w, loc.href, loc.origin, site);
+/* #180: virtualize parser-inserted anchor reads (the property
+   getter and getAttribute) once the guard keeps page-written reads
+   page-truthful; the install order matters because the shim's
+   getter seam is called from inside the guard. */
+applyAnchorShim(w);
 applyFindLoad(w);
 /* #121: notice (console note + window CustomEvent, never a
    reload) when the worker broadcasts zl:engineUpdate; a stale page

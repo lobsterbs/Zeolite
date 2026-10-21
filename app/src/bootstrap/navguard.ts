@@ -34,6 +34,7 @@ import { applyCookie } from "./cookie";
 import { applyIsolation } from "./isolation";
 import { applyStorage } from "./storage";
 import { applySenderShim } from "./postmsg";
+import { anchorVirtual } from "./anchorshim";
 
 export const NAV = "/__zl_nav__";
 /* #101: parent-relative marker. A same-origin child realm (an
@@ -238,7 +239,19 @@ export function applyNavGuard(
       configurable: true,
       enumerable: true,
       get(this: AnyRecord) {
-        return raw.get(this)?.[prop] ?? d.get!.call(this);
+        const rw = raw.get(this)?.[prop];
+        if (rw !== undefined) return rw;
+        const n = d.get!.call(this);
+        /* #180 (Injector phase 1): a parser-inserted anchor reads
+           back as the engine route URL; offer the anchor shim's
+           virtual destination first (swap rows only: the read-heavy
+           hrefs). Undefined = pending or not a route: the native
+           read stands. */
+        if (mode === "swap") {
+          const v = anchorVirtual(n);
+          if (v !== undefined) return v;
+        }
+        return n;
       },
       set(this: AnyRecord, v: string) {
         const s = String(v);

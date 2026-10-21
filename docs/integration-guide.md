@@ -220,7 +220,7 @@ sender gate is fail-closed:
 - Everything else (about:blank, blob:, cross-origin, unparseable) is
   treated as untrusted and receives only the page-facing set:
   `zl:mint`, `zl:docCookie`, `zl:wsOpen`, `zl:ext`, `zl:ping`,
-  `zl:getVirtualOrigin`, `zl:getEmbedder`.
+  `zl:getVirtualOrigin`, `zl:getEmbedder`, `zl:decodeRoutes`.
 - Host-only verbs include: `zl:config`, `zl:ping`, `zl:navHandle`,
   `zl:relayRegister`, `zl:wispRegister`, `zl:wispPrimary`, `zl:getNetLog`,
   `zl:getDiag`, the extension verbs (`zl:listExt`, `zl:installExt`,

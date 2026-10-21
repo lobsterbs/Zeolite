@@ -34,6 +34,12 @@ export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
      for URL/title sync. Names only the sender's own decoded state
      and the public embedder origin; grants no cross-site reach. */
   "zl:getEmbedder",
+  /* #180 (Injector phase 1): the anchor read shim's decode oracle.
+     Admitted like zl:mint: the destinations are the page's own
+     markup data, a keyed decode needs the realm key the page never
+     holds, and garbage or foreign tokens decode to null. Bounded
+     worker-side; no new capability. */
+  "zl:decodeRoutes",
 ]);
 
 /** Pathname half of the sender classification: true when a client at
