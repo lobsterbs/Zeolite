@@ -14,7 +14,7 @@
    this module keeps calling decideTransport/refineWithContent at the
    same seams the old handler did. */
 /// <reference lib="webworker" />
-import { b64uDecode, b64uEncode, decodeClientUrl, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { buildNavHandleUrl, mintableDest, b64uDecode, b64uEncode, decodeClientUrl, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
@@ -56,7 +56,7 @@ import { raceBoot } from "./lifecycle";
 import {PROXY_INJECTED_HEADERS, acceptLanguageValue, applyChUa, navigationAccept, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
-import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
+import { anySessionProfileActive, registerJarNavHandle, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
@@ -1593,8 +1593,19 @@ export function handleFetch(e: FetchEvent): void {
            non-NAVH parents keep the prel form (no visible-suffix
            route exists for them, documented residual). */
         if (e.request.method === "GET" && e.request.mode === "navigate") {
-          const clean = navhCleanFromPrel(url.pathname, navpDest);
+          /* #383: a prel parent that is not a handle (legacy /zl/<b64>,
+             marker routes) used to keep the opaque form, so the reloaded
+             document's location.search read empty. Mint a fresh handle
+             for the destination instead, and register it for the jar
+             profile the same way the zl:navHandle mint does. */
+          let clean = navhCleanFromPrel(url.pathname, navpDest);
+          let minted = false;
+          if (!clean && mintableDest(navpDest)) {
+            clean = buildNavHandleUrl(navpDest, undefined, e.clientId || undefined);
+            minted = clean !== null;
+          }
           if (clean) {
+            if (minted) registerJarNavHandle(clean, e.clientId || undefined);
             const traceId = DIAG.trace();
             netLogPush({
               method: e.request.method,
