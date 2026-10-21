@@ -188,6 +188,20 @@ export function policyMatch(p: CompiledPolicy, url: string, rtype: ResourceType)
   return best;
 }
 
+/* #154: transport-side view of the same rules. route "native" and
+   route "rewrite" choose a response's rewrite behavior (literal pass
+   demotion, rewrite upgrade); route "relay" and route "wisp" choose
+   the wire. A behavior rule winning the match must not also capture
+   the transport: on a relay-only deployment a "native" host rule
+   would otherwise demote its requests onto the default wasm wisp
+   transport the deployment refuses. upstreamFetch matches transports
+   only, so behavior rules compose with the transport rules (a
+   match-less default-relay still carries behavior-ruled hosts). */
+export function transportMatch(p: CompiledPolicy, url: string, rtype: ResourceType): PolicyRule | null {
+  const transports = p.rules.filter((r) => r.route === "relay" || r.route === "wisp");
+  return transports.length === 0 ? null : policyMatch({ rules: transports }, url, rtype);
+}
+
 /* Load /policy.kdl once per worker lifetime, like /rules.kdl. A
    missing file means "no policy" (the default); a malformed file
    is rejected loudly and the defaults stay active. */

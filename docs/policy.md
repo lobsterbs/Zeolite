@@ -60,6 +60,13 @@ there are dead code. Documents and stylesheets are never demoted,
 and the demotion records a POLICY_NATIVE transit decision with the
 rule id so the native share stays honest in telemetry.
 
+Behavior routes compose with transport routes (#154): the transport
+selection (upstreamFetch) ignores behavior rules, so a "native"
+host rule rides the transport a relay/wisp rule would pick for the
+request (a match-less relay rule still carries it) instead of
+dropping its requests onto the default wisp transport. The behavior
+side (the literal pass demotion) still uses the full rule set.
+
 route "relay" (#137) moves matching fetches onto the embedder's
 network stack (native TLS, embedder-side SSRF validation) for
 hosts that reject the wasm TLS ClientHello shapes at the

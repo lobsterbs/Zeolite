@@ -35,6 +35,22 @@ rule "default-relay" {
   reason "deployment wisp auth rejects the wasm client: relay all fetches"
 }
 
+// #154: Google's gapi loader sanity-validates every generated module
+// URL against an origin-pinning regex (^https?://<host>.google(rs)?.com).
+// The JS literal pass rewrites the "https://apis.google.com" literal into
+// an opaque route token, the regex rejects the token host and the loader
+// throws before any fetch ("Bad hint: failed sanity"). route "native"
+// serves the script body raw; the module loads then run as ordinary
+// cross-origin requests from a controlled page, which the engine fetches
+// itself (#34), so nothing goes direct. The transport composes: the
+// default-relay rule above still carries the wire.
+rule "gapi-native" priority=10 {
+  match host="apis.google.com"
+  types "script"
+  route "native"
+  reason "#154: gapi origin-pinning sanity rejects route-token literals"
+}
+
 // #168: brave search's bot wall is the inverse of the #149 set: it
 // refuses the embedder relay transport class (the PoW interstitial
 // never completes) and accepts the engine's own wasm wisp ClientHello
