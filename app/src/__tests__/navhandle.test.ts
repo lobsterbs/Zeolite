@@ -250,6 +250,19 @@ describe("client-URL destination derivation (#151)", () => {
     expect(decodeClientUrl(u)).toBe("https://example.com/dir/page.html?q=1");
   });
 
+  it("falls back to the legacy /zl/ route when the prefix does not match (#107 phase 2)", () => {
+    /* The content-origin SW never receives zl:config, so its prefix
+       stays "/j/"; the LB split-origin navigation embeds legacy
+       /zl/<b64u> routes there. decodePath refuses the tail; the
+       reserved "zl" segment must still decode. */
+    const tail = b64uEncode(
+      new TextEncoder().encode("https://example.com/dir/page.html?q=1"),
+    );
+    expect(decodeClientUrl(new URL("http://engine.example/zl/" + tail))).toBe(
+      "https://example.com/dir/page.html?q=1",
+    );
+  });
+
   it("keeps the honest null for undecodable clients", () => {
     setRouteKey(KEY_A);
     expect(decodeClientUrl(new URL("http://engine.example/not-a-route"))).toBeNull();
@@ -383,6 +396,10 @@ describe("senderIsHostPage (#170: the host gate fails closed)", () => {
     /* The LB adapter is a single-page app at "/": query strings do not
        change the pathname. */
     expect(senderIsHostPage(O + "/?view=browser", O)).toBe(true);
+    /* #107 phase 2: the LB split-origin boot page, embedded on the
+       content origin; its relay/wisp/embedder registration is
+       host-only control traffic and must pass the gate. */
+    expect(senderIsHostPage(O + "/zlsw-register", O)).toBe(true);
   });
   it("refuses proxied routes and extension code", () => {
     expect(senderIsHostPage(O + "/j/abc", O)).toBe(false);

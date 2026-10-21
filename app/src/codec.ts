@@ -542,7 +542,16 @@ export function decodeClientUrl(u: URL): string | null {
     return d === null ? null : d + u.search;
   }
   const d = decodePath(u.pathname);
-  return d === null ? null : d + u.search;
+  if (d !== null) return d + u.search;
+  /* #107 phase 2: the content-origin SW keeps the default "/j/"
+     prefix (only the UI origin receives zl:config), while the LB
+     split-origin navigation embeds legacy "/zl/<b64u>" routes on the
+     content origin. decodePath refuses them under the default
+     prefix; decodeLegacyRoute accepts the reserved "zl" segment
+     regardless of prefix, so fall back instead of nulling the
+     destination. */
+  const legacy = decodeLegacyRoute(u.pathname);
+  return legacy === null ? null : legacy + u.search;
 }
 
 /** #144: mint the full handle route URL for an absolute http(s)
