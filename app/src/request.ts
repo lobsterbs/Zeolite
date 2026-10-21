@@ -14,7 +14,7 @@
    this module keeps calling decideTransport/refineWithContent at the
    same seams the old handler did. */
 /// <reference lib="webworker" />
-import { b64uDecode, b64uEncode, decodeClientUrl, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { encodeNavHandle, navHandleStale, b64uDecode, b64uEncode, decodeClientUrl, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodePath, encodeDest, encodeDestLegacy, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
@@ -56,7 +56,7 @@ import { raceBoot } from "./lifecycle";
 import {PROXY_INJECTED_HEADERS, acceptLanguageValue, applyChUa, navigationAccept, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
-import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
+import { anySessionProfileActive, isRootClient, registerJarNavHandle, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
@@ -1191,6 +1191,27 @@ export function navhCleanFromPrel(pathname: string, dest: string): string | null
       : u.pathname.replace(/^\/(\/+)/, (_s: string, run: string) => "/" + "%2F".repeat(run.length));
   return NAVH + "/" + token + path + u.search;
 }
+
+/** #385: a navigation whose handle token lapsed (120 s TTL) is re-minted
+    for the same destination, so a reload or back/forward to an older
+    page of the same host client does not 404. Returns the refreshed
+    URL, or null when the token is live, fails its MAC, or the client
+    is not the root the handle was minted for. Pure apart from the
+    token mint. */
+export function refreshStaleNavHandle(url: URL, clientId?: string): string | null {
+  const tail = url.pathname.slice(NAVH.length + 1);
+  const slash = tail.indexOf("/");
+  const token = slash < 0 ? tail : tail.slice(0, slash);
+  const rest = slash < 0 ? "" : tail.slice(slash);
+  if (!token || decodeNavHandle(token) !== null) return null;
+  const stale = navHandleStale(token);
+  if (!stale || !stale.rootClientId || !isRootClient(clientId, stale.rootClientId)) return null;
+  const fresh = encodeNavHandle(stale.destination, undefined, stale.rootClientId);
+  if (!fresh) return null;
+  const to = new URL(url.href);
+  to.pathname = NAVH + "/" + fresh + rest;
+  return to.href;
+}
 function navOutcome(
   e: FetchEvent,
   url: URL,
@@ -1481,6 +1502,20 @@ export function handleFetch(e: FetchEvent): void {
            the requesting client's virtual context resolves first; the
            referrer decode survives as the compat fallback only. Neither
            resolves: passthrough. */
+      /* #385: a lapsed handle on a navigation is re-minted for the same
+         host client and redirected, before any NAVH or prel branch runs.
+         Fetches keep the expiry (a subresource never gets a fresh token). */
+      if (
+        e.request.method === "GET" &&
+        e.request.mode === "navigate" &&
+        url.pathname.startsWith(NAVH + "/")
+      ) {
+        const freshUrl = refreshStaleNavHandle(url, e.clientId || undefined);
+        if (freshUrl) {
+          registerJarNavHandle(freshUrl, e.clientId || undefined);
+          return new Response(null, { status: 302, headers: { location: freshUrl } });
+        }
+      }
       let dest0: string | null;
       /* Issue #38: only an engine route encodes its destination
          WITHOUT the query (the query travels as the request's own

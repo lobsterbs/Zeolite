@@ -449,6 +449,17 @@ export function decodeNavHandleRoot(token: string): string | null {
   return decodeNavHandlePayload(token)?.rootClientId ?? null;
 }
 
+/** #385: a MAC-verified handle that is past its TTL, as the destination
+    and host-client binding it carries. Null when the token fails the MAC
+    or is still live. Used only to re-mint for the owning client, never
+    to navigate directly: the expiry still bounds what a leaked token can
+    do on its own. */
+export function navHandleStale(token: string): { destination: string; rootClientId?: string } | null {
+  const info = decodeNavHandlePayload(token);
+  if (!info || Date.now() <= info.expires) return null;
+  return { destination: info.destination, rootClientId: info.rootClientId };
+}
+
 /** #144: resolve a full NAVH route tail - <token>, or <token>/
     <real path> on the new shape - to the destination it names. New
     tokens carry the origin only, so the visible path suffix resolves

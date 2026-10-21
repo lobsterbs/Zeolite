@@ -243,6 +243,12 @@ function navHandleToken(routeUrl: string | undefined): string | null {
   }
 }
 
+/** #385: whether a client belongs to the host root a handle was minted
+    for. A stale handle is re-minted only for that root. */
+export function isRootClient(clientId: string | undefined, root: string): boolean {
+  return !!clientId && rootOf(clientId) === root;
+}
+
 export function registerJarNavHandle(routeUrl: string, clientId?: string): void {
   const root = rootOf(clientId) ?? clientId ?? null;
   const token = navHandleToken(routeUrl);
