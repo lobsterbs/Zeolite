@@ -131,15 +131,17 @@ describe("prel navigation redirect to the visible handle form", () => {
     expect(transportMock.urls[0]).toBe(SEI_DEST);
   });
 
-  it("keeps the prel form for non-NAVH parents (scheme routes, documented residual)", async () => {
+  it("redirects a non-NAVH-parent prel navigation to a fresh handle (#383)", async () => {
     const scheme = encodeDestLegacy("https://site.example/dir/page");
     const prel = scheme + "/__zl_prel__/" + encodeURIComponent("/x?y=1");
-    transportMock.queue = [new Response("ok", { headers: { "content-type": "text/plain" } })];
     const { ev, armed } = mkEvent(ORIGIN + prel, "navigate", "document");
     handleFetch(ev);
     const served = await armed[0]!;
-    expect(served.status).toBe(200);
-    expect(transportMock.urls[0]).toBe("https://site.example/x?y=1");
+    expect(served.status).toBe(302);
+    const loc = served.headers.get("location")!;
+    expect(loc.startsWith("/__zl_navh__/")).toBe(true);
+    expect(decodeClientUrl(new URL(loc, ORIGIN))).toBe("https://site.example/x?y=1");
+    expect(transportMock.calls).toBe(0);
   });
 
   it("escapes surplus leading slashes in the clean form and round-trips them (#202)", () => {
@@ -155,8 +157,11 @@ describe("prel navigation redirect to the visible handle form", () => {
     expect(decodeClientUrl(new URL(clean!, ORIGIN))).toBe("https://www.google.com//b?c=1");
   });
 
-  it("returns null for a parent without a NAVH prefix or an unparsable destination", () => {
-    expect(navhCleanFromPrel("/not-a-route/__zl_prel__/%2Fx", "https://example.com/x")).toBeNull();
+  it("mints a fresh handle for a non-NAVH parent (#383); an unparsable destination still fails closed", () => {
+    const clean = navhCleanFromPrel("/not-a-route/__zl_prel__/%2Fx", "https://example.com/x");
+    expect(clean).not.toBeNull();
+    expect(clean!.startsWith("/__zl_navh__/")).toBe(true);
+    expect(decodeClientUrl(new URL(clean!, ORIGIN))).toBe("https://example.com/x");
     expect(navhCleanFromPrel("/__zl_navh__/tok/search/__zl_prel__/%2Fx", "::not a url")).toBeNull();
   });
 });

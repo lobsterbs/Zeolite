@@ -783,6 +783,20 @@ export function recoveryUpstream(
   return (u, init) => upstreamFetch(u, init, policy, rtype, traceId);
 }
 
+/** #381: Ghostery's list fetches ride the same relay/wisp transport
+    decision as page subresources instead of a raw wisp lambda: on
+    relay-only embedders (password-authed /wisp/) the raw lambda is
+    auth-refused, remote lists silently never loaded and only the
+    built-in local rules stayed active. Hop following and the SSRF
+    judgment stay with upstreamFetch and the embedder edge. */
+export function ghosteryListFetch(dest: string, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  const method = init?.method ?? "GET";
+  return loadPolicy().then((policy) =>
+    upstreamFetch(dest, { method, headers }, policy, "fetch", DIAG.trace()),
+  );
+}
+
 /** #179: the page cache spans jar profiles and sessions; clearing the
     jar or switching profile drops it so one account's cached pages
     never surface for another. */
@@ -1166,16 +1180,20 @@ export function navpResolve(pathname: string, engineOrigin?: string): string | n
     re-read (location.search, new URL(location.href)) misparses and
     self-refresh flows re-trigger. Rebuild the same destination on
     the visible handle form the initial navigation minted (#144):
-    token + real path + real query. Null = the parent is not a NAVH
-    handle route (scheme routes and NAV markers keep the prel form,
-    documented residual) or the destination does not parse. */
+    token + real path + real query. Null = the destination does
+    not parse, or no handle can be minted and no parent token
+    exists to fall back on (the prel decode then serves it). */
 export function navhCleanFromPrel(pathname: string, dest: string): string | null {
   const cut = pathname.indexOf(NAVP);
   if (cut < 0) return null;
   const parent = pathname.slice(0, cut);
-  if (!parent.startsWith(NAVH + "/")) return null;
-  const token = parent.slice(NAVH.length + 1).split("/")[0];
-  if (!token) return null;
+  /* #383: a NAVH parent keeps its token lineage (host-root
+     binding); a non-NAVH parent has no token, but the prel decode
+     already resolved the full destination, so the fresh mint
+     below still yields the readable handle form. */
+  const token = parent.startsWith(NAVH + "/")
+    ? parent.slice(NAVH.length + 1).split("/")[0] || null
+    : null;
   let u: URL;
   try {
     u = new URL(dest);
@@ -1189,8 +1207,15 @@ export function navhCleanFromPrel(pathname: string, dest: string): string | null
      parent's host-root binding; a failed mint (no route key) keeps
      the parent token - a short-lived clean URL still beats parking
      on the opaque prel form. */
-  const fresh = encodeNavHandle(dest, NAVH_TTL_MS, decodeNavHandleRoot(token) ?? undefined);
+  const fresh = encodeNavHandle(
+    dest,
+    NAVH_TTL_MS,
+    token ? decodeNavHandleRoot(token) ?? undefined : undefined,
+  );
   const use = fresh ?? token;
+  /* #383: no parent token and no mintable key: keep the prel
+     decode (null) rather than guessing a clean form. */
+  if (!use) return null;
     /* #202: surplus leading slashes are percent-escaped in the visible
      path exactly like buildNavHandleUrl, so the clean form decodes
      back through the same seam. */
@@ -1598,9 +1623,10 @@ export function handleFetch(e: FetchEvent): void {
            Serve the same destination on the visible handle form: one
            same-origin 302, then the document owns a URL whose path
            and query it can read. Fetches and non-GET navigations keep
-           the prel decode (a redirect would strip a POST body);
-           non-NAVH parents keep the prel form (no visible-suffix
-           route exists for them, documented residual). */
+           the prel decode (a redirect would strip a POST body).
+           #383: non-NAVH parents get a fresh minted handle too -
+           the prel decode already resolved the full destination,
+           so the clean form needs nothing from the parent. */
         if (e.request.method === "GET" && e.request.mode === "navigate") {
           const clean = navhCleanFromPrel(url.pathname, navpDest);
           if (clean) {

@@ -60,7 +60,7 @@ import { messageListener } from "./control";
    in ./request.ts; this module is the entrypoint and composition
    root: it boots the runtime and wires browser events to the engine
    and the control plane. */
-import { handleFetch, initEngine, persistRoute, routeReady } from "./request";
+import { ghosteryListFetch, handleFetch, initEngine, persistRoute, routeReady } from "./request";
 /* #121: engine-update alerting (update poll + activation broadcast)
    lives in ./updates; this entrypoint owns the worker lifecycle
    seams that call it. */
@@ -84,12 +84,15 @@ declare const self: ServiceWorkerGlobalScope;
    reporting init failures to zl:ping exactly as before (finding 5:
    the flag itself lives in ./swstate). */
 initTransport({ setDegraded: setEngineDegraded });
-/* Ghostery's subscription fetches stay inside the same Wisp transport
-   as proxied page traffic; global fetch here would expose the user's
-   direct network address to the filter-list hosts. */
+/* #381: Ghostery's subscription fetches ride the same transport
+   decision as page traffic (relay included): the raw wisp client
+   is auth-refused on relay-only embedders, so remote lists
+   silently never loaded. Global fetch stays forbidden: it would
+   expose the user's direct network address to the filter-list
+   hosts. */
 configureGhostery((input, init) => {
   const dest = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-  return wispTransport.fetch(dest, init);
+  return ghosteryListFetch(dest, init);
 });
 
 /* #86: the streaming rewrite pipelines + wasm rewriter lifecycle
