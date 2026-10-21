@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applyVloc } from "../bootstrap/vloc";
+import { onVlocChange } from "../bootstrap/vloc";
 
 const ENGINE = "https://engine.host";
 const ENTRY = "/j/abc123";
@@ -242,5 +243,20 @@ describe("backslash-form absolute URLs are cross-origin (#373)", () => {
     // Cross-origin: handed to the native location as-is, never folded
     // into a virtual path on this page's origin.
     expect(state.href).toBe("https://evil.example/x");
+  });
+});
+
+describe("onVlocChange (#107 phase 2)", () => {
+  it("observes real virtual-path moves only", () => {
+    const { w, fire } = makeWin(ENGINE + ENTRY);
+    applyVloc(w, "/start");
+    const seen: string[] = [];
+    onVlocChange((v) => seen.push(v));
+    const h = w.history as { pushState(s: unknown, t: string, u?: string | null): void };
+    h.pushState({}, "", "/next?q=1");
+    expect(seen).toEqual(["/next?q=1"]);
+    /* popstate back on the re-anchored URL decodes a real path: fires. */
+    fire("popstate");
+    expect(seen).toEqual(["/next?q=1", "/next?q=1"]);
   });
 });

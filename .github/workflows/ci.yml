@@ -215,10 +215,12 @@ jobs:
         # bootstrap wave (srcdoc script-body split, noopener popup
         # route, postMessage options form, ws scheme SyntaxError,
         # backslash-origin vloc); measured 30349, baseline 29649.
+        # Raised 30400 -> 31744 for the #107 phase 2 embedder URL/title
+        # sync module; measured 31406, baseline 30381.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 30400 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 30400)"; exit 1; fi
+          if [ "$SIZE" -ge 31744 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 31744)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

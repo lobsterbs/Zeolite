@@ -4,13 +4,15 @@
    shim, the navigation guard (#28), the find loader (#29), the
    postMessage sender repair (#128/#130/#131/#132), the virtual-origin
    marker + message-event filter (#130), the cross-site channel
-   isolation (#37). URL-level fetch/XHR need no patch: pages navigate
+   isolation (#37), the embedder URL/title sync (#107 phase 2).
+   URL-level fetch/XHR need no patch: pages navigate
    engine-local paths the SW intercepts.
 
    Source modules under ./bootstrap bundle into one synchronous
    artifact (patches must exist before page scripts run); the CI size
-   gate covers the built artifact. Budget: under 27648 bytes minified
-   (last raise: 25600 -> 27648 for the #236 virtual location).
+   gate covers the built artifact. Budget: under 31744 bytes minified
+   (raises: 25600 -> 27648 #236 virtual location, -> 30400 the
+   engine-adapter wave, -> 31744 #107 phase 2 embedder sync).
 
    Budget raises (each decided with the feature, never creep): 5 KiB
    original; 6.5 #28 nav guard; 8 #35 single file; 10 #37 isolation;
@@ -39,6 +41,7 @@ import { applyUpdateNotice } from "./bootstrap/update";
 import { applyPostMessage } from "./bootstrap/postmsg";
 import { applyVirtualOrigin } from "./bootstrap/vorigin";
 import { applyVloc } from "./bootstrap/vloc";
+import { applyEmbedSync } from "./bootstrap/embedsync";
 
 const w = window as unknown as Record<string, unknown>;
 const loc = w.location as Location;
@@ -72,3 +75,6 @@ applyVirtualOrigin(w);
 /* #236: the virtual location the #235 renames read; pathname-
    routed SPAs see their real path without a document reload. */
 applyVloc(w, ZL.vpath);
+/* #107 phase 2: URL/title sync up to a registered embedder (split
+   origin); inert without one. */
+applyEmbedSync(w);

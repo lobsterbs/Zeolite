@@ -43,6 +43,23 @@ import { NAVP } from "./navguard";
    independent of codec.ts (size gate), same as navguard's NAV. */
 const NAVH = "/__zl_navh__";
 
+/* #107 phase 2: consumers (embedsync) subscribe to virtual-path
+   changes. Module-level so applyVloc can run before the consumer
+   registers; the hook must never break the location view. */
+let vlocHook: ((virt: string) => void) | null = null;
+
+export function onVlocChange(cb: (virt: string) => void): void {
+  vlocHook = cb;
+}
+
+const moved = (v: string): void => {
+  try {
+    if (vlocHook) vlocHook(v);
+  } catch {
+    /* a consumer hook must never break the location view */
+  }
+};
+
 type NativeLoc = {
   href: string;
   origin: string;
@@ -235,6 +252,7 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
         const virt = toVirtual(String(u));
         if (virt === null) return O.call(hist, st, t, u);
         cur = virt;
+        moved(virt);
         return O.call(hist, st, t, anchor(virt));
       };
     }
@@ -252,6 +270,7 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
     const p = fromNative(u);
     if (p !== null) {
       cur = p;
+      moved(p);
       return;
     }
     /* a non-routed native URL (an opaque route): only the hash
