@@ -1,8 +1,9 @@
 /* Ghostery's EasyList-compatible network filter engine. The matcher
    lives only in service-worker memory: proxied documents share the
    app origin today, so persisted matcher data would be writable by
-   untrusted page scripts. List downloads use the engine's Wisp
-   transport (configured by sw.ts), never browser fetch.
+   untrusted page scripts. List downloads use the engine's
+   transport decision (wired by sw.ts through ghosteryListFetch,
+   #381), never browser fetch.
 
    This adapter currently applies network block and resource-redirect
    decisions. Cosmetic selectors and scriptlets need a separate,
@@ -15,6 +16,7 @@ import {
   type RequestType,
 } from "@ghostery/adblocker";
 import type { ResourceType } from "./rules";
+import { DIAG } from "./diag";
 
 const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 const RETRY_AFTER_MS = 60 * 1000;
@@ -79,12 +81,25 @@ async function loadEngine(force = false): Promise<void> {
       engine = await FiltersEngine.fromPrebuiltAdsAndTracking(fetchLists!);
       retryAt = 0;
       refreshAt = Date.now() + REFRESH_AFTER_MS;
-    } catch {
-      /* A temporarily unavailable Wisp/list host must not break page
-         requests. The existing local host list stays active and this
-         worker retries after a short cooldown. */
+    } catch (err) {
+      /* A temporarily unavailable list host must not break page
+         requests. The existing local host list stays active and
+         this worker retries after a short cooldown. #381: the
+         failure is no longer silent - a TRANSPORT row names the
+         load failure so relay-only transport gaps are visible. */
       retryAt = Date.now() + RETRY_AFTER_MS;
       refreshAt = retryAt;
+      DIAG.emit({
+        requestId: DIAG.trace(),
+        category: "TRANSPORT",
+        cause: "proxy",
+        severity: "warning",
+        stage: "UPSTREAM_REQUEST",
+        message:
+          "ghostery filter-list load failed: " +
+          (err instanceof Error ? err.message : String(err)) +
+          "; local rules stay active",
+      });
     } finally {
       loading = null;
     }

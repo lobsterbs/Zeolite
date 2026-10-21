@@ -20,8 +20,9 @@
      port as they arrive.
    - ponytail: GET/HEAD and string/ArrayBuffer bodies only; a stream
      body cannot ride the port, so such requests fall back to wisp.
-   - ponytail: no per-message timeout here; the caller's TTFB
-     deadline and the body-stall deadline remain the only clocks. */
+   - the relay header deadline is the only clock here; a breach
+     resolves the fetch as channel death (null) so the caller falls
+     back (#382), never a throw at the page. */
 
 import { DIAG } from "./diag";
 
@@ -180,21 +181,35 @@ export async function relayFetch(
     body,
   });
   /* Header deadline for every relayed fetch, subresources included.
-     Without it a silent embedder (or a port it dropped without a close
-     event) parks the request until the page gives up. A timeout cancels
-     the embedder's upstream like a caller abort does. */
+     Without it a silent embedder (or a port it dropped without a
+     close event) parks the request until the page gives up. #382:
+     a breach is channel death, not a caller error: resolve null so
+     the caller falls back to its secondary transport instead of
+     throwing, and cancel the embedder's upstream like a caller
+     abort does. An undeclared long-poll that would answer beyond
+     the bound dies here honestly - the bound is what keeps dead
+     channels from parking pages forever (a per-site override is
+     the ponytail ceiling). */
   let deadline: ReturnType<typeof setTimeout> | undefined;
-  const headerDeadline = new Promise<never>((_, reject) => {
+  const headerDeadline = new Promise<null>((resolve) => {
     deadline = setTimeout(() => {
-      /* Reject before aborting: onAbort wakes take(), and the first
-         settled promise decides the error the caller sees. */
-      const e = new Error("relay header deadline exceeded");
-      e.name = "TimeoutError";
-      reject(e);
+      /* Resolve before aborting: onAbort wakes take(), and the
+         first settled promise decides what the caller sees. */
+      resolve(null);
       onAbort();
+      DIAG.emit({
+        requestId: traceId,
+        traceId,
+        category: "TRANSPORT",
+        cause: "proxy",
+        severity: "warning",
+        stage: "UPSTREAM_REQUEST",
+        message: "relay header deadline exceeded: treated as a dead channel, caller falls back",
+        url: dest,
+      });
     }, RELAY_HEADER_DEADLINE_MS);
   });
-  let first: RelayMsg;
+  let first: RelayMsg | null;
   try {
     first = await Promise.race([take(), headerDeadline]);
   } catch (err) {
@@ -202,6 +217,10 @@ export async function relayFetch(
     throw err;
   } finally {
     clearTimeout(deadline);
+  }
+  if (!first) {
+    cleanup();
+    return null;
   }
   if (first.type === "zl:relayError") {
     cleanup();

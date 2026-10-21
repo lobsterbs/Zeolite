@@ -148,8 +148,8 @@ describe("relayFetch (#137)", () => {
   });
 });
 
-describe("relayFetch header deadline", () => {
-  it("rejects a silent embedder after the deadline and cancels upstream", async () => {
+describe("relayFetch header deadline (#382)", () => {
+  it("resolves null on a silent embedder after the deadline and cancels upstream", async () => {
     const p = reg();
     vi.useFakeTimers();
     try {
@@ -158,11 +158,8 @@ describe("relayFetch header deadline", () => {
         { method: "GET", headers: new Headers() },
         "t1",
       );
-      const settled = pending.catch((e: Error) => e);
       await vi.advanceTimersByTimeAsync(RELAY_HEADER_DEADLINE_MS + 1);
-      const err = await settled;
-      expect(err).toBeInstanceOf(Error);
-      expect((err as Error).name).toBe("TimeoutError");
+      await expect(pending).resolves.toBeNull();
       expect(p.posted.some((m) => (m as { type?: string }).type === "zl:relayCancel")).toBe(true);
     } finally {
       vi.useRealTimers();
