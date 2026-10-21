@@ -38,6 +38,10 @@ declare const self: ServiceWorkerGlobalScope;
 /* 1.9 Fullerene: active session recording, when any. */
 let rec: RecordingState | null = null;
 
+/* #180 (Injector phase 1): per-message bound for zl:decodeRoutes,
+   the anchor read shim's decode oracle. */
+const DECODE_ROUTES_MAX = 64;
+
 
 /* ---- Control plane (Phase 2 + Phase 4) ---------------------------- */
 
@@ -45,6 +49,7 @@ export interface ControlMessage {
   type:
     | "zl:config"
     | "zl:mint"
+    | "zl:decodeRoutes"
     | "zl:navHandle"
     | "zl:rules"
     | "zl:jarProfile"
@@ -168,6 +173,9 @@ export interface ControlMessage {
   /** zl:find options: caseSensitive, wholeWord and wrap (default
       true), passed through to the page-side finder. */
   options?: { caseSensitive?: boolean; wholeWord?: boolean; wrap?: boolean };
+  /** zl:decodeRoutes (#180): route strings from the page's own
+      markup; the reply's dests array parallels it. */
+  routes?: unknown[];
 }
 
 /* #29 (zl:find): the compiled page-side finder ships to the page
@@ -367,6 +375,31 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         break;
       }
       reply({ ok: true, route: encodeDest(msg.dest) });
+      break;
+    }
+    case "zl:decodeRoutes": {
+      /* #180 (Injector phase 1): the anchor read shim's decode
+         oracle. Keyed route tokens are undecodable in the page
+         realm (the key never leaves the worker), so a read of a
+         rewriter-minted anchor asks the worker to decode routes the
+         page's own markup already carries; Startpage-style pages
+         derive their visible breadcrumb from the anchor href, so
+         without this the opaque route URL leaked onto the page
+         surface. Admitted to proxied pages like zl:mint (the
+         destinations are the page's own markup data); bounded per
+         message (DECODE_ROUTES_MAX routes, 2048 chars each) so it
+         cannot become a bulk oracle; garbage and foreign tokens
+         decode to null and the caller keeps its native value. */
+      const routes = Array.isArray(msg.routes) ? msg.routes.slice(0, DECODE_ROUTES_MAX) : [];
+      const dests = routes.map((v: unknown): string | null => {
+        if (typeof v !== "string" || v.length > 2048) return null;
+        try {
+          return decodeClientUrl(new URL(v, self.location.origin));
+        } catch {
+          return null;
+        }
+      });
+      reply({ ok: true, dests });
       break;
     }
     case "zl:navHandle": {
@@ -1025,7 +1058,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister", "zl:wispRegister", "zl:wispPrimary",
+  "zl:ping", "zl:config", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister", "zl:wispRegister", "zl:wispPrimary",
 ]);
 
 
