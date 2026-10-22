@@ -30,6 +30,10 @@
      location with the re-anchored route; a cross-origin or
      opaque value passes through natively and the navguard
      navigate seam owns that class.
+   - hash/search/pathname member writes carry view setters
+     (#182): hash mirrors natively (a real history entry and
+     hashchange stay real), search/pathname re-anchor and
+     navigate like assign.
 
    Honest limits: bare top/parent reads stay native (#235 keeps
    frame-buster identity), so top.location still exposes the
@@ -296,11 +300,43 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
     get pathname(): string {
       return new URL("http://v" + cur).pathname;
     },
+    /* #182: a pathname write navigates (the native semantic),
+       keeping the current search and hash. */
+    set pathname(v: string) {
+      let u: URL;
+      try {
+        u = new URL(String(v), "http://v" + cur);
+      } catch {
+        return;
+      }
+      const c = new URL("http://v" + cur);
+      go(u.pathname + c.search + c.hash, false);
+    },
     get search(): string {
       return new URL("http://v" + cur).search;
     },
+    /* #182: a search write replaces the query, keeps the path
+       and hash, and navigates. */
+    set search(v: string) {
+      const c = new URL("http://v" + cur);
+      const q = v === "" ? "" : v.startsWith("?") ? v : "?" + v;
+      go(c.pathname + q + c.hash, false);
+    },
     get hash(): string {
       return new URL("http://v" + cur).hash;
+    },
+    /* #182: a hash write mirrors natively so the history entry
+       and hashchange stay real, and the view moves up front so
+       a read-after-write sees it like the native location. */
+    set hash(v: string) {
+      const h = v.startsWith("#") ? v : "#" + v;
+      cur = cur.split("#")[0] + h;
+      moved(cur);
+      try {
+        (nat as { hash: string }).hash = h;
+      } catch {
+        /* a sealed location keeps the native hash */
+      }
     },
     /* origin/protocol/host stay native: the #157 own-origin
        re-anchor class depends on them. */

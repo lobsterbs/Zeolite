@@ -223,10 +223,13 @@ jobs:
         # Raised 33792 -> 34304 for the #387/#388 follow-up (scan
         # window skip-memoized paging + the SVG animated-href read
         # seam); measured 34294, baseline 33782.
+        # Raised 34304 -> 34816 for the #182 location member-write
+        # view setters (hash/search/pathname); measured 34628,
+        # baseline 34294.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 34304 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 34304)"; exit 1; fi
+          if [ "$SIZE" -ge 34816 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 34816)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

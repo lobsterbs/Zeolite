@@ -410,6 +410,16 @@ mod tests {
     }
 
     #[test]
+    fn member_writes_rename_to_the_view() {
+        // #182: the object of a member write is a read, so the
+        // hash/search/pathname writes reach the vloc setters.
+        assert_eq!(rw("location.hash = '#x';"), "__zl.hash = '#x';");
+        assert_eq!(rw("location.search = '?q=1';"), "__zl.search = '?q=1';");
+        assert_eq!(rw("location.pathname = '/y';"), "__zl.pathname = '/y';");
+        assert_eq!(rw("window.location.hash = '#x';"), "__zl.hash = '#x';");
+    }
+
+    #[test]
     fn comment_gap_before_assignment_stays_native() {
         // #240: the write peek must skip comments.
         assert_eq!(
