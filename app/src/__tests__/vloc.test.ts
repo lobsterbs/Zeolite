@@ -260,3 +260,45 @@ describe("onVlocChange (#107 phase 2)", () => {
     expect(seen).toEqual(["/next?q=1", "/next?q=1"]);
   });
 });
+
+
+describe("location member writes reach the view (#182)", () => {
+  it("hash write mirrors natively and reads back immediately", () => {
+    const m = makeWin(ENGINE + ENTRY);
+    applyVloc(m.w, "/a/b?x=1");
+    const zl = m.w.__zl as { hash: string; pathname: string };
+    zl.hash = "#go";
+    expect(zl.hash).toBe("#go");
+    expect(new URL(m.state.href).hash).toBe("#go");
+    expect(zl.pathname).toBe("/a/b");
+  });
+
+  it("hash write without the leading hash sign normalizes", () => {
+    const m = makeWin(ENGINE + ENTRY);
+    applyVloc(m.w, "/a");
+    const zl = m.w.__zl as { hash: string };
+    zl.hash = "go";
+    expect(zl.hash).toBe("#go");
+    expect(new URL(m.state.href).hash).toBe("#go");
+  });
+
+  it("search write keeps path and hash and re-anchors", () => {
+    const m = makeWin(ENGINE + ENTRY);
+    applyVloc(m.w, "/a/b?x=1#h");
+    const zl = m.w.__zl as { search: string };
+    zl.search = "q=2";
+    expect(m.state.href).toBe(
+      ENGINE + ENTRY + "/__zl_prel__/" + encodeURIComponent("/a/b?q=2#h"),
+    );
+  });
+
+  it("pathname write keeps search and hash and re-anchors", () => {
+    const m = makeWin(ENGINE + ENTRY);
+    applyVloc(m.w, "/a/b?x=1#h");
+    const zl = m.w.__zl as { pathname: string };
+    zl.pathname = "/c";
+    expect(m.state.href).toBe(
+      ENGINE + ENTRY + "/__zl_prel__/" + encodeURIComponent("/c?x=1#h"),
+    );
+  });
+});
