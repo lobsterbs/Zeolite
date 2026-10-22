@@ -56,7 +56,7 @@ import { raceBoot } from "./lifecycle";
 import {PROXY_INJECTED_HEADERS, acceptLanguageValue, applyChUa, navigationAccept, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
 import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
 import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
-import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
+import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfilesReady, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
@@ -1073,10 +1073,28 @@ const routeRestore: Promise<void> = (async () => {
      working across a restart instead of stranding. */
   try {
     let history = await loadRouteHistory();
+    if (history === null) {
+      /* #399: the read failed (not empty) - one retry after a beat; a
+         transient IDB failure at boot must not be mistaken for first
+         boot, and minting over it would replace the decode set with
+         the fresh key alone. */
+      await new Promise((r) => setTimeout(r, 150));
+      history = await loadRouteHistory();
+    }
+    if (history === null) {
+      /* still failing: keyed codec stays off for this worker lifetime
+         (the documented degraded mode); nothing is overwritten and
+         the next restart recovers fully. */
+      return;
+    }
     if (history.length === 0) {
       const fresh = crypto.getRandomValues(new Uint8Array(16));
       await saveRouteKey(fresh);
-      history = [fresh];
+      /* #395-class honesty note: saveRouteKey preserves the stored
+         history, so the re-read restores the FULL decode set instead
+         of the fresh key alone; a failing re-read falls back to the
+         fresh key. */
+      history = (await loadRouteHistory()) ?? [fresh];
     }
     setRouteKey(b64uEncode(history[0]!));
     setRouteKeys(history.map(b64uEncode));
@@ -1148,6 +1166,18 @@ export function navpResolve(pathname: string, engineOrigin?: string): string | n
       base = decodeClientUrl(new URL(parent, "https://engine.invalid"));
     } catch {
       base = null;
+    }
+    /* #393: a NAVH parent past its TTL decodes to nothing here, so a
+       prel tail under it 404'd before the clean-form re-mint (#385)
+       could run. The MAC-verified expired decode recovers the parent
+       destination - the navigation then lands on a FRESH handle via
+       navhCleanFromPrel, and prel fetches keep resolving too. A
+       tampered or wrong-key token still decodes to nothing: no
+       widened reach. */
+    if (!base && parent.startsWith(NAVH + "/")) {
+      base =
+        decodeExpiredNavHandle(parent.slice(NAVH.length + 1).split("/")[0])
+          ?.destination ?? null;
     }
   }
   if (!base) return null;
@@ -1487,6 +1517,11 @@ export function handleFetch(e: FetchEvent): void {
   };
   const responsePromise = (async () => {
       await routeReady;
+      /* #394: the persisted jar-profile map restores before any
+         cookie or cache decision, so a restarted worker does not
+         silently route a session-profile page onto the durable
+         default jar. Memoized: one cache read per worker lifetime. */
+      await jarProfilesReady();
       /* Route-key restoration is needed to authenticate the NAVH host
          binding. Re-run this after the cold-start gate before any
          cookie or cache decision. */
@@ -3507,7 +3542,20 @@ export function navhTailDest(
           /* fall through to the append base */
         }
       }
-      let base = tokenBase ?? pageBase(contextUrl);
+      /* #395: a token-shaped head that does not decode (an expired
+         handle) still parks the page on the handle form, so the tail
+         after the token is a full path from the root: resolve against
+         the context ORIGIN. The old page-path base treated the
+         document path as a directory and doubled it
+         (/dir/page/dir/assets/x.js 404s upstream). */
+      let base = tokenBase;
+      if (!base && contextUrl) {
+        try {
+          base = new URL(contextUrl).origin + "/";
+        } catch {
+          base = null;
+        }
+      }
       if (!base) return null;
       if (!base.endsWith("/")) base += "/";
       try {

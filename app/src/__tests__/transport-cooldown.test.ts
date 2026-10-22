@@ -225,3 +225,55 @@ describe("cooldown relay first-byte deadline (#261)", () => {
     expect(port.sent.some((m) => (m as { type: string }).type === "zl:relayCancel")).toBe(true);
   });
 });
+
+/* #400: a stall on the cooldown relay arm feeds the storm detector.
+   Without the record, a wedged relay looked healthy the moment the
+   cooldown expired: the arming stalls age out of the 60s storm
+   window and the post-cooldown wisp stalls never reach the
+   threshold. The frozen Date.now makes the window arithmetic
+   observable without real 60s waits; the first-byte deadlines
+   themselves stay real 15ms setTimeout ticks. */
+describe("relay stalls feed the storm detector (#400)", () => {
+  it("a relay stall during cooldown refreshes the storm window", async () => {
+    h.fetchImpl = () => new Promise<Response>(() => {});
+    let t = 1_000_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => t);
+    const seen: Array<{ message?: string }> = [];
+    const emit = vi.spyOn(DIAG, "emit").mockImplementation((e: { message?: string }) => {
+      seen.push(e);
+    });
+    try {
+      await Promise.allSettled([
+        wispTransport.fetch("https://a.example/1"),
+        wispTransport.fetch("https://a.example/2"),
+      ]);
+      expect(wispCoolingForTests()).toBe(true);
+      class MutePort {
+        sent: unknown[] = [];
+        onmessage: ((ev: MessageEvent) => void) | null = null;
+        postMessage(m: unknown): void {
+          this.sent.push(m);
+        }
+      }
+      relayRegister(new MutePort() as unknown as MessagePort);
+      t = 1_010_000;
+      const err = await wispTransport.fetch("https://a.example/silent").then(
+        () => {
+          throw new Error("expected rejection");
+        },
+        (e: Error) => e,
+      );
+      expect(String(err)).toContain("relay transport stall");
+      /* past the cooldown: the arming stalls (t=1_000_000) aged out
+         of the 60s window; only the recorded relay stall keeps the
+         count at threshold when the wisp stalls land */
+      t = 1_070_000;
+      seen.length = 0;
+      await Promise.allSettled([wispTransport.fetch("https://a.example/after")]);
+      expect(seen.some((e) => String(e.message ?? "").includes("wisp stall storm"))).toBe(true);
+    } finally {
+      emit.mockRestore();
+      clock.mockRestore();
+    }
+  });
+});

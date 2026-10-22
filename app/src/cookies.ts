@@ -197,6 +197,64 @@ export function anySessionProfileActive(): boolean {
   return false;
 }
 
+/* #394: the profile map is worker memory that an idle restart wipes;
+   a session-profile page would then ride the DURABLE default jar
+   (reads from it, Set-Cookie persists into it). Persist the profile
+   state in the Cache API (#390 transport-persistence precedent) and
+   restore it before the first proxied request is served: a restored
+   root has an empty in-memory session jar, so its requests fail
+   closed (cookie-free) until the host re-pushes, which is the
+   documented restart semantics. */
+const PROFILE_CACHE = "zeolite-jar-profile-v1";
+let jarProfilesPromise: Promise<void> | null = null;
+
+export function jarProfilesReady(): Promise<void> {
+  if (!jarProfilesPromise) {
+    jarProfilesPromise = (async () => {
+      if (typeof caches === "undefined") return;
+      const c = await caches.open(PROFILE_CACHE);
+      const r = await c.match("profiles");
+      if (!r) return;
+      const j = (await r.json()) as { profile?: unknown; roots?: Record<string, unknown> };
+      if (
+        typeof j.profile === "string" &&
+        j.profile.length > 0 &&
+        j.profile.length <= 64 &&
+        !j.profile.includes(SEP)
+      ) {
+        profile = j.profile;
+      }
+      if (j.roots && typeof j.roots === "object") {
+        for (const [root, pid] of Object.entries(j.roots)) {
+          if (
+            typeof pid === "string" &&
+            pid.length > 0 &&
+            pid.length <= 64 &&
+            !pid.includes(SEP)
+          ) {
+            rootProfiles.set(root, pid);
+          }
+        }
+      }
+    })().catch(() => {
+      /* a failed restore keeps the in-memory defaults; any push
+         re-persists */
+    });
+  }
+  return jarProfilesPromise;
+}
+
+function persistJarProfiles(): void {
+  const snapshot = { profile, roots: Object.fromEntries(rootProfiles) };
+  void (async () => {
+    if (typeof caches === "undefined") return;
+    const c = await caches.open(PROFILE_CACHE);
+    await c.put("profiles", new Response(JSON.stringify(snapshot)));
+  })().catch(() => {
+    /* storage unavailable: memory-only semantics for this lifetime */
+  });
+}
+
 function profileNameForNamespace(namespace: string): string {
   if (namespace === PROFILE_DEFAULT) return PROFILE_DEFAULT;
   const clientNamespace = namespace.startsWith("client:");
@@ -297,10 +355,12 @@ export function markJarClientUnbound(clientId?: string): void {
 
 export function pruneJarClients(activeClientIds: ReadonlySet<string>): void {
   const liveRoots = new Set<string>();
+  let prunedProfiles = false;
   for (const [id, root] of clientRoots) if (activeClientIds.has(id)) liveRoots.add(root);
   for (const [root, pid] of rootProfiles) {
     if (!activeClientIds.has(root) && !liveRoots.has(root)) {
       rootProfiles.delete(root);
+      prunedProfiles = true;
       if (pid !== PROFILE_DEFAULT) clearNamespace(namespaceForProfile(pid, root));
     }
   }
@@ -320,6 +380,9 @@ export function pruneJarClients(activeClientIds: ReadonlySet<string>): void {
   for (const [token, entry] of navHandleRoots) {
     if (entry.expires <= Date.now() || !rootProfiles.has(entry.root)) navHandleRoots.delete(token);
   }
+  /* #394: a pruned root is a profile-state change; persist it or the
+     restore would resurrect dead roots after a restart. */
+  if (prunedProfiles) persistJarProfiles();
 }
 
 /** Switch the active jar profile (zl:jarProfile control message). A
@@ -340,6 +403,7 @@ export function setJarProfile(p: unknown, clientId?: string): { ok: boolean; pro
     if (prev !== PROFILE_DEFAULT && prev !== next) {
       clearNamespace(namespaceForProfile(prev, root));
     }
+    persistJarProfiles();
     return { ok: true, profile: next };
   }
   const prev = profile;
@@ -347,6 +411,7 @@ export function setJarProfile(p: unknown, clientId?: string): { ok: boolean; pro
     clearNamespace(namespaceForProfile(prev, null));
   }
   profile = next;
+  persistJarProfiles();
   return { ok: true, profile };
 }
 
