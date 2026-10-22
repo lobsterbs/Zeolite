@@ -167,6 +167,7 @@ port.postMessage({
   type: "zl:config",
   prefix: "/zl/",
   navHandles: true,
+  queryRoutes: true,
   httpsUpgrade: true,
   imageLazy: false,
 });
@@ -176,8 +177,8 @@ port.postMessage({
   only; anything else is refused. The prefix persists, so a worker
   restart keeps it, but a storage wipe reverts to defaults.
 - Probe `zl:ping` and compare the returned `prefix`, `navHandles`,
-  `httpsUpgrade` and `version` against what you pushed. On mismatch,
-  re-push. This is the only reliable detector of a reverted worker.
+  `queryRoutes`, `httpsUpgrade` and `version` against what you pushed.
+  On mismatch, re-push. This is the only reliable detector of a reverted worker.
 - The route prefix is per-origin state. Each origin worker needs its own
   `zl:config`. The codec accepts the reserved `zl` route segment regardless
   of the configured prefix, so legacy decode keeps working while you
@@ -198,6 +199,11 @@ browser-visible URL and is on a deprecation path. Use the handle flow:
 3. Navigate to the answered `/__zl_navh__/<token>` route. Expired handles
    re-mint on GET navigations; a parent parked on the opaque prel form
    is answered with a same-origin redirect to the visible handle form.
+4. With `queryRoutes: true` the answer is the query shape instead:
+   `<real path>?<real query>&zlNavh=<token>`. The committed pathname
+   is the real destination path, so native `location.pathname` reads
+   work without any shim (the LegacyUnforgeable fix). Destinations
+   whose paths collide with engine-internal paths keep the NAVH form.
 
 ### The committed-URL constraint (read this twice)
 

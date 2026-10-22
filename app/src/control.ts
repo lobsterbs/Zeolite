@@ -2,7 +2,7 @@
  * Extracted from sw.ts (issues #85, #90, #91). Core zl: handling lives here;
  * extension-facing zl: messages are forwarded to ./extensions/control. */
 
-import { buildNavHandleUrl, currentPrefix, decodeClientUrl, encodeDest, mintableDest, setScheme } from "./codec";
+import { buildNavHandleUrl, buildQueryHandleUrl, currentPrefix, decodeClientUrl, encodeDest, mintableDest, setScheme } from "./codec";
 import type { JarConflictRule } from "./cookies";
 import { documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
@@ -21,7 +21,7 @@ import { beginRecording, finishRecording } from "./recording";
 import { pageCacheClear } from "./request";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
-import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setSiteEnabled } from "./swstate";
+import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setQueryRoutes, setSiteEnabled } from "./swstate";
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
 import { relayRegister } from "./relayfetch";
@@ -116,6 +116,11 @@ export interface ControlMessage {
       value. Hosts that navigate via zl:navHandle set this so no
       plaintext embed can appear on the deployment afterwards. */
   navHandles?: boolean;
+  /** zl:config: opt-in query-shape committed routes (Injector phase
+      2; the committed URL keeps the real path and query, the opaque
+      token rides ?zlNavh=). Ephemeral like navHandles: a worker
+      restart reverts it, the host re-pushes on boot. */
+  queryRoutes?: boolean;
   /** zl:transport: engine selection (#64). Absent = a poll; the reply carries the live engine; "libcurl"|"epoxy" switches it on the next init(). */
   engine?: "libcurl" | "epoxy";
   /** zl:rules: default outgoing user-agent for hosts without an
@@ -266,7 +271,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       const sourceUrl = new URL(sourceClient.url);
       if (
         sourceUrl.origin === self.location.origin &&
-        senderIsProxiedPath(sourceUrl.pathname) &&
+        senderIsProxiedPath(sourceUrl.pathname, sourceUrl.search) &&
         !jarClientHasRoot(sourceClient.id)
       ) markJarClientUnbound(sourceClient.id);
     } catch {
@@ -335,6 +340,8 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         /* #63: the live ?url= refusal choice, so an embedder detects a
            revert to defaults and re-pushes its config. */
         navHandles: navHandlesEnabled(),
+        /* Injector phase 2: the live query-shape opt-in. */
+        queryRoutes: queryRoutesEnabled(),
         profile: jarProfileState((e.source as { id?: string } | null)?.id),
       });
       break;
@@ -354,10 +361,12 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       if (typeof msg.imageLazy === "boolean") setImageLazy(msg.imageLazy);
       /* #63: same migration-window rule for the ?url= refusal. */
       if (typeof msg.navHandles === "boolean") setNavHandles(msg.navHandles);
+      /* Injector phase 2: same rule for the query-shape routes. */
+      if (typeof msg.queryRoutes === "boolean") setQueryRoutes(msg.queryRoutes);
       setScheme(msg.prefix ?? "/j/");
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
-      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), navHandles: navHandlesEnabled() });
+      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled() });
       break;
     }
     case "zl:mint": {
@@ -424,7 +433,16 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          pathname-routed SPAs can route; the host stays opaque to the
          browser, history and extensions (decision recorded in
          docs/security.md). */
-      const url = buildNavHandleUrl(msg.dest, undefined, sourceClientId);
+      /* Injector phase 2: with queryRoutes on, the committed handle
+         rides the query string (<real path>?<real query>&zlNavh=
+         <token>), so location.pathname reads the real path natively -
+         the LegacyUnforgeable class no shim can fix. A mint-refused
+         collision (an engine-internal path) falls back to the NAVH
+         form so the host keeps a usable handle. */
+      const url = queryRoutesEnabled()
+        ? buildQueryHandleUrl(msg.dest, undefined, sourceClientId) ??
+          buildNavHandleUrl(msg.dest, undefined, sourceClientId)
+        : buildNavHandleUrl(msg.dest, undefined, sourceClientId);
       if (url === null) {
         reply({ ok: false, error: "navHandle unavailable: no route key (storage degraded); keep the legacy ?url= embed" });
         break;
