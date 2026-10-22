@@ -264,6 +264,27 @@ Honest gaps to document for your users: cookie jars are per-origin
 cross-origin frames, extensions do not ride content-origin pages, and
 DevTools document access is limited to the app origin.
 
+### 7a. COEP-protected embedders
+
+A host that runs COOP/COEP on its top document (cross-origin
+isolation, e.g. for SharedArrayBuffer) only embeds cross-origin
+frame documents that opt into embedding. Without
+`Cross-Origin-Resource-Policy: cross-origin` the browser blocks the
+frame load with `ERR_BLOCKED_BY_RESPONSE`: the iframe shows an empty
+chrome-error frame, the boot page never loads, and the engine looks
+"offline" while the server logs nothing.
+
+Both halves of the content origin must send the header: the origin
+server adds it to every response it serves (the boot page, the
+honest engine-offline notice, static assets), and the worker adds it
+to every response it hands back through `respondWith`
+(`app/src/corp.ts`, wired at the single fetch-listener seam in
+`sw.ts`). With both in place, split-origin frames embed cleanly
+inside cross-origin-isolated hosts. COEP `credentialless` is not a
+substitute: it exempts no-cors subresources, not iframes, and the
+`credentialless` iframe attribute is an ephemeral empty context that
+breaks the boot page's registration.
+
 ## 8. Pin the bytes and verify them
 
 Pin by dist commit. The reference host Dockerfile carries:

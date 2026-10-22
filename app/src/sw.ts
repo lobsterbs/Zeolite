@@ -61,6 +61,11 @@ import { messageListener } from "./control";
    root: it boots the runtime and wires browser events to the engine
    and the control plane. */
 import { ghosteryListFetch, handleFetch, initEngine, persistRoute, routeReady } from "./request";
+/* CORP parity for COEP embedders: withCorp (./corp) opts every
+   engine-served response into cross-origin embedding at the
+   respondWith seam, so a split-origin host that runs COOP/COEP
+   on its top document can embed the content-origin frames. */
+import { withCorp } from "./corp";
 /* #121: engine-update alerting (update poll + activation broadcast)
    lives in ./updates; this entrypoint owns the worker lifecycle
    seams that call it. */
@@ -215,8 +220,28 @@ self.addEventListener("activate", (e) => {
    itself (the browser's own byte-compare oracle). */
 startUpdateChecks();
 
-/* #82: pure wiring - the request lifecycle is the engine's. */
-self.addEventListener("fetch", handleFetch);
+/* #82: pure wiring - the request lifecycle is the engine's. The
+   event is proxied so every respondWith call site inside
+   handleFetch gets funneled through withCorp without touching the
+   engine's internal branches (redirects, rewrite streams, honest
+   error pages, cache hits). */
+self.addEventListener("fetch", (e) => {
+  handleFetch(
+    new Proxy(e, {
+      get(target, prop) {
+        if (prop === "respondWith") {
+          return (r: Response | Promise<Response>) => {
+            void target.respondWith(Promise.resolve(r).then(withCorp));
+          };
+        }
+        const v = target[prop as keyof FetchEvent] as unknown;
+        return typeof v === "function"
+          ? (v as (...args: unknown[]) => unknown).bind(target)
+          : v;
+      },
+    }) as FetchEvent,
+  );
+});
 
 /* ---- Control plane ----------------------------------------------- */
 // Core zl: dispatch lives in ./control.ts; the extension facade lives in
