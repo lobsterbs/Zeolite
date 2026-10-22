@@ -61,7 +61,7 @@ import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersi
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
    control plane are call sites. */
-import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, pushDocCookieView, setHttpsUpgrade, setNavHandles, setRouteKey, siteDisabled, siteProfileFor, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, pushDocCookieView, queryRoutesEnabled, setHttpsUpgrade, setNavHandles, setRouteKey, siteDisabled, siteProfileFor, VCTX, ZEOLITE_VERSION } from "./swstate";
 
 import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, serveExtensionAsset } from "./extensions";
 
@@ -1235,6 +1235,21 @@ export function navhCleanFromPrel(pathname: string, dest: string): string | null
   } catch {
     return null;
   }
+  /* Injector phase 2: with queryRoutes on, the clean form rides the
+     query shape (<real path>?<real query>&zlNavh=<token>) so the
+     reloaded document owns a natively readable pathname - the same
+     mint the zl:navHandle verb uses. A mint-refused collision
+     (engine-internal path) or missing route key falls through to the
+     NAVH path form below; the #383 fail-closed contract is intact. */
+  if (queryRoutesEnabled()) {
+    const q = buildQueryHandleUrl(
+      dest,
+      NAVH_TTL_MS,
+      token ? decodeNavHandleRoot(token) ?? undefined : undefined,
+    );
+    if (q !== null) return q;
+  }
+
   /* #385: mint a FRESH handle for the clean form: the parent token
      can be past its TTL at reload time, and a reused token inherits
      the expiry, so the redirected navigation would 404 one hop

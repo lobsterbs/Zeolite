@@ -35,6 +35,7 @@ vi.mock("../transport", () => ({
 
 import { handleFetch, navhCleanFromPrel, routeReady } from "../request";
 import { b64uEncode, buildNavHandleUrl, decodeClientUrl, encodeDestLegacy, setRouteKey, setScheme } from "../codec";
+import { setQueryRoutes } from "../swstate";
 
 const ORIGIN = "https://engine.example";
 const KEY = b64uEncode(new Uint8Array(16).map((_, i) => i));
@@ -205,5 +206,52 @@ describe("expired navigation handle re-mint (#385)", () => {
     const served = await armed[0]!;
     expect(served.status).toBe(404);
     expect(transportMock.calls).toBe(0);
+  });
+});
+
+describe("queryRoutes clean form (Injector phase 2)", () => {
+  beforeEach(() => {
+    setQueryRoutes(false);
+  });
+
+  it("mints the query shape when queryRoutes is on", () => {
+    setQueryRoutes(true);
+    const base = buildNavHandleUrl(DEST)!;
+    const parent = new URL(base, ORIGIN).pathname;
+    const clean = navhCleanFromPrel(
+      parent + "/__zl_prel__/" + encodeURIComponent("/search?q=what+is+a+hurricane&sei=SEI1"),
+      SEI_DEST,
+    );
+    expect(clean).not.toBeNull();
+    expect(clean!.startsWith("/search?q=what+is+a+hurricane&sei=SEI1&zlNavh=")).toBe(true);
+    expect(clean!.includes("/__zl_navh__/")).toBe(false);
+    expect(decodeClientUrl(new URL(clean!, ORIGIN))).toBe(SEI_DEST);
+  });
+
+  it("falls back to the NAVH path form on an engine-internal collision", () => {
+    setQueryRoutes(true);
+    const base = buildNavHandleUrl("https://www.google.com/")!;
+    const parent = new URL(base, ORIGIN).pathname;
+    const dest = "https://www.google.com/__zl_navh__/thing?q=1";
+    const clean = navhCleanFromPrel(
+      parent + "/__zl_prel__/" + encodeURIComponent("/__zl_navh__/thing?q=1"),
+      dest,
+    );
+    expect(clean).not.toBeNull();
+    expect(clean!.startsWith("/__zl_navh__/")).toBe(true);
+    expect(clean!.includes("zlNavh=")).toBe(false);
+    expect(decodeClientUrl(new URL(clean!, ORIGIN))).toBe(dest);
+  });
+
+  it("keeps the NAVH path form when queryRoutes is off", () => {
+    const base = buildNavHandleUrl(DEST)!;
+    const parent = new URL(base, ORIGIN).pathname;
+    const clean = navhCleanFromPrel(
+      parent + "/__zl_prel__/" + encodeURIComponent("/search?q=what+is+a+hurricane&sei=SEI1"),
+      SEI_DEST,
+    );
+    expect(clean).not.toBeNull();
+    expect(clean!.startsWith("/__zl_navh__/")).toBe(true);
+    expect(clean!.includes("zlNavh=")).toBe(false);
   });
 });
