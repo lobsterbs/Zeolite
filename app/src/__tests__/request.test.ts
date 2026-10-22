@@ -40,7 +40,7 @@ import { classifyRtype, forwardedHeaders, handleFetch, mergeRouteSearch, pageCac
 import { setFingerprint, setSiteEnabled } from "../swstate";
 import { establishContext, resolveRelative } from "../vctx";
 import { VCTX } from "../swstate";
-import { encodeDestLegacy } from "../codec";
+import { b64uEncode, encodeDestLegacy, setScheme } from "../codec";
 
 describe("reqDest (#82 seam)", () => {
   it("falls back to sec-fetch-dest when destination is empty (Firefox, #40)", () => {
@@ -833,5 +833,77 @@ describe("escape seam fails closed on route-shaped paths (#389)", () => {
     const served = await armed[0]!;
     expect(served.status).toBe(200);
     expect(await served.text()).toBe("origin-asset");
+  });
+});
+
+/* Wave 46 follow-up (the split-origin URL-bar strand): a legacy
+   /zl/<b64u> route minted under a prefix this worker has not
+   configured (LB split mode: the app worker owns /zl/, the
+   content worker keeps its own prefix) reaches the escape seam,
+   where the settled client context used to resolve the ROUTE PATH
+   against the previous page's virtual origin - a guaranteed
+   upstream 404 for every URL-bar navigation once the previous
+   page had settled. The legacy decode wins ahead of the context
+   recovery; genuine escaped relative paths are untouched. */
+describe("split-origin legacy routes decode ahead of the context recovery", () => {
+  const ORIGIN = "https://esc46.example";
+
+  const mkEvent = (routeUrl: string, clientId: string) => {
+    const armed: Promise<Response>[] = [];
+    const ev = {
+      request: {
+        url: routeUrl,
+        method: "GET",
+        mode: "navigate",
+        destination: "document",
+        credentials: "same-origin",
+        referrer: "",
+        body: null,
+        headers: new Headers(),
+      },
+      clientId,
+      resultingClientId: clientId + "-new",
+      respondWith: (p: Promise<Response>) => void armed.push(p),
+      waitUntil: () => {},
+    } as unknown as FetchEvent;
+    return { ev, armed };
+  };
+
+  beforeEach(() => {
+    transportMock.calls = 0;
+    transportMock.urls = [];
+    transportMock.queue = [
+      new Response("ok", { headers: { "content-type": "text/plain" } }),
+    ];
+    setScheme("/j/");
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN },
+      registration: { scope: ORIGIN + "/" },
+      clients: { get: async () => null },
+    });
+    vi.stubGlobal("caches", { open: async () => { throw new Error("no cache storage"); } });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("serves the decoded destination, never the previous page's virtual origin", async () => {
+    establishContext(VCTX, "esc-46a", "https://prev.example/dir/page.html");
+    const tail = b64uEncode(new TextEncoder().encode("https://target.example/path?q=1"));
+    const { ev, armed } = mkEvent(ORIGIN + "/zl/" + tail, "esc-46a");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(transportMock.urls[0]).toBe("https://target.example/path?q=1");
+  });
+
+  it("keeps the settled-context recovery for a genuine escaped path", async () => {
+    establishContext(VCTX, "esc-46b", "https://prev.example/dir/page.html");
+    const { ev, armed } = mkEvent(ORIGIN + "/dir/img.png", "esc-46b");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(transportMock.urls[0]).toBe("https://prev.example/dir/img.png");
   });
 });

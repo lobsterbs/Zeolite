@@ -1984,12 +1984,40 @@ export function handleFetch(e: FetchEvent): void {
         ) {
           return navOutcome(e, url, 403, "blocked", "zeolite: plaintext ?url= embed refused (navHandles opt-in; use zl:navHandle)");
         }
-        /* Issue #33: the requesting client's own virtual context is the
-           primary recovery for an escaped same-origin path (right even
-           with Referrer-Policy: no-referrer); referrer decoding
-           survives only as the compat fallback. */
-        const ctxDest = resolveRelative(VCTX, e.clientId, url.pathname + url.search);
-        if (ctxDest) {
+        /* Wave 46 follow-up (the split-origin URL-bar strand): a legacy
+           /zl/<b64u> route that reaches this seam is a route, never a
+           page-relative tail. The split-origin content worker keeps its
+           own configured prefix (LB pushes /zl/ only to the app worker),
+           so every frame navigation to a legacy route lands here; the #33
+           context recovery below used to resolve the route path against
+           the PREVIOUS page's virtual origin (https://prev.example/zl/
+           <b64u>), a guaranteed 404 strand for every URL-bar navigation
+           once the previous page had settled. decodeLegacyRoute already
+           validates the whole shape (two segments, the configured prefix
+           or the reserved "zl" segment, a strict-UTF-8 http(s) b64u
+           payload, never a keyed tail), so a decode wins here; an
+           undecodable tail keeps the ordinary #33/#113/#389 order below,
+           and a genuine escaped relative path (single or deeper
+           segments, or a tail that does not decode to an http(s)
+           destination) is untouched. */
+        const legacyFirst = decodeLegacyRoute(url.pathname);
+        const ctxDest = legacyFirst
+          ? null
+          : resolveRelative(VCTX, e.clientId, url.pathname + url.search);
+        if (legacyFirst) {
+          const ltid = DIAG.trace();
+          DIAG.emit({
+            traceId: ltid,
+            requestId: ltid,
+            category: "REWRITE",
+            severity: "info",
+            stage: "REQUEST_INTERCEPTED",
+            message: "legacy route decoded ahead of the context recovery (split-origin prefix gap)",
+            url: legacyFirst,
+          });
+          dest0 = unwrapDest(legacyFirst);
+          routeCarriesQuery = true;
+        } else if (ctxDest) {
           dest0 = ctxDest;
         } else {
           const refDest = e.request.referrer
