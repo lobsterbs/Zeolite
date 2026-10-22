@@ -986,37 +986,42 @@ fn is_event_attr(attr: &str) -> bool {
 /// "<script" inside escaped enters double-escaped, and a terminated
 /// "</script" inside double-escaped does NOT close the element
 /// (only "-->" exits double-escaped back to escaped, and another
-/// "-->" exits escaped). Byte-exact lowercase markers: a mixed-case
-/// "<Script" inside an escaped block degrades to the plain
-/// first-close search, never a false close of a normal script.
+/// "-->" exits escaped). #397: the tag markers match ASCII
+/// case-insensitively (the HTML tokenizer compares the
+/// script-data-escaped markers case-insensitively, so a
+/// </SCRIPT> close is a real close); <!-- and --> carry no letters.
 /// Returns (start of "</script", index just past its '>').
+fn starts_ci(b: &[u8], needle: &[u8]) -> bool {
+    b.len() >= needle.len() && b[..needle.len()].eq_ignore_ascii_case(needle)
+}
+
 fn find_script_close(buf: &str) -> Option<(usize, usize)> {
     let b = buf.as_bytes();
     let mut i = 0usize;
     let mut escaped = false;
     let mut double_escaped = false;
     while i < b.len() {
-        if !escaped && b[i..].starts_with(b"<!--") {
+        if !escaped && starts_ci(&b[i..], b"<!--") {
             escaped = true;
             i += 4;
             continue;
         }
-        if escaped && !double_escaped && b[i..].starts_with(b"<script") {
+        if escaped && !double_escaped && starts_ci(&b[i..], b"<script") {
             double_escaped = true;
             i += 7;
             continue;
         }
-        if double_escaped && b[i..].starts_with(b"-->") {
+        if double_escaped && starts_ci(&b[i..], b"-->") {
             double_escaped = false;
             i += 3;
             continue;
         }
-        if escaped && !double_escaped && b[i..].starts_with(b"-->") {
+        if escaped && !double_escaped && starts_ci(&b[i..], b"-->") {
             escaped = false;
             i += 3;
             continue;
         }
-        if !double_escaped && b[i..].starts_with(b"</script") {
+        if !double_escaped && starts_ci(&b[i..], b"</script") {
             let after = i + 8;
             if after < b.len()
                 && matches!(b[after], b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>')
@@ -1558,6 +1563,21 @@ mod tests {
         );
         let out = r.process(&html);
         assert!(out.contains(json), "JSON body changed: {}", out);
+    }
+
+    #[test]
+    fn uppercase_script_close_ends_the_script() {
+        // #397: </SCRIPT> is a real close (the tokenizer matches the
+        // marker ASCII case-insensitively); with a lowercase-only
+        // match the close was missed, the next <script src> was
+        // swallowed into the first raw body and its src never routed.
+        let base = "https://demo.example/app.html";
+        let mut r = Rewriter::new(cfg());
+        r.set_base(base);
+        let html = r#"<script>x</SCRIPT><script src="https://cdn.x.com/b.js"></script>"#;
+        let out = r.process(html);
+        let routed = cfg().encode_url("https://cdn.x.com/b.js");
+        assert!(out.contains(&routed), "src not routed: {}", out);
     }
 
     #[test]

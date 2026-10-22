@@ -79,8 +79,11 @@ export async function loadRouteKey(): Promise<Uint8Array | null> {
     of them, so a restart that mints a fresh key keeps routes minted
     under old keys working. A pre-history record store migrates: the
     lone "route" record becomes the one-entry history. Storage
-    unavailable degrades to [] (the caller keeps the legacy codec). */
-export async function loadRouteHistory(): Promise<Uint8Array[]> {
+    unavailable degrades to null (#399: a failed read is NOT first
+    boot - [] would make the caller mint over it and strand every
+    route minted before the restart; null tells the caller to keep
+    its in-memory keys and retry). */
+export async function loadRouteHistory(): Promise<Uint8Array[] | null> {
   try {
     const db = await openDb();
     const raw = await getBytesRetry(db, HIST_ID);
@@ -90,7 +93,10 @@ export async function loadRouteHistory(): Promise<Uint8Array[]> {
     const cur = await getBytesRetry(db, KEY_ID);
     return cur instanceof Uint8Array && cur.byteLength === 16 ? [cur] : [];
   } catch {
-    return [];
+    /* #399: a transient storage failure is not first boot. [] here
+       made routeRestore mint a fresh key and replace the in-memory
+       decode set with it alone. */
+    return null;
   }
 }
 

@@ -24,6 +24,8 @@
 //! undeclared property creates it.
 
 /// Neutralize frame-buster code in a script body (or inline handler).
+use super::literals::{find_regex_end, regex_allowed, MAX_KEYWORD};
+
 pub fn antiframe(js: &str) -> String {
     let mut s = replace_bound(js, "window.self", "self");
     s = replace_bound(&s, "window.top", "top");
@@ -39,8 +41,10 @@ pub fn antiframe(js: &str) -> String {
                 continue;
             }
             for op in ["==", "===", "!=", "!=="] {
-                s = replace_bound(&s, &format!("{a} {op} {b}"), &format!("self {op} self"));
-                s = replace_bound(&s, &format!("{a}{op}{b}"), &format!("self{op}self"));
+                /* #396: folding uses the member-chain-rejecting variant
+                (see replace_bound_fold). */
+                s = replace_bound_fold(&s, &format!("{a} {op} {b}"), &format!("self {op} self"));
+                s = replace_bound_fold(&s, &format!("{a}{op}{b}"), &format!("self{op}self"));
             }
         }
     }
@@ -52,14 +56,39 @@ fn is_ident(b: u8) -> bool {
 }
 
 /// Substring replace that respects identifier boundaries, so
-/// `window.topology` never matches the `window.top` pattern.
+/// window.topology never matches the window.top pattern.
 fn replace_bound(s: &str, pat: &str, rep: &str) -> String {
+    replace_bound_opt(s, pat, rep, false)
+}
+
+/// #396: comparison folding additionally rejects a match whose next
+/// byte opens a member chain: top === window.innerHeight is a
+/// property read, not the window identity, and folding it rewrote
+/// ordinary code to wrong values (self === self.innerHeight). Full
+/// correctness needs scope resolution (globals.rs oxc); the boundary
+/// rule keeps the cheap scanner honest.
+fn replace_bound_fold(s: &str, pat: &str, rep: &str) -> String {
+    replace_bound_opt(s, pat, rep, true)
+}
+
+fn replace_bound_opt(s: &str, pat: &str, rep: &str, fold: bool) -> String {
     let bytes = s.as_bytes();
     let pb = pat.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0usize;
+    let mut lex = LexState::new();
     while i < bytes.len() {
         if let Some(end) = comment_end(bytes, i) {
+            out.push_str(&s[i..end]);
+            i = end;
+            continue;
+        }
+        // #398: a regex body is code, not a string. Without this a
+        // quote inside it opened a fake string that swallowed the
+        // rest of the script (and any frame buster after it). A false
+        // positive only skips a span verbatim (a missed fold), the
+        // same safety rule as literals.rs.
+        if let Some(end) = regex_span(s, i, &mut lex) {
             out.push_str(&s[i..end]);
             i = end;
             continue;
@@ -72,22 +101,116 @@ fn replace_bound(s: &str, pat: &str, rep: &str) -> String {
             if let Some(end) = find_str_end(s, i) {
                 out.push_str(&s[i..end]);
                 i = end;
+                lex.value();
                 continue;
             }
         }
         if bytes[i..].starts_with(pb)
             && (i == 0 || (!is_ident(bytes[i - 1]) && bytes[i - 1] != b'.'))
             && (i + pb.len() >= bytes.len() || !is_ident(bytes[i + pb.len()]))
+            && (!fold
+                || i + pb.len() >= bytes.len()
+                || (bytes[i + pb.len()] != b'.' && bytes[i + pb.len()] != b'['))
         {
             out.push_str(rep);
             i += pb.len();
+            // the replacement carries the same token classes as the
+            // matched text; record it as a value.
+            lex.value();
             continue;
         }
+        if is_ident(bytes[i]) {
+            let start = i;
+            while i < bytes.len() && is_ident(bytes[i]) {
+                i += 1;
+            }
+            out.push_str(&s[start..i]);
+            lex.ident(&s.as_bytes()[start..i]);
+            continue;
+        }
+        let c = bytes[i];
         let ch = s[i..].chars().next().unwrap();
         out.push(ch);
         i += ch.len_utf8();
+        lex.byte(c);
     }
     out
+}
+
+/// #398: regex-vs-division lexing state, the same heuristic
+/// literals.rs uses (regex_allowed / find_regex_end there). A quote
+/// inside a regex body must not open a fake string that hides the
+/// guard or the sink after it; a false positive only skips a span
+/// verbatim, so the worst case is a missed fold, never corruption.
+struct LexState {
+    last_sig: u8,
+    word: [u8; MAX_KEYWORD],
+    wlen: usize,
+    w_member: bool,
+}
+
+impl LexState {
+    fn new() -> Self {
+        LexState {
+            last_sig: b';',
+            word: [0; MAX_KEYWORD],
+            wlen: 0,
+            w_member: false,
+        }
+    }
+
+    /// a string or regex literal (or a replacement) is a value
+    fn value(&mut self) {
+        self.last_sig = b'x';
+        self.wlen = 0;
+        self.w_member = false;
+    }
+
+    /// an identifier run
+    fn ident(&mut self, run: &[u8]) {
+        if run.len() <= MAX_KEYWORD {
+            self.word[..run.len()].copy_from_slice(run);
+            self.wlen = run.len();
+            // #345 (literals.rs): last_sig is still the sig BEFORE
+            // this run, so a '.' here means property access, not a
+            // keyword.
+            self.w_member = self.last_sig == b'.';
+        } else {
+            self.wlen = 0;
+            self.w_member = false;
+        }
+        self.last_sig = b'x';
+    }
+
+    /// any other significant byte
+    fn byte(&mut self, c: u8) {
+        match c {
+            b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {}
+            // #206 (literals.rs): postfix ++/-- ends an expression,
+            // so the '/' after it is division, never a regex start.
+            b'+' if self.last_sig == b'+' => self.last_sig = b'x',
+            b'-' if self.last_sig == b'-' => self.last_sig = b'x',
+            _ => {
+                self.last_sig = c;
+                self.wlen = 0;
+                self.w_member = false;
+            }
+        }
+    }
+}
+
+/// #398: when a regex literal starts at s[i] == '/', the offset just
+/// past its closing '/'; the lex state records the literal as a
+/// value. None = not a regex here (division; comments are checked
+/// first by the callers).
+fn regex_span(s: &str, i: usize, lex: &mut LexState) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes[i] != b'/' || !regex_allowed(lex.last_sig, &lex.word[..lex.wlen], lex.w_member) {
+        return None;
+    }
+    let close = find_regex_end(&s[i + 1..])?;
+    lex.value();
+    Some(i + 1 + close + 1)
 }
 
 /// #368: end offset of a `//` or `/* */` comment starting at s[i], copied
@@ -163,8 +286,16 @@ fn antiframe_scan(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len() + 32);
     let mut i = 0usize;
+    let mut lex = LexState::new();
     while i < bytes.len() {
         if let Some(end) = comment_end(bytes, i) {
+            out.push_str(&s[i..end]);
+            i = end;
+            continue;
+        }
+        // #398: see replace_bound_opt - a quote inside a regex body
+        // must not open a fake string that hides a later sink.
+        if let Some(end) = regex_span(s, i, &mut lex) {
             out.push_str(&s[i..end]);
             i = end;
             continue;
@@ -175,6 +306,7 @@ fn antiframe_scan(s: &str) -> String {
             if let Some(end) = find_str_end(s, i) {
                 out.push_str(&s[i..end]);
                 i = end;
+                lex.value();
                 continue;
             }
         }
@@ -189,14 +321,40 @@ fn antiframe_scan(s: &str) -> String {
             }
         }
         if tlen == 0 {
+            if is_ident(bytes[i]) {
+                let start = i;
+                while i < bytes.len() && is_ident(bytes[i]) {
+                    i += 1;
+                }
+                out.push_str(&s[start..i]);
+                lex.ident(&s.as_bytes()[start..i]);
+                continue;
+            }
+            let c = bytes[i];
             let ch = s[i..].chars().next().unwrap();
             out.push(ch);
             i += ch.len_utf8();
+            lex.byte(c);
             continue;
         }
         scan_sink(bytes, &mut i, &mut out, tlen);
+        // the emitted sink is a value reference
+        lex.value();
     }
     out
+}
+
+/// #392: the optional-chain sink is valid syntax only when a CALL
+/// follows the method name (the ?.reload?.() form); a bare reference
+/// (var r = top.location.reload) emitted the sink without the call
+/// and killed the whole inline script with a SyntaxError. Without an
+/// opening paren after the method the reference maps to the page's
+/// own location member, the same read semantics as .href below.
+fn sink_call_follows(bytes: &[u8], mut k: usize) -> bool {
+    while k < bytes.len() && matches!(bytes[k], b' ' | b'\t' | b'\n' | b'\r') {
+        k += 1;
+    }
+    k < bytes.len() && bytes[k] == b'('
 }
 
 /// Classify one matched top.location / parent.location token and
@@ -226,18 +384,33 @@ fn scan_sink(bytes: &[u8], i: &mut usize, out: &mut String, tlen: usize) {
         }
     }
     if bytes[j..].starts_with(b".replace") {
-        out.push_str("self.zl_antiframe?.replace?.");
-        *i += tlen + 8;
+        if sink_call_follows(bytes, j + 8) {
+            out.push_str("self.zl_antiframe?.replace?.");
+            *i += tlen + 8;
+        } else {
+            out.push_str("self.location");
+            *i += tlen;
+        }
         return;
     }
     if bytes[j..].starts_with(b".reload") {
-        out.push_str("self.zl_antiframe?.reload?.");
-        *i += tlen + 7;
+        if sink_call_follows(bytes, j + 7) {
+            out.push_str("self.zl_antiframe?.reload?.");
+            *i += tlen + 7;
+        } else {
+            out.push_str("self.location");
+            *i += tlen;
+        }
         return;
     }
     if bytes[j..].starts_with(b".assign") {
-        out.push_str("self.zl_antiframe?.assign?.");
-        *i += tlen + 7;
+        if sink_call_follows(bytes, j + 7) {
+            out.push_str("self.zl_antiframe?.assign?.");
+            *i += tlen + 7;
+        } else {
+            out.push_str("self.location");
+            *i += tlen;
+        }
         return;
     }
     out.push_str("self.location");
@@ -360,9 +533,51 @@ mod tests {
         assert_eq!(out, "var p = self.location;");
     }
 
+    /// #392: the sink needs a call; a bare reference must stay
+    /// valid JS (the whole inline script dies on a SyntaxError
+    /// otherwise).
+    #[test]
+    fn bare_method_references_stay_parseable() {
+        let out = antiframe("var r = top.location.reload;");
+        assert_eq!(out, "var r = self.location.reload;");
+        let out2 = antiframe("if (top.location.replace) x();");
+        assert_eq!(out2, "if (self.location.replace) x();");
+        let out3 = antiframe("var a = top.location.assign , b = 1;");
+        assert_eq!(out3, "var a = self.location.assign , b = 1;");
+    }
+
+    /// #396: comparison folding must not fire on member chains.
+    #[test]
+    fn member_chain_comparisons_do_not_fold() {
+        let out = antiframe("var t = top === window.innerHeight;");
+        assert_eq!(out, "var t = top === window.innerHeight;");
+        let out2 = antiframe("if (parent !== self.document.body) x();");
+        assert_eq!(out2, "if (parent !== self.document.body) x();");
+        let out3 = antiframe("var d = window == window['x'];");
+        assert_eq!(out3, "var d = window == window['x'];");
+    }
+
+    /// #398: a quote inside a regex body must not open a fake
+    /// string that swallows the guard and the sink after it.
+    #[test]
+    fn regex_quote_does_not_hide_the_guard() {
+        let out = antiframe("var re = /'/; if (top != self) top.location = location;");
+        assert!(out.contains("self.zl_antiframe = location"), "got: {out}");
+        assert!(!out.contains("top.location"), "got: {out}");
+    }
+
+    /// #398: an expression slash still divides; the regex heuristic
+    /// must not treat it as a literal start.
+    #[test]
+    fn division_is_not_a_regex() {
+        let out = antiframe("var q = a / b; if (top != self) top.location = location;");
+        assert!(out.contains("self.zl_antiframe = location"), "got: {out}");
+    }
+
     /// #208: fold and sink patterns never fire inside string
     /// literals.
     #[test]
+
     fn string_literals_are_never_folded() {
         let out = antiframe("var s = 'top != self'; var t = \"top.location = x\";");
         assert_eq!(out, "var s = 'top != self'; var t = \"top.location = x\";");

@@ -142,12 +142,20 @@ describe("navhTailDest (#143 follow-up: opaque-route relative recovery)", () => 
     );
   });
 
-  it("appends via the context when the token expired (long-lived page)", () => {
+  it("resolves an expired token head's suffix against the context origin (#395)", () => {
     setRouteKey(KEY_A);
     const tok = encodeNavHandle(PAGE, -1)!; /* expired */
-    expect(navhTailDest(tok + "/latest-commit", PAGE, true, decodeNavHandle)).toBe(
-      "https://github.com/lobsterbs/Zeolite/latest-commit",
+    /* #395: the tail after an expired token head is a full path from
+       the root. The old page-path append base treated the document
+       path as a directory and doubled it
+       (/dir/page/dir/assets/x.js 404'd upstream). */
+    expect(navhTailDest(tok + "/dir/assets/x.js", "https://h.example/dir/page", true, never)).toBe(
+      "https://h.example/dir/assets/x.js",
     );
+    /* the context path and query never leak into the base */
+    expect(
+      navhTailDest(tok + "/dir/assets/x.js", "https://h.example/dir/page?tab=1", true, never),
+    ).toBe("https://h.example/dir/assets/x.js");
   });
 
   it("resolves an expired new-shape tail as an absolute path via the context (#144)", () => {
@@ -158,21 +166,8 @@ describe("navhTailDest (#143 follow-up: opaque-route relative recovery)", () => 
     ).toBe("https://github.com/lobsterbs/Zeolite/latest-commit");
   });
 
-  it("strips the context URL query from the append base", () => {
-    setRouteKey(KEY_A);
-    const tok = encodeNavHandle(PAGE, -1)!;
-    expect(navhTailDest(tok + "/latest-commit", PAGE + "?tab=readme", true, never)).toBe(
-      "https://github.com/lobsterbs/Zeolite/latest-commit",
-    );
-  });
-
-  it("keeps a trailing-slash context from doubling the slash", () => {
-    setRouteKey(KEY_A);
-    const tok = encodeNavHandle(PAGE, -1)!;
-    expect(navhTailDest(tok + "/x.png", "https://example.com/dir/", true, never)).toBe(
-      "https://example.com/dir/x.png",
-    );
-  });
+  /* #395: the query-strip and trailing-slash append-base cases died
+     with the page-path base; the origin base needs neither. */
 
   it("returns null for a token-shaped suffix tail with no context and a dead token", () => {
     setRouteKey(KEY_A);
@@ -192,11 +187,11 @@ describe("navhTailDest (#143 follow-up: opaque-route relative recovery)", () => 
     expect(navhTailDest(tok, PAGE, true, decodeNavHandle)).toBeNull();
   });
 
-  it("preserves percent-encoding in the suffix", () => {
+  it("preserves percent-encoding in the suffix (#395 origin base)", () => {
     setRouteKey(KEY_A);
     const tok = encodeNavHandle(PAGE, -1)!;
     expect(navhTailDest(tok + "/a%20b.png", PAGE, true, never)).toBe(
-      "https://github.com/lobsterbs/Zeolite/a%20b.png",
+      "https://github.com/a%20b.png",
     );
   });
 });
@@ -299,6 +294,26 @@ describe("parent-relative route resolution (#101/#157)", () => {
     const url = buildNavHandleUrl("https://example.com/dir/page.html")!;
     const path = url.split("?")[0] + "/__zl_prel__/" + encodeURIComponent("/error/e.gif?x=1");
     expect(navpResolve(path)).toBe("https://example.com/error/e.gif?x=1");
+  });
+
+  it("recovers an expired NAVH parent for its prel tail (#393)", () => {
+    setRouteKey(KEY_A);
+    const tok = encodeNavHandle("https://example.com/dir/page.html", -1)!; /* expired */
+    const path =
+      "/__zl_navh__/" + tok + "/dir/page.html/__zl_prel__/" + encodeURIComponent("/img/logo.png");
+    expect(navpResolve(path)).toBe("https://example.com/img/logo.png");
+  });
+
+  it("keeps the honest null for a tampered expired NAVH parent (#393)", () => {
+    setRouteKey(KEY_A);
+    const bytes = b64uDecode(encodeNavHandle("https://example.com/dir/page.html", -1)!)!;
+    bytes[20] ^= 0xff;
+    const path =
+      "/__zl_navh__/" +
+      b64uEncode(bytes) +
+      "/dir/page.html/__zl_prel__/" +
+      encodeURIComponent("/img/logo.png");
+    expect(navpResolve(path)).toBeNull();
   });
 
   it("resolves a NAV navigation-route parent with its tail", () => {

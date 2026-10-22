@@ -20,7 +20,7 @@ pub fn rewrite_inline(js: &str, enc: &dyn Fn(&str) -> String) -> String {
 /// Regex-vs-division disambiguation: the longest keyword that can
 /// precede a regex literal ("instanceof"); anything longer is an
 /// identifier and cannot be one of these.
-const MAX_KEYWORD: usize = 11;
+pub(crate) const MAX_KEYWORD: usize = 11;
 
 fn rewrite_literals(js: &str, enc: &dyn Fn(&str) -> String, allow_template: bool) -> String {
     let mut out = String::with_capacity(js.len() + 64);
@@ -246,7 +246,7 @@ fn is_bare_specifier(spec: &str) -> bool {
 /// are harmless: the span is copied verbatim, so the worst case is a
 /// missed literal rewrite (the runtime bootstrap catches those at
 /// request time). False negatives corrupt the script.
-fn regex_allowed(last_sig: u8, last_word: &[u8], word_member: bool) -> bool {
+pub(crate) fn regex_allowed(last_sig: u8, last_word: &[u8], word_member: bool) -> bool {
     const KEYWORDS: [&[u8]; 13] = [
         b"return",
         b"typeof",
@@ -294,7 +294,7 @@ fn regex_allowed(last_sig: u8, last_word: &[u8], word_member: bool) -> bool {
 /// Byte offset of the closing '/' of a regex body, scanning
 /// conservatively: an unescaped line break means this was not a
 /// regex, and a '/' inside a character class does not close it.
-fn find_regex_end(s: &str) -> Option<usize> {
+pub(crate) fn find_regex_end(s: &str) -> Option<usize> {
     let b = s.as_bytes();
     let mut i = 0;
     let mut in_class = false;

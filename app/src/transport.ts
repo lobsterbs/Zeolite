@@ -333,6 +333,11 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
         });
       } catch (err) {
         if (init?.signal?.aborted) throw err;
+        /* #400: a stall on the relay arm counts for the storm detector
+           too. Without this, stalls seen while the cooldown was active
+           never refreshed the window, so a wedged relay looked
+           healthy the moment the cooldown expired. */
+        recordStall();
         throw new WispStallError(
           "relay transport stall: no first byte within " +
             WISP_TTFB_DEADLINE_MS +
