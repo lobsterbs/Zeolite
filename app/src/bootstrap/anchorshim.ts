@@ -10,13 +10,20 @@
    so this module asks the worker over the control plane
    (zl:decodeRoutes) to decode routes the page's own markup already
    carries, memoizes route -> virtual destination, and serves the
-   two read seams: the nav guard's swap-row property getter
-   (anchorVirtual) and Element.getAttribute.
+   read seams: the nav guard's swap-row property getter (A and
+   AREA href), Element.getAttribute, and the SVG anchor's
+   animated href object (#388).
 
    Honest limits: the first read before the decode reply lands
    returns the native route value (a race, not a hang); detached
    anchors never join a scan; a page without a controller keeps the
-   native degrade; non-anchor hrefs (link) stay native. */
+   native degrade; non-anchor hrefs (link) stay native; the SVG
+   virtual view is a plain object, not an SVGAnimatedString
+   instance. Large documents converge across scans (#387): the
+   collection spends its bounded window only on undecoded routes,
+   and a reply that leaves undecoded routes behind schedules the
+   next window, so anchors deep in the document virtualize without
+   waiting for a mutation or a read miss. */
 
 import { swc } from "./siteid";
 
@@ -80,7 +87,12 @@ function scheduleScan(): void {
 
 /* Collect route-shaped hrefs from the document: the attr string AND
    the absolute form (the property getter reads absolute URLs,
-   getAttribute reads attr strings). Bounded per scan. */
+   getAttribute reads attr strings). Bounded per scan; values the
+   memo already answers (positively or negatively) and in-flight
+   values are skipped, so the window is spent only on undecoded
+   routes (#387: without the skip every scan replayed the same
+   document prefix and anchors past the first window never
+   virtualized). */
 function scan(): void {
   scanning = true;
   try {
@@ -101,15 +113,18 @@ function scan(): void {
         continue;
       }
       if (typeof a !== "string" || !a) continue;
-      if (routeShaped(a)) batch.push(a);
+      if (!memo.has(a) && !inflight.has(a) && routeShaped(a)) batch.push(a);
       try {
         const abs = new URL(a, (w.location as AnyRecord).href).href;
-        if (abs !== a && routeShaped(abs)) batch.push(abs);
+        if (abs !== a && !memo.has(abs) && !inflight.has(abs) && routeShaped(abs)) batch.push(abs);
       } catch {
         /* an unparseable base anchors nothing */
       }
     }
-    if (batch.length) decodeBatch(batch);
+    /* the window filled before the document ended: undecoded
+       anchors may remain past it. */
+    const more = batch.length >= 2 * BATCH_MAX;
+    if (batch.length) decodeBatch(batch, more);
   } finally {
     scanning = false;
   }
@@ -118,14 +133,20 @@ function scan(): void {
 /* Ask the worker to decode a batch: the reply's dests array
    parallels routes and fills the memo in order. The 5s timeout
    clears the in-flight set so a lost reply stays retryable; a page
-   without a controller keeps the native degrade. */
-function decodeBatch(routes: string[]): void {
+   without a controller keeps the native degrade. more/capped mean
+   undecoded routes were left behind by a window bound; the reply
+   then schedules the next window so coverage converges (#387). */
+function decodeBatch(routes: string[], more: boolean): void {
   const uniq: string[] = [];
+  let capped = false;
   for (const r of routes) {
     if (memo.has(r) || inflight.has(r)) continue;
     inflight.add(r);
     uniq.push(r);
-    if (uniq.length >= BATCH_MAX) break;
+    if (uniq.length >= BATCH_MAX) {
+      capped = true;
+      break;
+    }
   }
   if (!uniq.length) return;
   const clear = () => {
@@ -154,6 +175,10 @@ function decodeBatch(routes: string[]): void {
       const dst = d.dests[i];
       memoSet(uniq[i], typeof dst === "string" ? dst : "");
     }
+    /* #387: a bounded window left undecoded routes behind; drive
+       the next one so a large document virtualizes fully without
+       waiting for a mutation or a read miss. */
+    if (capped || more) scheduleScan();
   };
   try {
     ctl.postMessage({ type: "zl:decodeRoutes", routes: uniq }, [ch.port2]);
@@ -176,8 +201,9 @@ export function anchorVirtual(v: string): string | undefined {
 
 /** Install: realm capture, the install-time scan (or one
     DOMContentLoaded scan while loading), a mutation observer for
-    later markup, and the Element.getAttribute wrap. One-way
-    dependency: navguard imports this module, never the reverse. */
+    later markup, the Element.getAttribute wrap and the SVG
+    animated-href read wrap. One-way dependency: navguard imports
+    this module, never the reverse. */
 export function applyAnchorShim(w: Record<string, unknown>): void {
   realmRef.w = w as AnyRecord;
   const doc = (w as AnyRecord).document as AnyRecord | undefined;
@@ -227,4 +253,44 @@ export function applyAnchorShim(w: Record<string, unknown>): void {
     }
     return O.call(this, n);
   };
+  /* #388: SVG anchors read their href through SVGAnimatedString
+     (baseVal/animVal), a seam neither the nav guard table nor the
+     getAttribute wrap covers (the nav guard wraps the anchor and
+     area property rows; the SVG animated object is a different
+     prototype). Virtualize the read on a memo hit; every pending
+     or non-route read keeps the native object, and a baseVal write
+     forwards to it. Honest limit: the virtual view is a plain
+     object, not an SVGAnimatedString instance. */
+  const SAE = (w as AnyRecord).SVGAElement as AnyRecord | undefined;
+  if (SAE && SAE.prototype) {
+    const sd = Object.getOwnPropertyDescriptor(SAE.prototype, "href");
+    if (sd && typeof sd.get === "function") {
+      const nativeSvgGet = sd.get as (this: AnyRecord) => AnyRecord;
+      Object.defineProperty(SAE.prototype, "href", {
+        configurable: true,
+        enumerable: true,
+        get(this: AnyRecord) {
+          const raw = nativeSvgGet.call(this);
+          const b = raw && typeof raw.baseVal === "string" ? raw.baseVal : "";
+          const v = b ? anchorVirtual(b) : undefined;
+          if (v === undefined) return raw;
+          return {
+            get baseVal() {
+              return v;
+            },
+            set baseVal(x: string) {
+              try {
+                raw.baseVal = x;
+              } catch {
+                /* a refused write stays native */
+              }
+            },
+            get animVal() {
+              return v;
+            },
+          };
+        },
+      });
+    }
+  }
 }
