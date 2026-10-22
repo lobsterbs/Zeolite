@@ -184,3 +184,31 @@ node suite/e2e/torture.mjs
 ```
 
 (The two suites bind the same ports, so run them sequentially.)
+
+# Injector differential suite (queryRoutes off vs on)
+
+`node suite/e2e/differential.mjs` runs the same reference pages through the engine
+in BOTH committed-route shapes - queryRoutes off (the NAVH path form) and on
+(the query shape) - and asserts all of the following in each mode:
+
+- `zl:config` flips the query-shape opt-in and `zl:ping` echoes it.
+- `zl:navHandle` mints the designed shape: `/__zl_navh__/<token>/<real path>` off,
+  `<real path>?zlNavh=<token>` on, with no destination leak in the mint reply.
+- A pathname-routed SPA (the #236 fixture, the modeled Brave Ask class) routes
+  identically in both shapes, and a NATIVE `window["location"]` pathname read -
+  what unshimmed page code and third-party scripts actually see - is the real
+  destination path only in the query shape (the LegacyUnforgeable constraint:
+  no shim can fix pathname reads, only the committed-URL shape can).
+- `pushState` re-anchors in the live shape, the router keeps the virtual path
+  without a document reload, and a fresh-page load of the pushed route restores
+  the SPA state (the URL-bar / deep-link escape class, the e293ecc seam).
+- Anchor reads stay virtual while the raw attribute keeps the engine route (#180).
+- Fallout: zero browser-direct fixture requests, zero 5xx answers, and the
+  fixture wire log shows no engine-origin referer in either shape (#34).
+
+## Run locally
+
+```
+cargo build -p zeolite-server --release
+ZL_STATIC=app/dist node suite/e2e/differential.mjs
+```

@@ -480,3 +480,11 @@ jobs:
             grep -E "^\[FAIL\]|HARNESS-ERROR" reload.out | head -20 | while IFS= read -r l; do echo "::error::RELOAD $l"; done
             exit 1
           fi
+      - name: Injector differential suite (queryRoutes off vs on)
+        run: |
+          node suite/e2e/differential.mjs 2>&1 | tee diff.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\[FAIL\]|HARNESS-ERROR" diff.out | head -20 | while IFS= read -r l; do echo "::error::DIFF $l"; done
+            exit 1
+          fi
