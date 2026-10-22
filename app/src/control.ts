@@ -25,7 +25,7 @@ import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade,
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
 import { relayRegister } from "./relayfetch";
-import { altRegister, currentEngine, setPrimaryWisp, wispTransport } from "./transport";
+import { altRegister, currentEngine, engineReady, setPrimaryWisp, wispTransport } from "./transport";
 import { loadInflight } from "./loadstate";
 import { activeStreams } from "./streams-alive";
 import { contextOf } from "./vctx";
@@ -499,11 +499,13 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          switches the transport for the NEXT init(): the
          running client keeps its engine until the service
          worker restarts, and the switchEngine seam forces the
-         re-init on the next request. Ephemeral like the
-         other host toggles: resets to the deployment
-         default (ZL_TRANSPORT) on SW restart. */
+         re-init on the next request. #390: the choice persists in
+         the Cache API and survives an idle worker restart
+         (controllerchange never fires for one, so the embedder
+         cannot re-send it); tracing stays ephemeral. */
       const eng = (msg as { engine?: unknown }).engine;
       if (eng === undefined) {
+        await engineReady(); // #390: answer the restored choice, not the pre-restore default
         reply({ ok: true, engine: currentEngine() });
       } else if (eng !== "libcurl" && eng !== "epoxy") {
         reply({ ok: false, error: "transport needs engine libcurl|epoxy" });

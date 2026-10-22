@@ -7,6 +7,7 @@ import {
   decodePath,
   isEngineAsset,
   isEnginePath,
+  legacyRouteShaped,
   looksKeyedToken,
   recoverPath,
   referrerDest,
@@ -357,5 +358,27 @@ describe("recoverPath (concatenated tails)", () => {
     expect(recoverPath(route) + "?cb=42").toBe(
       "https://www.youtube.com" + path + "?cb=42",
     );
+  });
+});
+
+/* #389: the fail-closed gate needs a shape-only route test - the
+   fetch handler must never pass a path it could have minted to the
+   origin, while the embedder app's own assets keep passing. */
+describe("legacyRouteShaped (#389)", () => {
+  it("accepts the reserved zl segment without decoding", () => {
+    expect(legacyRouteShaped("/zl/aHR0cHM6Ly93aWtpcGVkaWEub3Jn")).toBe(true);
+  });
+
+  it("accepts the configured prefix segment", () => {
+    setScheme("/q/");
+    expect(legacyRouteShaped("/q/AAAA")).toBe(true);
+    setScheme("/j/");
+  });
+
+  it("refuses host paths, extra segments and foreign segments", () => {
+    expect(legacyRouteShaped("/assets/index-9f2.js")).toBe(false);
+    expect(legacyRouteShaped("/zl/tail/extra")).toBe(false);
+    expect(legacyRouteShaped("/r/AAAA")).toBe(false);
+    expect(legacyRouteShaped("/")).toBe(false);
   });
 });

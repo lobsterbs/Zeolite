@@ -755,6 +755,19 @@ export function decodeLegacyRoute(path: string): string | null {
   return /^https?:\/\//.test(dest) ? dest : null;
 }
 
+/** #389: the mintable route shape without decoding - two segments, a
+    b64url tail, and the first segment is the configured prefix or the
+    reserved legacy "zl" segment. The fetch handler fails closed on a
+    route-shaped path no held key decodes: the origin can never answer
+    an engine route, and a proxy host answers /zl/ with a misleading
+    503 ("Engine offline") that blames a live engine. */
+export function legacyRouteShaped(path: string): boolean {
+  const m = /^\/([^/]+)\/([A-Za-z0-9_-]+)$/.exec(path);
+  if (!m) return false;
+  const seg = m[1];
+  return prefix === "/" + seg + "/" || seg === "zl";
+}
+
 /** Schemes the engine never routes: the browser owns blob:, data: and
     about: natively (createObjectURL media, blob workers, generated
     downloads, data: documents). The SW fetch handler passes these

@@ -85,6 +85,10 @@ Rules:
   registered relay port. Re-register the relay on an interval (the
   reference host uses 15 seconds) and answer the engine `zl:relayLost`
   broadcast.
+- Since the idle-restart fixes (Zeolite #391) the engine broadcasts
+  `zl:relayLost` once on every worker start (a cold wake), so answering
+  that broadcast alone re-arms the relay after an idle restart; keep the
+  interval as defense in depth.
 - Wait for the worker to be ready before the first navigation, then push
   configuration (section 4).
 
@@ -298,9 +302,10 @@ Run this after integrating and after every pin bump:
    false, and `version` is the expected release.
 3. A first navigation renders through the engine: the net log shows the
    relay or wisp transport engaged, no direct fetches from the page.
-4. The relay channel survives an idle worker restart: the
-   `zl:relayLost` broadcast is answered, or your interval re-register
-   fires before the deadline.
+4. The relay channel survives an idle worker restart: the engine
+   cold-wakes with a `zl:relayLost` broadcast at every worker start
+   (#391), and your listener or interval re-register re-arms the relay
+   before the deadline.
 5. A proxied page sending `zl:config` is refused by the sender gate.
 6. In split-origin mode, both origin workers report the pushed prefix.
 7. Recovery candidates and filter-list fetches ride the same transport
