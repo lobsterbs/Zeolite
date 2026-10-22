@@ -212,3 +212,163 @@ describe("install ordering (#180)", () => {
     expect(b).toBeGreaterThan(a);
   });
 });
+
+describe("deep-document coverage and the SVG/AREA seams (#387/#388)", () => {
+  it("virtualizes anchors beyond the first scan window (100-anchor paging, #387)", async () => {
+    const LOC = "https://engine.host/j/abc";
+    const ENGINE = "https://engine.host";
+    const anchor = makeClass("href");
+    const els: Array<Record<string, any>> = [];
+    const destOf = new Map<string, string>();
+    for (let i = 0; i < 100; i++) {
+      const dest = "https://real.site/p" + i;
+      const attr = "/j/" + tok(dest);
+      const abs = ENGINE + attr;
+      const el = anchor.make();
+      anchor.set(el, abs);
+      el._attrs = { href: attr };
+      els.push(el);
+      destOf.set(attr, dest);
+      destOf.set(abs, dest);
+    }
+    const sent: Array<{ type: string; routes: string[] }> = [];
+    const ports: Array<{ postMessage: (p: unknown) => void }> = [];
+    vi.stubGlobal("navigator", {
+      serviceWorker: {
+        controller: {
+          postMessage: (
+            m: { type: string; routes: string[] },
+            t: Array<{ postMessage: (p: unknown) => void }>,
+          ) => {
+            sent.push(m);
+            ports.push(t[0]);
+          },
+        },
+      },
+    });
+    const w: Record<string, any> = {
+      HTMLAnchorElement: { prototype: anchor.proto },
+      document: { readyState: "complete", querySelectorAll: () => els },
+      location: { href: LOC },
+    };
+    applyNavGuard(w, LOC, ENGINE);
+    applyAnchorShim(w);
+    /* converge: each reply that leaves undecoded routes behind
+       schedules the next bounded window */
+    for (let round = 0; round < 16; round++) {
+      for (let i = 0; i < 60 && sent.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      if (!sent.length) break;
+      const m = sent.shift()!;
+      ports.shift()!.postMessage({ ok: true, dests: m.routes.map((r) => destOf.get(r) ?? null) });
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    await new Promise((r) => setTimeout(r, 260));
+    /* coverage converged: nothing left to decode */
+    expect(sent.length).toBe(0);
+    /* deep anchors virtualize through the property getter */
+    expect(els[64].href).toBe("https://real.site/p64");
+    expect(els[99].href).toBe("https://real.site/p99");
+  });
+
+  it("virtualizes SVG animated href reads on a memo hit; pending reads keep the native object (#388)", async () => {
+    const LOC = "https://engine.host/j/abc";
+    const dest = "https://real.site/svg";
+    const attr = "/j/" + tok(dest);
+    const svgAnim: Record<string, any> = { baseVal: attr, animVal: attr };
+    const svgProto: Record<string, any> = {
+      getAttribute(this: any, n: string) {
+        return (this._attrs ?? {})[n] ?? null;
+      },
+    };
+    Object.defineProperty(svgProto, "href", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return svgAnim;
+      },
+    });
+    const svgEl = Object.create(svgProto) as Record<string, any>;
+    svgEl._attrs = { href: attr };
+    const sent: Array<{ type: string; routes: string[] }> = [];
+    const ports: Array<{ postMessage: (p: unknown) => void }> = [];
+    vi.stubGlobal("navigator", {
+      serviceWorker: {
+        controller: {
+          postMessage: (
+            m: { type: string; routes: string[] },
+            t: Array<{ postMessage: (p: unknown) => void }>,
+          ) => {
+            sent.push(m);
+            ports.push(t[0]);
+          },
+        },
+      },
+    });
+    const w: Record<string, any> = {
+      SVGAElement: { prototype: svgProto },
+      document: { readyState: "complete", querySelectorAll: () => [svgEl] },
+      location: { href: LOC },
+      Element: { prototype: svgProto },
+    };
+    applyAnchorShim(w);
+    /* pending read: the native animated string object stands */
+    expect(svgEl.href).toBe(svgAnim);
+    expect(svgEl.href.baseVal).toBe(attr);
+    for (let i = 0; i < 60 && sent.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(sent.length).toBe(1);
+    ports[0].postMessage({ ok: true, dests: [dest, dest] });
+    await new Promise((r) => setTimeout(r, 10));
+    /* memo hit: the read seams return the virtual destination */
+    expect(svgEl.href.baseVal).toBe(dest);
+    expect(svgEl.href.animVal).toBe(dest);
+    /* a baseVal write forwards to the native object */
+    svgEl.href.baseVal = "https://w.example/x";
+    expect(svgAnim.baseVal).toBe("https://w.example/x");
+  });
+
+  it("virtualizes AREA property reads through the nav guard swap row (#388: the area seam was already covered)", async () => {
+    const LOC = "https://engine.host/j/abc";
+    const ENGINE = "https://engine.host";
+    const dest = "https://real.site/map";
+    const attr = "/j/" + tok(dest);
+    const abs = ENGINE + attr;
+    const area = makeClass("href");
+    const el = area.make();
+    area.set(el, abs);
+    el._attrs = { href: attr };
+    const sent: Array<{ type: string; routes: string[] }> = [];
+    const ports: Array<{ postMessage: (p: unknown) => void }> = [];
+    vi.stubGlobal("navigator", {
+      serviceWorker: {
+        controller: {
+          postMessage: (
+            m: { type: string; routes: string[] },
+            t: Array<{ postMessage: (p: unknown) => void }>,
+          ) => {
+            sent.push(m);
+            ports.push(t[0]);
+          },
+        },
+      },
+    });
+    const w: Record<string, any> = {
+      HTMLAreaElement: { prototype: area.proto },
+      document: { readyState: "complete", querySelectorAll: () => [el] },
+      location: { href: LOC },
+    };
+    applyNavGuard(w, LOC, ENGINE);
+    applyAnchorShim(w);
+    /* first read race: native until the decode reply lands */
+    expect(el.href).toBe(abs);
+    for (let i = 0; i < 60 && sent.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    ports[0].postMessage({ ok: true, dests: [dest, dest] });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(el.href).toBe(dest);
+  });
+});

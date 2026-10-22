@@ -220,10 +220,13 @@ jobs:
         # Raised 31744 -> 33792 for the #180 anchor read
         # virtualization (Injector phase 1: bootstrap anchorshim +
         # the zl:decodeRoutes oracle); measured 33782, baseline 31406.
+        # Raised 33792 -> 34304 for the #387/#388 follow-up (scan
+        # window skip-memoized paging + the SVG animated-href read
+        # seam); measured 34294, baseline 33782.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 33792 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 33792)"; exit 1; fi
+          if [ "$SIZE" -ge 34304 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 34304)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
