@@ -72,8 +72,49 @@ export function setPrimaryWisp(url: string): boolean {
   return true;
 }
 
+/* #390: the zl:transport choice must survive an idle worker restart.
+   controllerchange never fires for an instance restart, so the
+   embedder cannot re-send its toggle; without persistence the UI
+   shows epoxy while the engine silently runs the deployment default.
+   Same Cache API pattern as the route-shape restore; a write failure
+   keeps the choice for this worker lifetime only. */
+const ENGINE_CACHE = "zeolite-engine-v1";
+const engineOrigin = (): string =>
+  typeof self !== "undefined" && self.location ? self.location.origin : "http://zeolite.test";
+let engineReadyPromise: Promise<void> | null = null;
+
+/** Restore the persisted engine choice once per worker instance;
+    safe to call from any seam, never throws. */
+export function engineReady(): Promise<void> {
+  if (!engineReadyPromise) {
+    engineReadyPromise = (async () => {
+      try {
+        const hit = await (
+          await caches.open(ENGINE_CACHE)
+        ).match(new Request(engineOrigin() + "/zl-engine-choice"));
+        const eng = hit ? await hit.text() : "";
+        if (eng === "libcurl" || eng === "epoxy") setEngine(eng);
+      } catch {
+        /* storage unavailable: the deployment default stays */
+      }
+    })();
+  }
+  return engineReadyPromise;
+}
+
+async function persistEngine(engine: TransportEngine): Promise<void> {
+  try {
+    await (
+      await caches.open(ENGINE_CACHE)
+    ).put(new Request(engineOrigin() + "/zl-engine-choice"), new Response(engine));
+  } catch {
+    /* storage unavailable: the choice lives for this worker lifetime */
+  }
+}
+
 let curlReady: Promise<void> | null = null;
 async function ensureCurl(): Promise<void> {
+  await engineReady(); // #390: replay the persisted choice before the first init
   if (!curlReady) {
     curlReady = zlCurlInit({ websocket: primaryWispUrl() }).catch((err) => {
       setDegradedImpl("libcurl transport: " + String(err));
@@ -368,6 +409,7 @@ export const wispTransport: Transport = {
   switchEngine(engine) {
     setEngine(engine);
     curlReady = null; // force re-init inside the next ensureCurl()
+    void persistEngine(engine); // #390: survive the next idle restart
   },
 };
 

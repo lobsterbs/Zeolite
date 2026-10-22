@@ -14,7 +14,7 @@
    this module keeps calling decideTransport/refineWithContent at the
    same seams the old handler did. */
 /// <reference lib="webworker" />
-import { b64uDecode, b64uEncode, buildNavHandleUrl, decodeClientUrl, decodeExpiredNavHandle, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodeNavHandleRoot, decodePath, encodeDest, encodeDestLegacy, encodeNavHandle, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, looksKeyedToken, NAVH, NAVH_TTL_MS, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { b64uDecode, b64uEncode, buildNavHandleUrl, decodeClientUrl, decodeExpiredNavHandle, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodeNavHandleRoot, decodePath, encodeDest, encodeDestLegacy, encodeNavHandle, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, legacyRouteShaped, looksKeyedToken, NAVH, NAVH_TTL_MS, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
@@ -1925,6 +1925,23 @@ export function handleFetch(e: FetchEvent): void {
               });
               dest0 = unwrapDest(legacy);
               routeCarriesQuery = true;
+            } else if (legacyRouteShaped(url.pathname)) {
+              /* #389: the path carries the engine's own mintable
+                 route shape but nothing decodes it (a corrupt or
+                 truncated tail - a live worker answered every
+                 decodable one above). The origin can never serve an
+                 engine route: a proxy host answers /zl/ with a 503
+                 that says the engine is offline, which is false and
+                 misleads operators. Fail closed from the engine;
+                 non-route-shaped paths (the embedder app's own
+                 assets) keep the #101 passthrough below. */
+              return navOutcome(
+                e,
+                url,
+                404,
+                "route",
+                "zeolite: undecodable legacy route",
+              );
             } else {
               /* #101: the silent passthrough. Neither the client's
                  virtual context nor the referrer names a home for this

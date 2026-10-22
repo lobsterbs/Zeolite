@@ -89,6 +89,30 @@ export async function requestRelayReRegister(deadlineMs: number, traceId: string
   return got;
 }
 
+/* #391: the relay port, the embedder origin and the boot-page
+   handshake state are worker memory; an idle restart drops them all
+   and the embedder only re-arms on its own timer or when a relay
+   fetch broadcasts zl:relayLost - which costs a 3s wait and can end
+   in a 30s backoff (live-measured recovery: 33.9s). Asking every
+   window client at worker start closes the gap before the first
+   post-restart fetch: both the app page and the zlsw-register boot
+   page re-register on this message. Harmless at first install -
+   zero clients answer. */
+export async function relayColdWake(): Promise<void> {
+  try {
+    const scope: {
+      clients?: { matchAll(o: { type: string }): Promise<Array<{ postMessage(m: unknown): void }>> };
+    } = typeof self !== "undefined" ? (self as unknown as typeof scope) : (globalThis as unknown as typeof scope);
+    const cs = (await scope.clients?.matchAll({ type: "window" })) ?? [];
+    for (const c of cs) c.postMessage({ type: "zl:relayLost" });
+  } catch {
+    /* no clients API in this realm */
+  }
+}
+/* Fires on every worker instance start (module eval), including the
+   post-idle-restart wake the fetch handler runs on. */
+if (typeof self !== "undefined") void relayColdWake();
+
 /** Control-plane half of zl:relayRegister: remember the embedder's
     port and route its answers to the pending fetches. */
 export function relayRegister(port: MessagePort): void {

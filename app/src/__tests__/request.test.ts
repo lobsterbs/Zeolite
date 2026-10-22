@@ -774,3 +774,64 @@ describe("jar client prune options (#366)", () => {
     expect(seen).toEqual({ includeUncontrolled: true, type: "all" });
   });
 });
+
+/* #389: a route-shaped same-origin path nothing decodes must be
+   answered by the engine, never passed to the origin: LB answers a
+   /zl/ hit with a misleading 503 "Engine offline". */
+describe("escape seam fails closed on route-shaped paths (#389)", () => {
+  const ORIGIN = "https://esc.example";
+
+  const mkEvent = (routeUrl: string, clientId: string) => {
+    const armed: Promise<Response>[] = [];
+    const ev = {
+      request: {
+        url: routeUrl,
+        method: "GET",
+        mode: "cors",
+        destination: "empty",
+        credentials: "same-origin",
+        referrer: "",
+        body: null,
+        headers: new Headers(),
+      },
+      clientId,
+      resultingClientId: clientId + "-new",
+      respondWith: (p: Promise<Response>) => void armed.push(p),
+      waitUntil: () => {},
+    } as unknown as FetchEvent;
+    return { ev, armed };
+  };
+
+  beforeEach(() => {
+    transportMock.calls = 0;
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN },
+      registration: { scope: ORIGIN + "/" },
+      clients: { get: async () => null },
+    });
+    vi.stubGlobal("caches", { open: async () => { throw new Error("no cache storage"); } });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("answers an undecodable /zl/ tail from the engine, not the origin", async () => {
+    const { ev, armed } = mkEvent(ORIGIN + "/zl/w44garbg", "esc-1");
+    handleFetch(ev);
+    expect(armed.length).toBe(1);
+    const served = await armed[0]!;
+    expect(served.status).toBe(404);
+    expect(transportMock.calls).toBe(0);
+  });
+
+  it("keeps the #101 passthrough for non-route-shaped paths", async () => {
+    vi.stubGlobal("fetch", async () => new Response("origin-asset", { status: 200 }));
+    const { ev, armed } = mkEvent(ORIGIN + "/assets/index-9f2.js", "esc-2");
+    handleFetch(ev);
+    expect(armed.length).toBe(1);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe("origin-asset");
+  });
+});
