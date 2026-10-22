@@ -14,7 +14,7 @@
    this module keeps calling decideTransport/refineWithContent at the
    same seams the old handler did. */
 /// <reference lib="webworker" />
-import { b64uDecode, b64uEncode, buildNavHandleUrl, decodeClientUrl, decodeExpiredNavHandle, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodeNavHandleRoot, decodePath, encodeDest, encodeDestLegacy, encodeNavHandle, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, legacyRouteShaped, looksKeyedToken, NAVH, NAVH_TTL_MS, passChallengeRedirFixed, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { b64uDecode, b64uEncode, buildNavHandleUrl, buildQueryHandleUrl, decodeClientUrl, decodeExpiredNavHandle, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodeNavHandleRoot, decodePath, decodeQueryHandle, encodeDest, encodeDestLegacy, encodeNavHandle, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, legacyRouteShaped, looksKeyedToken, NAVH, NAVH_TTL_MS, NAVQ_PARAM, passChallengeRedirFixed, queryHandleToken, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
@@ -983,7 +983,9 @@ export function csInjectUrls(target: string, req: Request, parentUrl?: string): 
       const hostParent =
         pu.protocol !== "about:" &&
         !pu.pathname.startsWith(NAVH + "/") &&
-        !isEnginePath(pu.pathname);
+        !isEnginePath(pu.pathname) &&
+        /* Injector phase 2: a query-shape parent is a proxied page. */
+        queryHandleToken(pu.search) === null;
       if (hostParent) subframe = false;
     } catch {
       /* ponytail: unparseable parent keeps subframe semantics */
@@ -1358,7 +1360,10 @@ export function handleFetch(e: FetchEvent): void {
           const sourceUrl = new URL(sourceClient.url);
           if (
             !jarClientHasRoot(e.clientId) &&
-            (isEnginePath(sourceUrl.pathname) || sourceUrl.pathname.startsWith(NAVH + "/"))
+            (isEnginePath(sourceUrl.pathname) ||
+              sourceUrl.pathname.startsWith(NAVH + "/") ||
+              /* Injector phase 2: a query-shape client is proxied. */
+              queryHandleToken(sourceUrl.search) !== null)
           ) markJarClientUnbound(e.clientId);
         } catch {
           /* An unparseable client URL cannot establish a proxied root. */
@@ -1563,6 +1568,49 @@ export function handleFetch(e: FetchEvent): void {
          complete URL doubled the query (the Anubis pass-challenge
          fetch carried it twice, joined by a literal "?"). */
       let routeCarriesQuery = false;
+      /* Injector phase 2 (query-shape committed routes): a live
+         zlNavh token decodes in the chain below like any route
+         shape; an EXPIRED one on a GET navigation re-mints first (the
+         #385 reload contract, mirrored from the NAVH branch). A
+         garbage token takes neither arm: the ordinary chain below
+         keeps its native behavior, so a host page that happens to
+         carry the param name never breaks. */
+      const qHandle = decodeQueryHandle(url);
+      const qTok = qHandle !== null ? null : queryHandleToken(url.search);
+      const qExp =
+        qTok !== null && e.request.method === "GET" && e.request.mode === "navigate"
+          ? decodeExpiredNavHandle(qTok)
+          : null;
+      if (qExp !== null) {
+        /* the expired payload names the origin only; the real path
+           and query are the committed URL itself minus the token
+           param (byte-faithful raw strip, same as the codec) */
+        const qRaw = url.search.startsWith("?") ? url.search.slice(1) : "";
+        const qRest = qRaw.split("&").filter((p) => p !== NAVQ_PARAM + "=" + qTok);
+        const qFull =
+          qExp.destination + url.pathname + (qRest.length > 0 ? "?" + qRest.join("&") : "");
+        const qFresh = buildQueryHandleUrl(qFull, NAVH_TTL_MS, qExp.rootClientId);
+        if (qFresh) {
+          const qtid = DIAG.trace();
+          netLogPush({
+            method: e.request.method,
+            traceId: qtid,
+            path: url.pathname + url.search,
+            dest: qFull,
+            status: 302,
+            rtype: classifyRtype(reqDest(e.request), ""),
+            ms: 0,
+            bytes: 0,
+            verdict: "engine: expired query handle re-minted",
+            transport: "engine",
+            detail: { internalUrl: qFresh, ttfb: 0 },
+          });
+          return new Response(null, { status: 302, headers: { location: qFresh } });
+        }
+        /* a verified expiry that cannot re-mint (route key degraded)
+           strands like the NAVH class - never a guess */
+        return navOutcome(e, url, 404, "route", "zeolite: bad or expired query handle");
+      }
       if (foreign) {
         /* Issue #34. The client lookup is the only async part; the
            policy itself is pure and unit-tested. */
@@ -1640,6 +1688,13 @@ export function handleFetch(e: FetchEvent): void {
           return new Response(null, { status: 204, headers: h });
         }
         dest0 = url.href;
+      } else if (qHandle !== null) {
+        /* Injector phase 2: the query-shape committed route. The live
+           token names the origin; the real path and query are the
+           committed URL itself. The destination carries its own real
+           query (the token rode the search string), so
+           routeCarriesQuery stays false: no merge, no doubled query. */
+        dest0 = qHandle.destination;
       } else if (url.pathname.includes(NAVP)) {
         /* #101: a root-relative or relative input re-emitted by the
            page or a guarded child realm as <parent route>/<NAVP>/
@@ -3692,6 +3747,10 @@ function referrerOrigin(referrer: string): string | null {
     let ref = decodePath(refU.pathname);
     if (!ref && refU.pathname.startsWith(NAVH + "/"))
       ref = decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1));
+    /* Injector phase 2: a query-shape referrer carries its token in
+       the search; the path is the real destination path. */
+    if (!ref && queryHandleToken(refU.search) !== null)
+      ref = decodeQueryHandle(refU)?.destination ?? null;
     /* #113: legacy /zl/ routes from cold starts or pre-#113 dists
        also fail decodePath when the prefix is not configured yet.
        decodeLegacyRoute recovers them at the escape seam. */
@@ -3813,6 +3872,11 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
          (the real query is the route search, appended below), so the
          Referer is the full upstream page URL. */
       ref = decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1));
+    }
+    /* Injector phase 2: a query-shape referrer carries its token in
+       the search; the path is the real destination path. */
+    if (!ref && queryHandleToken(refU.search) !== null) {
+      ref = decodeQueryHandle(refU)?.destination ?? null;
     }
     /* #113: legacy /zl/ routes from cold starts or pre-#113 dists
        also fail decodePath when the prefix is not configured yet.

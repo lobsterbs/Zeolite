@@ -537,6 +537,12 @@ export function decodeNavHandlePath(tail: string): string | null {
     from a handle-navigated page. Every client-URL-to-destination
     derivation goes through here. */
 export function decodeClientUrl(u: URL): string | null {
+  /* Injector phase 2: a query-shape client carries its route token in
+     the search and its real destination path in the path, so every
+     client-URL-to-destination derivation (extensions, cookies,
+     virtual origins) inherits the shape through this shared seam. */
+  const q = decodeQueryHandle(u);
+  if (q !== null) return q.destination;
   if (u.pathname.startsWith(NAVH + "/")) {
     const d = decodeNavHandlePath(u.pathname.slice(NAVH.length + 1));
     return d === null ? null : d + u.search;
@@ -588,6 +594,118 @@ export function buildNavHandleUrl(
           (_s: string, one: string, rest: string) => one + "%2F".repeat(rest.length),
         );
   return NAVH + "/" + token + path + u.search;
+}
+
+/* ---- query-shape committed routes (Injector phase 2) -------------- */
+
+/** Committed query-route param: with the host's queryRoutes opt-in
+    (zl:config), zl:navHandle mints the opaque initial-navigation
+    token into the QUERY STRING instead of a path prefix, so the
+    committed URL is <real path>?<real query>&zlNavh=<token>. The
+    LegacyUnforgeable constraint (window.location cannot be shimmed)
+    means only the committed-URL shape fixes pathname reads; with the
+    token in the query, location.pathname IS the real destination
+    path natively. Engine-owned name: a page-supplied zlNavh value
+    that does not MAC-verify is never a route token. */
+export const NAVQ_PARAM = "zlNavh";
+
+/* The navguard marker, duplicated like NAVP so codec stays
+   import-free. Keep in lockstep with bootstrap/navguard. */
+const NAVQ_NAV = "/__zl_nav__";
+/* Engine-internal route roots, same lockstep rule (extensions/serve). */
+const NAVQ_EXT = "/zl-ext/";
+const NAVQ_CS = "/zl-cs/";
+const NAVQ_WISP = "/wisp/";
+
+/** Raw search string -> the zlNavh param value, or null. Raw on
+    purpose: the committed query round-trips byte-faithfully (no
+    URLSearchParams re-encode), and a percent-encoded impostor value
+    fails the b64u decode downstream instead of decoding into a
+    token. */
+export function queryHandleToken(search: string): string | null {
+  const raw = search.startsWith("?") ? search.slice(1) : search;
+  if (raw === "") return null;
+  for (const part of raw.split("&")) {
+    if (part.startsWith(NAVQ_PARAM + "=")) return part.slice(NAVQ_PARAM.length + 1);
+  }
+  return null;
+}
+
+/** A committed query-route URL -> its destination, or null. The
+    token is the same origin-only NAVH payload (MAC-verified,
+    TTL-bound); the committed path and the cleaned search are the
+    real destination tail. Only the component that MAC-verifies is
+    removed from the search: every other param byte survives,
+    including page-authored zlNavh impostors. Fail-closed: a garbage
+    or expired token decodes to null. */
+export function decodeQueryHandle(u: URL): { destination: string; rootClientId?: string } | null {
+  const raw = u.search.startsWith("?") ? u.search.slice(1) : u.search;
+  if (raw === "") return null;
+  const parts = raw.split("&");
+  const head = NAVQ_PARAM + "=";
+  for (let i = 0; i < parts.length; i++) {
+    if (!parts[i].startsWith(head)) continue;
+    const token = parts[i].slice(head.length);
+    const origin = decodeNavHandle(token);
+    if (origin === null) continue;
+    /* Origin-only payload only: a full-destination token pasted into
+       the search by a page is a path-shape NAVH token, not a
+       committed query route. Fail closed; the NAVH path shape owns
+       those tokens. */
+    try {
+      if (new URL(origin).origin !== origin) continue;
+    } catch {
+      continue;
+    }
+    /* The payload names the origin; the committed path and the
+       cleaned search are the real destination tail. */
+    const rest = parts.slice(0, i).concat(parts.slice(i + 1));
+    const cleaned = rest.length > 0 ? "?" + rest.join("&") : "";
+    return {
+      destination: origin + u.pathname + cleaned,
+      rootClientId: decodeNavHandleRoot(token) ?? undefined,
+    };
+  }
+  return null;
+}
+
+/** Mint the query-shape handle URL: <real path>?<real
+    query>[&]zlNavh=<origin-only token>, the hash riding the committed
+    URL only (the destination keeps none, matching buildNavHandleUrl).
+    Refuses the engine's own path vocabulary (assets, the route
+    prefix, the NAV/NAVH/NAVP markers, the wisp and extension roots):
+    a committed URL that collides with an engine-internal path would
+    be served by the engine, not the proxy, so the mint fails and
+    the caller keeps the NAVH form. Null = no route key or a
+    non-mintable destination, the same contract as buildNavHandleUrl. */
+export function buildQueryHandleUrl(
+  dest: string,
+  ttlMs: number = NAVH_TTL_MS,
+  rootClientId?: string,
+): string | null {
+  const token = encodeNavHandle(dest, ttlMs, rootClientId);
+  if (token === null) return null;
+  let u: URL;
+  try {
+    u = new URL(dest);
+  } catch {
+    return null;
+  }
+  if (
+    isEngineAsset(u.pathname) ||
+    isEnginePath(u.pathname) ||
+    u.pathname.startsWith(NAVH) ||
+    u.pathname.startsWith(NAVP) ||
+    u.pathname.startsWith(NAVQ_NAV) ||
+    u.pathname.startsWith(NAVQ_EXT) ||
+    u.pathname.startsWith(NAVQ_CS) ||
+    u.pathname.startsWith(NAVQ_WISP)
+  ) {
+    return null;
+  }
+  const search =
+    u.search === "" ? "?" + NAVQ_PARAM + "=" + token : u.search + "&" + NAVQ_PARAM + "=" + token;
+  return u.pathname + search + u.hash;
 }
 
 /** Keyed per-origin site identity (#32 hardening on #55's key): a

@@ -226,10 +226,13 @@ jobs:
         # Raised 34304 -> 34816 for the #182 location member-write
         # view setters (hash/search/pathname); measured 34628,
         # baseline 34294.
+        # Raised 34816 -> 35328 for the Injector phase 2 query-shape
+        # vloc re-anchors (native-path commits keep the zlNavh
+        # token); measured 35113, baseline 34628.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 34816 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 34816)"; exit 1; fi
+          if [ "$SIZE" -ge 35328 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 35328)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

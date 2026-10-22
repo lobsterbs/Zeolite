@@ -47,6 +47,27 @@ import { NAVP } from "./navguard";
    independent of codec.ts (size gate), same as navguard's NAV. */
 const NAVH = "/__zl_navh__";
 
+/* Local copy of the query-route param (Injector phase 2), same
+   lockstep rule: keep in step with codec.NAVQ_PARAM. */
+const NAVQ = "zlNavh";
+
+/* search -> [token, cleanedSearch] with the token component removed
+   (raw, byte-faithful; the first param wins, mirroring the codec's
+   order). Null = no param. The page realm cannot MAC-verify the
+   token; it only carries it, and the SW fails impostors closed. */
+function navqStrip(search: string): [string, string] | null {
+  const raw = search.startsWith("?") ? search.slice(1) : search;
+  if (raw === "") return null;
+  const parts = raw.split("&");
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].startsWith(NAVQ + "=")) {
+      const rest = parts.slice(0, i).concat(parts.slice(i + 1));
+      return [parts[i].slice(NAVQ.length + 1), rest.length > 0 ? "?" + rest.join("&") : ""];
+    }
+  }
+  return null;
+}
+
 /* #107 phase 2: consumers (embedsync) subscribe to virtual-path
    changes. Module-level so applyVloc can run before the consumer
    registers; the hook must never break the location view. */
@@ -96,10 +117,14 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
      the previous tail inside every re-encoded tail, and each
      fallback reload doubled it (the Brave Ask snowball: 429
      loops, then a 414 Request-URI-Too-Long). */
+  /* Injector phase 2: a query-shape committed URL carries the route
+     token in the search; re-anchors keep the token and commit the
+     real path natively. */
+  const navq = navqStrip(natUrl.search);
   const navpCut = natUrl.pathname.indexOf(NAVP);
   const entry =
     navpCut > 0 ? natUrl.pathname.slice(0, navpCut) : natUrl.pathname;
-  if (entry.length < 2) return;
+  if (entry.length < 2 && navq === null) return;
   const origin = natUrl.origin;
 
   /* Virtual path from the native URL: a NAVH handle carries the
@@ -107,6 +132,10 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
      carries it encoded; anything else is not a page route. */
   const fromNative = (u: URL): string | null => {
     const pn = u.pathname;
+    /* Injector phase 2: a query-shape route commits the real path and
+       query natively; the token is the only engine mark in the URL. */
+    const qs = navqStrip(u.search);
+    if (qs !== null) return pn + qs[1] + u.hash;
     if (pn.startsWith(NAVH + "/")) {
       const tail = pn.slice(NAVH.length + 1);
       const slash = tail.indexOf("/");
@@ -216,9 +245,18 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
     return u.pathname + u.search + u.hash;
   };
 
-  /* Virtual path -> re-anchored engine-local route. */
-  const anchor = (virt: string): string =>
-    entry + NAVP + "/" + encodeURIComponent(virt);
+  /* Virtual path -> re-anchored engine-local route. Injector phase 2:
+     a query-shape page re-commits the REAL path natively and keeps
+     the token (the token names the origin only, so any path under it
+     decodes): history entries read the real pathname and a reload of
+     any of them deep-links back to the same virtual path. */
+  const anchor = (virt: string): string => {
+    if (navq === null) return entry + NAVP + "/" + encodeURIComponent(virt);
+    const hashCut = virt.indexOf("#");
+    const base = hashCut >= 0 ? virt.slice(0, hashCut) : virt;
+    const hash = hashCut >= 0 ? virt.slice(hashCut) : "";
+    return base + (base.includes("?") ? "&" : "?") + NAVQ + "=" + navq[0] + hash;
+  };
 
   const go = (v: string, replace: boolean): void => {
     const s = String(v);

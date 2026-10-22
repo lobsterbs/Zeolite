@@ -7,7 +7,7 @@
    not be able to mint initial-navigation handles for arbitrary
    destinations. */
 
-import { isEnginePath, NAVH } from "./codec";
+import { isEnginePath, NAVH, queryHandleToken } from "./codec";
 import { NAV } from "./bootstrap/navguard";
 /* The constants come from serve, not the barrel: serve's module graph
    is proven vitest-import-safe (ext-pages.test.ts), the barrel pulls
@@ -49,13 +49,18 @@ export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
     #151: a handle-navigated page is a proxied page; without the NAVH
     arm it classified as a host page and every host-only control
     message was accepted from it. */
-export function senderIsProxiedPath(pathname: string): boolean {
+export function senderIsProxiedPath(pathname: string, search?: string): boolean {
   return (
     isEnginePath(pathname) ||
     pathname.startsWith(NAVH) ||
     pathname.startsWith(NAV) ||
     pathname.startsWith(EXT_ROUTE) ||
-    pathname.startsWith(CS_ROUTE)
+    pathname.startsWith(CS_ROUTE) ||
+    /* Injector phase 2: a query-shape committed URL is a proxied page
+       at ANY pathname; the zlNavh param is the engine's mark (an
+       impostor value fails closed worker-side). Presence-only here:
+       the gate is cheap and runs before any key material is needed. */
+    (search !== undefined && queryHandleToken(search) !== null)
   );
 }
 
@@ -94,5 +99,11 @@ export function senderIsHostPage(url: string, origin: string): boolean {
     return false;
   }
   if (u.origin !== origin) return false;
+  /* Injector phase 2: a query-shape committed URL is a proxied page
+     even at a host pathname ("/" or "/index.html"): the engine never
+     mints a zlNavh token for a host page, so the param's presence
+     fails closed - the sender keeps the proxied refusal, never host
+     powers. */
+  if (queryHandleToken(u.search) !== null) return false;
   return HOST_PATHS.has(u.pathname);
 }
