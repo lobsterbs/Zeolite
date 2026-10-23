@@ -40,6 +40,7 @@ import {
   b64uEncode,
   buildQueryHandleUrl,
   decodeClientUrl,
+  encodeDest,
   decodeExpiredNavHandle,
   decodeQueryHandle,
   queryHandleToken,
@@ -153,6 +154,30 @@ describe("query-route codec (Injector phase 2)", () => {
     expect(decodeQueryHandle(cu)?.destination).toBe(dest);
   });
 
+  it("never decodes a route-shaped pathname: the path arm owns it (Google /zl/ 404 class)", () => {
+    const committed = buildQueryHandleUrl("https://www.google.com/search?q=1")!;
+    const token = queryHandleToken(new URL(committed, ORIGIN).search)!;
+    /* a live, MAC-valid token copied by page JS onto engine-owned
+       pathnames (subresource and navigation URLs the page builds) */
+    const SHAPED = [
+      "/j/" + "a".repeat(40),
+      "/__zl_navh__/" + "a".repeat(40),
+      "/__zl_prel__/x",
+      "/__zl_nav__/x",
+      "/wisp/endpoint",
+      "/zl-ext/x",
+      "/zl-cs/x",
+      "/sw.js",
+    ];
+    for (const path of SHAPED) {
+      expect(decodeQueryHandle(new URL(path + "?x=1&zlNavh=" + token, ORIGIN))).toBeNull();
+    }
+    /* the ordinary contract is unchanged on a page pathname */
+    expect(decodeQueryHandle(new URL(committed, ORIGIN))?.destination).toBe(
+      "https://www.google.com/search?q=1",
+    );
+  });
+
   it("fails closed on garbage, expired and empty tokens", () => {
     const garbage = new URL("/search?q=1&zlNavh=notatoken", ORIGIN);
     expect(queryHandleToken(garbage.search)).toBe("notatoken");
@@ -258,6 +283,9 @@ describe("config-gated mint (zl:config / zl:navHandle)", () => {
       ctx(mkMsgEvent(ORIGIN + "/", { type: "zl:ping" } as unknown as ControlMessage), ping.reply),
     );
     expect((ping.replies[0] as { queryRoutes?: boolean }).queryRoutes).toBe(true);
+    /* imageLazy parity with the zl:config ack (the LB debug readout
+       reads ping). */
+    expect((ping.replies[0] as { imageLazy?: boolean }).imageLazy).toBe(true);
   });
 
   it("falls back to the NAVH form when the query mint refuses an engine path", async () => {
@@ -317,6 +345,26 @@ describe("query-route navigation (handleFetch arms)", () => {
     expect(loc.startsWith("/%2Fp?q=1&zlNavh=")).toBe(true);
     expect(decodeClientUrl(new URL(loc, ORIGIN))).toBe("https://host.tld//p?q=1");
     expect(transportMock.calls).toBe(0);
+  });
+
+  it("a keyed engine route with a copied zlNavh param serves the keyed destination (Google /zl/ 404)", async () => {
+    /* the page was committed query-shape, so its JS copies the
+       live zlNavh onto every URL it builds - including keyed
+       in-page routes. The path arm must own the request. */
+    const committed = buildQueryHandleUrl("https://www.google.com/search?q=1")!;
+    const token = queryHandleToken(new URL(committed, ORIGIN).search)!;
+    const keyed = encodeDest("https://www.google.com/gen_204?atyp=i&zx=1");
+    transportMock.queue = [new Response("ok", { headers: { "content-type": "text/plain" } })];
+    const { ev, armed } = mkEvent(
+      ORIGIN + keyed + "?zx=2&zlNavh=" + token,
+      "no-cors",
+      "empty",
+    );
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(transportMock.urls[0].startsWith("https://www.google.com/gen_204")).toBe(true);
+    expect(transportMock.urls[0].includes("/j/")).toBe(false);
   });
 
   it("a garbage token does not shadow the honest route strand", async () => {

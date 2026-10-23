@@ -337,6 +337,9 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
            old embedder probes that compare it stay compatible. */
         scheme: "b64u",
         httpsUpgrade: isHttpsUpgrade(),
+        /* Lazy images: parity with the zl:config ack, so an embedder
+           (the LB debug readout) reads the live choice from ping. */
+        imageLazy: isImageLazy(),
         /* #63: the live ?url= refusal choice, so an embedder detects a
            revert to defaults and re-pushes its config. */
         navHandles: navHandlesEnabled(),
