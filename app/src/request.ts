@@ -14,7 +14,7 @@
    this module keeps calling decideTransport/refineWithContent at the
    same seams the old handler did. */
 /// <reference lib="webworker" />
-import { b64uDecode, b64uEncode, buildNavHandleUrl, buildQueryHandleUrl, decodeClientUrl, decodeExpiredNavHandle, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodeNavHandleRoot, decodePath, decodeQueryHandle, encodeDest, encodeDestLegacy, encodeNavHandle, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, legacyRouteShaped, looksKeyedToken, NAVH, NAVH_TTL_MS, NAVQ_PARAM, passChallengeRedirFixed, queryHandleToken, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix } from "./codec";
+import { b64uDecode, b64uEncode, buildNavHandleUrl, buildQueryHandleUrl, decodeClientUrl, decodeExpiredNavHandle, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodeNavHandleRoot, decodePath, decodeQueryHandle, encodeDest, encodeDestLegacy, encodeNavHandle, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, legacyRouteShaped, looksKeyedToken, NAVH, NAVH_TTL_MS, NAVQ_PARAM, passChallengeRedirFixed, queryHandleToken, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix, restoreLeadingSlashes } from "./codec";
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
@@ -1602,8 +1602,13 @@ export function handleFetch(e: FetchEvent): void {
            param (byte-faithful raw strip, same as the codec) */
         const qRaw = url.search.startsWith("?") ? url.search.slice(1) : "";
         const qRest = qRaw.split("&").filter((p) => p !== NAVQ_PARAM + "=" + qTok);
+        /* #410: the committed path may carry the builder-escaped
+           leading-slash run; restore it so the re-minted handle rides
+           the real destination bytes. */
         const qFull =
-          qExp.destination + url.pathname + (qRest.length > 0 ? "?" + qRest.join("&") : "");
+          qExp.destination +
+          restoreLeadingSlashes(url.pathname) +
+          (qRest.length > 0 ? "?" + qRest.join("&") : "");
         const qFresh = buildQueryHandleUrl(qFull, NAVH_TTL_MS, qExp.rootClientId);
         if (qFresh) {
           const qtid = DIAG.trace();
