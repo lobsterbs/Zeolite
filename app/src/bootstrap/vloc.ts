@@ -51,6 +51,14 @@ const NAVH = "/__zl_navh__";
    lockstep rule: keep in step with codec.NAVQ_PARAM. */
 const NAVQ = "zlNavh";
 
+/* #410: lockstep copies of the codec's leading-slash escape/restore
+   (the bootstrap bundle stays independent of codec.ts, same rule as
+   the NAVH/NAVQ markers above). */
+const escapeLeading = (p: string): string =>
+  p.replace(/^(\/)(\/+)/, (_s: string, one: string, rest: string) => one + "%2F".repeat(rest.length));
+const restoreLeading = (p: string): string =>
+  p.replace(/^\/((?:%2F)+)/, (_all: string, run: string) => "/" + "/".repeat(run.length / 3));
+
 /* search -> [token, cleanedSearch] with the token component removed
    (raw, byte-faithful; the first param wins, mirroring the codec's
    order). Null = no param. The page realm cannot MAC-verify the
@@ -133,9 +141,19 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
   const fromNative = (u: URL): string | null => {
     const pn = u.pathname;
     /* Injector phase 2: a query-shape route commits the real path and
-       query natively; the token is the only engine mark in the URL. */
+       query natively; the token is the only engine mark in the URL.
+       #411: the arm is presence-only (the page realm cannot
+       MAC-verify), so it never wins on a route-shaped pathname: a
+       NAVH-path page whose REAL destination query carries the
+       engine-chosen param name misclassified every read and surfaced
+       the opaque handle path as the virtual path. The worker side
+       stays fail-closed (decodeClientUrl MAC-verifies the token). */
     const qs = navqStrip(u.search);
-    if (qs !== null) return pn + qs[1] + u.hash;
+    if (qs !== null && !pn.startsWith(NAVH + "/") && pn.indexOf(NAVP + "/") < 0) {
+      /* #410: builder-escaped surplus leading slashes restore, the
+         same #202 parity as the NAVH arm below. */
+      return restoreLeading(pn) + qs[1] + u.hash;
+    }
     if (pn.startsWith(NAVH + "/")) {
       const tail = pn.slice(NAVH.length + 1);
       const slash = tail.indexOf("/");
@@ -164,12 +182,9 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
         }
       }
       /* #202 parity: builder-escaped surplus leading slashes
-         restore to the real "//" pathname. */
-      const path = rest.replace(
-        /^\/((?:%2F)+)/,
-        (_all: string, run: string) => "/" + "/".repeat(run.length / 3),
-      );
-      return path + u.search + u.hash;
+         restore to the real "//" pathname (the module-level
+         restoreLeading, #410's shared lockstep copy). */
+      return restoreLeading(rest) + u.search + u.hash;
     }
     const cut = pn.indexOf(NAVP + "/");
     if (cut > 0) {
@@ -255,7 +270,13 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
     const hashCut = virt.indexOf("#");
     const base = hashCut >= 0 ? virt.slice(0, hashCut) : virt;
     const hash = hashCut >= 0 ? virt.slice(hashCut) : "";
-    return base + (base.includes("?") ? "&" : "?") + NAVQ + "=" + navq[0] + hash;
+    /* #410: a "//"-leading virtual path re-commits escaped, the
+       mint's form - a raw "//" path would resolve protocol-relative
+       on the committed URL. */
+    const qCut = base.indexOf("?");
+    const path = qCut >= 0 ? base.slice(0, qCut) : base;
+    const query = qCut >= 0 ? base.slice(qCut) : "";
+    return escapeLeading(path) + query + (query ? "&" : "?") + NAVQ + "=" + navq[0] + hash;
   };
 
   const go = (v: string, replace: boolean): void => {

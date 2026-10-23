@@ -661,12 +661,32 @@ export function decodeQueryHandle(u: URL): { destination: string; rootClientId?:
        cleaned search are the real destination tail. */
     const rest = parts.slice(0, i).concat(parts.slice(i + 1));
     const cleaned = rest.length > 0 ? "?" + rest.join("&") : "";
+    /* #410: builder-escaped surplus leading slashes restore to the
+       real "//" pathname, the NAVH decode contract. */
     return {
-      destination: origin + u.pathname + cleaned,
+      destination: origin + restoreLeadingSlashes(u.pathname) + cleaned,
       rootClientId: decodeNavHandleRoot(token) ?? undefined,
     };
   }
   return null;
+}
+
+/** #410 (#202 parity): a committed query-route path escapes a surplus
+    leading-slash run into "%2F" bytes so it never opens "//" (a host
+    assignment would resolve it protocol-relative); the decode is the
+    exact inverse. The same trade as the NAVH shape: a genuine
+    "%2F"-initial destination path decodes to "//". */
+export function escapeLeadingSlashes(path: string): string {
+  return path.replace(
+    /^(\/)(\/+)/,
+    (_s: string, one: string, rest: string) => one + "%2F".repeat(rest.length),
+  );
+}
+export function restoreLeadingSlashes(path: string): string {
+  return path.replace(
+    /^\/((?:%2F)+)/,
+    (_all: string, run: string) => "/" + "/".repeat(run.length / 3),
+  );
 }
 
 /** Mint the query-shape handle URL: <real path>?<real
@@ -705,7 +725,9 @@ export function buildQueryHandleUrl(
   }
   const search =
     u.search === "" ? "?" + NAVQ_PARAM + "=" + token : u.search + "&" + NAVQ_PARAM + "=" + token;
-  return u.pathname + search + u.hash;
+  /* #410: the committed path never opens "//" (protocol-relative on
+     host assignment); the decode restores the real pathname. */
+  return escapeLeadingSlashes(u.pathname) + search + u.hash;
 }
 
 /** Keyed per-origin site identity (#32 hardening on #55's key): a

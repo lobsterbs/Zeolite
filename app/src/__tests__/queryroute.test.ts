@@ -299,6 +299,26 @@ describe("query-route navigation (handleFetch arms)", () => {
     expect(transportMock.calls).toBe(0);
   });
 
+  it("escapes a leading // run at mint and restores it on decode (#410)", () => {
+    const minted = buildQueryHandleUrl("https://host.tld//p?q=1")!;
+    expect(minted.startsWith("/%2Fp?q=1&zlNavh=")).toBe(true);
+    const dec = decodeQueryHandle(new URL(minted, ORIGIN))!;
+    expect(dec.destination).toBe("https://host.tld//p?q=1");
+    expect(decodeClientUrl(new URL(minted, ORIGIN))).toBe("https://host.tld//p?q=1");
+  });
+
+  it("re-mints an expired query handle with the // run restored and re-escaped (#410)", async () => {
+    const expired = buildQueryHandleUrl("https://host.tld//p?q=1", -1)!;
+    const { ev, armed } = mkEvent(ORIGIN + expired, "navigate", "document");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(302);
+    const loc = served.headers.get("location")!;
+    expect(loc.startsWith("/%2Fp?q=1&zlNavh=")).toBe(true);
+    expect(decodeClientUrl(new URL(loc, ORIGIN))).toBe("https://host.tld//p?q=1");
+    expect(transportMock.calls).toBe(0);
+  });
+
   it("a garbage token does not shadow the honest route strand", async () => {
     const { ev, armed } = mkEvent(ORIGIN + "/j/" + "a".repeat(40) + "?zlNavh=zzz", "navigate", "document");
     handleFetch(ev);

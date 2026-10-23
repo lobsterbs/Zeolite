@@ -89,6 +89,34 @@ describe("applyVloc (#236)", () => {
     expect(zl(w).search).toBe("?x=1");
   });
 
+  it("reads the real path on a NAVH handle whose destination query carries the param name (#411)", () => {
+    /* the query arm is presence-only in the page realm; it must never
+       win on a route-shaped pathname (the opaque route leak class) */
+    const { w } = makeWin(ENGINE + "/__zl_navh__/TOKEN123/real/path?zlNavh=impostor");
+    applyVloc(w);
+    expect(zl(w).pathname).toBe("/real/path");
+    expect(zl(w).search).toBe("?zlNavh=impostor");
+  });
+
+  it("query-shape routes restore the escaped leading-slash run on read (#410)", () => {
+    const { w } = makeWin(ENGINE + "/%2Fp?q=1&zlNavh=TOKEN123");
+    applyVloc(w);
+    expect(zl(w).pathname).toBe("//p");
+    expect(zl(w).search).toBe("?q=1");
+  });
+
+  it("re-commits a // virtual path escaped in query mode (#410)", () => {
+    /* a raw "//" path on the committed URL would resolve
+       protocol-relative; the anchor seam re-escapes it. The virtual
+       view keeps the page's own re-emitted form until the next
+       fromNative sync; the committed URL is the contract. */
+    const { w, state } = makeWin(ENGINE + "/%2Fp?q=1&zlNavh=TOKEN123");
+    applyVloc(w);
+    const h = w.history as { pushState(s: unknown, t: string, u?: string | null): void };
+    h.pushState({}, "", "/%2Fp?q=1");
+    expect(state.href).toBe(ENGINE + "/%2Fp?q=1&zlNavh=TOKEN123");
+  });
+
   it("falls back to the opaque route view without vpath or handle", () => {
     const { w } = makeWin(ENGINE + ENTRY + "?z=9#top");
     applyVloc(w);
