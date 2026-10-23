@@ -473,33 +473,24 @@ export function applyNavGuard(
         if (s == null) return (OW as AnyRecord).call(this, u, t, f);
         const d = destAbs(s);
         if (!d) return (OW as AnyRecord).call(this, rewire(s), t, f);
-        /* With noopener or noreferrer the native open returns null, so
-           there is no window to drive. Mint first, then open the route
-           directly: the plaintext target still never reaches a request. */
-        if (/(^|[\s,])(noopener|noreferrer)(?=$|[\s,=])/i.test(f ?? "")) {
-          mintRoute(d).then((route) => {
-            try {
-              (OW as AnyRecord).call(this, route ?? navEncode(d), t, f);
-            } catch {
-              /* a blocked popup stays contained */
-            }
-          });
+        /* #412: the popup class opens the key-free NAV marker route
+           directly, the same form the anchor popup path already
+           uses. A minted keyed token ties the popup URL to the
+           opener's route key: a popup context whose worker instance
+           does not share that key (fresh partition, instance
+           restart) cannot decode it, and an uncontrolled popup
+           context passes the route through to the host's
+           no-worker notice. The marker branch is prefix-independent
+           and needs no key, so any controlled instance on this
+           origin decodes it; the synchronous open also rides the
+           activation window (#109). The plaintext target still
+           never reaches a request. */
+        try {
+          return (OW as AnyRecord).call(this, navEncode(d), t, f);
+        } catch {
+          /* a window that refuses the popup stays contained */
           return null;
         }
-        /* #54: open the popup on a blank engine-origin document,
-           then drive it to the minted route - the plaintext target
-           never reaches the popup request. A closed popup stays
-           blank (contained). */
-        const win = (OW as AnyRecord).call(this, "", t, f) as AnyRecord | null;
-        mintRoute(d).then((route) => {
-          try {
-            const l = win && (win as { location?: unknown }).location;
-            if (l) (l as { href: string }).href = route ?? navEncode(d);
-          } catch {
-            /* a closed popup cannot be driven */
-          }
-        });
-        return win;
       };
     });
   }
