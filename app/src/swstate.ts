@@ -171,11 +171,13 @@ export function setQueryRoutes(on: boolean): void {
   queryRoutes = on;
 }
 
-/* Lazy images (LB host toggle): the rewriter injects loading="lazy" on
-   <img> tags that lack one, so below-the-fold images defer until they
-   approach the viewport. Ephemeral like adblock: resets on SW
-   restart, the host re-sends it. */
-let imageLazy = false;
+/* Lazy images (always on, #413): the rewriter injects
+   loading="lazy" on <img> tags that lack one, so below-the-fold
+   images defer until they approach the viewport. Ephemeral like
+   adblock: resets on SW restart, so the module default itself
+   carries the intent - a host zl:config stays the runtime
+   opt-out. */
+let imageLazy = true;
 
 export function isImageLazy(): boolean {
   return imageLazy;

@@ -179,10 +179,10 @@ describe("applyNavGuard", () => {
     const e = makeEnv();
     const win = e.w.open(REAL, "_blank");
     expect(win).toBeTruthy();
-    expect(e.opened[0][0]).toBe(""); /* blank popup first (#54) */
+    expect(e.opened[0][0]).toBe(navEncode(REAL)); /* marker popup, no mint (#412) */
     expect(e.opened[0][1]).toBe("_blank");
     await settle();
-    expect(e.wins[0]._hrefs).toEqual([navEncode(REAL)]); /* mint refused: marker */
+    expect(e.wins[0]._hrefs).toEqual([]); /* nothing left to drive */
     e.w.open("/local");
     expect(e.opened[1][0]).toBe("/local");
     e.w.open();
@@ -250,9 +250,9 @@ describe("applyNavGuard", () => {
     const e = makeEnv();
     const win = e.w.open(REAL);
     expect(win).toBeTruthy();
-    expect(e.opened[0][0]).toBe("");
+    expect(e.opened[0][0]).toBe(navEncode(REAL)); /* marker popup, no mint (#412) */
     await settle();
-    expect(e.wins[0]._hrefs).toEqual([navEncode(REAL)]);
+    expect(e.wins[0]._hrefs).toEqual([]); /* nothing left to drive */
   });
 });
 
@@ -837,10 +837,11 @@ describe("inline child realm guard (#58 follow-up)", () => {
 /* #54 residual 3: the mint seams. A stubbed controller answers
    zl:mint with a fixed route; the tests pin swap (marker sync,
    route upgrade), defer (blank, route), the newer-write-wins
-   guard, the navigate re-drive, window.open popups,
-   parser-inserted frames and the mint-failure marker fallback.
-   Unique destinations per test: the module-level memo must not
-   leak routes across tests. */
+   guard, the navigate re-drive, the window.open popup marker
+   override (#412: popups never mint), parser-inserted frames and
+   the mint-failure marker fallback. Unique destinations per
+   test: the module-level memo must not leak routes across
+   tests. */
 describe("navguard mint seams (#54 residual 3)", () => {
   function stubMint(route: string) {
     vi.stubGlobal("navigator", {
@@ -905,22 +906,21 @@ describe("navguard mint seams (#54 residual 3)", () => {
     expect(e.navigated).toEqual(["/j/m4"]);
   });
 
-  it("window.open drives the popup to the minted route", async () => {
+  it("window.open popups ignore the mint and open the marker route (#412)", async () => {
     stubMint("/j/m5");
     const e = makeEnv();
     e.w.open("https://mint5.site/x", "_blank");
-    expect(e.opened[0][0]).toBe("");
+    expect(e.opened[0][0]).toBe(navEncode("https://mint5.site/x"));
     await settle();
-    expect(e.wins[0]._hrefs).toEqual(["/j/m5"]);
+    expect(e.wins[0]._hrefs).toEqual([]); /* no mint upgrade, nothing left to drive */
   });
 
-  it("window.open with noopener opens the minted route directly (#372)", async () => {
+  it("window.open with noopener opens the marker route synchronously (#412)", async () => {
     stubMint("/j/m8");
     const e = makeEnv();
     const ret = e.w.open("https://mint8.site/x", "_blank", "noopener");
-    expect(ret).toBe(null); /* the native noopener contract */
-    await settle();
-    expect(e.opened[0][0]).toBe("/j/m8");
+    expect(ret).toBeTruthy(); /* the native return forwards untouched */
+    expect(e.opened[0]).toEqual([navEncode("https://mint8.site/x"), "_blank", "noopener"]);
   });
 
   it("makeRel accepts URL objects from mint callers (#374)", () => {
