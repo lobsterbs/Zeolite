@@ -631,6 +631,26 @@ export function queryHandleToken(search: string): string | null {
   return null;
 }
 
+/** The query-handle path contract: the exact set of engine-owned
+    pathnames buildQueryHandleUrl refuses at mint. The decode
+    shares it (single source of truth): a committed query route
+    never has one of these pathnames, so the decode never widens
+    past the mint. ponytail: deliberately NOT legacyRouteShaped -
+    a genuine destination path /zl/<b64u> is mintable under a
+    non-zl prefix and must stay decodable. */
+export function queryHandlePathShaped(path: string): boolean {
+  return (
+    isEngineAsset(path) ||
+    isEnginePath(path) ||
+    path.startsWith(NAVH) ||
+    path.startsWith(NAVP) ||
+    path.startsWith(NAVQ_NAV) ||
+    path.startsWith(NAVQ_EXT) ||
+    path.startsWith(NAVQ_CS) ||
+    path.startsWith(NAVQ_WISP)
+  );
+}
+
 /** A committed query-route URL -> its destination, or null. The
     token is the same origin-only NAVH payload (MAC-verified,
     TTL-bound); the committed path and the cleaned search are the
@@ -639,6 +659,12 @@ export function queryHandleToken(search: string): string | null {
     including page-authored zlNavh impostors. Fail-closed: a garbage
     or expired token decodes to null. */
 export function decodeQueryHandle(u: URL): { destination: string; rootClientId?: string } | null {
+  /* Route-shaped pathname: a page-copied zlNavh impostor, never a
+     committed query route (the mint refuses these pathnames).
+     The path-shape decoders own the URL; without this gate the
+     query arm resolved /zl/<keyed> + copied search into
+     <origin>/zl/<keyed> and the upstream 404ed (Google gen_204). */
+  if (queryHandlePathShaped(u.pathname)) return null;
   const raw = u.search.startsWith("?") ? u.search.slice(1) : u.search;
   if (raw === "") return null;
   const parts = raw.split("&");
@@ -711,16 +737,7 @@ export function buildQueryHandleUrl(
   } catch {
     return null;
   }
-  if (
-    isEngineAsset(u.pathname) ||
-    isEnginePath(u.pathname) ||
-    u.pathname.startsWith(NAVH) ||
-    u.pathname.startsWith(NAVP) ||
-    u.pathname.startsWith(NAVQ_NAV) ||
-    u.pathname.startsWith(NAVQ_EXT) ||
-    u.pathname.startsWith(NAVQ_CS) ||
-    u.pathname.startsWith(NAVQ_WISP)
-  ) {
+  if (queryHandlePathShaped(u.pathname)) {
     return null;
   }
   const search =
