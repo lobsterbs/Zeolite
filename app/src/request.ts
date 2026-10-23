@@ -2225,6 +2225,26 @@ export function handleFetch(e: FetchEvent): void {
         target = coFixed;
       }
 
+      /* The Google apps widget (ogs.google.com) builds its origin=
+         from window.location.origin (LegacyUnforgeable, the #112
+         co= class): upstream validation sees the engine origin and
+         the 9-dot apps menu never renders. Virtualize an origin=
+         that names this deployment at the seam the engine owns. */
+      const ogsFixed = virtualOgsOrigin(target, e.request.referrer, self.location.origin);
+      if (ogsFixed !== target) {
+        const otid = DIAG.trace();
+        DIAG.emit({
+          traceId: otid,
+          requestId: otid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "ogs origin= virtualized to the page origin",
+          url: target,
+        });
+        target = ogsFixed;
+      }
+
       /* #129: challenge-widget frames stay engine-routed. The #120
          policy redirected these navigations provider-direct, which
          was an IP leak (the #32 class) AND left the widget
@@ -3767,6 +3787,42 @@ export function virtualRecaptchaCo(target: string, referrer: string, engineOrigi
   const port = vu.port ? "" : vu.protocol === "https:" ? ":443" : ":80";
   const co = btoa(vu.origin + port).replace(/=+$/, (p) => ".".repeat(p.length));
   return u.href.replace(m[0], m[1] + "co=" + co);
+}
+
+/** The Google apps widget (ogs.google.com /widget/) receives an
+    origin= built by page JS from window.location.origin
+    (LegacyUnforgeable, the #112 co= class), so upstream always sees
+    the engine origin and the widget never renders. Virtualize an
+    origin= that names this deployment at the seam the engine owns;
+    rendering fidelity only. */
+export function virtualOgsOrigin(target: string, referrer: string, engineOrigin: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host !== "ogs.google.com") return target;
+  if (!u.pathname.startsWith("/widget/")) return target;
+  const m = /([?&])origin=([^&]*)/.exec(u.search);
+  if (!m || !m[2]) return target;
+  let dec: string;
+  try {
+    dec = decodeURIComponent(m[2]);
+  } catch {
+    return target;
+  }
+  /* Only an origin= that names THIS deployment is ours to fix; any
+     other value is an origin the page genuinely chose. */
+  if (dec !== engineOrigin && dec !== engineOrigin + ":443" && dec !== engineOrigin + ":80")
+    return target;
+  /* Unlike the recaptcha anchor there is no honest widget-side
+     fallback: without a decoded page origin Google cannot validate
+     the request, so it passes through unchanged. */
+  const parent = referrerOrigin(referrer);
+  if (!parent) return target;
+  return u.href.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
 }
 
 /** #120: challenge-widget frame URLs (reCAPTCHA, hCaptcha, Turnstile
