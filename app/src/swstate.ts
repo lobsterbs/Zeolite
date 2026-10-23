@@ -158,9 +158,10 @@ export function setNavHandles(on: boolean): void {
 
 /* Injector phase 2: query-shape committed routes (the opaque token
    rides ?zlNavh=, the real path stays the committed pathname).
-   Ephemeral like navHandles: resets on SW restart, the host re-sends
-   it on boot. */
-let queryRoutes = false;
+   Always on by default; a host zl:config can still opt a deployment
+   out. Ephemeral like navHandles: resets on SW restart, the host
+   re-sends its choice on boot. */
+let queryRoutes = true;
 
 export function queryRoutesEnabled(): boolean {
   return queryRoutes;
