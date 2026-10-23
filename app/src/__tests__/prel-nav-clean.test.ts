@@ -70,6 +70,9 @@ beforeEach(async () => {
   await routeReady;
   setScheme("/j/");
   setRouteKey(KEY);
+  /* NAVH-path-form suite: the injector default is on, these tests
+     pin the arm they assert; the query shape has its own describe. */
+  setQueryRoutes(false);
   transportMock.calls = 0;
   transportMock.urls = [];
   transportMock.inits = [];
