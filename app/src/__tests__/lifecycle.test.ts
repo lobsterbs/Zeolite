@@ -107,6 +107,22 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("host-only broadcast isolation (#439)", () => {
+  it("fails closed for query handles and unknown clients, preserving host delivery", async () => {
+    const trusted = ["/", "/devtools.html", "/zlsw-register"].map(p => mkClient(ORIGIN + p));
+    const guests = ["/?zlNavh=impostor", "/index.html?zlNavh=token", "/search?q=x&zlNavh=token", "/__zl_nav__/token", "/zl-ext/id/popup.html", "/unowned", "https://foreign.example/", "about:blank", "blob:" + ORIGIN + "/id"].map(p => mkClient(p.startsWith("/") ? ORIGIN + p : p));
+    stubSelf([...trusted, ...guests].map(x => x.c));
+    const { captured, hosts } = capture();
+    wireDispatchers(hosts);
+    captured.tabsOp!({ op: "create", url: "https://a.example/" } as TabsOp);
+    captured.downloadOp!({ url: "https://a.example/file" } as DownloadOp);
+    captured.notifyOp!({ id: "notice" } as NotifyOp);
+    await flush();
+    for (const host of trusted) expect(host.messages).toHaveLength(3);
+    for (const page of guests) expect(page.messages).toEqual([]);
+  });
+});
+
 describe("client classification (#243)", () => {
   it("host clients are windows off the NAVH and engine routes; bad URLs fail closed", () => {
     stubSelf([]);

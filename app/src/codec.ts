@@ -564,6 +564,17 @@ export function decodeNavHandlePath(tail: string): string | null {
     from a handle-navigated page. Every client-URL-to-destination
     derivation goes through here. */
 export function decodeClientUrl(u: URL): string | null {
+  /* #428: navguard's key-free marker is a real engine route too.
+     The request path already decodes it, but the shared page/anchor
+     oracle did not, so popup handoff could not recover its target. */
+  if (u.pathname.startsWith("/__zl_nav__/")) {
+    const bytes = b64uDecode(u.pathname.slice("/__zl_nav__/".length));
+    if (!bytes) return null;
+    try {
+      const dest = DEC_STRICT.decode(bytes);
+      return /^https?:\/\//.test(dest) ? dest + u.search : null;
+    } catch { return null; }
+  }
   /* Injector phase 2: a query-shape client carries its route token in
      the search and its real destination path in the path, so every
      client-URL-to-destination derivation (extensions, cookies,

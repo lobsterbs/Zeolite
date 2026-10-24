@@ -134,6 +134,8 @@ export interface ControlMessage {
   tabs?: UiTab[];
   /** Delta sync cursor for zl:getNetLog. */
   since?: number;
+  /** Host-only diagnostic scope. */
+  clientId?: string;
   /** zl:wsOpen: page WebSocket bridge destination + protocols. */
   url?: string;
   protocols?: string[];
@@ -728,7 +730,7 @@ case "zl:tracing":
           url = null;
         }
       }
-      reply({ ok: true, origin: embedderOrigin || null, url });
+      reply({ ok: true, origin: embedderOrigin || null, url, clientId: src?.id ?? null });
       break;
     }
     case "zl:fingerprint":
@@ -1019,15 +1021,22 @@ case "zl:tracing":
       // Delta sync: the devtools page sends the last seq it has seen and
       // gets only newer entries, so polling stays cheap at any ring size.
       const since = (msg as { since?: number }).since ?? 0;
-      reply({ entries: netLogSince(since), lastSeq: netLogCursor(), generation: netLogGeneration(),
-          version: ZEOLITE_VERSION, stats: transitStats() });
+      const clientId = msg.clientId === undefined ? undefined : String(msg.clientId).slice(0, 256);
+      const scoped = clientId === undefined ? null : netLogSince(0, clientId);
+      reply({ entries: netLogSince(since, clientId), lastSeq: netLogCursor(), generation: netLogGeneration(), clientId: clientId ?? null,
+          version: ZEOLITE_VERSION, stats: scoped === null ? transitStats() : {
+            native: scoped.filter(x => x.transport === "NativeTransit").length,
+            fallback: scoped.filter(x => x.transport === "RewriteFallback").length,
+            fallbacks: scoped.filter(x => x.fallbackReason).map(x => ({ ts: x.ts, url: x.dest, reason: x.fallbackReason, traceId: x.traceId })),
+          } });
       break;
     }
     case "zl:getDiag": {
       /* UI -> SW: diagnostics delta poll. Same cursor protocol as
          zl:getNetLog so the devtools page can poll both cheaply. */
       const since = (msg as { since?: number }).since ?? 0;
-      reply({ ok: true, ...DIAG.snapshot(since) });
+      const clientId = msg.clientId === undefined ? undefined : String(msg.clientId).slice(0, 256);
+      reply({ ok: true, generation: netLogGeneration(), clientId: clientId ?? null, ...DIAG.snapshot(since, clientId) });
       break;
     }
     default:

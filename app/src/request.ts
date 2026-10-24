@@ -1282,7 +1282,7 @@ function navOutcome(
   category: ErrorCategory,
   text: string,
 ): Response {
-  const traceId = DIAG.trace();
+  const traceId = DIAG.trace(e.resultingClientId || e.clientId);
   netLogPush({
     method: e.request.method,
     traceId,
@@ -1618,7 +1618,7 @@ export function handleFetch(e: FetchEvent): void {
           (qRest.length > 0 ? "?" + qRest.join("&") : "");
         const qFresh = buildQueryHandleUrl(qFull, NAVH_TTL_MS, qExp.rootClientId);
         if (qFresh) {
-          const qtid = DIAG.trace();
+          const qtid = DIAG.trace(e.resultingClientId || e.clientId);
           netLogPush({
             method: e.request.method,
             traceId: qtid,
@@ -1671,7 +1671,7 @@ export function handleFetch(e: FetchEvent): void {
           }
           netLogPush({
             method: e.request.method,
-            traceId: DIAG.trace(),
+            traceId: DIAG.trace(e.resultingClientId || e.clientId),
             path: url.pathname + url.search,
             dest: e.request.url,
             status: 0,
@@ -1701,7 +1701,7 @@ export function handleFetch(e: FetchEvent): void {
           }
           netLogPush({
             method: "OPTIONS",
-            traceId: DIAG.trace(),
+            traceId: DIAG.trace(e.resultingClientId || e.clientId),
             path: url.href,
             dest: url.href,
             status: 204,
@@ -1750,7 +1750,7 @@ export function handleFetch(e: FetchEvent): void {
         if (e.request.method === "GET" && e.request.mode === "navigate") {
           const clean = navhCleanFromPrel(url.pathname, navpDest);
           if (clean) {
-            const traceId = DIAG.trace();
+            const traceId = DIAG.trace(e.resultingClientId || e.clientId);
             netLogPush({
               method: e.request.method,
               traceId,
@@ -1860,7 +1860,7 @@ export function handleFetch(e: FetchEvent): void {
                 if (navhFresh) {
                   const navhSuffix = navhNavSlash >= 0 ? navhTail.slice(navhNavSlash) : "";
                   const clean = navhFresh + navhSuffix + url.search;
-                  const traceId = DIAG.trace();
+                  const traceId = DIAG.trace(e.resultingClientId || e.clientId);
                   netLogPush({
                     method: e.request.method,
                     traceId,
@@ -2032,7 +2032,7 @@ export function handleFetch(e: FetchEvent): void {
           ? null
           : resolveRelative(VCTX, e.clientId, url.pathname + url.search);
         if (legacyFirst) {
-          const ltid = DIAG.trace();
+          const ltid = DIAG.trace(e.resultingClientId || e.clientId);
           DIAG.emit({
             traceId: ltid,
             requestId: ltid,
@@ -2058,7 +2058,7 @@ export function handleFetch(e: FetchEvent): void {
                proxy-origin 404. Recover the tail here. */
             const legacy = decodeLegacyRoute(url.pathname);
             if (legacy) {
-              const ltid = DIAG.trace();
+              const ltid = DIAG.trace(e.resultingClientId || e.clientId);
               DIAG.emit({
                 traceId: ltid,
                 requestId: ltid,
@@ -2097,7 +2097,7 @@ export function handleFetch(e: FetchEvent): void {
                  dest records what the browser will actually request. */
               netLogPush({
                 method: e.request.method,
-                traceId: DIAG.trace(),
+                traceId: DIAG.trace(e.resultingClientId || e.clientId),
                 path: url.pathname + url.search,
                 dest: e.request.url,
                 status: 0,
@@ -2166,7 +2166,7 @@ export function handleFetch(e: FetchEvent): void {
           homeCtx && /^https?:/i.test(homeCtx.targetOrigin) ? homeCtx.targetOrigin : null;
         const fixed = passChallengeRedirFixed(target, self.location.origin, homeOrigin, url.pathname);
         if (fixed && fixed !== target) {
-          const ctid = DIAG.trace();
+          const ctid = DIAG.trace(e.resultingClientId || e.clientId);
           DIAG.emit({
             requestId: ctid,
             traceId: ctid,
@@ -2191,7 +2191,7 @@ export function handleFetch(e: FetchEvent): void {
          fetch seam, before anything else shapes the destination. */
       const deref = derefSelfRoute(target, self.location.origin);
       if (deref !== target) {
-        const dtid = DIAG.trace();
+        const dtid = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.emit({
           traceId: dtid,
           requestId: dtid,
@@ -2211,7 +2211,7 @@ export function handleFetch(e: FetchEvent): void {
          co= that names this deployment at the seam the engine owns. */
       const coFixed = virtualRecaptchaCo(target, e.request.referrer, self.location.origin);
       if (coFixed !== target) {
-        const ctid = DIAG.trace();
+        const ctid = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.emit({
           traceId: ctid,
           requestId: ctid,
@@ -2232,7 +2232,7 @@ export function handleFetch(e: FetchEvent): void {
          that names this deployment at the seam the engine owns. */
       const ogsFixed = virtualOgsOrigin(target, e.request.referrer, self.location.origin);
       if (ogsFixed !== target) {
-        const otid = DIAG.trace();
+        const otid = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.emit({
           traceId: otid,
           requestId: otid,
@@ -2253,7 +2253,7 @@ export function handleFetch(e: FetchEvent): void {
          this deployment at the seam the engine owns. */
       const hcFixed = virtualHcaptchaHost(target, e.request.referrer, self.location.origin);
       if (hcFixed !== target) {
-        const htid = DIAG.trace();
+        const htid = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.emit({
           traceId: htid,
           requestId: htid,
@@ -2285,7 +2285,7 @@ export function handleFetch(e: FetchEvent): void {
         (e.request.destination === "iframe" || e.request.destination === "frame") &&
         isChallengeFrameUrl(target)
       ) {
-        const rtid = DIAG.trace();
+        const rtid = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.emit({
           traceId: rtid,
           requestId: rtid,
@@ -2318,7 +2318,7 @@ export function handleFetch(e: FetchEvent): void {
 
       return (async () => {
         const t0 = Date.now();
-        const traceId = DIAG.trace();
+        const traceId = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.stage(traceId, "REQUEST_INTERCEPTED", { url: target });
         /* Issue #34: a foreign-origin request has no engine-local path;
            the full URL is its internal identity (and the netLog path). */
