@@ -2245,6 +2245,28 @@ export function handleFetch(e: FetchEvent): void {
         target = ogsFixed;
       }
 
+      /* The hCaptcha widget (#433) builds its host= from
+         window.location.hostname (LegacyUnforgeable, the #112 co=
+         class): hCaptcha validates it against the sitekey's
+         registered hostnames, so upstream sees the engine host and
+         the widget never renders. Virtualize a host= that names
+         this deployment at the seam the engine owns. */
+      const hcFixed = virtualHcaptchaHost(target, e.request.referrer, self.location.origin);
+      if (hcFixed !== target) {
+        const htid = DIAG.trace();
+        DIAG.emit({
+          traceId: htid,
+          requestId: htid,
+          category: "CHALLENGE",
+          cause: "challenge",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "hcaptcha host= virtualized to the page origin",
+          url: target,
+        });
+        target = hcFixed;
+      }
+
       /* #129: challenge-widget frames stay engine-routed. The #120
          policy redirected these navigations provider-direct, which
          was an IP leak (the #32 class) AND left the widget
@@ -3852,6 +3874,78 @@ export function virtualOgsOrigin(target: string, referrer: string, engineOrigin:
   const parent = referrerOrigin(referrer);
   if (!parent) return target;
   return u.href.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
+}
+
+/** The hCaptcha widget (newassets.hcaptcha.com frames,
+    api.hcaptcha.com config/challenge endpoints) receives a host= built
+    by page JS from window.location.hostname (LegacyUnforgeable, the
+    #112 co= class): hCaptcha validates it against the sitekey's
+    registered hostnames, so a virtualized page names the engine host
+    and the widget never renders (#433). Virtualize a host= that
+    names this deployment at the seam the engine owns; rendering
+    fidelity only. */
+export function virtualHcaptchaHost(target: string, referrer: string, engineOrigin: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host !== "newassets.hcaptcha.com" && u.host !== "api.hcaptcha.com")
+    return target;
+  if (u.host === "newassets.hcaptcha.com" && !u.pathname.startsWith("/captcha/"))
+    return target;
+  if (
+    u.host === "api.hcaptcha.com" &&
+    !u.pathname.startsWith("/checksiteconfig") &&
+    !u.pathname.startsWith("/getcaptcha")
+  )
+    return target;
+  const m = /([?&])host=([^&]*)/.exec(u.search);
+  if (!m || !m[2]) return target;
+  let dec: string;
+  try {
+    dec = decodeURIComponent(m[2]);
+  } catch {
+    return target;
+  }
+  /* Only a host= that names THIS deployment is ours to fix; any other
+     value is a hostname the page genuinely chose. The SDK sends
+     window.location.hostname; host and origin forms are accepted so
+     a page that built the value differently still gets its real
+     host back. */
+  let engineHost = "";
+  let engineHostname = "";
+  try {
+    const eo = new URL(engineOrigin);
+    engineHost = eo.host;
+    engineHostname = eo.hostname;
+  } catch {
+    return target;
+  }
+  if (
+    dec !== engineHostname &&
+    dec !== engineHost &&
+    dec !== engineOrigin &&
+    dec !== engineOrigin + ":443" &&
+    dec !== engineOrigin + ":80" &&
+    dec !== engineHost + ":443" &&
+    dec !== engineHost + ":80"
+  )
+    return target;
+  /* No honest widget-side fallback exists: without a decoded page
+     origin hCaptcha cannot validate the request, so it passes
+     through unchanged. */
+  const parent = referrerOrigin(referrer);
+  if (!parent) return target;
+  let vu: URL;
+  try {
+    vu = new URL(parent);
+  } catch {
+    return target;
+  }
+  return u.href.replace(m[0], m[1] + "host=" + encodeURIComponent(vu.hostname));
 }
 
 /** #120: challenge-widget frame URLs (reCAPTCHA, hCaptcha, Turnstile
