@@ -175,7 +175,8 @@ button:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }
 <pre>${esc(LOGO)}</pre>
 <h1>Could not load this page</h1>
 <p>${esc(CATEGORY_TEXT[input.category])}</p>
-${input.attribution === "engine" ? `<p class="zlbug">This is a Zeolite engine bug, not a problem with the site. Please report it: https://github.com/lobsterbs/Zeolite/issues (include the Trace ID).</p>` : ""}
+<p class="zlbug">This page is not a real website response. You are not supposed to see it as a standalone page; if it opened like that, it is a bug - please report it: https://github.com/lobsterbs/Zeolite/issues (include the Trace ID).</p>
+${input.attribution === "engine" ? `<p class="zlbug">This is a Zeolite engine bug, not a problem with the site.</p>` : ""}
 <dl>${rows}
 </dl>
 <form method="get" action="${esc(input.route)}"><button type="submit">Try again</button></form>
