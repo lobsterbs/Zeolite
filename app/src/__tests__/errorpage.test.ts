@@ -146,4 +146,4 @@ describe("errorPage standalone-page notice (#430)", () => {
       expect(p).toContain("https://github.com/lobsterbs/Zeolite/issues");
     }
   });
-}););
+});
