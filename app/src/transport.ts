@@ -67,7 +67,6 @@ export function setPrimaryWisp(url: string): boolean {
   if (url !== "" && next === null) return false;
   if (next === primaryWispOverrideValue()) return true;
   setPrimaryWispOverride(next);
-  curlGeneration++;
   curlReady = null;
   zlCurlReset();
   return true;
@@ -113,17 +112,43 @@ async function persistEngine(engine: TransportEngine): Promise<void> {
   }
 }
 
-/* #415: only the first failure from a generation may reset it.
-   Late peers reuse its replacement instead of tearing down retries. */
+/* #415: a wedged singleton fans one connect-class failure across
+   every concurrent request, and each one used to run its own
+   reset+re-init (the chatgpt singleton-reset storm). The reset is
+   shared per client generation: requests remember the generation
+   that served them, the first failure of a generation runs the
+   one reset, and later failures await it and retry on the fresh
+   client. */
 let curlGeneration = 0;
-let altGeneration = 0;
+let curlResetInflight: Promise<void> | null = null;
+async function sharedCurlReset(gen: number): Promise<void> {
+  if (gen !== curlGeneration) {
+    /* a newer generation already reset: nothing to do */
+    if (curlResetInflight) await curlResetInflight.catch(() => {});
+    return;
+  }
+  if (curlResetInflight) return curlResetInflight;
+  const p = (async () => {
+    try {
+      zlCurlReset();
+      curlReady = null; // force re-init inside the next ensureCurl()
+      curlGeneration++;
+      await ensureCurl();
+    } finally {
+      curlResetInflight = null;
+    }
+  })();
+  curlResetInflight = p;
+  await p;
+}
+
 let curlReady: Promise<void> | null = null;
 async function ensureCurl(): Promise<void> {
   await engineReady(); // #390: replay the persisted choice before the first init
   if (!curlReady) {
-    const pending = zlCurlInit({ websocket: primaryWispUrl() }).catch((err) => {
+    curlReady = zlCurlInit({ websocket: primaryWispUrl() }).catch((err) => {
       setDegradedImpl("libcurl transport: " + String(err));
-      if (curlReady === pending) curlReady = null; // never clear a newer initialization
+      curlReady = null; // allow retry on next request
       DIAG.emit({
         category: "TRANSPORT",
         severity: "error",
@@ -133,7 +158,6 @@ async function ensureCurl(): Promise<void> {
       });
       throw err;
     });
-    curlReady = pending;
   }
   return curlReady;
 }
@@ -216,6 +240,11 @@ export function transportResetForTests(deadlineMs: number): void {
   WISP_TTFB_DEADLINE_MS = deadlineMs;
   stallTimes.length = 0;
   cooldownUntil = 0;
+  /* #415: zero the reset generations and any pending shared reset */
+  curlGeneration = 0;
+  curlResetInflight = null;
+  altGeneration = 0;
+  altResetInflight = null;
 }
 
 export function wispCoolingForTests(): boolean {
@@ -362,12 +391,13 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
       await waitForTransportState("connected", WAIT_FOR_RECONNECT_MS);
     }
     await ensureCurl();
-    const generation = curlGeneration;
+    /* #415: remember which client generation serves this request */
+    const curlGen = curlGeneration;
     try {
       const resp = await fetchWithDeadline(zlCurlFetch, dest, init);
       /* A first-byte success is evidence the socket is healthy:
          clear the storm window and any cooldown. */
-      if (generation === curlGeneration) stallClear();
+      stallClear();
       return resp;
     } catch (err) {
       if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw err;
@@ -397,12 +427,8 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
         technicalReason: String(err),
         url: primaryWispUrl(),
       });
-      if (generation === curlGeneration) {
-        curlGeneration++;
-        zlCurlReset();
-        curlReady = null;
-      }
-      await ensureCurl();
+      /* #415: one shared reset per generation, not one per failure */
+      await sharedCurlReset(curlGen);
       try {
         return await fetchWithDeadline(zlCurlFetch, dest, init);
       } catch (err2) {
@@ -423,7 +449,6 @@ export const wispTransport: Transport = {
   ready: ensureCurl,
   switchEngine(engine) {
     setEngine(engine);
-    curlGeneration++;
     curlReady = null; // force re-init inside the next ensureCurl()
     void persistEngine(engine); // #390: survive the next idle restart
   },
@@ -434,9 +459,33 @@ export const wispTransport: Transport = {
    accounting. Deliberately no stall-storm cooldown (that state
    tracks the primary endpoint's health) and no lifecycle machine
    (transport-lifecycle owns the primary only). */
+/* #415: the same shared-reset contract for the policy wisp route:
+   one reset per alt-client generation; a late failure from an old
+   generation rides the already-reset client. */
+let altGeneration = 0;
+let altResetInflight: Promise<void> | null = null;
+async function sharedAltReset(gen: number): Promise<void> {
+  if (gen !== altGeneration) {
+    if (altResetInflight) await altResetInflight.catch(() => {});
+    return;
+  }
+  if (altResetInflight) return altResetInflight;
+  const p = (async () => {
+    try {
+      zlAltReset();
+      altGeneration++;
+    } finally {
+      altResetInflight = null;
+    }
+  })();
+  altResetInflight = p;
+  await p;
+}
+
 export async function altWispFetch(dest: string, init?: RequestInit): Promise<Response> {
-  const generation = altGeneration;
   loadEnter(dest);
+  /* #415: remember which alt client generation serves this request */
+  const altGen = altGeneration;
   try {
     try {
       return await fetchWithDeadline(zlAltFetch, dest, init);
@@ -463,10 +512,7 @@ export async function altWispFetch(dest: string, init?: RequestInit): Promise<Re
         technicalReason: String(err),
         url: dest,
       });
-      if (generation === altGeneration) {
-        altGeneration++;
-        zlAltReset();
-      }
+      await sharedAltReset(altGen);
       return fetchWithDeadline(zlAltFetch, dest, init);
     }
   } finally {

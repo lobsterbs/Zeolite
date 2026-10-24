@@ -40,8 +40,10 @@ export type FallbackReason =
    re-reading the call site. */
 /* #138: a policy rule with route "native" demoted the JS literal
    pass for a proven host; the decision explains itself like a
-   fallback does, so the compat matrix can track the share. */
-export type NativeReason = "NON_DOCUMENT_RESOURCE" | "POLICY_NATIVE";
+   fallback does, so the compat matrix can track the share.
+   CDN_CGI_NATIVE is the same explainable demotion for Cloudflare's
+   challenge namespace: those bytes serve verbatim. */
+export type NativeReason = "NON_DOCUMENT_RESOURCE" | "POLICY_NATIVE" | "CDN_CGI_NATIVE";
 export type BlockReason = "BLOCKED_RULES" | "BLOCKED_INTERCEPT" | "BLOCKED_WEBREQUEST";
 export type TransitReason = FallbackReason | NativeReason | BlockReason;
 
@@ -142,6 +144,27 @@ export function sniffsAsHtml(head: Uint8Array): boolean {
   let s = "";
   for (let i = 0; i < head.length && i < 512; i++) s += String.fromCharCode(head[i]);
   return /<!doctype\s+html|<!--|<\/?(?:html|head|body|script|iframe|table|h[1-6]|title|meta)\b/i.test(s);
+}
+
+/* Cloudflare's /cdn-cgi/ edge namespace (challenge-platform scripts,
+   flow API answers, Turnstile assets) on any host behind Cloudflare.
+   The managed challenge verifies those bytes end to end, so no
+   serve-time transformation may touch them: a URL-literal pass over
+   the orchestration script or a document bootstrap injected into an
+   HTML-typed flow answer corrupts the challenge protocol and the
+   site dies on its challenge UI for every visitor. The engine serves
+   cdn-cgi bodies verbatim (ScramJet parity: the server-side engine
+   never transforms subresource bodies and Cloudflare sites work
+   through it). Classification only - it never solves or bypasses a
+   challenge; detection stays the only challenge posture. */
+export function isCdnCgiUrl(target: string): boolean {
+  try {
+    const u = new URL(target);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+    return u.pathname.startsWith("/cdn-cgi/");
+  } catch {
+    return false;
+  }
 }
 
 /** Pre-fetch decision from the destination URL and the request

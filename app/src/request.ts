@@ -26,7 +26,7 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
+import { decideTransport, isCdnCgiUrl, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
 import { loadPolicy, policyMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
@@ -1478,7 +1478,7 @@ export function handleFetch(e: FetchEvent): void {
             } else if (e.clientId) {
               const client = await self.clients.get(e.clientId);
               if (client && client.url) {
-                pageUrl = decodePath(new URL(client.url, self.location.origin).pathname);
+                pageUrl = decodeClientUrl(new URL(client.url, self.location.origin));
               }
             }
           } catch {
@@ -1665,7 +1665,7 @@ export function handleFetch(e: FetchEvent): void {
              sees the response and claims no timing for it. */
           let initiator: string | undefined;
           try {
-            if (e.request.referrer) initiator = decodePath(new URL(e.request.referrer).pathname) || undefined;
+            if (e.request.referrer) initiator = decodeClientUrl(new URL(e.request.referrer, self.location.origin)) ?? undefined;
           } catch {
             /* initiator stays unknown */
           }
@@ -2245,6 +2245,28 @@ export function handleFetch(e: FetchEvent): void {
         target = ogsFixed;
       }
 
+      /* The hCaptcha widget (#433) builds its host= from
+         window.location.hostname (LegacyUnforgeable, the #112 co=
+         class): hCaptcha validates it against the sitekey's
+         registered hostnames, so upstream sees the engine host and
+         the widget never renders. Virtualize a host= that names
+         this deployment at the seam the engine owns. */
+      const hcFixed = virtualHcaptchaHost(target, e.request.referrer, self.location.origin);
+      if (hcFixed !== target) {
+        const htid = DIAG.trace();
+        DIAG.emit({
+          traceId: htid,
+          requestId: htid,
+          category: "CHALLENGE",
+          cause: "challenge",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "hcaptcha host= virtualized to the page origin",
+          url: target,
+        });
+        target = hcFixed;
+      }
+
       /* #129: challenge-widget frames stay engine-routed. The #120
          policy redirected these navigations provider-direct, which
          was an IP leak (the #32 class) AND left the widget
@@ -2312,7 +2334,7 @@ export function handleFetch(e: FetchEvent): void {
           try {
             if (e.clientId) {
               const client = await raceBoot(self.clients.get(e.clientId), "initiator client lookup", PRE_DEADLINE_BOUND_MS);
-              if (client) initiator = decodePath(new URL(client.url, self.location.origin).pathname) || undefined;
+              if (client) initiator = decodeClientUrl(new URL(client.url, self.location.origin)) ?? undefined;
             }
           } catch {
             /* initiator stays unknown */
@@ -2520,6 +2542,14 @@ export function handleFetch(e: FetchEvent): void {
             ) {
               dec = { mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: policyRule.id };
             }
+            /* Cloudflare's /cdn-cgi/ edge namespace: challenge
+               infrastructure that verifies its own bytes. Cached or
+               fresh, those bodies serve verbatim (the live-path twin
+               below gates the same way). */
+            const chNative = isCdnCgiUrl(target);
+            if (chNative && dec.mode === "RewriteFallback") {
+              dec = { mode: "NativeTransit", reason: "CDN_CGI_NATIVE" };
+            }
             transitRecord(traceId, target, dec);
             /* #95: a decision that leaves the native path is an
                explainable event on the always-on diag stream (the
@@ -2592,7 +2622,9 @@ export function handleFetch(e: FetchEvent): void {
                as a fresh response, or every second visit serves an
                unrewritten page (links escape the engine, no __ZL
                bootstrap, no cookie/storage virtualization). */
-            if (DOC_DESTS.has(dest) && isHtml(hit) && hit.body) {
+            /* #414: HTML MIME alone does not make a document; the
+               live-path twin below gates the same way. */
+            if (DOC_DESTS.has(dest) && isHtml(hit) && hit.body && !chNative) {
               const chRules = await siteRules();
               const chRule = ruleFor(chRules, target);
               const csInject = csInjectUrls(target, e.request, e.request.referrer);
@@ -2606,7 +2638,7 @@ export function handleFetch(e: FetchEvent): void {
                 { status: hit.status, headers: hitHeaders },
               );
             }
-            if (isCss(hit) && hit.body) {
+            if (isCss(hit) && hit.body && !chNative) {
               const hitCt = hit.headers.get("content-type") ?? "text/css";
               hitHeaders.set("content-type", utf8ContentType(hitCt));
               return new Response(cssRewriteStream(hit.body, cacheRewriteBase(hit, target), hitCt), {
@@ -2633,7 +2665,8 @@ export function handleFetch(e: FetchEvent): void {
             if (
               isJs(hit) &&
               (e.request.destination === "script" || e.request.destination === "") &&
-              hit.body
+              hit.body &&
+              !chNative
             ) {
               const jsCt = hit.headers.get("content-type") ?? "";
               const raw0 = decodeBody(await hit.arrayBuffer(), jsCt);
@@ -3166,6 +3199,20 @@ export function handleFetch(e: FetchEvent): void {
             dec = { mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: policyRule.id };
             traceDecision({ subsystem: "policy", rule: policyRule.id, original: target, result: "native", resource: rtype, traceId });
           }
+          /* Cloudflare's /cdn-cgi/ edge namespace (challenge-platform
+             scripts, flow API answers, Turnstile wiring): the upstream
+             verifies those bytes. A URL-literal pass over the
+             orchestration script or the document bootstrap injected
+             into an HTML-typed flow answer corrupts the challenge
+             protocol, and the widget dies on its own "unable to
+             connect" for every visitor. ScramJet never transforms
+             subresource bodies and Cloudflare sites work through it;
+             cdn-cgi responses serve verbatim, live and from the
+             cache. */
+          const cdnCgiNative = isCdnCgiUrl(target);
+          if (cdnCgiNative && dec.mode === "RewriteFallback") {
+            dec = { mode: "NativeTransit", reason: "CDN_CGI_NATIVE" };
+          }
           /* #95: same explainable-decision event on the response path
              (every document, stylesheet and transformed script body
              lands here, so the reason is in the diag stream, not just
@@ -3237,7 +3284,7 @@ export function handleFetch(e: FetchEvent): void {
              JS - the branch below stores the transformed copy. */
           const policyNativeJs = dec.mode === "NativeTransit" && dec.reason === "POLICY_NATIVE";
           const scriptServe =
-            JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && !!resp.body && !policyNativeJs;
+            JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && !!resp.body && !policyNativeJs && !cdnCgiNative;
           if (
             e.request.method === "GET" &&
             !workerServe &&
@@ -3267,7 +3314,7 @@ export function handleFetch(e: FetchEvent): void {
              and HTML-fragment fetches are application data: document
              rewriting would inject bootstrap scripts into their return
              values. The cached path uses this same destination gate. */
-          if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body) {
+          if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body && !cdnCgiNative) {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
             traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });
@@ -3317,7 +3364,7 @@ export function handleFetch(e: FetchEvent): void {
               headers: outHeaders,
             });
           }
-          if (isCss(resp) && resp.body) {
+          if (isCss(resp) && resp.body && !cdnCgiNative) {
             /* 2.4 Bromide: standalone stylesheets stream through the wasm
                CSS rewriter (previously a one-shot pass over a fully
                buffered body). Completion events fire at stream end, like
@@ -3446,7 +3493,7 @@ export function handleFetch(e: FetchEvent): void {
              HTML and CSS rewrite by content type with no destination
              gate, JS alone was gated. Inline module scripts are a
              rewriter gap (#36): the parser path, not this seam. */
-          if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body && !policyNativeJs) {
+          if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body && !policyNativeJs && !cdnCgiNative) {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
@@ -3827,6 +3874,78 @@ export function virtualOgsOrigin(target: string, referrer: string, engineOrigin:
   const parent = referrerOrigin(referrer);
   if (!parent) return target;
   return u.href.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
+}
+
+/** The hCaptcha widget (newassets.hcaptcha.com frames,
+    api.hcaptcha.com config/challenge endpoints) receives a host= built
+    by page JS from window.location.hostname (LegacyUnforgeable, the
+    #112 co= class): hCaptcha validates it against the sitekey's
+    registered hostnames, so a virtualized page names the engine host
+    and the widget never renders (#433). Virtualize a host= that
+    names this deployment at the seam the engine owns; rendering
+    fidelity only. */
+export function virtualHcaptchaHost(target: string, referrer: string, engineOrigin: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host !== "newassets.hcaptcha.com" && u.host !== "api.hcaptcha.com")
+    return target;
+  if (u.host === "newassets.hcaptcha.com" && !u.pathname.startsWith("/captcha/"))
+    return target;
+  if (
+    u.host === "api.hcaptcha.com" &&
+    !u.pathname.startsWith("/checksiteconfig") &&
+    !u.pathname.startsWith("/getcaptcha")
+  )
+    return target;
+  const m = /([?&])host=([^&]*)/.exec(u.search);
+  if (!m || !m[2]) return target;
+  let dec: string;
+  try {
+    dec = decodeURIComponent(m[2]);
+  } catch {
+    return target;
+  }
+  /* Only a host= that names THIS deployment is ours to fix; any other
+     value is a hostname the page genuinely chose. The SDK sends
+     window.location.hostname; host and origin forms are accepted so
+     a page that built the value differently still gets its real
+     host back. */
+  let engineHost = "";
+  let engineHostname = "";
+  try {
+    const eo = new URL(engineOrigin);
+    engineHost = eo.host;
+    engineHostname = eo.hostname;
+  } catch {
+    return target;
+  }
+  if (
+    dec !== engineHostname &&
+    dec !== engineHost &&
+    dec !== engineOrigin &&
+    dec !== engineOrigin + ":443" &&
+    dec !== engineOrigin + ":80" &&
+    dec !== engineHost + ":443" &&
+    dec !== engineHost + ":80"
+  )
+    return target;
+  /* No honest widget-side fallback exists: without a decoded page
+     origin hCaptcha cannot validate the request, so it passes
+     through unchanged. */
+  const parent = referrerOrigin(referrer);
+  if (!parent) return target;
+  let vu: URL;
+  try {
+    vu = new URL(parent);
+  } catch {
+    return target;
+  }
+  return u.href.replace(m[0], m[1] + "host=" + encodeURIComponent(vu.hostname));
 }
 
 /** #120: challenge-widget frame URLs (reCAPTCHA, hCaptcha, Turnstile
