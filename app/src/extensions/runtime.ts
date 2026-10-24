@@ -1,8 +1,8 @@
 /* Zeolite extension subsystem: runtime API surface.
 
    The centralized registry. buildApi() produces the browser.* object a
-   given extension context sees, plus the chrome.* alias (Firefox
-   exposes compatible chrome.* names for the same underlying APIs).
+   given extension context sees, plus a callback-compatible chrome.*
+   surface over the same permission-gated implementations.
    Not-yet-implemented namespaces are intentionally ABSENT so feature
    detection like "if (browser.tabs)" answers honestly instead of
    throwing or, worse, lying. Events that need the background runtime
@@ -41,6 +41,7 @@ import { MGMT, infoOf } from "./management";
 import type { MgmtListener } from "./management";
 import type { ExtensionManager } from "./manager";
 import { bootEnabled } from "./background";
+import { chromeApi } from "./chrome";
 
 export interface EventNamespace<L> {
   addListener(l: L): void;
@@ -543,8 +544,8 @@ export function buildApi(
     ...(notificationsNs && !isApiDetached("notifications") ? { notifications: notificationsNs } : {}),
     ...(cookiesNs && !isApiDetached("cookies") ? { cookies: cookiesNs } : {}),
   };
-  /* Firefox-style chrome.* alias over the same implementations. */
-  return { browser, chrome: browser };
+  /* Share implementations while honoring Chrome callbacks. */
+  return { browser, chrome: chromeApi(browser) };
 }
 
 
