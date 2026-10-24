@@ -8,6 +8,34 @@
 
 import { swc } from "./siteid";
 
+/* #419: normalize the second constructor argument the way the
+   native constructor does: undefined/null -> [], a string -> one
+   token, a sequence -> its items, anything else (the options
+   object Colyseus passes) -> one coerced token, which fails the
+   token check and throws SyntaxError like native instead of
+   concatenating a garbage entry into the bridge array. */
+function wsProtocolsList(protocols: unknown): string[] {
+  let list: unknown[];
+  if (protocols === undefined || protocols === null) list = [];
+  else if (typeof protocols === "string") list = [protocols];
+  else if (Array.isArray(protocols)) list = protocols;
+  else if (typeof (protocols as unknown as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function")
+    list = Array.from(protocols as unknown as Iterable<unknown>);
+  else list = [protocols];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tok of list) {
+    const s = String(tok);
+    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(s))
+      throw new DOMException("The subprotocol '" + s + "' is invalid.", "SyntaxError");
+    if (seen.has(s))
+      throw new DOMException("The subprotocol '" + s + "' is invalid.", "SyntaxError");
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
 export function applyWs(w: Record<string, unknown>): void {
 /* ---- WebSocket ---------------------------------------------------- */
 /* The SW cannot intercept WebSocket upgrades, so ws(s):// URLs are
@@ -55,6 +83,9 @@ export function applyWs(w: Record<string, unknown>): void {
       if (u.href.includes("#")) {
         throw new DOMException(url, "SyntaxError");
       }
+      /* #419: validate and normalize the subprotocol list here,
+         before anything reaches the bridge. */
+      const protoList = wsProtocolList(protocols);
       const es = new EventTarget() as unknown as WebSocket;
       /* instanceof parity: the EventTarget keeps its internal slots
          and adopts the real prototype; own plain on-handler props
@@ -144,7 +175,7 @@ const disp = (e: Event) => {
                (the SW retargets it), the page's own cross-origin
                choice otherwise. */
             url: u.href,
-            protocols: ([] as string[]).concat(protocols ?? []),
+            protocols: protoList,
           },
           [ch.port2],
         );
