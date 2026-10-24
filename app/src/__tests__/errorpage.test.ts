@@ -57,10 +57,10 @@ describe("errorPage", () => {
 
   it("never prints a destination URL (issue #32)", () => {
     expect(page).not.toContain("target.dev");
-    /* #430: the only https URL on the page is the issue-tracker
-       link on the standalone-page notice */
-    expect(page).toContain("https://github.com/lobsterbs/Zeolite/issues");
-    expect((page.match(/https:\/\//g) ?? []).length).toBe(1);
+    /* #430: the standalone-page notice names the issue tracker
+       schemeless, so the blanket https:// leak guard holds (#32) */
+    expect(page).toContain("github.com/lobsterbs/Zeolite/issues");
+    expect((page.match(/https:\/\//g) ?? []).length).toBe(0);
   });
 
   it("escapes hostile route input instead of reflecting it", () => {
