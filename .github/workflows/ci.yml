@@ -229,10 +229,14 @@ jobs:
         # Raised 34816 -> 35328 for the Injector phase 2 query-shape
         # vloc re-anchors (native-path commits keep the zlNavh
         # token); measured 35113, baseline 34628.
+        # Raised 35328 -> 36352 for the wave-56 bootstrap rides: the
+        # ws subprotocol allow-list call repair (#419, the blooket
+        # Colyseus class) and the anchor read scan order fix (#418,
+        # attribute before absolute); measured 35662, baseline 35113.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 35328 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 35328)"; exit 1; fi
+          if [ "$SIZE" -ge 36352 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 36352)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
