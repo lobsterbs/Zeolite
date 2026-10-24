@@ -244,7 +244,6 @@ export function transportResetForTests(deadlineMs: number): void {
   curlGeneration = 0;
   curlResetInflight = null;
   altGeneration = 0;
-  altResetInflight = null;
 }
 
 export function wispCoolingForTests(): boolean {
@@ -463,23 +462,12 @@ export const wispTransport: Transport = {
    one reset per alt-client generation; a late failure from an old
    generation rides the already-reset client. */
 let altGeneration = 0;
-let altResetInflight: Promise<void> | null = null;
 async function sharedAltReset(gen: number): Promise<void> {
-  if (gen !== altGeneration) {
-    if (altResetInflight) await altResetInflight.catch(() => {});
-    return;
-  }
-  if (altResetInflight) return altResetInflight;
-  const p = (async () => {
-    try {
-      zlAltReset();
-      altGeneration++;
-    } finally {
-      altResetInflight = null;
-    }
-  })();
-  altResetInflight = p;
-  await p;
+  if (gen !== altGeneration) return;
+  // altReset is synchronous: bump before resetting so concurrent old
+  // failures share the replacement, with no resolved promise to retain.
+  altGeneration++;
+  zlAltReset();
 }
 
 export async function altWispFetch(dest: string, init?: RequestInit): Promise<Response> {

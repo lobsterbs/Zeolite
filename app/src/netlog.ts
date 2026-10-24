@@ -7,7 +7,7 @@
   entry). sw.ts and the extracted request engine / control plane are
   call sites. */
 
-import { redactSecrets } from "./diag";
+import { redactSecrets, traceClient } from "./diag";
 
 /* ---- Network inspector log (Phase 4) -------------------------------- */
 /* Fixed-size ring buffer of proxied requests. The devtools page polls
@@ -15,6 +15,7 @@ import { redactSecrets } from "./diag";
    lets it drop entries it has already seen. */
 
 export interface NetEntry {
+  clientId?: string;
   seq: number;
   ts: number;
   method: string;
@@ -81,7 +82,7 @@ export const netLog: NetEntry[] = [];
 let netSeq = 0;
 
 export function netLogPush(entry: Omit<NetEntry, "seq" | "ts">): void {
-  netLog.push({ ...entry, seq: ++netSeq, ts: Date.now() });
+  netLog.push({ ...entry, clientId: traceClient(entry.traceId), seq: ++netSeq, ts: Date.now() });
   if (netLog.length > NET_LIMIT) netLog.shift();
 }
 
@@ -122,8 +123,8 @@ export function netLogGeneration(): number {
 
 /** Entries with seq strictly greater than the cursor (delta poll /
     recording slices share this). */
-export function netLogSince(since: number): NetEntry[] {
-  return netLog.filter((x) => x.seq > since);
+export function netLogSince(since: number, clientId?: string): NetEntry[] {
+  return netLog.filter((x) => x.seq > since && (clientId === undefined || x.clientId === clientId));
 }
 
 /** Current ring cursor (zl:recordStart captures it). */

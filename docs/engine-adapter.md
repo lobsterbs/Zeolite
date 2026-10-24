@@ -161,3 +161,30 @@ v2.1 protocol does not have).
 - Pending before "done": runtime validation of the full switch path
   (Scramjet -> Zeolite -> teardown -> Scramjet) on a real deployment,
   which also requires the Phase 1 transport vendoring to land first.
+
+
+## Registered embedder page messages
+
+A trusted host registers its HTTPS origin with `zl:embedderOrigin` on
+boot and after worker replacement. Embedded pages query `zl:getEmbedder`
+for that origin and their own decoded URL. The bootstrap sends messages
+to that exact parent origin; hosts must validate both event.origin and
+that event.source is one of their tab frames.
+
+`{lb:"nav",data:{url,title,clientId,favicon}}` synchronizes page metadata.
+`favicon` is a bounded page-reported link URL; engine-mapped values need
+worker-side decoding before display. `clientId` is available when the
+worker supplies it and is a correlation hint, not page attestation.
+
+`{lb:"navigate",data:{href,newTab:true,clientId}}` requests a host tab.
+An empty popup uses `{href:"",newTab:true,blank:true,clientId}`. The host
+must handle that explicitly and validate all other destinations as
+HTTP(S). Relative popups resolve against the virtual page URL and keyed
+engine URLs decode through the existing worker oracle.
+
+This is **Partial** popup compatibility: handled `window.open()` returns
+null because a host tab has no native WindowProxy. Code that opens a
+blank popup and later writes its location cannot use that native handle.
+Standalone top-level pages keep native popup behavior. Embedded startup
+requests queue while registration is checked; an unknown/timed-out
+embedder fails closed rather than opening an uncontrolled native tab.
