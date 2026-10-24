@@ -85,7 +85,7 @@ export function applyWs(w: Record<string, unknown>): void {
       }
       /* #419: validate and normalize the subprotocol list here,
          before anything reaches the bridge. */
-      const protoList = wsProtocolList(protocols);
+      const protoList = wsProtocolsList(protocols);
       const es = new EventTarget() as unknown as WebSocket;
       /* instanceof parity: the EventTarget keeps its internal slots
          and adopts the real prototype; own plain on-handler props
