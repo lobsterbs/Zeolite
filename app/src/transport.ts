@@ -67,6 +67,7 @@ export function setPrimaryWisp(url: string): boolean {
   if (url !== "" && next === null) return false;
   if (next === primaryWispOverrideValue()) return true;
   setPrimaryWispOverride(next);
+  curlGeneration++;
   curlReady = null;
   zlCurlReset();
   return true;
@@ -112,13 +113,17 @@ async function persistEngine(engine: TransportEngine): Promise<void> {
   }
 }
 
+/* #415: only the first failure from a generation may reset it.
+   Late peers reuse its replacement instead of tearing down retries. */
+let curlGeneration = 0;
+let altGeneration = 0;
 let curlReady: Promise<void> | null = null;
 async function ensureCurl(): Promise<void> {
   await engineReady(); // #390: replay the persisted choice before the first init
   if (!curlReady) {
-    curlReady = zlCurlInit({ websocket: primaryWispUrl() }).catch((err) => {
+    const pending = zlCurlInit({ websocket: primaryWispUrl() }).catch((err) => {
       setDegradedImpl("libcurl transport: " + String(err));
-      curlReady = null; // allow retry on next request
+      if (curlReady === pending) curlReady = null; // never clear a newer initialization
       DIAG.emit({
         category: "TRANSPORT",
         severity: "error",
@@ -128,6 +133,7 @@ async function ensureCurl(): Promise<void> {
       });
       throw err;
     });
+    curlReady = pending;
   }
   return curlReady;
 }
@@ -356,11 +362,12 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
       await waitForTransportState("connected", WAIT_FOR_RECONNECT_MS);
     }
     await ensureCurl();
+    const generation = curlGeneration;
     try {
       const resp = await fetchWithDeadline(zlCurlFetch, dest, init);
       /* A first-byte success is evidence the socket is healthy:
          clear the storm window and any cooldown. */
-      stallClear();
+      if (generation === curlGeneration) stallClear();
       return resp;
     } catch (err) {
       if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw err;
@@ -390,8 +397,11 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
         technicalReason: String(err),
         url: primaryWispUrl(),
       });
-      zlCurlReset();
-      curlReady = null; // force re-init inside the next ensureCurl()
+      if (generation === curlGeneration) {
+        curlGeneration++;
+        zlCurlReset();
+        curlReady = null;
+      }
       await ensureCurl();
       try {
         return await fetchWithDeadline(zlCurlFetch, dest, init);
@@ -413,6 +423,7 @@ export const wispTransport: Transport = {
   ready: ensureCurl,
   switchEngine(engine) {
     setEngine(engine);
+    curlGeneration++;
     curlReady = null; // force re-init inside the next ensureCurl()
     void persistEngine(engine); // #390: survive the next idle restart
   },
@@ -424,6 +435,7 @@ export const wispTransport: Transport = {
    tracks the primary endpoint's health) and no lifecycle machine
    (transport-lifecycle owns the primary only). */
 export async function altWispFetch(dest: string, init?: RequestInit): Promise<Response> {
+  const generation = altGeneration;
   loadEnter(dest);
   try {
     try {
@@ -451,7 +463,10 @@ export async function altWispFetch(dest: string, init?: RequestInit): Promise<Re
         technicalReason: String(err),
         url: dest,
       });
-      zlAltReset();
+      if (generation === altGeneration) {
+        altGeneration++;
+        zlAltReset();
+      }
       return fetchWithDeadline(zlAltFetch, dest, init);
     }
   } finally {
