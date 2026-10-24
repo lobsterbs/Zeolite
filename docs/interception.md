@@ -106,7 +106,10 @@ SW: no DOM, no page globals.
 
 ## Streaming guarantees
 
-- Header-only transforms by default: nothing buffers.
+- Header-only transforms by default: nothing buffers. HTML fetched by
+  fetch/XHR remains application data, even with a `text/html` or
+  `application/xhtml+xml` response type; only document-loading
+  destinations run the streaming HTML rewriter and bootstrap injection.
 - A response body transform is opt-in and gated: the SW applies it
   only when content-length is known and <= BODY_LIMIT (512 KiB), and
   never for documents or stylesheets (the streaming rewriter owns

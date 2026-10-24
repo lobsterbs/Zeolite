@@ -46,9 +46,11 @@ const SCAN_DEBOUNCE = 200;
    navguard imports this module). Real site paths that
    false-positive decode to null and memoize negative; the native
    value is kept either way. Covers the relative and absolute
-   forms. */
+   forms. Query-shape handles carry their marker in the search, so
+   inspect it before stripping the pathname (#418). Only the worker
+   verifies the token; a false-positive candidate memoizes negative. */
 function routeShaped(v: string): boolean {
-  if (v.startsWith("/__zl_")) return true;
+  if (/[?&]zlNavh=/.test(v)) return true;
   let p = v;
   if (/^https?:/i.test(v)) {
     try {
