@@ -180,8 +180,9 @@ export function decideTransport(target: string, dest: string): TransitDecision {
   return { mode: "NativeTransit", reason: "NON_DOCUMENT_RESOURCE" };
 }
 
-/** Post-response refinement: an HTML or CSS body forces the rewrite
-    path whatever the request's destination said. dest is the request
+/** Post-response refinement: HTML document loads and CSS bodies use
+    the rewrite path. HTML fetched as application data must retain its
+    original bytes (#414). dest is the request
     destination (issue C): an XML document (SVG/XML navigation) is
     recorded as a required-but-unsupported rewrite instead of silently
     counted as native - the rewriter speaks HTML, not XML, so the body
@@ -195,7 +196,7 @@ export function refineWithContent(
      decided requests (fallback, blocked) pass through untouched. */
   if (dec.mode !== "NativeTransit") return dec;
   const kind = docKind(contentType);
-  if (kind === "html") {
+  if (kind === "html" && DOC_DESTS.has(dest.toLowerCase())) {
     return { mode: "RewriteFallback", reason: "DOCUMENT_REWRITE_REQUIRED" };
   }
   if (kind === "css") {
