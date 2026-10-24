@@ -35,6 +35,7 @@ import { applyIsolation } from "./isolation";
 import { applyStorage } from "./storage";
 import { applySenderShim } from "./postmsg";
 import { anchorVirtual } from "./anchorshim";
+import { embedPopup } from "./embedsync";
 
 export const NAV = "/__zl_nav__";
 /* #101: parent-relative marker. A same-origin child realm (an
@@ -470,6 +471,8 @@ export function applyNavGuard(
     safe(() => {
       w.open = function (this: AnyRecord, u?: string | URL, t?: string, f?: string) {
         const s = u == null ? undefined : typeof u === "string" ? u : u.href;
+        if (!/^_(self|top|parent)$/i.test(t ?? "") &&
+            embedPopup(w, s ?? "", () => (OW as AnyRecord).call(this, s == null ? u : rewire(s), t, f))) return null;
         if (s == null) return (OW as AnyRecord).call(this, u, t, f);
         const d = destAbs(s);
         if (!d) return (OW as AnyRecord).call(this, rewire(s), t, f);
@@ -538,6 +541,15 @@ export function applyNavGuard(
       const popup =
         tgt === "_blank" || btn === 1 || e.ctrlKey || e.metaKey || e.shiftKey;
       if (!popup && tgt !== "_top" && tgt !== "_parent") return;
+      if (driven.has(n)) { ev.preventDefault(); return; }
+      if (popup && embedPopup(w, href, () => {
+        if (typeof OW === "function") (OW as AnyRecord).call(w, rewire(href), "_blank", "noopener");
+      })) {
+        ev.preventDefault();
+        driven.add(n);
+        setTimeout(() => driven.delete(n));
+        return;
+      }
       const d = destAbs(href);
       if (d === null) return;
       /* canceled in capture phase: nothing browser-direct is ever
