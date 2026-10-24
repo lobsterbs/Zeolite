@@ -42,10 +42,15 @@ impl JsFrame {
     }
     #[wasm_bindgen(getter, js_name = "closeReason")]
     pub fn close_reason(&self) -> u8 {
-        if self.payload.first().copied().unwrap_or(0) == 0 && self.is_close() {
-            0
-        } else {
-            self.payload.first().copied().unwrap_or(0)
+        // #421: report the real close reason byte instead of the old
+        // no-op conditional; unknown codes map to Unspecified.
+        if !self.is_close() {
+            return 0;
+        }
+        let raw = self.payload.first().copied().unwrap_or(0);
+        match wisp_core::CloseReason::from_u8(raw) {
+            Ok(_) => raw,
+            Err(_) => CloseReason::Unspecified as u8,
         }
     }
     #[wasm_bindgen(getter, js_name = "payload")]
@@ -107,7 +112,8 @@ pub fn continue_packet(stream_id: u32, buffer_remaining: u32) -> Vec<u8> {
 /// CLOSE a stream (or stream 0 to end the whole connection).
 #[wasm_bindgen(js_name = "closePacket")]
 pub fn close_packet(stream_id: u32, reason: u8) -> Vec<u8> {
-    let reason = wisp_core::CloseReason::from_u8(reason).unwrap_or(CloseReason::Voluntary);
+    // #421: unknown close reasons map to Unspecified, not Voluntary.
+    let reason = wisp_core::CloseReason::from_u8(reason).unwrap_or(CloseReason::Unspecified);
     let pkt = Packet::Close { stream_id, reason };
     encode_into_bytes(&pkt)
 }
@@ -168,5 +174,28 @@ mod tests {
         assert_eq!(wire[0], 0x05);
         assert_eq!(wire[5], 2); // major
         assert_eq!(wire[6], 1); // minor
+    }
+
+    #[test]
+    fn close_reason_getter_contract() {
+        // #421: valid reasons pass through, unknown codes map to
+        // Unspecified, DATA frames report 0, and an empty close
+        // payload parses as Unspecified.
+        let wire = |reason: u8| {
+            let mut w = vec![0x04];
+            w.extend_from_slice(&7u32.to_le_bytes());
+            w.push(reason);
+            w
+        };
+        let f = parse_frame(wire(0x48)).unwrap();
+        assert!(f.is_close());
+        assert_eq!(f.close_reason(), 0x48);
+        let f = parse_frame(wire(0x05)).unwrap();
+        assert_eq!(f.close_reason(), CloseReason::Unspecified as u8);
+        let f = parse_frame(data_packet(7, vec![9])).unwrap();
+        assert!(!f.is_close());
+        assert_eq!(f.close_reason(), 0);
+        let f = parse_frame(vec![0x04, 7, 0, 0, 0]).unwrap();
+        assert_eq!(f.close_reason(), CloseReason::Unspecified as u8);
     }
 }

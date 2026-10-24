@@ -1,12 +1,12 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const seam = vi.hoisted(() => ({ queue: [] as Response[], rewrites: 0, fetches: 0 }));
+const seam = vi.hoisted(() => ({ queue: [] as Response[], rewrites: 0, fetches: 0, inits: [] as Array<Headers | undefined> }));
 vi.mock("../transport", () => ({
   currentEngine: () => "libcurl",
   wispTransport: {
     ready: async () => {},
-    fetch: async () => { seam.fetches++; return seam.queue.shift()!; },
+    fetch: async (_url: string, init?: { headers?: Headers }) => { seam.fetches++; seam.inits.push(init?.headers); return seam.queue.shift()!; },
   },
 }));
 /* Exercise the request lifecycle without a browser WASM loader. API
@@ -25,8 +25,8 @@ vi.mock("../transform", async () => {
   };
 });
 
-import { handleFetch } from "../request";
-import { encodeDestLegacy, setScheme } from "../codec";
+import { handleFetch, routeReady } from "../request";
+import { b64uEncode, buildQueryHandleUrl, encodeDestLegacy, setRouteKey, setScheme } from "../codec";
 import { DOC_DESTS, transitResetForTests, transitStats } from "../transit";
 
 const ORIGIN = "https://engine.example";
@@ -51,6 +51,7 @@ function run(method: string, destination = "") {
 beforeEach(() => {
   seam.queue = [];
   seam.rewrites = seam.fetches = 0;
+  seam.inits = [];
   cached = undefined;
   transitResetForTests();
   setScheme("/j/");
@@ -102,5 +103,39 @@ describe("HTML-typed API payloads (#414)", () => {
       expect(await (await run("GET", destination)).text()).toBe("document rewrite");
     }
     expect(seam.rewrites).toBe(DOC_DESTS.size);
+  });
+});
+
+describe("query-shape initiator decode (the claude.ai Referer class, #414 reopen)", () => {
+  it("restores the Referer for a fetch whose client URL is a query-shape route", async () => {
+    /* The initiator fallback used decodePath on the client URL pathname;
+       since pin 115 the default client shape is a query handle, so the
+       decode nulls, virtualRefererFallback receives no initiator and the
+       Referer is omitted upstream with a TRANSPORT warning. decodeClientUrl
+       resolves every committed route shape. */
+    await routeReady;
+    setRouteKey(b64uEncode(new Uint8Array(16).map((_, i) => i)));
+    const page = "https://page.example/dir/page";
+    const clientUrl = ORIGIN + buildQueryHandleUrl(page)!;
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN }, registration: { scope: ORIGIN + "/" },
+      clients: { get: async () => ({ url: clientUrl }) },
+    });
+    seam.queue.push(new Response("data", { headers: { "content-type": "text/plain" } }));
+    let response!: Promise<Response>;
+    const event = {
+      request: {
+        url: ORIGIN + encodeDestLegacy("https://api.example/user/api.php"),
+        method: "GET", destination: "", mode: "cors",
+        credentials: "same-origin", headers: new Headers(), referrer: ORIGIN + "/", body: null,
+      },
+      clientId: "init-client", resultingClientId: "init-result",
+      respondWith: (r: Promise<Response>) => { response = r; },
+      waitUntil: () => {},
+    } as unknown as FetchEvent;
+    handleFetch(event);
+    await response;
+    expect(seam.fetches).toBe(1);
+    expect(seam.inits[0]!.get("referer")).toBe("https://page.example/");
   });
 });

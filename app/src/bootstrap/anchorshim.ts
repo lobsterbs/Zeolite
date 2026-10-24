@@ -46,20 +46,34 @@ const SCAN_DEBOUNCE = 200;
    navguard imports this module). Real site paths that
    false-positive decode to null and memoize negative; the native
    value is kept either way. Covers the relative and absolute
-   forms. Query-shape handles carry their marker in the search, so
-   inspect it before stripping the pathname (#418). Only the worker
-   verifies the token; a false-positive candidate memoizes negative. */
+   forms. */
 function routeShaped(v: string): boolean {
-  if (/[?&]zlNavh=/.test(v)) return true;
+  if (v.startsWith("/__zl_")) return true;
   let p = v;
+  let q = "";
   if (/^https?:/i.test(v)) {
     try {
-      p = new URL(v).pathname;
+      const u = new URL(v);
+      p = u.pathname;
+      q = u.search;
     } catch {
       return false;
     }
+  } else {
+    /* #418: relative forms can still carry the query part */
+    try {
+      q = new URL(v, "http://zeolite.invalid").search;
+    } catch {
+      /* unparseable: no query to inspect */
+    }
   }
-  return p.startsWith("/__zl_") || /^[A-Za-z0-9_-]{12,}$/.test(p.split("/")[2] ?? "");
+  if (p.startsWith("/__zl_")) return true;
+  /* #418: query-shape routes carry the handle in zlNavh with the
+     real pathname untouched; the worker decode stays the judge (a
+     real-site path that false-positives decodes to null and
+     memoizes negative). */
+  if (/[?&]zlNavh=([A-Za-z0-9_-]{12,})/.test(q)) return true;
+  return /^[A-Za-z0-9_-]{12,}$/.test(p.split("/")[2] ?? "");
 }
 
 function memoSet(k: string, v: string): void {

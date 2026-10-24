@@ -57,7 +57,10 @@ describe("errorPage", () => {
 
   it("never prints a destination URL (issue #32)", () => {
     expect(page).not.toContain("target.dev");
-    expect(page).not.toContain("https://");
+    /* #430: the standalone-page notice names the issue tracker
+       schemeless, so the blanket https:// leak guard holds (#32) */
+    expect(page).toContain("github.com/lobsterbs/Zeolite/issues");
+    expect((page.match(/https:\/\//g) ?? []).length).toBe(0);
   });
 
   it("escapes hostile route input instead of reflecting it", () => {
@@ -129,8 +132,18 @@ describe("errorPage attribution (engine bug reporting)", () => {
       status: 502,
       attribution: "upstream",
     });
-    expect(p).not.toContain("engine bug");
-    expect(p).not.toContain("github.com/lobsterbs");
+    expect(p).not.toContain("This is a Zeolite engine bug");
     expect(p).toContain("attribution&quot;:&quot;upstream&quot;");
+  });
+});
+
+describe("errorPage standalone-page notice (#430)", () => {
+  it("every category states the user is not supposed to see this page", () => {
+    for (const cat of ["dns", "tls", "timeout", "blocked", "stream", "route"] as const) {
+      const p = errorPage({ route: "/j/x", category: cat, engineVersion: "v" });
+      expect(p).toContain("This page is not a real website response");
+      expect(p).toContain("You are not supposed to see it as a standalone page");
+      expect(p).toContain("github.com/lobsterbs/Zeolite/issues");
+    }
   });
 });
