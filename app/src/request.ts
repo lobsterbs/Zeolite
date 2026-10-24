@@ -2545,7 +2545,7 @@ export function handleFetch(e: FetchEvent): void {
               bytes: Number(hit.headers.get("content-length") ?? -1),
               verdict: "cache",
               rewritten:
-                hit.status === 200 && isHtml(hit)
+                hit.status === 200 && DOC_DESTS.has(dest) && isHtml(hit)
                   ? "html"
                   : hit.status === 200 && isCss(hit)
                     ? "css"
@@ -2592,7 +2592,7 @@ export function handleFetch(e: FetchEvent): void {
                as a fresh response, or every second visit serves an
                unrewritten page (links escape the engine, no __ZL
                bootstrap, no cookie/storage virtualization). */
-            if (isHtml(hit) && hit.body) {
+            if (DOC_DESTS.has(dest) && isHtml(hit) && hit.body) {
               const chRules = await siteRules();
               const chRule = ruleFor(chRules, target);
               const csInject = csInjectUrls(target, e.request, e.request.referrer);
@@ -3185,7 +3185,7 @@ export function handleFetch(e: FetchEvent): void {
             bytes: Number(resp.headers.get("content-length") ?? -1),
             verdict: plugins?.length ? "pass:" + plugins.length : undefined,
             rtype: classifyRtype(dest, resp.headers.get("content-type") ?? ""),
-            rewritten: isHtml(resp) ? "html" : isCss(resp) ? "css" : isJs(resp) && (dest === "script" || dest === "") ? "js" : undefined,
+            rewritten: DOC_DESTS.has(dest) && isHtml(resp) ? "html" : isCss(resp) ? "css" : isJs(resp) && (dest === "script" || dest === "") ? "js" : undefined,
             transport: dec.mode,
             fallbackReason: reasonOf(dec),
             finalDest,
@@ -3206,7 +3206,7 @@ export function handleFetch(e: FetchEvent): void {
           if (rIc.headers) {
             for (const [k, v] of Object.entries(rIc.headers)) outHeaders.set(k, v);
           }
-          if (rIc.body && !isHtml(resp) && !isCss(resp)) {
+          if (rIc.body && !(DOC_DESTS.has(dest) && isHtml(resp)) && !isCss(resp)) {
             const clen = Number(resp.headers.get("content-length") ?? -1);
             if (clen >= 0 && clen <= BODY_LIMIT) {
               WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
@@ -3263,7 +3263,11 @@ export function handleFetch(e: FetchEvent): void {
             WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             return maskedScriptResponse(resp.status, sct);
           }
-          if ((isHtml(resp) || (respCt === "" && DOC_DESTS.has(dest) && resp.body)) && resp.body) {
+          /* #414: HTML MIME alone does not make a document. PHP APIs
+             and HTML-fragment fetches are application data: document
+             rewriting would inject bootstrap scripts into their return
+             values. The cached path uses this same destination gate. */
+          if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body) {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
             traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });

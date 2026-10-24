@@ -181,8 +181,8 @@ describe("sniffsAsHtml", () => {
 });
 
 describe("refineWithContent", () => {
-  it("html/css bodies force the rewrite path", () => {
-    expect(refineWithContent(native, "text/html")).toEqual({
+  it("HTML documents and CSS bodies use the rewrite path", () => {
+    expect(refineWithContent(native, "text/html", "document")).toEqual({
       mode: "RewriteFallback",
       reason: "DOCUMENT_REWRITE_REQUIRED",
     });
@@ -193,6 +193,12 @@ describe("refineWithContent", () => {
     expect(refineWithContent(native, "image/png")).toEqual(native);
     expect(refineWithContent({ mode: "RewriteFallback", reason: "DOCUMENT_REWRITE_REQUIRED" }, "image/png"))
       .toEqual({ mode: "RewriteFallback", reason: "DOCUMENT_REWRITE_REQUIRED" });
+  });
+  it("HTML fetched as application data keeps the native response (#414)", () => {
+    for (const destination of ["", "empty", "fetch", "image", "font"]) {
+      expect(refineWithContent(native, "text/html", destination)).toEqual(native);
+      expect(refineWithContent(native, "application/xhtml+xml", destination)).toEqual(native);
+    }
   });
   /* Issue C: destination-aware refinement. An XML document on a
      document destination is a required-but-unsupported rewrite: the
