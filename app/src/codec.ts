@@ -65,6 +65,8 @@ export function b64uEncode(bytes: Uint8Array): string {
 }
 
 export function b64uDecode(s: string): Uint8Array | null {
+  // #423: reject impossible lengths (len % 4 === 1) up front.
+  if (s.length % 4 === 1) return null;
   const out: number[] = [];
   let buf = 0;
   let bits = 0;
@@ -78,6 +80,9 @@ export function b64uDecode(s: string): Uint8Array | null {
       out.push((buf >> bits) & 0xff);
     }
   }
+  // #423: leftover bits must be zero, so each byte string has
+  // exactly one valid encoding.
+  if (bits > 0 && (buf & ((1 << bits) - 1)) !== 0) return null;
   return new Uint8Array(out);
 }
 
