@@ -13,9 +13,11 @@ globalThis.browser with runtime.id exists. The extension runtime
 exposes exactly that: background boots set the globals during the
 synchronous script execution (#139), popup/options pages set
 window.browser natively, so the polyfill binds to the native
-promise surface and its chrome-callback machinery never runs
-(which is what would hang: this runtime's chrome.* is promise
-based and would never invoke the polyfill's callbacks). Content
+promise surface and its chrome-callback machinery never runs.
+Implemented asynchronous background APIs also accept trailing Chrome
+callbacks directly, with `runtime.lastError` scoped to an error callback
+(#417); calls without callbacks retain their Promise results. Popup,
+options and content-script bridges remain Promise-only. Content
 scripts are the honest gap: they run in the page's JS world, so a
 global browser would hand the page the extension's API object
 (a property-setter trap captures it); recorded as unsupported in
