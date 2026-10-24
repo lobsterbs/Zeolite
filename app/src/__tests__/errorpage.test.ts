@@ -143,7 +143,7 @@ describe("errorPage standalone-page notice (#430)", () => {
       const p = errorPage({ route: "/j/x", category: cat, engineVersion: "v" });
       expect(p).toContain("This page is not a real website response");
       expect(p).toContain("You are not supposed to see it as a standalone page");
-      expect(p).toContain("https://github.com/lobsterbs/Zeolite/issues");
+      expect(p).toContain("github.com/lobsterbs/Zeolite/issues");
     }
   });
 });

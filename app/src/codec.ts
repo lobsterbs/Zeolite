@@ -86,6 +86,28 @@ export function b64uDecode(s: string): Uint8Array | null {
   return new Uint8Array(out);
 }
 
+/** #423 follow-up: recoverPath alone consumes concatenated tails
+    (<token><plaintext rest>), whose trailing chars are arbitrary
+    b64u letters, so it decodes leniently - trailing bits dropped,
+    partial groups kept - exactly like the pre-#423 decoder. Route
+    decoding stays canonical-only via b64uDecode. */
+function b64uDecodeLenient(s: string): Uint8Array | null {
+  const out: number[] = [];
+  let buf = 0;
+  let bits = 0;
+  for (const c of s) {
+    const v = B64URL.indexOf(c);
+    if (v < 0) return null;
+    buf = (buf << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((buf >> bits) & 0xff);
+    }
+  }
+  return new Uint8Array(out);
+}
+
 const ENC = new TextEncoder();
 const DEC_STRICT = new TextDecoder("utf-8", { fatal: true });
 
@@ -849,7 +871,7 @@ export function recoverPath(path: string): string | null {
   let maxL = 0;
   while (maxL < tail.length && B64URL.indexOf(tail[maxL]) >= 0) maxL++;
   if (maxL < 23) return null;
-  const bytes = b64uDecode(tail.slice(0, maxL));
+  const bytes = b64uDecodeLenient(tail.slice(0, maxL)); // #423: lenient, tails are concatenated
   if (!bytes || bytes.length < 24 || bytes[0] !== 1) return null;
   const iv = bytes.slice(1, 17);
   const ct = bytes.slice(17);
