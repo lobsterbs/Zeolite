@@ -191,6 +191,9 @@ export function rewriteStream(
   csInject: string[],
   contentType: string,
   onDone?: () => void,
+  /* #414: false keeps the URL pass but skips the init splice - a
+     fetch/XHR HTML body is a programmatic read, never a document. */
+  injectInit = true,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const modP = rewriter();
@@ -213,7 +216,10 @@ export function rewriteStream(
            must settle the heartbeat instead of escaping with it
            armed. */
         await deps!.routeReady();
-        const init = initScript(base, deps!.fpScript() ?? (await deps!.siteScript(base)));
+        /* #414: injectInit=false serves fetch/XHR HTML with the URL
+           rewrite but no bootstrap splice, so a plain-text API answer
+           behind an HTML content-type survives byte intact. */
+        const init = injectInit ? initScript(base, deps!.fpScript() ?? (await deps!.siteScript(base))) : "";
         const emit = (out: string) => {
           if (out) controller.enqueue(encoder.encode(out));
         };

@@ -26,7 +26,7 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
+import { decideTransport, isCdnCgiUrl, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
 import { loadPolicy, policyMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
@@ -2520,6 +2520,14 @@ export function handleFetch(e: FetchEvent): void {
             ) {
               dec = { mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: policyRule.id };
             }
+            /* Cloudflare's /cdn-cgi/ edge namespace: challenge
+               infrastructure that verifies its own bytes. Cached or
+               fresh, those bodies serve verbatim (the live-path twin
+               below gates the same way). */
+            const chNative = isCdnCgiUrl(target);
+            if (chNative && dec.mode === "RewriteFallback") {
+              dec = { mode: "NativeTransit", reason: "CDN_CGI_NATIVE" };
+            }
             transitRecord(traceId, target, dec);
             /* #95: a decision that leaves the native path is an
                explainable event on the always-on diag stream (the
@@ -2592,21 +2600,26 @@ export function handleFetch(e: FetchEvent): void {
                as a fresh response, or every second visit serves an
                unrewritten page (links escape the engine, no __ZL
                bootstrap, no cookie/storage virtualization). */
-            if (isHtml(hit) && hit.body) {
+            if (isHtml(hit) && hit.body && !chNative) {
               const chRules = await siteRules();
               const chRule = ruleFor(chRules, target);
-              const csInject = csInjectUrls(target, e.request, e.request.referrer);
+              /* #414: a fetch/XHR hit (dest "") is a programmatic
+                 read, never a document: innerHTML fragments never
+                 execute the bootstrap, and a plain-text API body
+                 behind an HTML content-type must survive byte intact.
+                 URL pass stays, injection goes. */
+              const csInject = dest === "" ? [] : csInjectUrls(target, e.request, e.request.referrer);
               const hitCt = hit.headers.get("content-type") ?? "text/html";
               /* Issue B: the served copy is re-encoded UTF-8. */
               hitHeaders.set("content-type", utf8ContentType(hitCt));
               return new Response(
                 rewriteStream(hit.body, cacheRewriteBase(hit, target), chRule, csInject, hitCt, () => {
                   if (e.request.mode === "navigate") WEBNAV.completed(target);
-                }),
+                }, dest !== ""),
                 { status: hit.status, headers: hitHeaders },
               );
             }
-            if (isCss(hit) && hit.body) {
+            if (isCss(hit) && hit.body && !chNative) {
               const hitCt = hit.headers.get("content-type") ?? "text/css";
               hitHeaders.set("content-type", utf8ContentType(hitCt));
               return new Response(cssRewriteStream(hit.body, cacheRewriteBase(hit, target), hitCt), {
@@ -2633,7 +2646,8 @@ export function handleFetch(e: FetchEvent): void {
             if (
               isJs(hit) &&
               (e.request.destination === "script" || e.request.destination === "") &&
-              hit.body
+              hit.body &&
+              !chNative
             ) {
               const jsCt = hit.headers.get("content-type") ?? "";
               const raw0 = decodeBody(await hit.arrayBuffer(), jsCt);
@@ -3166,6 +3180,20 @@ export function handleFetch(e: FetchEvent): void {
             dec = { mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: policyRule.id };
             traceDecision({ subsystem: "policy", rule: policyRule.id, original: target, result: "native", resource: rtype, traceId });
           }
+          /* Cloudflare's /cdn-cgi/ edge namespace (challenge-platform
+             scripts, flow API answers, Turnstile wiring): the upstream
+             verifies those bytes. A URL-literal pass over the
+             orchestration script or the document bootstrap injected
+             into an HTML-typed flow answer corrupts the challenge
+             protocol, and the widget dies on its own "unable to
+             connect" for every visitor. ScramJet never transforms
+             subresource bodies and Cloudflare sites work through it;
+             cdn-cgi responses serve verbatim, live and from the
+             cache. */
+          const cdnCgiNative = isCdnCgiUrl(target);
+          if (cdnCgiNative && dec.mode === "RewriteFallback") {
+            dec = { mode: "NativeTransit", reason: "CDN_CGI_NATIVE" };
+          }
           /* #95: same explainable-decision event on the response path
              (every document, stylesheet and transformed script body
              lands here, so the reason is in the diag stream, not just
@@ -3237,7 +3265,7 @@ export function handleFetch(e: FetchEvent): void {
              JS - the branch below stores the transformed copy. */
           const policyNativeJs = dec.mode === "NativeTransit" && dec.reason === "POLICY_NATIVE";
           const scriptServe =
-            JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && !!resp.body && !policyNativeJs;
+            JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && !!resp.body && !policyNativeJs && !cdnCgiNative;
           if (
             e.request.method === "GET" &&
             !workerServe &&
@@ -3263,14 +3291,18 @@ export function handleFetch(e: FetchEvent): void {
             WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             return maskedScriptResponse(resp.status, sct);
           }
-          if ((isHtml(resp) || (respCt === "" && DOC_DESTS.has(dest) && resp.body)) && resp.body) {
+          if ((isHtml(resp) || (respCt === "" && DOC_DESTS.has(dest) && resp.body)) && resp.body && !cdnCgiNative) {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
             traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });
             /* Main-frame document loads feed the webNavigation bridge;
                subresource fetches do not arrive in navigate mode. */
             if (e.request.mode === "navigate") WEBNAV.committed(target);
-            const csInject = csInjectUrls(target, e.request, e.request.referrer);
+            /* #414: dest "" (fetch/XHR) bodies are programmatic
+               reads: keep the URL pass, drop the init + content-script
+               injection (innerHTML never executes them, and a
+               text/plain-in-HTML API answer must survive intact). */
+            const csInject = dest === "" ? [] : csInjectUrls(target, e.request, e.request.referrer);
             const rewriteDone = () => {
               /* webNavigation.onCompleted + webRequest.onCompleted:
                  the document stream (and with it the navigation) is
@@ -3284,7 +3316,7 @@ export function handleFetch(e: FetchEvent): void {
                  charset corrupts the page. */
               outHeaders.set("content-type", utf8ContentType(respCt));
               return new Response(
-                rewriteStream(resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone),
+                rewriteStream(resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone, dest !== ""),
                 {
                   status: resp.status,
                   headers: outHeaders,
@@ -3301,7 +3333,7 @@ export function handleFetch(e: FetchEvent): void {
             if (sniffHead && sniffsAsHtml(sniffHead)) {
               outHeaders.set("content-type", "text/html; charset=utf-8");
               return new Response(
-                rewriteStream(sniffReader, finalDest ?? target, rule, csInject, "text/html", rewriteDone),
+                rewriteStream(sniffReader, finalDest ?? target, rule, csInject, "text/html", rewriteDone, dest !== ""),
                 {
                   status: resp.status,
                   headers: outHeaders,
@@ -3313,7 +3345,7 @@ export function handleFetch(e: FetchEvent): void {
               headers: outHeaders,
             });
           }
-          if (isCss(resp) && resp.body) {
+          if (isCss(resp) && resp.body && !cdnCgiNative) {
             /* 2.4 Bromide: standalone stylesheets stream through the wasm
                CSS rewriter (previously a one-shot pass over a fully
                buffered body). Completion events fire at stream end, like
@@ -3442,7 +3474,7 @@ export function handleFetch(e: FetchEvent): void {
              HTML and CSS rewrite by content type with no destination
              gate, JS alone was gated. Inline module scripts are a
              rewriter gap (#36): the parser path, not this seam. */
-          if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body && !policyNativeJs) {
+          if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body && !policyNativeJs && !cdnCgiNative) {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
