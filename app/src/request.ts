@@ -26,7 +26,7 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, isCdnCgiUrl, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
+import { decideTransport, isCdnCgiUrl, isChallengeMitigated, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
 import { loadPolicy, policyMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
@@ -3213,6 +3213,14 @@ export function handleFetch(e: FetchEvent): void {
           if (cdnCgiNative && dec.mode === "RewriteFallback") {
             dec = { mode: "NativeTransit", reason: "CDN_CGI_NATIVE" };
           }
+          /* cf-mitigated: challenge documents (the Cloudflare
+             interstitial itself) serve verbatim for the same reason
+             as the cdn-cgi resources above: the widget rejects any
+             tampering with the challenge document. */
+          const cfChallenge = isChallengeMitigated(resp.headers);
+          if (cfChallenge && dec.mode === "RewriteFallback") {
+            dec = { mode: "NativeTransit", reason: "CF_CHALLENGE_VERBATIM" };
+          }
           /* #95: same explainable-decision event on the response path
              (every document, stylesheet and transformed script body
              lands here, so the reason is in the diag stream, not just
@@ -3232,7 +3240,7 @@ export function handleFetch(e: FetchEvent): void {
             bytes: Number(resp.headers.get("content-length") ?? -1),
             verdict: plugins?.length ? "pass:" + plugins.length : undefined,
             rtype: classifyRtype(dest, resp.headers.get("content-type") ?? ""),
-            rewritten: DOC_DESTS.has(dest) && isHtml(resp) ? "html" : isCss(resp) ? "css" : isJs(resp) && (dest === "script" || dest === "") ? "js" : undefined,
+            rewritten: DOC_DESTS.has(dest) && isHtml(resp) && !cfChallenge ? "html" : isCss(resp) ? "css" : isJs(resp) && (dest === "script" || dest === "") ? "js" : undefined,
             transport: dec.mode,
             fallbackReason: reasonOf(dec),
             finalDest,
@@ -3284,7 +3292,7 @@ export function handleFetch(e: FetchEvent): void {
              JS - the branch below stores the transformed copy. */
           const policyNativeJs = dec.mode === "NativeTransit" && dec.reason === "POLICY_NATIVE";
           const scriptServe =
-            JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && !!resp.body && !policyNativeJs && !cdnCgiNative;
+            JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && !!resp.body && !policyNativeJs && !cdnCgiNative && !cfChallenge;
           if (
             e.request.method === "GET" &&
             !workerServe &&
@@ -3314,7 +3322,7 @@ export function handleFetch(e: FetchEvent): void {
              and HTML-fragment fetches are application data: document
              rewriting would inject bootstrap scripts into their return
              values. The cached path uses this same destination gate. */
-          if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body && !cdnCgiNative) {
+          if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body && !cdnCgiNative && !cfChallenge) {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
             traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });
@@ -3364,7 +3372,7 @@ export function handleFetch(e: FetchEvent): void {
               headers: outHeaders,
             });
           }
-          if (isCss(resp) && resp.body && !cdnCgiNative) {
+          if (isCss(resp) && resp.body && !cdnCgiNative && !cfChallenge) {
             /* 2.4 Bromide: standalone stylesheets stream through the wasm
                CSS rewriter (previously a one-shot pass over a fully
                buffered body). Completion events fire at stream end, like
@@ -3493,7 +3501,7 @@ export function handleFetch(e: FetchEvent): void {
              HTML and CSS rewrite by content type with no destination
              gate, JS alone was gated. Inline module scripts are a
              rewriter gap (#36): the parser path, not this seam. */
-          if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body && !policyNativeJs && !cdnCgiNative) {
+          if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body && !policyNativeJs && !cdnCgiNative && !cfChallenge) {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });

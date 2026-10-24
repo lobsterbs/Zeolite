@@ -37,7 +37,7 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
   };
 });
 
-import { isCdnCgiUrl } from "../transit";
+import { isCdnCgiUrl, isChallengeMitigated } from "../transit";
 import { initTransform, rewriteStream } from "../transform";
 import { initScript } from "../pageload";
 import type { TransformDeps } from "../transform";
@@ -121,5 +121,17 @@ describe("rewriteStream injectInit (#414)", () => {
     const body = "https://files.catbox.moe/ilxf5f.mp4";
     const out = await readAll(rewriteStream(streamOf([body]), BASE, {}, [], "text/html", undefined, false));
     expect(out).toBe(body);
+  });
+});
+
+describe("isChallengeMitigated (cf-mitigated challenge documents)", () => {
+  it("accepts the challenge flag case-insensitively and trimmed", () => {
+    expect(isChallengeMitigated({ get: () => "challenge" })).toBe(true);
+    expect(isChallengeMitigated({ get: () => " Challenge " })).toBe(true);
+  });
+
+  it("rejects other values and absent headers", () => {
+    expect(isChallengeMitigated({ get: () => "blocked" })).toBe(false);
+    expect(isChallengeMitigated({ get: () => null })).toBe(false);
   });
 });
