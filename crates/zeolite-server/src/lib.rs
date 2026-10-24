@@ -2133,10 +2133,10 @@ async fn udp_relay_loop(
     loop {
         tokio::select! {
             r = sock.recv(&mut buf) => match r {
-                // Bug-scout fix: a zero-length datagram is legal
-                // UDP and tokio surfaces it as Ok(0); it must not
-                // end the stream.
-                Ok(0) => continue,
+                // #424: a zero-length datagram is legal UDP; tokio
+                // surfaces it as Ok(0), which rides the Ok(n) arm
+                // below and relays as an empty DATA payload instead
+                // of being silently dropped.
                 // #209: a connected UDP socket reports ECONNREFUSED
                 // on Linux when an ICMP port-unreachable arrives; the
                 // datagram is lost, the destination is not dead.
@@ -3166,15 +3166,14 @@ mod tests {
             .await
         });
 
-        // Two datagrams in, two datagrams out; boundaries preserved.
-        // A zero-length datagram is legal UDP: it must ride along
-        // without ending the stream (bug-scout fix: tokio surfaces it
-        // as Ok(0), which read as EOF).
+        // Three datagrams in, three out; boundaries preserved and the
+        // zero-length one included (#424: the socket arm relays it
+        // as an empty DATA frame instead of dropping it).
         input_tx.send(Vec::new()).await.unwrap();
         input_tx.send(vec![1, 2, 3]).await.unwrap();
         input_tx.send(vec![4]).await.unwrap();
         let mut got: Vec<Vec<u8>> = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             let msg = tokio::time::timeout(Duration::from_secs(5), ws_rx.recv())
                 .await
                 .expect("timeout")
@@ -3190,10 +3189,11 @@ mod tests {
                 other => panic!("expected DATA, got {other:?}"),
             }
         }
-        assert_eq!(got, vec![vec![1, 2, 3], vec![4]]);
+        assert_eq!(got, vec![Vec::new(), vec![1, 2, 3], vec![4]]);
         // The counter is bidirectional: 3 client->upstream datagrams
-        // (one of them zero-length) plus the 2 echoed back.
-        assert_eq!(pkt_ctr.load(Ordering::Relaxed), 5);
+        // (one of them zero-length) plus the 3 echoed back (#424:
+        // the empty echo now counts too).
+        assert_eq!(pkt_ctr.load(Ordering::Relaxed), 6);
         relay.abort();
         echo_task.abort();
     }

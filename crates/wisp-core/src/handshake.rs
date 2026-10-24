@@ -80,7 +80,9 @@ impl ServerHandshake {
                 major,
                 ..
             } => {
-                if *major > 2 {
+                // #422: only v2 speaks this handshake; a lower major
+                // is not a compatible peer either.
+                if *major != 2 {
                     return Err(CloseReason::IncompatibleExtensions);
                 }
                 self.version = Some(NegotiatedVersion::V2);
@@ -246,6 +248,21 @@ mod tests {
         let mut hs = ServerHandshake::new(vec![]);
         assert_eq!(
             hs.handle(&info_packet(9, vec![])),
+            Err(CloseReason::IncompatibleExtensions)
+        );
+    }
+
+    #[test]
+    fn lower_major_rejected() {
+        // #422: major 2 is the only version this handshake accepts.
+        let mut hs = ServerHandshake::new(vec![]);
+        assert_eq!(
+            hs.handle(&info_packet(1, vec![])),
+            Err(CloseReason::IncompatibleExtensions)
+        );
+        let mut hs = ServerHandshake::new(vec![]);
+        assert_eq!(
+            hs.handle(&info_packet(0, vec![])),
             Err(CloseReason::IncompatibleExtensions)
         );
     }

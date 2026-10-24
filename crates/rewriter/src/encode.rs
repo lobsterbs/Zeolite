@@ -75,6 +75,10 @@ pub fn b64u_encode(data: &[u8]) -> String {
 }
 
 pub fn b64u_decode(s: &str) -> Option<Vec<u8>> {
+    // #423: reject impossible lengths (len % 4 == 1) up front.
+    if s.len() % 4 == 1 {
+        return None;
+    }
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
     let mut buf: u32 = 0;
     let mut bits = 0u32;
@@ -93,6 +97,11 @@ pub fn b64u_decode(s: &str) -> Option<Vec<u8>> {
             bits -= 8;
             out.push((buf >> bits) as u8);
         }
+    }
+    // #423: leftover bits must be zero, so each byte string has
+    // exactly one valid encoding.
+    if bits > 0 && (buf & ((1 << bits) - 1)) != 0 {
+        return None;
     }
     Some(out)
 }
@@ -430,6 +439,22 @@ mod tests {
                 s.as_bytes()
             );
         }
+    }
+
+    #[test]
+    fn b64u_canonical_only() {
+        // #423: impossible lengths and non-zero trailing bits are
+        // rejected; canonical encodings still decode.
+        assert_eq!(b64u_decode("Y"), None);
+        assert_eq!(b64u_decode("YWJjY"), None);
+        assert_eq!(b64u_decode("YWI"), Some("ab".as_bytes().to_vec()));
+        assert_eq!(b64u_decode("YWJ"), None);
+        assert_eq!(b64u_decode("eA"), Some("x".as_bytes().to_vec()));
+        assert_eq!(b64u_decode("eB"), None);
+        assert_eq!(
+            b64u_decode(&b64u_encode("https://example.com/x?y=1".as_bytes())),
+            Some("https://example.com/x?y=1".as_bytes().to_vec())
+        );
     }
 
     #[test]
