@@ -35,7 +35,7 @@ export interface NetEntry {
       and XHR are not distinguishable without initiator info, so both
       are reported as FETCH rather than guessed apart. */
   rtype: string;
-  /** Rewrite applied to this response, when any: "html" | "css". */
+  /** Rewrite applied to this response, when any: "html" | "css" | "js", or "js-pinned" when the #449 origin-pinning literal skip fired. */
   rewritten?: string;
   err?: string;
   /** Diagnostics trace identifier, joinable with zl:getDiag events. */
@@ -96,6 +96,20 @@ export function netLogPush(entry: Omit<NetEntry, "seq" | "ts">): void {
     clientId: traceClient(entry.traceId), seq: ++netSeq, ts: Date.now(),
   });
   if (netLog.length > NET_LIMIT) netLog.shift();
+}
+
+/** #449: the URL-literal pass can skip a script body (an anchored
+    origin-pinning regex, the gapi-class loader case). The row was
+    pushed before the body was read, so the skip re-annotates the
+    latest row for this traceId with the machine-readable reason
+    ("js-pinned"); a traceId with no row is a no-op. */
+export function netLogAnnotateRewrite(traceId: string, reason: string): void {
+  for (let i = netLog.length - 1; i >= 0; i--) {
+    if (netLog[i].traceId === traceId) {
+      netLog[i].rewritten = reason;
+      return;
+    }
+  }
 }
 
 /** Flatten headers into a redacted record for the inspector detail.

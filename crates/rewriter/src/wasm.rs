@@ -150,6 +150,15 @@ pub fn rewrite_js_body_export(
     r.rewrite_js_body(&js)
 }
 
+/// #449: does this script body pin its generated URLs with an
+/// anchored ^https?: regex? Pinned bodies keep their URL literals
+/// verbatim in rewriteJsBody (the loader validates them); the SW
+/// records the machine-readable literal-skip reason when this fires.
+#[wasm_bindgen(js_name = "hasOriginPinningRegex")]
+pub fn has_origin_pinning_regex(js: String) -> bool {
+    crate::js::has_origin_pinning_regex(&js)
+}
+
 /// One-shot CSS pass for complete strings (style blocks). Standalone
 /// stylesheets use the streaming JsCssRewriter below instead.
 #[wasm_bindgen(js_name = "rewriteCss")]

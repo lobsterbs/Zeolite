@@ -7,8 +7,29 @@
 //! (js/globals.rs: location reads -> the #236 virtual location);
 //! a general AST rewrite remains unscheduled (#146).
 
+/// #449: does this script body pin its generated URLs to an origin
+/// with an anchored regex (a `/^https?:.../` literal or a
+/// `RegExp("...")` source beginning `^https?:` / `^https?:\:`)? Such
+/// loaders sanity-validate the URLs they build (gapi's "Bad hint:
+/// failed sanity", LobsterBrowse #154): a route token fails the pin
+/// and the loader throws before any fetch. The scan is a plain
+/// substring match on the raw body - the needles are regex-specific
+/// byte sequences, and a false positive only skips the literal pass
+/// (the runtime seams still route every request), so the failure
+/// direction is safe.
+pub fn has_origin_pinning_regex(js: &str) -> bool {
+    js.contains("^https?:") || js.contains("^https?\\:")
+}
+
 /// Rewrite URL-like string literals in a <script> body.
 pub fn rewrite_script(js: &str, enc: &dyn Fn(&str) -> String) -> String {
+    // #449: an origin-pinning body keeps its URL literals verbatim:
+    // the loader validates the URLs it builds. The callers still run
+    // their other passes (frame-buster neutralization, #235 globals)
+    // over the body.
+    if has_origin_pinning_regex(js) {
+        return js.to_string();
+    }
     rewrite_literals(js, enc, true)
 }
 
@@ -715,6 +736,74 @@ mod tests {
         let js = "var b=`https://${h}/x`;";
         let out = rewrite_script(js, &|u| format!("[{}]", u));
         assert_eq!(out, js);
+    }
+
+    /// #449: a gapi-shaped loader validates the URLs it builds
+    /// against an anchored origin-pinning regex. The whole literal
+    /// pass must skip that body: with the rewritten output exactly
+    /// as authored, the loader's own sanity check passes.
+    #[test]
+    fn origin_pinned_script_keeps_url_literals_verbatim() {
+        let js = r#"var va=/^https?:\/\//;var u="https://a.example.com/x";if(!va.test(u))throw new Error("Bad hint: failed sanity");"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js, "pinned body changed at all: {}", out);
+        assert!(
+            !out.contains("[https://a.example.com"),
+            "route token in pinned body: {}",
+            out
+        );
+    }
+
+    /// #449: the trigger fires from a RegExp(...) constructor string
+    /// and the escaped-colon spelling; a plain body and an anchored
+    /// regex without the s-quantifier (the measured-table control)
+    /// stay untouched.
+    #[test]
+    fn origin_pinning_trigger_forms() {
+        assert!(
+            has_origin_pinning_regex(r#"new RegExp("^https?:\\/[a-z]+\\.example\\.com")"#),
+            "RegExp string form not detected"
+        );
+        assert!(
+            has_origin_pinning_regex(r#"var va=/^https?:\:\/\//;"#),
+            "escaped-colon form not detected"
+        );
+        assert!(
+            !has_origin_pinning_regex(r#"var u="https://plain.example.com/x";fetch(u);"#),
+            "plain body false positive"
+        );
+        assert!(
+            !has_origin_pinning_regex(r#"var va=new RegExp("^https://apis.google.com/");"#),
+            "no-quantifier anchored regex false positive"
+        );
+    }
+
+    /// #449: the skip is whole-script by design: a pinned body's
+    /// ordinary fetch literals stay plaintext too (a per-literal skip
+    /// would break comparisons that work today); the runtime seams,
+    /// not the literal pass, keep those requests on the engine.
+    #[test]
+    fn pinned_skip_is_script_level() {
+        let js = r#"var va=/^https?:\/\//;fetch("https://other.example.com/b");"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(
+            out, js,
+            "ordinary literal rewritten inside a pinned body: {}",
+            out
+        );
+    }
+
+    /// #449 acceptance: a script without the pinning regex rewrites
+    /// exactly as before.
+    #[test]
+    fn unpinned_script_rewrites_as_before() {
+        let js = r#"var u="https://plain.example.com/x";fetch(u);"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(
+            out.contains(r#""[https://plain.example.com/x]""#),
+            "plain literal not rewritten: {}",
+            out
+        );
     }
 
     /// #206: postfix ++/-- ends the expression, so the '/' after it

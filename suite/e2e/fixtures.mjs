@@ -156,6 +156,32 @@ export function startFixture(port) {
         send(res, "text/javascript", `var WLIB_MARKER = "wlib-ok";\n`);
       } else if (path === "/dir/shared.js") {
         send(res, "text/javascript", `self.onconnect = (e) => { const p = e.ports[0]; p.onmessage = () => {}; p.postMessage("shared-ok"); };\n`);
+      } else if (path === "/dir/pinned.html") {
+        /* #449: a page whose loader script pins its generated URLs
+           with an anchored origin regex. */
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><head><title>zl pinned</title></head><body><p id="zl-pinned">zl-pinned-page</p><script src="pinned.js"></script></body></html>`);
+      } else if (path === "/dir/pinned.js") {
+        /* #449: a gapi-shaped origin-pinning loader. The rewriter
+           must skip the URL-literal pass for this body (the pin regex
+           rejects route tokens, the loader throws "Bad hint" before
+           any fetch), while the runtime seams (fetch shim, anchor
+           nav guard, window.open guard) keep every destination on
+           the engine. The popup stays open: the E2E check inspects
+           its URL before closing it. */
+        send(res, "text/javascript", [
+          `var va=/^https?:\\/\\/[a-z0-9_.-]+(:[0-9]+)?\\/dir\\/[a-z-]+\\.html$/;`,
+          `var u="http://127.0.0.1:7101/dir/anchor-pinned.html";`,
+          `self.__zlPinned={hint:va.test(u)?"validated":"bad-hint"};`,
+          `fetch("http://127.0.0.1:7102/api/data").then(function(r){return r.json()}).then(function(j){self.__zlPinnedFetch=j.zl}).catch(function(e){self.__zlPinnedFetch="err:"+e});`,
+          `self.__zlPinnedPopup="unset";`,
+          `var w=window.open("http://127.0.0.1:7101/dir/popup-pinned.html");`,
+          `if(w){self.__zlPinnedPopup="opened"}else{self.__zlPinnedPopup="null"}`,
+          `var a=document.createElement("a");a.id="pa";a.href=u;document.body.appendChild(a);`,
+        ].join("\n"));
+      } else if (path === "/dir/anchor-pinned.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><p id="zl-ap">anchor-target</p>`);
+      } else if (path === "/dir/popup-pinned.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><p id="zl-pp">popup-target</p>`);
       } else if (path === "/api/data") {
         /* No CORS headers: the #34 canary. Browser-direct = unreadable. */
         send(res, "application/json", `{"zl":"api"}`);

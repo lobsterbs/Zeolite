@@ -68,7 +68,8 @@ export type DiagStage =
   | "DOWNSTREAM_REQUEST"
   | "TRANSPORT_FALLBACK"
   | "REDIRECT_HOP"
-  | "REDIRECTED";
+  | "REDIRECTED"
+  | "PINNED_SCRIPT";
 
 export interface DiagEvent {
   /** Browser-owned source client, assigned at interception. */
