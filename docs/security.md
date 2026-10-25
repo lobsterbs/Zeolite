@@ -136,6 +136,13 @@ app/src/__tests__/leak.test.ts):
   unknown embedding identity leaves the parameter unchanged instead
   of substituting the provider's origin.
 
+  The mint boundary preserves fragments outside the encoded network
+  target. hCaptcha frame fragments that name this deployment are
+  normalized using verified sender identity. Its `host=` protocol
+  field then visibly contains the embedding hostname in the fragment;
+  this rendering compatibility case does not provide host opacity.
+  The fragment is never sent in the upstream HTTP request.
+
 Re-audited at 3.0: the engine-route CORS surgery (2.3, app/src/cors.ts)
 never reflects a request origin: engine routes state the engine's
 own CORS facts, credentialed responses get the engine origin, and
