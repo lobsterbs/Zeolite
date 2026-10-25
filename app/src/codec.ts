@@ -929,9 +929,11 @@ export function recoverPath(path: string): string | null {
     so it reaches the escape seam instead of the route decode. The
     tail still names a real page: accept a two-segment path whose
     first segment is the configured prefix or the reserved legacy
-    "zl" segment (host routes like /r/ are never captured), refuse
-    keyed tails - fail closed, keyed decode is decodePath's job - and
-    bind the payload to http(s) like every other decode. */
+    "zl" segment (host routes like /r/ are never captured), decode
+    keyed tails only with a held route key (#428: the worker owns its
+    key history, so its own mints must not strand at this seam;
+    unknown keys still fail closed), and bind the payload to http(s)
+    like every other decode. */
 export function decodeLegacyRoute(path: string): string | null {
   const m = /^\/([^/]+)\/([A-Za-z0-9_-]+)$/.exec(path);
   if (!m) return null;
@@ -940,7 +942,23 @@ export function decodeLegacyRoute(path: string): string | null {
   if (seg === undefined || tail === undefined) return null;
   if (prefix !== "/" + seg + "/" && seg !== "zl") return null;
   const bytes = b64uDecode(tail);
-  if (!bytes || (bytes.length >= 17 && bytes[0] === 1)) return null;
+  if (!bytes) return null;
+  if (bytes.length >= 17 && bytes[0] === 1) {
+    /* #428: a keyed tail under the reserved "zl" segment (or the
+       configured one) is this deployment's own mint, and the worker
+       holds its full key history (the routeReady restore, #55), so
+       try every held key instead of stranding the route at the
+       escape seam - a worker whose configured prefix has not landed
+       yet (a restart ahead of the config re-push, a cold start) must
+       still decode the routes this deployment minted under /zl/.
+       Foreign-key and garbage tails fail the MAC and stay null:
+       fail-closed unchanged. */
+    for (const key of routeKeys) {
+      const dest = keyedDecode(key, bytes);
+      if (dest) return dest;
+    }
+    return null;
+  }
   let dest: string;
   try {
     dest = DEC_STRICT.decode(bytes);

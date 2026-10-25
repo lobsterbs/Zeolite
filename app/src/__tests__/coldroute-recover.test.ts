@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { b64uEncode, decodeLegacyRoute, encodeDest, setRouteKey, setScheme } from "../codec";
+import { b64uEncode, decodeLegacyRoute, encodeDest, setRouteKey, setRouteKeys, setScheme } from "../codec";
 
 /* #113: decodeLegacyRoute recovers a legacy route minted under a
    prefix the worker has not configured yet (cold start), the shape
@@ -24,10 +24,27 @@ describe("decodeLegacyRoute (#113)", () => {
     expect(decodeLegacyRoute("/q/" + tail)).toBe("https://example.com/page");
   });
 
-  it("fails closed on a keyed tail", () => {
+  it("decodes a keyed tail minted under /zl/ while configured elsewhere (#428)", () => {
+    /* The split-origin class: anchors minted under /zl/ reach a
+       worker whose configured prefix never landed (the /j/ default).
+       The worker holds its key history, so its own mints decode
+       instead of answering the "undecodable legacy route" strand. */
     setRouteKey(KEY);
+    setScheme("/zl/");
     const route = encodeDest("https://example.com/page");
-    expect(decodeLegacyRoute("/zl/" + route.slice(3))).toBeNull();
+    const tail = route.slice("/zl/".length);
+    setScheme("/j/");
+    expect(decodeLegacyRoute("/zl/" + tail)).toBe("https://example.com/page");
+  });
+
+  it("fails closed on a keyed tail no held key minted (#428)", () => {
+    setRouteKey(KEY);
+    setScheme("/zl/");
+    const route = encodeDest("https://example.com/page");
+    const tail = route.slice("/zl/".length);
+    setScheme("/j/");
+    setRouteKeys([b64uEncode(new Uint8Array(16).map((_, i) => 15 - i))]);
+    expect(decodeLegacyRoute("/zl/" + tail)).toBeNull();
   });
 
   it("never captures host routes or engine assets", () => {
