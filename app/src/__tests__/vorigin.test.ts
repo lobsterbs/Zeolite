@@ -288,3 +288,35 @@ describe("applyVirtualOrigin (#132 source identity)", () => {
   });
 });
 });
+
+/* #472: the window message wrapper is keyed by (listener, capture) -
+   a repeated add reuses the wrapper and removal hits the matching
+   capture variant, not the newest one. */
+describe("window message wrapper identity and capture-aware removal (#472)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("reuses the wrapper on repeated adds and removes by capture variant", () => {
+    const { w, listeners } = fakeWindow();
+    stubController();
+    applyVirtualOrigin(w);
+    const add = w.addEventListener as unknown as (t: string, f: Listener, o?: unknown) => void;
+    const rem = w.removeEventListener as unknown as (t: string, f: Listener, o?: unknown) => void;
+    const l = (): unknown => undefined;
+    add("message", l, false);
+    const arr = () => (listeners.get("message") ?? []) as Listener[];
+    const fB = arr()[0];
+    add("message", l, false); /* reuse: the same wrapper function */
+    expect(arr()[1]).toBe(fB);
+    add("message", l, true); /* the capture variant is a distinct wrapper */
+    const fC = arr()[2];
+    expect(fC).not.toBe(fB);
+    rem("message", l, false); /* drops one bubble wrapper */
+    expect(arr()).toEqual([fB, fC]);
+    rem("message", l, false);
+    expect(arr()).toEqual([fC]); /* the old single-key map removed fC here */
+    rem("message", l, true);
+    expect(arr()).toEqual([]);
+  });
+});

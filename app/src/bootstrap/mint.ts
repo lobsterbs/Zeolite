@@ -75,7 +75,9 @@ export function mintRoute(dest: string, timeout = 5000): Promise<string | null> 
   }
   memo.set(dest, p);
   p.then((route) => {
-    if (!route) memo.delete(dest);
+    /* #459: delete only OUR entry - an evicted promise settling
+       after a newer mint for the same dest must not drop it. */
+    if (!route && memo.get(dest) === p) memo.delete(dest);
   });
   return p;
 }
@@ -150,15 +152,19 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
 
   /* sendBeacon(): the native contract queues and returns true, it
      does not deliver; the shim keeps the optimistic true and posts
-     on the minted route (keepalive). A refused mint or a rejected
-     POST falls back to the native beacon, and so does a beacon
-     fired during unload: a deferred mint cannot land once the page
-     is torn down, but the native beacon is queued past it. */
+     on the minted route (keepalive). A refused mint falls back to
+     the native beacon (no first request left the page), and so does
+     a beacon fired during unload: a deferred mint cannot land once
+     the page is torn down, but the native beacon is queued past it.
+     A rejected POST is never replayed (#457): delivery uncertain. */
   /* pagehide (not unload: also covers the back/forward cache). */
   let unloading = false;
   const wadd = (w as { addEventListener?: (t: string, l: () => void) => void })
     .addEventListener;
   if (typeof wadd === "function") wadd.call(w, "pagehide", () => { unloading = true; });
+  /* #458: pageshow clears the latch - a bfcache-restored page keeps
+     minting instead of falling back to the native beacon forever. */
+  if (typeof wadd === "function") wadd.call(w, "pageshow", () => { unloading = false; });
   const navg = w.navigator as
     | { sendBeacon?: (u: string | URL, d?: BodyInit | null) => boolean }
     | undefined;
@@ -178,7 +184,12 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
          path: optimistic true, native fallback on a refused POST */
       const post = (t: string): boolean => {
         if (!OF) return false;
-        OF(t, { method: "POST", body: d ?? null, keepalive: true }).catch(() => native(u, d));
+        OF(t, { method: "POST", body: d ?? null, keepalive: true }).catch(() => {
+          /* #457: a rejected POST may already be accepted upstream;
+             replaying a non-idempotent beacon natively risks a double
+             write. One attempt: the beacon is honestly lost on
+             uncertain delivery. */
+        });
         return true;
       };
       const rel = relRoute(s);

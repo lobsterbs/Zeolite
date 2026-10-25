@@ -32,9 +32,11 @@ import {
   cacheRewriteBase,
   cacheStorable,
   cacheTtl,
+  ifRangeAccepts,
   pageCacheClear,
   pageCacheMatch,
   pageCacheStore,
+  rangeFromEntry,
 } from "../request";
 
 describe("cacheTtl / cacheStorable", () => {
@@ -502,5 +504,36 @@ describe("pageCacheMatch If-Range (#341)", () => {
     );
     expect(out).not.toBeNull();
     expect(out!.status).toBe(206);
+  });
+
+  it("bypasses the cache on a weak request tag even though the stored etag matches modulo weakness (#468)", async () => {
+    seed('"v1"');
+    const out = await pageCacheMatch(
+      new Request("https://e.example/p", { headers: { range: "bytes=0-1", "if-range": 'W/"v1"' } }),
+    );
+    expect(out).toBeNull();
+  });
+});
+
+/* #468: If-Range is a STRONG comparison (RFC 9110 13.1.5); #469:
+   the empty 416 must not advertise the stored length. */
+describe("If-Range strength and the empty 416 (#468, #469)", () => {
+  it("ifRangeAccepts: strong tags only, exact last-modified (#468)", () => {
+    expect(ifRangeAccepts('"v1"', '"v1"', null)).toBe(true);
+    expect(ifRangeAccepts('W/"v1"', '"v1"', null)).toBe(false); /* weak request tag */
+    expect(ifRangeAccepts('"v1"', 'W/"v1"', null)).toBe(false); /* weak stored validator */
+    expect(ifRangeAccepts('"v2"', '"v1"', null)).toBe(false);
+    expect(ifRangeAccepts('"v1"', null, null)).toBe(false);
+    expect(ifRangeAccepts("Wed, 21 Oct 2015 07:28:00 GMT", null, "Wed, 21 Oct 2015 07:28:00 GMT")).toBe(true);
+    expect(ifRangeAccepts("Wed, 21 Oct 2015 07:28:00 GMT", null, "Thu, 22 Oct 2015 07:28:00 GMT")).toBe(false);
+  });
+
+  it("the empty 416 does not advertise the stored length (#469)", async () => {
+    const hit = new Response("abcdef", { headers: { "content-type": "text/plain" } });
+    const out = await rangeFromEntry(hit, "bytes=100-200");
+    if (!out) throw new Error("expected a 416");
+    expect(out.status).toBe(416);
+    expect(out.headers.get("content-range")).toBe("bytes */6");
+    expect(out.headers.get("content-length")).toBeNull();
   });
 });

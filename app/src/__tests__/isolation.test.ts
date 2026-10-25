@@ -292,3 +292,50 @@ describe("#37 isolation", () => {
     expect(st.scopedLocal).toBeUndefined();
   });
 });
+
+/* #475: storage listener registration identity - keyed by
+   (listener, capture), with once and AbortSignal honored. */
+describe("storage listener registration identity (#475)", () => {
+  it("a capture-flag remove drops only that variant; the bubble registration survives", () => {
+    const { w, listeners } = fakeWindow(fakeStore().store, fakeStore().store);
+    const P = "zl:aaa:";
+    const st = isolate(w, P);
+    const seen: unknown[] = [];
+    const h = (e: unknown) => seen.push(e);
+    (w.addEventListener as Fn)("storage", h, { capture: true });
+    (w.addEventListener as Fn)("storage", h); /* the bubble variant */
+    (w.removeEventListener as Fn)("storage", h, { capture: true });
+    const fire = realStorageListener(listeners);
+    fire(ev(P + "k", st.realLocal));
+    expect(seen).toHaveLength(1); /* the bubble registration survived */
+    (w.removeEventListener as Fn)("storage", h);
+    fire(ev(P + "k", st.realLocal));
+    expect(seen).toHaveLength(1); /* both variants are gone now */
+  });
+
+  it("an once storage listener is dropped after its first delivery (#475)", () => {
+    const { w, listeners } = fakeWindow(fakeStore().store, fakeStore().store);
+    const P = "zl:aaa:";
+    const st = isolate(w, P);
+    const seen: unknown[] = [];
+    const h = (e: unknown) => seen.push(e);
+    (w.addEventListener as Fn)("storage", h, { once: true });
+    const fire = realStorageListener(listeners);
+    fire(ev(P + "k", st.realLocal));
+    fire(ev(P + "k", st.realLocal));
+    expect(seen).toHaveLength(1); /* delivered once, then dropped */
+  });
+
+  it("an AbortSignal removes its storage listener on abort (#475)", () => {
+    const { w, listeners } = fakeWindow(fakeStore().store, fakeStore().store);
+    const P = "zl:aaa:";
+    const st = isolate(w, P);
+    const seen: unknown[] = [];
+    const h = (e: unknown) => seen.push(e);
+    const ac = new AbortController();
+    (w.addEventListener as Fn)("storage", h, { signal: ac.signal });
+    ac.abort();
+    realStorageListener(listeners)(ev(P + "k", st.realLocal));
+    expect(seen).toHaveLength(0); /* the abort dropped the registration */
+  });
+});

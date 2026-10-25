@@ -118,7 +118,9 @@ export function mintUrlViaRelay(
   }
   mintMemo.set(dest, p);
   p.then((route) => {
-    if (!route) mintMemo.delete(dest);
+    /* #459: delete only OUR entry - an evicted promise settling
+       after a newer mint for the same dest must not drop it. */
+    if (!route && mintMemo.get(dest) === p) mintMemo.delete(dest);
   });
   return p;
 }

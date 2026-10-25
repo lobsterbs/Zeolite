@@ -248,3 +248,33 @@ describe("source files contain no NUL bytes (#357)", () => {
     expect(relaySrc.includes("\u0000"), "relay.ts contains a literal NUL byte").toBe(false);
   });
 });
+
+/* #472: wrapper identity - the old raw-callback key minted a fresh
+   wrapper per add (double delivery on repeated adds) and broke removal
+   identity across capture variants. */
+describe("tapChannel wrapper identity and capture-aware removal (#472)", () => {
+  it("a repeated add reuses one wrapper: a single delivery", () => {
+    const ch = new FakeChannel();
+    tapChannel(ch as unknown as MessagePort);
+    const seen: unknown[] = [];
+    const cb = (e: Event) => seen.push((e as MessageEvent).data);
+    ch.addEventListener("message", cb);
+    ch.addEventListener("message", cb);
+    ch.dispatchEvent(msg({ ok: 1 }));
+    expect(seen).toEqual([{ ok: 1 }]);
+  });
+
+  it("removal is capture-aware: a mismatched flag removes nothing", () => {
+    const ch = new FakeChannel();
+    tapChannel(ch as unknown as MessagePort);
+    const seen: unknown[] = [];
+    const cb = (e: Event) => seen.push((e as MessageEvent).data);
+    ch.addEventListener("message", cb, false);
+    ch.removeEventListener("message", cb, true); /* a different registration */
+    ch.dispatchEvent(msg({ ok: 1 }));
+    expect(seen).toEqual([{ ok: 1 }]); /* the bubble wrapper survived */
+    ch.removeEventListener("message", cb, false);
+    ch.dispatchEvent(msg({ ok: 2 }));
+    expect(seen).toEqual([{ ok: 1 }]);
+  });
+});

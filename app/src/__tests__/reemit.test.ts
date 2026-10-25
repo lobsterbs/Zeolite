@@ -552,3 +552,94 @@ describe("own-origin absolute re-anchor (#157/#159)", () => {
     expect(e.calls[0].input).toBe(u);
   });
 });
+
+/* Scout-wave regressions: beacon replay (#457), the unload latch
+   (#458) and the mint memo identity guard (#459). */
+describe("scout-wave beacon and mint regressions (#457-#459)", () => {
+  it("sendBeacon never replays a rejected POST natively (#457)", async () => {
+    stubMint("/j/bR");
+    const e = fakeWindow();
+    e.w.fetch = (input: unknown, init?: unknown) => {
+      e.calls.push({ input, init });
+      return Promise.reject(new Error("net down"));
+    };
+    applyReemit(e.w);
+    expect(e.w.navigator.sendBeacon("https://beacon.example/r1", "hi")).toBe(true);
+    await settle();
+    expect(e.calls.map((c) => c.input)).toEqual(["/j/bR"]); /* one POST on the minted route */
+    expect(e.beacons).toHaveLength(0); /* never replayed natively */
+  });
+
+  it("pageshow clears the unload latch: a restored page mints again (#458)", async () => {
+    stubMint("/j/b8");
+    const e = fakeWindow();
+    const et = new EventTarget();
+    e.w.addEventListener = et.addEventListener.bind(et);
+    e.w.removeEventListener = et.removeEventListener.bind(et);
+    applyReemit(e.w);
+    et.dispatchEvent(new Event("pagehide"));
+    expect(e.w.navigator.sendBeacon("https://beacon.example/u1", "x")).toBe(true);
+    await settle();
+    expect(e.beacons).toEqual([{ url: "https://beacon.example/u1", data: "x" }]); /* native during unload */
+    expect(e.calls).toHaveLength(0);
+    et.dispatchEvent(new Event("pageshow"));
+    expect(e.w.navigator.sendBeacon("https://beacon.example/u2", "y")).toBe(true);
+    await settle();
+    expect(e.calls.map((c) => c.input)).toEqual(["/j/b8"]); /* minted after the restore */
+    expect(e.beacons).toHaveLength(1);
+  });
+
+  it("a settled evicted promise never drops a newer memo entry (#459)", async () => {
+    const ports: Array<(route: string | null) => void> = [];
+    let posts = 0;
+    vi.stubGlobal("navigator", {
+      serviceWorker: {
+        controller: {
+          postMessage(_m: unknown, transfer?: MessagePort[]) {
+            posts += 1;
+            const p2 = transfer?.[0];
+            ports.push((route: string | null) => p2?.postMessage({ ok: true, route }));
+          },
+        },
+      },
+    });
+    const dest = "https://ident.example/a";
+    const pA = mintRoute(dest);
+    for (let i = 0; i < 256; i++) mintRoute("https://filler.example/f" + i);
+    expect(posts).toBe(257);
+    const pB = mintRoute(dest); /* dest was evicted: a fresh mint */
+    expect(posts).toBe(258);
+    ports[0](null); /* the EVICTED promise settles failed */
+    await settle();
+    ports[257]("/j/id-b"); /* the newer mint succeeds */
+    expect(await pA).toBeNull();
+    expect(await pB).toBe("/j/id-b");
+    expect(await mintRoute(dest)).toBe("/j/id-b"); /* memo hit, no re-mint */
+    expect(posts).toBe(258); /* the newer entry survived the eviction */
+    for (let i = 1; i <= 256; i++) ports[i]("/j/f"); /* settle the fillers */
+  });
+
+  it("a settled evicted relay mint never drops a newer memo entry (#459, worker prelude)", async () => {
+    const ports: Array<(route: string | null) => void> = [];
+    let posts = 0;
+    const post = (_m: unknown, tr?: Transferable[]) => {
+      posts += 1;
+      const p2 = tr?.[0] as MessagePort;
+      ports.push((route: string | null) => p2.postMessage({ ok: true, route }));
+      return true;
+    };
+    const dest = "https://worker.example/ident";
+    const pA = mintUrlViaRelay(post, dest);
+    for (let i = 0; i < 256; i++) mintUrlViaRelay(post, "https://worker.example/f" + i);
+    const pB = mintUrlViaRelay(post, dest); /* dest was evicted: a fresh mint */
+    expect(posts).toBe(258);
+    ports[0](null); /* the EVICTED promise settles failed */
+    await settle();
+    ports[257]("/j/w-b");
+    expect(await pA).toBeNull();
+    expect(await pB).toBe("/j/w-b");
+    expect(await mintUrlViaRelay(post, dest)).toBe("/j/w-b"); /* memo hit, no re-mint */
+    expect(posts).toBe(258); /* the newer entry survived the eviction */
+    for (let i = 1; i <= 256; i++) ports[i]("/j/f"); /* settle the fillers */
+  });
+});

@@ -30,14 +30,30 @@ export interface SwShimStore {
   clear(): void;
 }
 
-function scopeFor(pageUrl: string, scope?: string): string {
-  const origin = new URL(pageUrl).origin;
-  try {
-    const s = new URL(scope ?? "", pageUrl).href;
-    return s.startsWith(origin) ? s : origin + "/";
-  } catch {
-    return origin + "/";
+/* #474: exact-origin compare - the old startsWith(origin) prefix test
+   admitted lookalike hosts (https://a.example.evil/). #473: the
+   DEFAULT scope is the script directory, like the native container;
+   an explicit scope resolves against the page. Cross-origin or
+   malformed inputs throw TypeError like the native register. */
+function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string): string {
+  const pageOrigin = new URL(pageUrl).origin;
+  if (scope === undefined) {
+    const s = new URL("./", scriptHref);
+    if (s.origin !== pageOrigin) {
+      throw new TypeError("The Service Worker scope is outside the page origin");
+    }
+    return s.href;
   }
+  let s: URL | null = null;
+  try {
+    s = new URL(scope, pageUrl);
+  } catch {
+    /* malformed below */
+  }
+  if (!s || s.origin !== pageOrigin) {
+    throw new TypeError("The Service Worker scope is outside the page origin");
+  }
+  return s.href;
 }
 
 function registration(scriptURL: string, scope: string, store: SwShimStore, settled: boolean): VirtualRegistration {
@@ -71,7 +87,18 @@ export function swShimRegister(
   scriptURL: string | URL,
   options?: { scope?: string },
 ): VirtualRegistration {
-  const rec = { scriptURL: new URL(scriptURL + "", pageUrl).href, scope: scopeFor(pageUrl, options?.scope) };
+  /* #474: a cross-origin or malformed script URL is a native-style
+     TypeError, never a foreign registration. */
+  let script: URL | null = null;
+  try {
+    script = new URL(scriptURL + "", pageUrl);
+  } catch {
+    /* malformed below */
+  }
+  if (!script || script.origin !== new URL(pageUrl).origin) {
+    throw new TypeError("The Service Worker script is outside the page origin");
+  }
+  const rec = { scriptURL: script.href, scope: scopeFor(pageUrl, options?.scope, script.href) };
   store.set(JSON.stringify(rec));
   return registration(rec.scriptURL, rec.scope, store, false);
 }
@@ -93,9 +120,22 @@ export function swShimGet(
     return undefined;
   }
   /* Defense in depth: a record that scopes a foreign origin is not
-     this page's registration, even if it landed in this store. */
-  if (!rec.scope.startsWith(new URL(pageUrl).origin)) return undefined;
-  if (scope != null && rec.scope !== scopeFor(pageUrl, scope)) return undefined;
+     this page's registration, even if it landed in this store.
+     #474: exact-origin compare - a prefix test admitted lookalikes. */
+  let scopeUrl: URL | null = null;
+  try {
+    scopeUrl = new URL(rec.scope);
+  } catch {
+    return undefined;
+  }
+  if (scopeUrl.origin !== new URL(pageUrl).origin) return undefined;
+  if (scope != null) {
+    try {
+      if (rec.scope !== scopeFor(pageUrl, scope, rec.scriptURL)) return undefined;
+    } catch {
+      return undefined;
+    }
+  }
   return registration(rec.scriptURL, rec.scope, store, true);
 }
 
@@ -106,8 +146,14 @@ export function swShimGet(
     they belong to the engine's real worker. */
 export function swShimApply(container: object, store: SwShimStore, pageUrl: string): void {
   const c = container as Record<string, unknown>;
-  c.register = ((u: string | URL, o?: { scope?: string }) =>
-    Promise.resolve(swShimRegister(store, pageUrl, u, o))) as unknown;
+  c.register = ((u: string | URL, o?: { scope?: string }) => {
+    /* #474: a native-style rejected promise, not a sync throw. */
+    try {
+      return Promise.resolve(swShimRegister(store, pageUrl, u, o));
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  }) as unknown;
   c.getRegistration = ((s?: string) =>
     Promise.resolve(swShimGet(store, pageUrl, s))) as unknown;
   c.getRegistrations = (() => {

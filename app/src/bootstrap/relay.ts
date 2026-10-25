@@ -27,7 +27,12 @@ const isWrapper = (d: unknown): boolean =>
 export const tapChannel = (t: Worker | MessagePort): void => {
  const nativeAdd = t.addEventListener.bind(t) as (...a: unknown[]) => void;
  const nativeRemove = t.removeEventListener.bind(t) as (...a: unknown[]) => void;
- const wrapped = new WeakMap<object, EventListener>();
+ /* #472: key by (callback, capture) and reuse the wrapper - the old
+    raw-callback key double-delivered on repeated adds and broke
+    removal identity. */
+ const wrapped = new WeakMap<object, Map<boolean, EventListener>>();
+ const capOf = (o: unknown): boolean =>
+  !!o && (typeof o === "object" ? !!(o as { capture?: unknown }).capture : true);
  let app: ((ev: MessageEvent) => unknown) | null = null;
  let delivery = false;
  const deliver = (ev: Event) => {
@@ -63,17 +68,29 @@ export const tapChannel = (t: Worker | MessagePort): void => {
  t.addEventListener = function (this: Worker | MessagePort, ...a: unknown[]) {
   if (a[0] === "message" && isListener(a[1])) {
    const orig = a[1] as object;
-   const fwd: EventListener = (ev: Event) => {
-    if (isWrapper((ev as MessageEvent).data)) return;
-    call(orig, ev);
-   };
-   wrapped.set(orig, fwd);
+   const cap = capOf(a[2]);
+   let byCap = wrapped.get(orig);
+   if (!byCap) {
+    byCap = new Map();
+    wrapped.set(orig, byCap);
+   }
+   let fwd = byCap.get(cap);
+   if (!fwd) {
+    fwd = (ev: Event) => {
+     if (isWrapper((ev as MessageEvent).data)) return;
+     call(orig, ev);
+    };
+    byCap.set(cap, fwd);
+   }
    return nativeAdd(a[0], fwd, a[2]);
   }
   return nativeAdd(...a);
  } as unknown as (...a: unknown[]) => void;
  t.removeEventListener = function (this: Worker | MessagePort, ...a: unknown[]) {
-  const fwd = a[0] === "message" && isListener(a[1]) ? wrapped.get(a[1] as object) : undefined;
+  const fwd =
+   a[0] === "message" && isListener(a[1])
+    ? wrapped.get(a[1] as object)?.get(capOf(a[2]))
+    : undefined;
   return nativeRemove(a[0], fwd ?? a[1], a[2]);
  } as unknown as (...a: unknown[]) => void;
 };
