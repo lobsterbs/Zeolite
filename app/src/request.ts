@@ -3978,6 +3978,30 @@ export function virtualHcaptchaHost(target: string, referrer: string, engineOrig
   return u.href.replace(m[0], m[1] + "host=" + encodeURIComponent(vu.hostname));
 }
 
+/** A frame fragment is browser-only and never reaches handleFetch.
+    zl:mint still sees the original URL, so a verified sender can
+    normalize the hCaptcha frame's host= there before route encoding.
+    Reuse the query helper's identity checks; edit only the matched
+    fragment value so unrelated query/hash bytes stay untouched. */
+export function virtualHcaptchaFrameFragment(target: string, engineOrigin: string, initiator?: string): string {
+  if (!initiator) return target;
+  let u: URL;
+  try { u = new URL(target); } catch { return target; }
+  if (!/^https?:$/.test(u.protocol) || u.host !== "newassets.hcaptcha.com") return target;
+  if (!u.pathname.startsWith("/captcha/") || !u.pathname.endsWith("/hcaptcha.html")) return target;
+  const cut = target.indexOf("#");
+  if (cut < 0) return target;
+  const fragment = target.slice(cut);
+  const m = /([#&])host=([^&]*)/.exec(fragment);
+  if (!m || !m[2]) return target;
+  const probe = u.origin + u.pathname + "?host=" + m[2];
+  const fixed = virtualHcaptchaHost(probe, "", engineOrigin, initiator);
+  if (fixed === probe) return target;
+  const host = new URL(fixed).searchParams.get("host");
+  if (!host) return target;
+  return target.slice(0, cut) + fragment.replace(m[0], m[1] + "host=" + encodeURIComponent(host));
+}
+
 /** #120: challenge-widget frame URLs (reCAPTCHA, hCaptcha, Turnstile
     - the shapes whose FRAMES are the challenge UI a human solves).
     The google hosts are scoped to /recaptcha/ so ordinary
