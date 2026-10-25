@@ -30,6 +30,7 @@ try {
         }
       }}});
       applyNavGuard(window,location.href,location.origin); applyEmbedSync(window);
+      if(parent!==window) window.earlyResult=window.open('https://accounts.example/early','_blank','noopener');
       document.querySelector('#mapped').href = location.origin+navEncode('https://accounts.example/signin?continue=mail')+'#step';
     };`, resolveDir: root, sourcefile: "popup-fixture.ts", loader: "ts" }, bundle: true, format: "iife", write: false });
   content = createServer(tls, (req, res) => {
@@ -50,7 +51,7 @@ try {
   const page = await context.newPage(); await page.goto(appOrigin);
   const frame = page.frames().find(f => f.url().startsWith(contentOrigin));
   assert(frame, "content frame mounted");
-  assert.equal(await frame.evaluate(() => window.open("https://accounts.example/early", "_blank", "noopener")), null);
+  assert.equal(await frame.evaluate(() => window.earlyResult), null);
   await page.waitForFunction(() => received.some(e => e.lb === "navigate"));
   await frame.evaluate(() => { window.open("../js-relative"); window.open(); });
   await frame.click("#mapped"); await frame.click("#plain", { modifiers: ["Control"] }); await frame.click("#middle", { button: "middle" });
