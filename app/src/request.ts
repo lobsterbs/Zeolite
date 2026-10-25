@@ -47,7 +47,7 @@ import { flatRed, netLogPush, type NetDetail } from "./netlog";
 import { traceDecision } from "./tracing";
 import { siteToken } from "./pageload";
 
-import { altConfigured, altEndpoint, altRegister, altWispFetch, wispTransport } from "./transport";
+import { altConfigured, altEndpoint, altRegister, altWispFetch, canReplayAfterFailure, wispTransport } from "./transport";
 import { normalizeWispUrl, primaryWispOverrideValue, setPrimaryWispOverride } from "./config";
 import { raceBoot } from "./lifecycle";
 
@@ -689,6 +689,9 @@ async function upstreamFetch(
   rtype: ResourceType,
   traceId: string,
 ): Promise<Response> {
+  if (init.signal?.aborted) {
+    throw init.signal.reason ?? new DOMException("request aborted", "AbortError");
+  }
   /* #154: the transport-side match. Behavior rules (native, rewrite)
      must not capture the wire: a native host rule composes with the
      transport rules instead of falling onto the default wisp stack. */
@@ -753,6 +756,24 @@ async function upstreamFetch(
         wispRecord();
         return wr;
       } catch (err) {
+        /* #444: a failed alternate transport may already have delivered
+           the write. An outer fallback must honor the same replay gate
+           as the transport's own retry, including one-shot bodies and
+           cancellation. Only a proven pre-send failure permits a
+           replayable non-idempotent method to try another endpoint. */
+        if (
+          init.signal?.aborted ||
+          (err instanceof Error && err.name === "AbortError") ||
+          !canReplayAfterFailure(init, err)
+        ) {
+          DIAG.emit({
+            traceId, requestId: traceId, category: "TRANSPORT", cause: "proxy",
+            severity: "warning", stage: "UPSTREAM_REQUEST", url: dest,
+            message: 'policy route "wisp" failed: fallback refused because delivery is unknown, the body is one-shot, or the caller cancelled',
+            technicalReason: String(err),
+          });
+          throw err;
+        }
         DIAG.emit({
           traceId,
           requestId: traceId,
@@ -1282,7 +1303,7 @@ function navOutcome(
   category: ErrorCategory,
   text: string,
 ): Response {
-  const traceId = DIAG.trace();
+  const traceId = DIAG.trace(e.resultingClientId || e.clientId);
   netLogPush({
     method: e.request.method,
     traceId,
@@ -1618,7 +1639,7 @@ export function handleFetch(e: FetchEvent): void {
           (qRest.length > 0 ? "?" + qRest.join("&") : "");
         const qFresh = buildQueryHandleUrl(qFull, NAVH_TTL_MS, qExp.rootClientId);
         if (qFresh) {
-          const qtid = DIAG.trace();
+          const qtid = DIAG.trace(e.resultingClientId || e.clientId);
           netLogPush({
             method: e.request.method,
             traceId: qtid,
@@ -1671,7 +1692,7 @@ export function handleFetch(e: FetchEvent): void {
           }
           netLogPush({
             method: e.request.method,
-            traceId: DIAG.trace(),
+            traceId: DIAG.trace(e.resultingClientId || e.clientId),
             path: url.pathname + url.search,
             dest: e.request.url,
             status: 0,
@@ -1701,7 +1722,7 @@ export function handleFetch(e: FetchEvent): void {
           }
           netLogPush({
             method: "OPTIONS",
-            traceId: DIAG.trace(),
+            traceId: DIAG.trace(e.resultingClientId || e.clientId),
             path: url.href,
             dest: url.href,
             status: 204,
@@ -1750,7 +1771,7 @@ export function handleFetch(e: FetchEvent): void {
         if (e.request.method === "GET" && e.request.mode === "navigate") {
           const clean = navhCleanFromPrel(url.pathname, navpDest);
           if (clean) {
-            const traceId = DIAG.trace();
+            const traceId = DIAG.trace(e.resultingClientId || e.clientId);
             netLogPush({
               method: e.request.method,
               traceId,
@@ -1860,7 +1881,7 @@ export function handleFetch(e: FetchEvent): void {
                 if (navhFresh) {
                   const navhSuffix = navhNavSlash >= 0 ? navhTail.slice(navhNavSlash) : "";
                   const clean = navhFresh + navhSuffix + url.search;
-                  const traceId = DIAG.trace();
+                  const traceId = DIAG.trace(e.resultingClientId || e.clientId);
                   netLogPush({
                     method: e.request.method,
                     traceId,
@@ -2032,7 +2053,7 @@ export function handleFetch(e: FetchEvent): void {
           ? null
           : resolveRelative(VCTX, e.clientId, url.pathname + url.search);
         if (legacyFirst) {
-          const ltid = DIAG.trace();
+          const ltid = DIAG.trace(e.resultingClientId || e.clientId);
           DIAG.emit({
             traceId: ltid,
             requestId: ltid,
@@ -2058,7 +2079,7 @@ export function handleFetch(e: FetchEvent): void {
                proxy-origin 404. Recover the tail here. */
             const legacy = decodeLegacyRoute(url.pathname);
             if (legacy) {
-              const ltid = DIAG.trace();
+              const ltid = DIAG.trace(e.resultingClientId || e.clientId);
               DIAG.emit({
                 traceId: ltid,
                 requestId: ltid,
@@ -2097,7 +2118,7 @@ export function handleFetch(e: FetchEvent): void {
                  dest records what the browser will actually request. */
               netLogPush({
                 method: e.request.method,
-                traceId: DIAG.trace(),
+                traceId: DIAG.trace(e.resultingClientId || e.clientId),
                 path: url.pathname + url.search,
                 dest: e.request.url,
                 status: 0,
@@ -2166,7 +2187,7 @@ export function handleFetch(e: FetchEvent): void {
           homeCtx && /^https?:/i.test(homeCtx.targetOrigin) ? homeCtx.targetOrigin : null;
         const fixed = passChallengeRedirFixed(target, self.location.origin, homeOrigin, url.pathname);
         if (fixed && fixed !== target) {
-          const ctid = DIAG.trace();
+          const ctid = DIAG.trace(e.resultingClientId || e.clientId);
           DIAG.emit({
             requestId: ctid,
             traceId: ctid,
@@ -2191,7 +2212,7 @@ export function handleFetch(e: FetchEvent): void {
          fetch seam, before anything else shapes the destination. */
       const deref = derefSelfRoute(target, self.location.origin);
       if (deref !== target) {
-        const dtid = DIAG.trace();
+        const dtid = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.emit({
           traceId: dtid,
           requestId: dtid,
@@ -2204,14 +2225,34 @@ export function handleFetch(e: FetchEvent): void {
         target = deref;
       }
 
+      /* #436: resolve the requesting page before widget identity
+         correction and before a navigation replaces its client context.
+         Initiator: the controlling page destination. Issue #33: the
+         client's own virtual context is the primary source (right
+         even with an empty referrer); the client URL decode remains
+         the fallback (unknown after a restart, for instance). */
+      let initiator: string | undefined;
+      const ctx = contextOf(VCTX, e.clientId);
+      if (ctx) initiator = ctx.currentUrl;
+      if (initiator === undefined) {
+        try {
+          if (e.clientId) {
+            const client = await raceBoot(self.clients.get(e.clientId), "initiator client lookup", PRE_DEADLINE_BOUND_MS);
+            if (client) initiator = decodeClientUrl(new URL(client.url, self.location.origin)) ?? undefined;
+          }
+        } catch {
+          /* initiator stays unknown */
+        }
+      }
+
       /* #112: the Referer fix alone does not repair the reCAPTCHA
          widget: its JS builds co= from window.location.origin
          (LegacyUnforgeable), so upstream always receives the engine
          origin and the site-key domain check fails. Virtualize a
          co= that names this deployment at the seam the engine owns. */
-      const coFixed = virtualRecaptchaCo(target, e.request.referrer, self.location.origin);
+      const coFixed = virtualRecaptchaCo(target, e.request.referrer, self.location.origin, initiator);
       if (coFixed !== target) {
-        const ctid = DIAG.trace();
+        const ctid = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.emit({
           traceId: ctid,
           requestId: ctid,
@@ -2230,9 +2271,9 @@ export function handleFetch(e: FetchEvent): void {
          co= class): upstream validation sees the engine origin and
          the 9-dot apps menu never renders. Virtualize an origin=
          that names this deployment at the seam the engine owns. */
-      const ogsFixed = virtualOgsOrigin(target, e.request.referrer, self.location.origin);
+      const ogsFixed = virtualOgsOrigin(target, e.request.referrer, self.location.origin, initiator);
       if (ogsFixed !== target) {
-        const otid = DIAG.trace();
+        const otid = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.emit({
           traceId: otid,
           requestId: otid,
@@ -2251,9 +2292,9 @@ export function handleFetch(e: FetchEvent): void {
          registered hostnames, so upstream sees the engine host and
          the widget never renders. Virtualize a host= that names
          this deployment at the seam the engine owns. */
-      const hcFixed = virtualHcaptchaHost(target, e.request.referrer, self.location.origin);
+      const hcFixed = virtualHcaptchaHost(target, e.request.referrer, self.location.origin, initiator);
       if (hcFixed !== target) {
-        const htid = DIAG.trace();
+        const htid = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.emit({
           traceId: htid,
           requestId: htid,
@@ -2285,7 +2326,7 @@ export function handleFetch(e: FetchEvent): void {
         (e.request.destination === "iframe" || e.request.destination === "frame") &&
         isChallengeFrameUrl(target)
       ) {
-        const rtid = DIAG.trace();
+        const rtid = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.emit({
           traceId: rtid,
           requestId: rtid,
@@ -2318,28 +2359,11 @@ export function handleFetch(e: FetchEvent): void {
 
       return (async () => {
         const t0 = Date.now();
-        const traceId = DIAG.trace();
+        const traceId = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.stage(traceId, "REQUEST_INTERCEPTED", { url: target });
         /* Issue #34: a foreign-origin request has no engine-local path;
            the full URL is its internal identity (and the netLog path). */
         const internalUrl = foreign ? url.href : url.pathname + url.search;
-        /* Initiator: the controlling page destination. Issue #33: the
-           client's own virtual context is the primary source (right
-           even with an empty referrer); the client URL decode remains
-           the fallback (unknown after a restart, for instance). */
-        let initiator: string | undefined;
-        const ctx = contextOf(VCTX, e.clientId);
-        if (ctx) initiator = ctx.currentUrl;
-        if (initiator === undefined) {
-          try {
-            if (e.clientId) {
-              const client = await raceBoot(self.clients.get(e.clientId), "initiator client lookup", PRE_DEADLINE_BOUND_MS);
-              if (client) initiator = decodeClientUrl(new URL(client.url, self.location.origin)) ?? undefined;
-            }
-          } catch {
-            /* initiator stays unknown */
-          }
-        }
         const mkDetail = (resp?: Response): NetDetail => {
           const d: NetDetail = {
             internalUrl,
@@ -2728,23 +2752,22 @@ export function handleFetch(e: FetchEvent): void {
              fetch, but this request is engine-built). An active
              fingerprint profile still wins: the wire surface must match
              the spoofed document surface (1.8 Telluride). */
-          const ruleUa = siteUaFor(target);
-          if (ruleUa && !getFpProfile()) sendHeaders.set("user-agent", ruleUa);
-          /* #80: a per-site FingerprintProfile from siteconfig data
-             rides the same wire surfaces; it overrides the zl:rules
-             UA (a full coherent surface beats one header), and the
-             global profile still beats both. */
-          if (!getFpProfile()) {
-            const sp = await siteProfileFor(target);
-            if (sp) {
-              sendHeaders.set("user-agent", sp.p.userAgent);
-              sendHeaders.set("accept-language", acceptLanguageValue(sp.p.languages));
-            }
+          let identityProfile = getFpProfile();
+          if (!identityProfile) identityProfile = (await siteProfileFor(target))?.p ?? null;
+          if (identityProfile) {
+            sendHeaders.set("accept-language", acceptLanguageValue(identityProfile.languages));
+            if (identityProfile.matchUserAgent !== false) sendHeaders.set("user-agent", identityProfile.userAgent);
+          } else {
+            const ruleUa = siteUaFor(target);
+            if (ruleUa) sendHeaders.set("user-agent", ruleUa);
           }
-          /* Sec-CH-UA hints must match the FINAL user-agent (profile,
-             zl:rules or site profile); applyChUa deletes first, so a
-             non-Chromium final UA carries no stale hints. */
-          applyChUa(sendHeaders, sendHeaders.get("user-agent") ?? "");
+          /* #429/#437: opting out keeps native UA/Client Hints. Otherwise
+             every hint follows the final profile/rule identity. */
+          if (identityProfile?.matchUserAgent !== false) {
+            const wireUa = sendHeaders.get("user-agent") ?? "";
+            // An unchanged native identity needs no high-entropy filtering.
+            applyChUa(sendHeaders, wireUa, !identityProfile && wireUa === (e.request.headers.get("user-agent") ?? ""));
+          }
           /* 2.2 Arsenide: initiator context for the opt-in SameSite
              policy. Issue #33: the initiator comes from the client's own
              virtual context first (a SW-assigned key, not a page-supplied
@@ -3810,10 +3833,10 @@ export function derefSelfRoute(target: string, engineOrigin: string): string {
     proxied embed sends the engine origin and the widget answers
     "Invalid domain for site key". This seam rewrites a co= that names
     this deployment to the virtual origin of the embedding page (the
-    decoded referrer's origin; the destination's own origin as the
-    no-referrer fallback). Rendering fidelity only: the challenge
+    browser-observed client context, with the decoded referrer as
+    fallback). An unknown embedding origin stays unmodified (#436). Rendering fidelity only: the challenge
     itself is never solved or bypassed. */
-export function virtualRecaptchaCo(target: string, referrer: string, engineOrigin: string): string {
+export function virtualRecaptchaCo(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
   let u: URL;
   try {
     u = new URL(target);
@@ -3835,8 +3858,8 @@ export function virtualRecaptchaCo(target: string, referrer: string, engineOrigi
      value is an origin the page genuinely chose. */
   if (dec !== engineOrigin && dec !== engineOrigin + ":443" && dec !== engineOrigin + ":80")
     return target;
-  const parent = referrerOrigin(referrer);
-  const home = parent ?? u.origin;
+  const home = referrerOrigin(referrer, initiator);
+  if (!home) return target;
   let vu: URL;
   try {
     vu = new URL(home);
@@ -3854,7 +3877,7 @@ export function virtualRecaptchaCo(target: string, referrer: string, engineOrigi
     the engine origin and the widget never renders. Virtualize an
     origin= that names this deployment at the seam the engine owns;
     rendering fidelity only. */
-export function virtualOgsOrigin(target: string, referrer: string, engineOrigin: string): string {
+export function virtualOgsOrigin(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
   let u: URL;
   try {
     u = new URL(target);
@@ -3876,10 +3899,9 @@ export function virtualOgsOrigin(target: string, referrer: string, engineOrigin:
      other value is an origin the page genuinely chose. */
   if (dec !== engineOrigin && dec !== engineOrigin + ":443" && dec !== engineOrigin + ":80")
     return target;
-  /* Unlike the recaptcha anchor there is no honest widget-side
-     fallback: without a decoded page origin Google cannot validate
-     the request, so it passes through unchanged. */
-  const parent = referrerOrigin(referrer);
+  /* Without a verified page origin there is no honest widget-side
+     fallback, so the request passes through unchanged. */
+  const parent = referrerOrigin(referrer, initiator);
   if (!parent) return target;
   return u.href.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
 }
@@ -3892,7 +3914,7 @@ export function virtualOgsOrigin(target: string, referrer: string, engineOrigin:
     and the widget never renders (#433). Virtualize a host= that
     names this deployment at the seam the engine owns; rendering
     fidelity only. */
-export function virtualHcaptchaHost(target: string, referrer: string, engineOrigin: string): string {
+export function virtualHcaptchaHost(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
   let u: URL;
   try {
     u = new URL(target);
@@ -3945,7 +3967,7 @@ export function virtualHcaptchaHost(target: string, referrer: string, engineOrig
   /* No honest widget-side fallback exists: without a decoded page
      origin hCaptcha cannot validate the request, so it passes
      through unchanged. */
-  const parent = referrerOrigin(referrer);
+  const parent = referrerOrigin(referrer, initiator);
   if (!parent) return target;
   let vu: URL;
   try {
@@ -3982,7 +4004,16 @@ export function isChallengeFrameUrl(target: string): boolean {
 
 /** The virtual origin of the page that embedded a recaptcha frame:
     decode its engine-route referrer (keyed route or nav handle). */
-function referrerOrigin(referrer: string): string | null {
+function referrerOrigin(referrer: string, initiator?: string): string | null {
+  /* #436: browser-owned client context survives no-referrer/origin-only
+     policies and expired route tokens. Unknown context falls back to
+     a verified route; a page-supplied origin claim is never used. */
+  if (initiator) {
+    try {
+      const u = new URL(initiator);
+      if (u.protocol === "https:" || u.protocol === "http:") return u.origin;
+    } catch { /* malformed context falls through */ }
+  }
   if (!referrer) return null;
   try {
     const refU = new URL(referrer, "https://zl.invalid/");
@@ -4100,6 +4131,7 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
        (b64u encodes it inside the tail); the Referer must match what
        direct browsing sends (issue #20). */
     let ref = decodePath(refU.pathname);
+    let queryReferrer = false;
     /* #112: a nav-handle document keeps the real destination inside
        its keyed token, so decodePath fails on the navh route and
        every subresource from that page lost the Referer upstream.
@@ -4119,6 +4151,7 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
        the search; the path is the real destination path. */
     if (!ref && queryHandleToken(refU.search) !== null) {
       ref = decodeQueryHandle(refU)?.destination ?? null;
+      queryReferrer = ref !== null;
     }
     /* #113: legacy /zl/ routes from cold starts or pre-#113 dists
        also fail decodePath when the prefix is not configured yet.
@@ -4126,7 +4159,9 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     if (!ref) {
       ref = decodeLegacyRoute(refU.pathname);
     }
-    if (ref) out.set("referer", mergeRouteSearch(ref, refU.search));
+    /* #435: query decoding already removed the verified engine
+       component. Never reattach the physical zlNavh search. */
+    if (ref) out.set("referer", queryReferrer ? ref : mergeRouteSearch(ref, refU.search));
     /* #127: a page with an origin-only referrer policy (google.com
        serves one) sends the engine ORIGIN root as Referer, which no
        route decode recovers, so every subresource from that page
@@ -4169,9 +4204,9 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
      match the document surface, so its UA and languages win over
      whatever the page sent. */
   const profile = getFpProfile();
-  if (profile) {
+  if (profile) out.set("accept-language", acceptLanguageValue(profile.languages));
+  if (profile && profile.matchUserAgent !== false) {
     out.set("user-agent", profile.userAgent);
-    out.set("accept-language", acceptLanguageValue(profile.languages));
     /* The navigation Accept must match the CLAIMED major, not the
        physical browser's: a Chrome 124 persona carrying image/jxl
        (a Chrome 155+ format) contradicts its own UA. */

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { wsIdentityHeaders, wsTargetForLookups, type WsIdentityProfile } from "../wsidentity";
 
 /* Per-origin virtual WS identities (deep-integration item 4): the
@@ -60,6 +60,16 @@ describe("wsIdentityHeaders", () => {
       ["user-agent", "ProfileUA/2.0"],
       ["accept-language", "en-US,en;q=0.9"],
     ]);
+  });
+
+  it("explicit UA opt-out uses native worker UA while retaining independent language settings", () => {
+    vi.stubGlobal("navigator", { userAgent: "NativeUA/154" });
+    try {
+      const h = wsIdentityHeaders("https://page.example/", "wss://spoof.example/ws", { ...opts, profile: { ...profile, matchUserAgent: false } });
+      expect(h).toContainEqual(["user-agent", "NativeUA/154"]);
+      expect(h).toContainEqual(["accept-language", "en-US,en;q=0.9"]);
+      expect(h).not.toContainEqual(["user-agent", profile.userAgent]);
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("an http initiator origin is kept (native pages may be plain http)", () => {
