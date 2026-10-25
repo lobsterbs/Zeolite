@@ -18,7 +18,7 @@ import { netLogCursor, netLogGeneration, netLogSince } from "./netlog";
 import { senderVirtualOrigin } from "./origin";
 import type { RecordingState } from "./recording";
 import { beginRecording, finishRecording } from "./recording";
-import { pageCacheClear } from "./request";
+import { pageCacheClear, virtualHcaptchaFrameFragment } from "./request";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
 import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setQueryRoutes, setSiteEnabled } from "./swstate";
@@ -388,7 +388,18 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         reply({ ok: false, error: "mint needs an absolute http(s) dest" });
         break;
       }
-      reply({ ok: true, route: encodeDest(msg.dest) });
+      /* The browser strips fragments before fetch interception, but
+         the mint message still carries them. Source identity comes
+         only from the browser-owned client/context, never msg.origin. */
+      const sourceId = e.source && "id" in e.source ? e.source.id : undefined;
+      const home = contextOf(VCTX, sourceId)?.targetOrigin ?? senderOrigin(e) ?? undefined;
+      const dest = virtualHcaptchaFrameFragment(msg.dest, self.location.origin, home);
+      /* Fragments belong to the browser, never the encoded network
+         target. Otherwise the worker strips the decoded fragment
+         before fetch and the document can never observe it. */
+      const hash = dest.indexOf("#");
+      const route = hash < 0 ? encodeDest(dest) : encodeDest(dest.slice(0, hash)) + dest.slice(hash);
+      reply({ ok: true, route });
       break;
     }
     case "zl:decodeRoutes": {
