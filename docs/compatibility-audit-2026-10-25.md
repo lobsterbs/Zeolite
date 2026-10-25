@@ -46,6 +46,12 @@ that query shape.
 
 ## Next changes worth prioritizing
 
+HTML charset follow-up (#478): streamed HTML now waits for the first three
+bytes even with a charset header, so a split BOM can override a conflicting
+header before decoding. CSS retains its existing header precedence. The
+regression fixture covers split UTF-16 bytes; live-site compatibility is
+not implied by the fixture.
+
 1. Keep a direct-control and proxied-control compatibility fixture for every
    route shape, referrer policy and widget family; distinguish upstream HTTP
    rejections from routing, runtime and transport failures.

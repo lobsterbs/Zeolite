@@ -93,8 +93,8 @@ export function mapRefreshHeader(headers: Headers, dest: string): void {
 /* ---- Charset resolution (issue B) -----------------------------------
    A rewritten body is decoded with the upstream charset and served
    re-encoded UTF-8, so the served content-type must declare utf-8.
-   Resolution order: the Content-Type header's charset parameter,
-   then a BOM, then a prescan of the head bytes (an HTML <meta
+   For HTML a BOM precedes the Content-Type charset parameter; for
+   other bodies the header precedes the BOM. Then a prescan of the head bytes (an HTML <meta
    charset> or a CSS leading @charset), then the spec default
    (windows-1252 for HTML per the HTML spec, UTF-8 for CSS without
    @charset). ponytail: the prescan is a latin1 regex, not the full
@@ -122,12 +122,13 @@ function latin1(head: Uint8Array, max: number): string {
 /** The TextDecoder label a rewritable body decodes with. */
 export function resolveCharset(contentType: string, head: Uint8Array | null, html: boolean): string {
   const fromHeader = charsetFromHeader(contentType);
-  if (fromHeader) return fromHeader;
+  if (fromHeader && !html) return fromHeader;
   if (head && head.length >= 2) {
     for (const [bom, label] of BOMS) {
       if (bom.every((b, i) => head[i] === b)) return label;
     }
   }
+  if (fromHeader) return fromHeader;
   if (head) {
     const s = latin1(head, 1024);
     if (html) {

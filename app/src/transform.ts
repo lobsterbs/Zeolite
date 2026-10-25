@@ -241,14 +241,14 @@ export function rewriteStream(
         if (deps!.lazyImages()) rw.set_lazy_images();
         for (const u of csInject) rw.add_injection(u);
         /* Stream-head hold (quirks splice + charset): raw bytes
-           accumulate until the charset resolves (header label, else
-           BOM/meta prescan over the first 1024 bytes), decoded text
+           accumulate until the charset resolves (BOM, header label,
+           then meta prescan over the first 1024 bytes), decoded text
            until the doctype splice point resolves (initSplicePoint).
            Bounded: 2KB of still-undecided head falls back to
            stream-start injection, the old placement - never an
            unbounded hold. */
         const headerLabel = charsetFromHeader(contentType);
-        let decoder: TextDecoder | null = headerLabel ? makeDecoder(headerLabel) : null;
+        let decoder: TextDecoder | null = null;
         let held: Uint8Array[] = [];
         let heldLen = 0;
         let head = "";
@@ -295,7 +295,9 @@ export function rewriteStream(
           } else {
             held.push(value);
             heldLen += value.length;
-            if (heldLen < 1024) continue;
+            /* Even a valid header must wait for a possibly split BOM.
+               Three bytes suffice to decide every supported BOM. */
+            if (heldLen < (headerLabel ? 3 : 1024)) continue;
             decoder = makeDecoder(resolveCharset(contentType, cat(held), true));
             head += decoder.decode(cat(held), { stream: true });
             held = [];

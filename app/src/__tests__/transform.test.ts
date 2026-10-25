@@ -137,6 +137,14 @@ describe("rewriteStream (#86)", () => {
     expect(out).toBe(SPLICED);
   });
 
+  it("decodes a split UTF-16 BOM before a conflicting HTML header", async () => {
+    const bytes = new Uint8Array([0xff, 0xfe, ...Array.from(DOC).flatMap(ch => [ch.charCodeAt(0), 0])]);
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(bytes.slice(0, 1)); c.enqueue(bytes.slice(1, 2)); c.enqueue(bytes.slice(2)); c.close(); },
+    });
+    expect(await readAll(rewriteStream(stream, BASE, {}, [], "text/html; charset=utf-8"))).toBe(SPLICED);
+  });
+
   it("prefers the active fingerprint script and skips the site lookup", async () => {
     initTransform({
       routeReady: () => Promise.resolve(),
