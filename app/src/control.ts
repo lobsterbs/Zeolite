@@ -21,7 +21,7 @@ import { beginRecording, finishRecording } from "./recording";
 import { pageCacheClear, virtualHcaptchaFrameFragment } from "./request";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
-import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setQueryRoutes, setSiteEnabled } from "./swstate";
+import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled } from "./swstate";
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
 import { relayRegister } from "./relayfetch";
@@ -48,6 +48,7 @@ const DECODE_ROUTES_MAX = 64;
 export interface ControlMessage {
   type:
     | "zl:config"
+    | "zl:reloadBypass"
     | "zl:mint"
     | "zl:decodeRoutes"
     | "zl:navHandle"
@@ -374,6 +375,12 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled() });
       break;
     }
+    case "zl:reloadBypass":
+      /* #211 (LobsterBrowse): arm the one-shot page-cache bypass for
+         the next document GET (Reload and bypass cache). */
+      setReloadBypass(true);
+      reply({ ok: true });
+      break;
     case "zl:mint": {
       /* #55/#54: mint an opaque route for a destination. The reply
          carries the route only, never the key: the key must not
@@ -1101,7 +1108,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister", "zl:wispRegister", "zl:wispPrimary",
+  "zl:ping", "zl:config", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary",
 ]);
 
 
