@@ -53,6 +53,11 @@ const waiters = new Map<number, (m: RelayMsg) => void>();
 let reRegisterWaiters: Array<() => void> = [];
 let reRegisterBackoffUntil = 0;
 
+/** Test-only visibility into the bounded re-registration wait set. */
+export function relayReRegisterPendingForTests(): number {
+  return reRegisterWaiters.length;
+}
+
 /** Ask the embedder to re-register its relay port, then wait once,
     bounded. True when a port is registered (possibly by a concurrent
     wait), false on the deadline or during the backoff window. */
@@ -79,11 +84,16 @@ export async function requestRelayReRegister(deadlineMs: number, traceId: string
     /* no clients API in this realm: the bounded wait below still applies */
   }
   const got = await new Promise<boolean>((resolve) => {
-    const t = setTimeout(() => resolve(hostPort !== null), deadlineMs);
-    reRegisterWaiters.push(() => {
+    const wake = () => {
       clearTimeout(t);
       resolve(true);
-    });
+    };
+    const t = setTimeout(() => {
+      const index = reRegisterWaiters.indexOf(wake);
+      if (index >= 0) reRegisterWaiters.splice(index, 1);
+      resolve(hostPort !== null);
+    }, deadlineMs);
+    reRegisterWaiters.push(wake);
   });
   if (!got) reRegisterBackoffUntil = Date.now() + 30_000;
   return got;

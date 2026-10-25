@@ -142,6 +142,31 @@ describe("mintRoute client (#54 seam consumer)", () => {
     await mintRoute(first); /* evicted with the older entries: re-mints */
     expect(posts.length).toBe(258);
   });
+
+  it("does not let an evicted mint failure delete a newer mint for the same URL", async () => {
+    const first = "https://mint-race.example/a";
+    let oldPort: MessagePort | undefined;
+    let newPort: MessagePort | undefined;
+    let firstPosts = 0;
+    vi.stubGlobal("navigator", { serviceWorker: { controller: {
+      postMessage(m: { dest: string }, ports: MessagePort[]) {
+        if (m.dest === first) {
+          if (++firstPosts === 1) oldPort = ports[0];
+          else newPort = ports[0];
+        } else queueMicrotask(() => ports[0].postMessage({ route: "/j/filler" }));
+      },
+    } } });
+    const old = mintRoute(first);
+    for (let i = 0; i < 256; i++) await mintRoute("https://mint-race.example/filler/" + i);
+    const fresh = mintRoute(first);
+    oldPort!.postMessage({ ok: false });
+    expect(await old).toBeNull();
+    await settle();
+    expect(mintRoute(first)).toBe(fresh);
+    expect(firstPosts).toBe(2);
+    newPort!.postMessage({ route: "/j/fresh" });
+    expect(await fresh).toBe("/j/fresh");
+  });
 });
 
 describe("re-emission seams (#54 residual 2)", () => {
@@ -388,6 +413,31 @@ describe("worker mint relay (#54 residual 5)", () => {
     // first was evicted, so a repeat mints again instead of leaking.
     expect(await mintUrlViaRelay(post, first)).toBe("/j/w");
     expect(posts).toBe(258);
+  });
+
+  it("keeps a replacement worker mint after an evicted request fails", async () => {
+    const first = "https://worker-mint-race.example/a";
+    let oldPort: MessagePort | undefined;
+    let newPort: MessagePort | undefined;
+    let firstPosts = 0;
+    const post = (m: unknown, tr?: Transferable[]) => {
+      const port = tr![0] as MessagePort;
+      if ((m as { msg: { dest: string } }).msg.dest === first) {
+        if (++firstPosts === 1) oldPort = port;
+        else newPort = port;
+      } else queueMicrotask(() => port.postMessage({ route: "/j/filler" }));
+      return true;
+    };
+    const old = mintUrlViaRelay(post, first);
+    for (let i = 0; i < 256; i++) await mintUrlViaRelay(post, "https://worker-mint-race.example/filler/" + i);
+    const fresh = mintUrlViaRelay(post, first);
+    oldPort!.postMessage({ ok: false });
+    expect(await old).toBeNull();
+    await settle();
+    expect(mintUrlViaRelay(post, first)).toBe(fresh);
+    expect(firstPosts).toBe(2);
+    newPort!.postMessage({ route: "/j/fresh" });
+    expect(await fresh).toBe("/j/fresh");
   });
 });
 describe("fetch init SRI (#77 runtime half)", () => {

@@ -9,6 +9,7 @@ describe("relay re-registration after a worker restart (#354)", () => {
   let relayRegister: (p: MessagePort) => void;
   let relayAvailable: () => boolean;
   let requestRelayReRegister: (d: number, t: string, u: string) => Promise<boolean>;
+  let pending: () => number;
 
   beforeEach(async () => {
     vi.useFakeTimers();
@@ -18,6 +19,7 @@ describe("relay re-registration after a worker restart (#354)", () => {
     relayRegister = mod.relayRegister;
     relayAvailable = mod.relayAvailable;
     requestRelayReRegister = mod.requestRelayReRegister;
+    pending = mod.relayReRegisterPendingForTests;
   });
 
   afterEach(() => {
@@ -51,6 +53,7 @@ describe("relay re-registration after a worker restart (#354)", () => {
     const p = requestRelayReRegister(25, "t2", "https://ddg.example/");
     await vi.advanceTimersByTimeAsync(25);
     expect(await p).toBe(false);
+    expect(pending()).toBe(0);
     expect(posts).toHaveLength(1);
     /* backoff window: the second call refuses immediately, no second
        broadcast, no wait. */
@@ -63,5 +66,23 @@ describe("relay re-registration after a worker restart (#354)", () => {
     const p = requestRelayReRegister(10, "t4", "https://x.example/");
     await vi.advanceTimersByTimeAsync(10);
     expect(await p).toBe(false);
+    expect(pending()).toBe(0);
+  });
+
+  it("does not retain expired callbacks through repeated recovery attempts", async () => {
+    vi.stubGlobal("clients", { matchAll: async () => [] });
+    for (let i = 0; i < 5; i++) {
+      const p = requestRelayReRegister(10, "t" + i, "https://x.example/");
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await p).toBe(false);
+      expect(pending()).toBe(0);
+      await vi.advanceTimersByTimeAsync(30_001);
+    }
+    const active = requestRelayReRegister(100, "active", "https://x.example/");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pending()).toBe(1);
+    relayRegister(new FakePort() as unknown as MessagePort);
+    expect(await active).toBe(true);
+    expect(pending()).toBe(0);
   });
 });

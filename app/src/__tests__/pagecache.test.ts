@@ -503,4 +503,18 @@ describe("pageCacheMatch If-Range (#341)", () => {
     expect(out).not.toBeNull();
     expect(out!.status).toBe(206);
   });
+
+  it("does not use weak ETags to validate a cached byte range", async () => {
+    for (const [stored, requested] of [
+      ['"v1"', 'W/"v1"'],
+      ['W/"v1"', '"v1"'],
+      ['W/"v1"', 'W/"v1"'],
+    ]) {
+      seed(stored);
+      const out = await pageCacheMatch(
+        new Request("https://e.example/p", { headers: { range: "bytes=0-1", "if-range": requested } }),
+      );
+      expect(out).toBeNull();
+    }
+  });
 });

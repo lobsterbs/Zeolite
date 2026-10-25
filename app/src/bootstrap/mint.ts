@@ -75,7 +75,7 @@ export function mintRoute(dest: string, timeout = 5000): Promise<string | null> 
   }
   memo.set(dest, p);
   p.then((route) => {
-    if (!route) memo.delete(dest);
+    if (!route && memo.get(dest) === p) memo.delete(dest);
   });
   return p;
 }

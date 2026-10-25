@@ -44,6 +44,20 @@ alone. Query routes preserve the destination's native pathname; the original
 LobsterBrowse #205 separately fixes initial split-origin navigations bypassing
 that query shape.
 
+## Follow-up cache and relay fixes
+
+- #459: an older, evicted route-mint failure no longer removes a newer pending
+  mint for the same destination, in both page and worker bridges.
+- #463: expired relay re-registration attempts remove their waiting callbacks;
+  repeated recovery attempts do not retain stale closures.
+- #468: cached range responses require a strong `If-Range` ETag match. Weak
+  validators fall through to the network path.
+- #469: an unsatisfiable cached range returns a bodyless 416 without the
+  stored representation's positive `Content-Length`.
+
+The app type check and unit suite cover these cases. Live compatibility
+coverage remains necessary before claiming specific site behavior.
+
 ## Next changes worth prioritizing
 
 1. Keep a direct-control and proxied-control compatibility fixture for every

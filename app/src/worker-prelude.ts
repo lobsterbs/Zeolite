@@ -118,7 +118,7 @@ export function mintUrlViaRelay(
   }
   mintMemo.set(dest, p);
   p.then((route) => {
-    if (!route) mintMemo.delete(dest);
+    if (!route && mintMemo.get(dest) === p) mintMemo.delete(dest);
   });
   return p;
 }

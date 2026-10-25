@@ -78,6 +78,16 @@ describe("rangeFromEntry (#314)", () => {
     expect(out!.headers.get("content-range")).toBe("bytes */4");
   });
 
+  it("does not advertise the stored body's length on an empty 416", async () => {
+    const hit = new Response(new Uint8Array([1, 2, 3, 4]), {
+      headers: { "content-length": "4" },
+    });
+    const out = await rangeFromEntry(hit, "bytes=9-");
+    expect(out!.status).toBe(416);
+    expect(out!.headers.get("content-range")).toBe("bytes */4");
+    expect(out!.headers.get("content-length")).toBeNull();
+  });
+
   it("serves the slice without x-zl-* bookkeeping headers (#338)", async () => {
     const hit = new Response(new Uint8Array([1, 2, 3, 4]), {
       headers: {
