@@ -60,6 +60,16 @@ there are dead code. Documents and stylesheets are never demoted,
 and the demotion records a POLICY_NATIVE transit decision with the
 rule id so the native share stays honest in telemetry.
 
+Automatic demotion based on a script containing an anchored origin regex is
+**Planned**, not implemented (#449). Such a regex does not establish that all
+URL literals in the script are safe to leave native: a script can also assign
+an absolute destination to an anchor or use browser-owned navigation paths.
+The existing `gapi-native` rule remains scoped to the tested host. A general
+replacement needs a captured loader fixture, generated-URL validation, and
+browser leak checks covering fetch, anchors and `window.open`, plus an
+explainable decision in the network log. A regex match alone must not opt an
+arbitrary script out of URL rewriting.
+
 Behavior routes compose with transport routes (#154): the transport
 selection (upstreamFetch) ignores behavior rules, so a "native"
 host rule rides the transport a relay/wisp rule would pick for the
