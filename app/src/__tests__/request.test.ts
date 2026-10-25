@@ -592,6 +592,28 @@ describe("redirect hop gates and cross-origin header scoping (#186, #194)", () =
     setSiteEnabled("blocked.example", true);
   });
 
+  it("keeps profile UA and requested hints together, with native opt-out (#429/#437)", async () => {
+    const nativeUa = "Mozilla/5.0 (X11; CrOS x86_64 16123.0.0) AppleWebKit/537.36 Chrome/154.0.0.0 Safari/537.36";
+    const profileUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149.0.7827.12 Safari/537.36";
+    try {
+      for (const matchUserAgent of [false, true]) {
+        expect(setFingerprint({ userAgent: profileUa, matchUserAgent }).ok).toBe(true);
+        transportMock.inits = [];
+        transportMock.queue = [new Response("ok", { headers: { "content-type": "text/plain" } })];
+        const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/identity-" + matchUserAgent), "identity-437", "");
+        (ev.request as any).headers = new Headers({ "user-agent": nativeUa, "sec-ch-ua-platform": '"Chrome OS"',
+          "sec-ch-ua-full-version": '"154.0.1234.2"', "sec-ch-ua-model": '"physical-device"' });
+        handleFetch(ev);
+        expect((await armed[0]!).status).toBe(200);
+        const sent = transportMock.inits[0]?.headers!;
+        expect(sent.get("user-agent")).toBe(matchUserAgent ? profileUa : nativeUa);
+        expect(sent.get("sec-ch-ua-platform")).toBe(matchUserAgent ? '"Windows"' : '"Chrome OS"');
+        expect(sent.get("sec-ch-ua-full-version")).toBe(matchUserAgent ? '"149.0.7827.12"' : '"154.0.1234.2"');
+        expect(sent.get("sec-ch-ua-model")).toBe(matchUserAgent ? null : '"physical-device"');
+      }
+    } finally { setFingerprint(null); }
+  });
+
   it("blocks a redirect hop to a disabled site (#186)", async () => {
     setSiteEnabled("blocked.example", false);
     transportMock.queue = [

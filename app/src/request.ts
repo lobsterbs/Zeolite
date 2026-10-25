@@ -2731,23 +2731,22 @@ export function handleFetch(e: FetchEvent): void {
              fetch, but this request is engine-built). An active
              fingerprint profile still wins: the wire surface must match
              the spoofed document surface (1.8 Telluride). */
-          const ruleUa = siteUaFor(target);
-          if (ruleUa && !getFpProfile()) sendHeaders.set("user-agent", ruleUa);
-          /* #80: a per-site FingerprintProfile from siteconfig data
-             rides the same wire surfaces; it overrides the zl:rules
-             UA (a full coherent surface beats one header), and the
-             global profile still beats both. */
-          if (!getFpProfile()) {
-            const sp = await siteProfileFor(target);
-            if (sp) {
-              sendHeaders.set("user-agent", sp.p.userAgent);
-              sendHeaders.set("accept-language", acceptLanguageValue(sp.p.languages));
-            }
+          let identityProfile = getFpProfile();
+          if (!identityProfile) identityProfile = (await siteProfileFor(target))?.p ?? null;
+          if (identityProfile) {
+            sendHeaders.set("accept-language", acceptLanguageValue(identityProfile.languages));
+            if (identityProfile.matchUserAgent !== false) sendHeaders.set("user-agent", identityProfile.userAgent);
+          } else {
+            const ruleUa = siteUaFor(target);
+            if (ruleUa) sendHeaders.set("user-agent", ruleUa);
           }
-          /* Sec-CH-UA hints must match the FINAL user-agent (profile,
-             zl:rules or site profile); applyChUa deletes first, so a
-             non-Chromium final UA carries no stale hints. */
-          applyChUa(sendHeaders, sendHeaders.get("user-agent") ?? "");
+          /* #429/#437: opting out keeps native UA/Client Hints. Otherwise
+             every hint follows the final profile/rule identity. */
+          if (identityProfile?.matchUserAgent !== false) {
+            const wireUa = sendHeaders.get("user-agent") ?? "";
+            // An unchanged native identity needs no high-entropy filtering.
+            applyChUa(sendHeaders, wireUa, !identityProfile && wireUa === (e.request.headers.get("user-agent") ?? ""));
+          }
           /* 2.2 Arsenide: initiator context for the opt-in SameSite
              policy. Issue #33: the initiator comes from the client's own
              virtual context first (a SW-assigned key, not a page-supplied
@@ -4184,9 +4183,9 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
      match the document surface, so its UA and languages win over
      whatever the page sent. */
   const profile = getFpProfile();
-  if (profile) {
+  if (profile) out.set("accept-language", acceptLanguageValue(profile.languages));
+  if (profile && profile.matchUserAgent !== false) {
     out.set("user-agent", profile.userAgent);
-    out.set("accept-language", acceptLanguageValue(profile.languages));
     /* The navigation Accept must match the CLAIMED major, not the
        physical browser's: a Chrome 124 persona carrying image/jxl
        (a Chrome 155+ format) contradicts its own UA. */
