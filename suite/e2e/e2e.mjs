@@ -1404,7 +1404,7 @@ async function main() {
     assert(fetched === "api", "plaintext fetch did not ride the engine: " + fetched);
     /* Acceptance 2: window.open must stay on the engine - a popup at
        the fixture origin is a direct escape. */
-    const pages = pg.context.pages();
+    const pages = context.pages();
     const escaped = pages.filter((p) => p.url().startsWith(ORIGIN_A) || p.url().startsWith(ORIGIN_B));
     assert(escaped.length === 0, "window.open escaped the engine: " + escaped.map((p) => p.url()).join(", "));
     for (const p of pages) if (p !== pg) await p.close().catch(() => {});
