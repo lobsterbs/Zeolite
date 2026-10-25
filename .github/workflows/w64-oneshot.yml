@@ -1,0 +1,33 @@
+name: w64-oneshot
+on:
+  push:
+    branches: [w64-449]
+permissions:
+  contents: write
+jobs:
+  push-449:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: convert placeholders
+        run: python3 -c "s=open('.w64-patch.py').read(); open('.w64-patch.py','w').write(s.replace('@BS@', chr(92)).replace('@BT@', chr(96)))"
+      - name: sha gate
+        run: echo "775ea30c061ad7010100e59e3ac81928d58e23ba818345f724369845feafd0eb  .w64-patch.py" | sha256sum -c -
+      - name: apply patch
+        run: python3 .w64-patch.py "$PWD"
+      - name: rustfmt
+        run: rustfmt --edition 2021 crates/rewriter/src/js/literals.rs crates/rewriter/src/js/mod.rs crates/rewriter/src/wasm.rs
+      - name: commit and push
+        run: |
+          rm -f .w64-patch.py .github/workflows/w64-oneshot.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(rewriter): script-level URL-literal skip for origin-pinning scripts (#449)" -m "Fixes #449"
+          git push origin HEAD:main
+          git push origin --delete w64-449
