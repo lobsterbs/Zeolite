@@ -100,7 +100,12 @@ export function applyVirtualOrigin(w: Record<string, unknown>): void {
 
   const nativeAdd = (w.addEventListener as (...a: unknown[]) => unknown).bind(w);
   const nativeRemove = (w.removeEventListener as (...a: unknown[]) => unknown).bind(w);
-  const fwd = new WeakMap<object, (this: unknown, ev: unknown) => unknown>();
+  /* #472: key by (callback, capture) and reuse the wrapper - the old
+     raw-callback key minted a fresh wrapper per add (double delivery
+     on a repeated add) and removal only ever hit the newest one. */
+  const fwd = new WeakMap<object, Map<boolean, (this: unknown, ev: unknown) => unknown>>();
+  const capOf = (o: unknown): boolean =>
+    !!o && (typeof o === "object" ? !!(o as { capture?: unknown }).capture : true);
   /* #268: relabel both listener shapes - a callback function and an
      EventListener object with handleEvent. */
   const isListener = (l: unknown): l is object =>
@@ -109,18 +114,30 @@ export function applyVirtualOrigin(w: Record<string, unknown>): void {
   const addWrap = function (...a: unknown[]): unknown {
     if (a[0] === "message" && isListener(a[1])) {
       const orig = a[1] as object;
-      const f = function (this: unknown, ev: unknown) {
-        const r = relabel(ev);
-        if (typeof orig === "function") (orig as (e: unknown) => unknown).call(this, r);
-        else (orig as { handleEvent: (e: unknown) => unknown }).handleEvent(r);
-      };
-      fwd.set(orig, f);
+      const cap = capOf(a[2]);
+      let byCap = fwd.get(orig);
+      if (!byCap) {
+        byCap = new Map();
+        fwd.set(orig, byCap);
+      }
+      let f = byCap.get(cap);
+      if (!f) {
+        f = function (this: unknown, ev: unknown) {
+          const r = relabel(ev);
+          if (typeof orig === "function") (orig as (e: unknown) => unknown).call(this, r);
+          else (orig as { handleEvent: (e: unknown) => unknown }).handleEvent(r);
+        };
+        byCap.set(cap, f);
+      }
       return nativeAdd(a[0], f, a[2]);
     }
     return nativeAdd(...a);
   };
   const remWrap = function (...a: unknown[]): unknown {
-    const f = a[0] === "message" && isListener(a[1]) ? fwd.get(a[1] as object) : undefined;
+    const f =
+      a[0] === "message" && isListener(a[1])
+        ? fwd.get(a[1] as object)?.get(capOf(a[2]))
+        : undefined;
     return nativeRemove(a[0], f ?? a[1], a[2]);
   };
   /* ponytail: no half-install restore - addEventListener and

@@ -399,13 +399,27 @@ export async function pageCacheMatch(
     if (ifRange) {
       const etag = hit.headers.get("etag");
       const lm = hit.headers.get("last-modified");
-      const strong = ifRange.replace(/^W\//, "");
-      const ok = (!!etag && strong === etag) || (!!lm && ifRange === lm);
-      if (!ok) return null;
+      if (!ifRangeAccepts(ifRange, etag, lm)) return null;
     }
     return await rangeFromEntry(hit, rangeHeader);
   }
   return hit;
+}
+
+/** #468: If-Range is a STRONG comparison (RFC 9110 13.1.5) - a weak
+    request tag or a weak stored validator never gates a slice; the
+    origin owns the range semantics. */
+export function ifRangeAccepts(
+  ifRange: string,
+  etag: string | null,
+  lm: string | null,
+): boolean {
+  const weakReq = ifRange.startsWith("W/");
+  const weakStored = !!etag && etag.startsWith("W/");
+  return (
+    (!!etag && !weakReq && !weakStored && ifRange === etag) ||
+    (!!lm && ifRange === lm)
+  );
 }
 
 /** Issue #18: slice a single-range request out of a stored full 200.
@@ -430,6 +444,8 @@ export async function rangeFromEntry(hit: Response, rangeHeader: string): Promis
   const headers = stripInternalHeaders(hit.headers);
   if (plan.kind === "unsatisfiable") {
     headers.set("content-range", `bytes */${body.byteLength}`);
+    /* #469: the empty 416 must not advertise the stored length. */
+    headers.delete("content-length");
     return new Response(null, { status: 416, headers });
   }
   const slice = new Uint8Array(body.subarray(plan.start, plan.end + 1));

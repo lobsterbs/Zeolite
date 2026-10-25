@@ -190,6 +190,48 @@ describe("navigator.serviceWorker shim (1.6)", () => {
     const ready = await (c.ready as Promise<{ active: unknown }>);
     expect(ready.active).toBeTruthy();
   });
+
+  it("the default scope is the script directory (#473)", () => {
+    const s = mkStore();
+    const reg = swShimRegister(s, "https://a.example/app/page.html", "/assets/sw.js");
+    expect(reg.scope).toBe("https://a.example/assets/");
+    expect(swShimGet(s, "https://a.example/app/page.html", "/assets/")?.scope).toBe(
+      "https://a.example/assets/",
+    );
+  });
+
+  it("an explicit scope resolves against the page (#473)", () => {
+    const s = mkStore();
+    const reg = swShimRegister(s, "https://a.example/app/page.html", "/assets/sw.js", { scope: "../" });
+    expect(reg.scope).toBe("https://a.example/");
+  });
+
+  it("a cross-origin script URL is a native-style TypeError (#474)", () => {
+    const s = mkStore();
+    expect(() => swShimRegister(s, "https://a.example/", "https://evil.example/sw.js")).toThrow(TypeError);
+  });
+
+  it("a lookalike scope origin is refused, not prefix-matched (#474)", () => {
+    const s = mkStore();
+    expect(() =>
+      swShimRegister(s, "https://a.example/", "sw.js", { scope: "https://a.example.evil/" }),
+    ).toThrow(TypeError);
+  });
+
+  it("a stored record scoping a foreign or lookalike origin never reads back (#474)", () => {
+    const s = mkStore();
+    s.set(JSON.stringify({ scriptURL: "https://a.example.evil/sw.js", scope: "https://a.example.evil/" }));
+    expect(swShimGet(s, "https://a.example/")).toBeUndefined();
+  });
+
+  it("container register rejects on a cross-origin script (#474)", async () => {
+    const s = mkStore();
+    const c: Record<string, unknown> = {};
+    swShimApply(c, s, "https://a.example/");
+    await expect(
+      (c.register as (u: string) => Promise<unknown>)("https://evil.example/sw.js"),
+    ).rejects.toThrow(TypeError);
+  });
 });
 
 

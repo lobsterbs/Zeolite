@@ -25,6 +25,7 @@
      replay (#442). Large/multipart uploads have a finite 10min bound. */
 
 import { DIAG } from "./diag";
+import { isHostClient, type WinClient } from "./lifecycle";
 
 type RelayMsg =
   | {
@@ -71,22 +72,44 @@ export async function requestRelayReRegister(deadlineMs: number, traceId: string
   });
   try {
     const scope: {
-      clients?: { matchAll(o: { type: string }): Promise<Array<{ postMessage(m: unknown): void }>> };
+      clients?: { matchAll(o: { type: string }): Promise<Array<{ url?: string; postMessage(m: unknown): void }>> };
     } = typeof self !== "undefined" ? (self as unknown as typeof scope) : (globalThis as unknown as typeof scope);
     const cs = (await scope.clients?.matchAll({ type: "window" })) ?? [];
-    for (const c of cs) c.postMessage({ type: "zl:relayLost" });
+    /* #464: host clients only - a proxied page cannot register the
+       relay (the control gate), so the recovery signal holds the
+       same host-only boundary as the #439 lifecycle broadcast. */
+    for (const c of cs) {
+      try {
+        if (isHostClient(c as unknown as WinClient)) c.postMessage({ type: "zl:relayLost" });
+      } catch {
+        /* unparseable client URL: not a host */
+      }
+    }
   } catch {
     /* no clients API in this realm: the bounded wait below still applies */
   }
   const got = await new Promise<boolean>((resolve) => {
-    const t = setTimeout(() => resolve(hostPort !== null), deadlineMs);
-    reRegisterWaiters.push(() => {
-      clearTimeout(t);
+    /* #463: the deadline removes its own waiter - an expired
+       registration request must not linger in worker memory for
+       the worker lifetime. */
+    const waiter = () => {
+      if (t !== undefined) clearTimeout(t);
       resolve(true);
-    });
+    };
+    let t: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+      const i = reRegisterWaiters.indexOf(waiter);
+      if (i >= 0) reRegisterWaiters.splice(i, 1);
+      resolve(hostPort !== null);
+    }, deadlineMs);
+    reRegisterWaiters.push(waiter);
   });
   if (!got) reRegisterBackoffUntil = Date.now() + 30_000;
   return got;
+}
+
+/** Test seam: retained re-registration waiters (#463). */
+export function reRegisterWaiterCount(): number {
+  return reRegisterWaiters.length;
 }
 
 /* #391: the relay port, the embedder origin and the boot-page
@@ -101,10 +124,19 @@ export async function requestRelayReRegister(deadlineMs: number, traceId: string
 export async function relayColdWake(): Promise<void> {
   try {
     const scope: {
-      clients?: { matchAll(o: { type: string }): Promise<Array<{ postMessage(m: unknown): void }>> };
+      clients?: { matchAll(o: { type: string }): Promise<Array<{ url?: string; postMessage(m: unknown): void }>> };
     } = typeof self !== "undefined" ? (self as unknown as typeof scope) : (globalThis as unknown as typeof scope);
     const cs = (await scope.clients?.matchAll({ type: "window" })) ?? [];
-    for (const c of cs) c.postMessage({ type: "zl:relayLost" });
+    /* #464: host clients only - a proxied page cannot register the
+       relay (the control gate), so the recovery signal holds the
+       same host-only boundary as the #439 lifecycle broadcast. */
+    for (const c of cs) {
+      try {
+        if (isHostClient(c as unknown as WinClient)) c.postMessage({ type: "zl:relayLost" });
+      } catch {
+        /* unparseable client URL: not a host */
+      }
+    }
   } catch {
     /* no clients API in this realm */
   }

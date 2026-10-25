@@ -65,27 +65,53 @@ export function applyIsolation(
       | undefined;
     if (typeof add === "function" && typeof rem === "function") {
       /* #266: keyed by the RAW listener so removeEventListener finds
-         the same registration for functions and object listeners. */
-      const handlers = new Map<unknown, StorageHandler>();
+         the same registration for functions and object listeners.
+         #475: registration identity is (listener, capture); once and
+         AbortSignal are honored by the synthetic delivery. */
+      type Reg = { h: StorageHandler; once: boolean };
+      const handlers = new Map<unknown, Map<boolean, Reg>>();
+      const capOf = (o?: unknown): boolean =>
+        !!o && (typeof o === "object" ? !!(o as { capture?: unknown }).capture : true);
+      const onceOf = (o?: unknown): boolean =>
+        !!o && typeof o === "object" && !!(o as { once?: unknown }).once;
+      const drop = (l: unknown, cap: boolean): void => {
+        const m = handlers.get(l);
+        if (m) {
+          m.delete(cap);
+          if (!m.size) handlers.delete(l);
+        }
+      };
       let onstorage: StorageHandler | null = null;
       const wrappedAdd = (t: string, l: unknown, o?: unknown): void => {
         /* #266: an object-style listener ({ handleEvent(ev) {} }) is as
            standard as a function listener; both are filtered here, and
            neither ever reaches the real (unfiltered) registration. */
         if (t === "storage") {
-          if (typeof l === "function") {
-            handlers.set(l, l as StorageHandler);
-            return;
-          }
-          if (
-            l !== null &&
-            typeof l === "object" &&
-            typeof (l as EventListenerObject).handleEvent === "function"
-          ) {
-            handlers.set(
-              l,
-              (ev) => (l as EventListenerObject).handleEvent(ev),
-            );
+          const h: StorageHandler | null =
+            typeof l === "function"
+              ? (l as StorageHandler)
+              : l !== null &&
+                  typeof l === "object" &&
+                  typeof (l as EventListenerObject).handleEvent === "function"
+                ? (ev) => (l as EventListenerObject).handleEvent(ev)
+                : null;
+          if (h) {
+            const cap = capOf(o);
+            let byCap = handlers.get(l);
+            if (!byCap) {
+              byCap = new Map();
+              handlers.set(l, byCap);
+            }
+            if (!byCap.has(cap)) byCap.set(cap, { h, once: onceOf(o) });
+            const sig =
+              !!o && typeof o === "object" ? (o as { signal?: AbortSignal }).signal : undefined;
+            if (sig) {
+              try {
+                sig.addEventListener("abort", () => drop(l, cap));
+              } catch {
+                /* not a real AbortSignal: the manual remove still works */
+              }
+            }
             return;
           }
         }
@@ -93,7 +119,7 @@ export function applyIsolation(
       };
       const wrappedRem = (t: string, l: unknown, o?: unknown): void => {
         if (t === "storage") {
-          handlers.delete(l);
+          drop(l, capOf(o));
           return;
         }
         rem(t, l, o);
@@ -173,11 +199,14 @@ export function applyIsolation(
               /* a page handler threw: not ours to surface */
             }
           }
-          for (const h of [...handlers.values()]) {
-            try {
-              h(fake);
-            } catch {
-              /* ditto */
+          for (const [l, byCap] of [...handlers.entries()]) {
+            for (const [cap, reg] of [...byCap.entries()]) {
+              try {
+                reg.h(fake);
+              } catch {
+                /* ditto */
+              }
+              if (reg.once) drop(l, cap);
             }
           }
         });
