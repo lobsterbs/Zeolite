@@ -1867,6 +1867,16 @@ document.write('<script src=x></script>');
     }
 
     #[test]
+    fn image_set_strings_in_style_blocks_and_attributes() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = r.process("<style>a{background:image-set('a.png' 1x)}</style><div style=\"background:image-set('b.png' 1x)\"></div>");
+        assert!(!out.contains("'a.png'"), "got: {out}");
+        assert!(!out.contains("'b.png'"), "got: {out}");
+        assert!(out.matches("/j/").count() >= 2, "got: {out}");
+    }
+
+    #[test]
     fn comments_pass_through() {
         let mut r = Rewriter::new(cfg());
         r.set_base("https://example.com/");

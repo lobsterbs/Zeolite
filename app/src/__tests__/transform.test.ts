@@ -145,6 +145,17 @@ describe("rewriteStream (#86)", () => {
     expect(await readAll(rewriteStream(stream, BASE, {}, [], "text/html; charset=utf-8"))).toBe(SPLICED);
   });
 
+  it("keeps UTF-8 text when a split BOM contradicts a legacy charset header", async () => {
+    const html = "<html><body>café</body></html>";
+    const bytes = new Uint8Array([0xef, 0xbb, 0xbf, ...enc.encode(html)]);
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(bytes.slice(0, 1)); c.enqueue(bytes.slice(1, 2)); c.enqueue(bytes.slice(2)); c.close(); },
+    });
+    const out = await readAll(rewriteStream(stream, BASE, {}, [], "text/html; charset=windows-1252"));
+    expect(out).toContain("café");
+    expect(out).not.toContain("ï»¿");
+  });
+
   it("prefers the active fingerprint script and skips the site lookup", async () => {
     initTransform({
       routeReady: () => Promise.resolve(),

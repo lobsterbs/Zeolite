@@ -52,6 +52,12 @@ header before decoding. CSS retains its existing header precedence. The
 regression fixture covers split UTF-16 bytes; live-site compatibility is
 not implied by the fixture.
 
+CSS URL follow-up (#476): direct string candidates in `image-set()` and
+`-webkit-image-set()` now use the same route encoder as `url()` in standalone
+CSS, style blocks and inline style attributes. Strings in `type()`, comments
+and unrelated properties remain literal. The scanner retains an incomplete
+image-set function across chunks, with one-shot and split parity fixtures.
+
 1. Keep a direct-control and proxied-control compatibility fixture for every
    route shape, referrer policy and widget family; distinguish upstream HTTP
    rejections from routing, runtime and transport failures.

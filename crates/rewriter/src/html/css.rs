@@ -108,6 +108,34 @@ fn scan(data: &str, enc: &dyn Fn(&str) -> String, final_scan: bool) -> (String, 
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
+        if (b == b'i' || b == b'I' || b == b'-') && (i == 0 || !is_ident_byte(bytes[i - 1])) {
+            let rest = &data[i..];
+            let mut consumed = None;
+            for prefix in ["image-set(", "-webkit-image-set("] {
+                if rest.len() < prefix.len()
+                    && !final_scan
+                    && rest.as_bytes().eq_ignore_ascii_case(&prefix.as_bytes()[..rest.len()])
+                {
+                    return (out, Some(i));
+                }
+                if rest.len() >= prefix.len()
+                    && rest.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+                {
+                    if let Some(end) = image_set_end(rest, prefix.len()) {
+                        push_image_set(&mut out, &rest[..end], prefix.len(), enc);
+                        consumed = Some(end);
+                        break;
+                    }
+                    if !final_scan {
+                        return (out, Some(i));
+                    }
+                }
+            }
+            if let Some(end) = consumed {
+                i += end;
+                continue;
+            }
+        }
         if b == b'u' || b == b'U' {
             let rest = &data[i..];
             // Fewer than four bytes left, a case-insensitive prefix of
@@ -292,6 +320,107 @@ fn scan_import(s: &str) -> ImportTok<'_> {
         };
     }
     ImportTok::NotImport
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b >= 0x80
+}
+
+/// Find the matching close paren, ignoring strings and comments. An
+/// incomplete function is held across stream chunks like an open url().
+fn image_set_end(s: &str, open_end: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut depth = 1;
+    let mut j = open_end;
+    while j < b.len() {
+        if b[j] == b'\'' || b[j] == b'"' {
+            j = scan_string(b, j)?;
+        } else if j + 1 < b.len() && b[j] == b'/' && b[j + 1] == b'*' {
+            j += 2 + s[j + 2..].find("*/")? + 2;
+        } else {
+            if b[j] == b'(' {
+                depth += 1;
+            }
+            if b[j] == b')' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j + 1);
+                }
+            }
+            j += utf8_len(b[j]);
+        }
+    }
+    None
+}
+
+/// Bare strings only name URLs at the beginning of a direct image-set
+/// candidate. Preserve the quote and all other tokens, including type()
+/// strings. url() candidates use the normal URL scanner.
+fn push_image_set(out: &mut String, s: &str, open_end: usize, enc: &dyn Fn(&str) -> String) {
+    out.push_str(&s[..open_end]);
+    let b = s.as_bytes();
+    let mut i = open_end;
+    let mut depth = 1;
+    let mut candidate = true;
+    while i < b.len() {
+        if b[i] == b'\'' || b[i] == b'"' {
+            let end = scan_string(b, i).expect("complete image-set string");
+            let original = &s[i..end];
+            if candidate && depth == 1 {
+                let logical = css_unescape(&s[i + 1..end - 1]);
+                if !logical.trim().is_empty()
+                    && !logical.starts_with('#')
+                    && !is_opaque_scheme(&logical)
+                {
+                    let quote = b[i] as char;
+                    out.push(quote);
+                    out.push_str(
+                        &enc(&logical)
+                            .replace('\\', "\\\\")
+                            .replace(quote, &format!("\\{quote}")),
+                    );
+                    out.push(quote);
+                } else {
+                    out.push_str(original);
+                }
+            } else {
+                out.push_str(original);
+            }
+            candidate = false;
+            i = end;
+            continue;
+        }
+        if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'*' {
+            let end = i + 2 + s[i + 2..].find("*/").expect("complete image-set comment") + 2;
+            out.push_str(&s[i..end]);
+            i = end;
+            continue;
+        }
+        if (b[i] == b'u' || b[i] == b'U') && i + 4 <= b.len()
+            && b[i..i + 4].eq_ignore_ascii_case(b"url(")
+        {
+            if let UrlTok::Complete { inner, end } = scan_url(&s[i..]) {
+                push_url(out, &s[i..i + end], inner, enc);
+                candidate = false;
+                i += end;
+                continue;
+            }
+        }
+        if b[i] == b'(' {
+            depth += 1;
+        }
+        if b[i] == b')' {
+            depth -= 1;
+        }
+        if b[i] == b',' && depth == 1 {
+            candidate = true;
+        } else if depth == 1 && !b[i].is_ascii_whitespace() && b[i] != b',' && candidate {
+            candidate = false;
+        }
+        let len = utf8_len(b[i]);
+        out.push_str(&s[i..i + len]);
+        i += len;
+    }
 }
 
 /// Index one past the closing quote of the string starting at
@@ -523,6 +652,24 @@ mod tests {
             out,
             "a{background:url('[img/x.png]')}b{background:url('[y.png]')}"
         );
+    }
+
+    #[test]
+    fn image_set_bare_string_candidates() {
+        let css = "a{background:image-set(\"a.png\" 1x, 'b.png' 2x, url(c.png) 3x)}";
+        let expected = "a{background:image-set(\"[a.png]\" 1x, '[b.png]' 2x, url('[c.png]') 3x)}";
+        assert_eq!(rewrite_stylesheet(css, &enc), expected);
+        chunked_eq(css, &all_splits(css));
+        let prefixed = "a{background:-webkit-image-set(\"a.png\" 1x)}";
+        assert_eq!(rewrite_stylesheet(prefixed, &enc), "a{background:-webkit-image-set(\"[a.png]\" 1x)}");
+        chunked_eq(prefixed, &all_splits(prefixed));
+    }
+
+    #[test]
+    fn image_set_keeps_non_candidate_strings_and_opaque_urls() {
+        let css = "a{content:\"image-set('x')\";background:image-set('data:image/png,x' 1x type('image/png'), url(#icon) 2x)}/* image-set('x') */";
+        assert_eq!(rewrite_stylesheet(css, &enc), css);
+        chunked_eq(css, &all_splits(css));
     }
 
     #[test]
