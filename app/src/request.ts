@@ -453,17 +453,37 @@ function requestHasCredentials(req: Request, dest: string, clientId?: string): b
   return !!cookieHeaderFor(dest, { clientId });
 }
 
-/** A route search replaces the decoded destination's own query - the
-    resolution a browser applies to a query-only relative navigation
-    ("?x" keeps the path, swaps the query). JS-literal mints and legacy
-    full-dest tokens encode their query inside the token, so gluing the
-    outer search on produced "...?a=1?b=2" (Brave Ask live strand: the
-    new question never reached the page). A query-free decode keeps
-    plain concat - the ordinary #38 route shape. */
+/** A route search JOINS the decoded destination's own query - union,
+    outer params overriding inner ones per key. Page JS appending a
+    runtime param onto an opaque token picks "?" as the separator
+    precisely because the token hides its own query (MSAL live strand:
+    "authorize?client_id=..." + "?iframe-request-id=" lost client_id
+    upstream, AAD answered AADSTS900144), so replace semantics dropped
+    params the upstream needs. A pure append keeps the token query
+    bytes exact; only a key conflict resolves through a canonical
+    rebuild. A query-free decode keeps plain concat - the ordinary
+    #38 route shape, and the old "...?a=1?b=2" double-? mangling
+    (Brave Ask live strand: the new question never reached the page)
+    stays dead either way. */
 export function mergeRouteSearch(dest: string, search: string): string {
   if (!search) return dest;
+  if (!search.startsWith("?")) search = "?" + search;
   const qi = dest.indexOf("?");
-  return (qi >= 0 ? dest.slice(0, qi) : dest) + search;
+  if (qi < 0) return dest + search;
+  const inner = dest.slice(qi + 1);
+  if (!inner) return dest.slice(0, qi) + search;
+  const innerP = new URLSearchParams(inner);
+  const outer = new URLSearchParams(search);
+  let conflict = false;
+  for (const k of outer.keys()) {
+    if (innerP.has(k)) {
+      conflict = true;
+      break;
+    }
+  }
+  if (!conflict) return dest + "&" + search.slice(1);
+  for (const [k, v] of outer) innerP.set(k, v);
+  return dest.slice(0, qi) + "?" + innerP.toString();
 }
 
 /** #184: a redirected entry rewrites against the final URL it was
@@ -1832,9 +1852,9 @@ export function handleFetch(e: FetchEvent): void {
         if (handleDest) {
           dest0 = handleDest;
           /* #144: the real query rides in the route search; the merge
-             seam replaces a full-dest token's own query with it
-             (browser "?x" semantics), so a legacy token that carries
-             one keeps its query only while the route has none. */
+             seam unions it with a full-dest token's own query (outer
+             winning per key), so a legacy token that carries one
+             keeps its params even when the route has a search. */
           routeCarriesQuery = true;
         } else if (e.request.mode === "navigate") {
           /* #144: pathname-routed SPAs parked on the opaque handle
@@ -2145,7 +2165,8 @@ export function handleFetch(e: FetchEvent): void {
         : dest0;
       // Query string travels outside the encoded destination - engine
       // routes only (see routeCarriesQuery above). A token-encoded
-      // query loses to the route search (browser "?x" semantics).
+      // query unions with the route search, outer params winning per
+      // key (see mergeRouteSearch for the live-strand reasoning).
       let target = routeCarriesQuery && url.search ? mergeRouteSearch(bareDest, url.search) : bareDest;
       /* #53: the single upgrade choke point. Every destination
          shape (rewriter-emitted routes, navguard markers, escaped
