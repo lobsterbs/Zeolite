@@ -16,13 +16,13 @@
    - the engine never fetches here: destination, method, headers and
      body cross to the embedder, and the SSRF judgment stays
      embedder-side by design.
-   - streaming both ways, no full-body buffering: chunks ride the
-     port as they arrive.
+   - response bodies stream over the port; request bodies use the
+     existing bounded replay buffer at the upstream choke point.
    - ponytail: GET/HEAD and string/ArrayBuffer bodies only; a stream
      body cannot ride the port, so such requests fall back to wisp.
-   - the relay header deadline is the only clock here; a breach
-     resolves the fetch as channel death (null) so the caller falls
-     back (#382), never a throw at the page. */
+   - the relay header deadline is bounded. Idempotent delivery may
+     fall back (#382); unknown POST/PATCH delivery fails without
+     replay (#442). Large/multipart uploads have a finite 10min bound. */
 
 import { DIAG } from "./diag";
 
@@ -137,6 +137,20 @@ export function relayAvailable(): boolean {
     channel, untransportable body) so the caller falls back to wisp. */
 /** Longest wait for the embedder's first answer on a relayed fetch. */
 export const RELAY_HEADER_DEADLINE_MS = 60_000;
+export const RELAY_UPLOAD_HEADER_DEADLINE_MS = 600_000;
+/** Upload time counts before response headers. Large buffered bodies
+    and multipart uploads get a finite budget matching the host relay. */
+export function relayHeaderDeadlineMs(init: { headers: Headers; body?: BodyInit | null }): number {
+  const body = init.body;
+  const size = typeof body === "string" ? body.length : body instanceof ArrayBuffer ? body.byteLength : 0;
+  return body != null && (size > 512 * 1024 || /^multipart\/form-data\b/i.test(init.headers.get("content-type") ?? ""))
+    ? RELAY_UPLOAD_HEADER_DEADLINE_MS : RELAY_HEADER_DEADLINE_MS;
+}
+/** Dispatch happened, so a POST/PATCH may already have succeeded.
+    This terminal error prevents a second transport from duplicating it. */
+export class RelayDeliveryUnknownError extends Error {
+  name = "RelayDeliveryUnknownError";
+}
 
 export async function relayFetch(
   dest: string,
@@ -154,6 +168,11 @@ export async function relayFetch(
      rejects with AbortError, and a zl:relayCancel frame tells the
      embedder to drop its /zlrelay connection, which drops the
      server-side upstream request instead of streaming it out. */
+  const mayFallback = /^(GET|HEAD|OPTIONS|PUT|DELETE|TRACE)$/i.test(init.method);
+  const failedAfterDispatch = (reason: string): null => {
+    if (!mayFallback) throw new RelayDeliveryUnknownError("relay delivery outcome unknown; request not retried: " + reason);
+    return null;
+  };
   const signal = init.signal;
   const abortErr = () => {
     const e = new Error("The operation was aborted.");
@@ -208,9 +227,10 @@ export async function relayFetch(
      Without it a silent embedder (or a port it dropped without a
      close event) parks the request until the page gives up. #382:
      a breach is channel death, not a caller error: resolve null so
-     the caller falls back to its secondary transport instead of
-     throwing, and cancel the embedder's upstream like a caller
-     abort does. An undeclared long-poll that would answer beyond
+     idempotent callers can fall back to their secondary transport.
+     Non-idempotent delivery outcomes fail terminally (#442).
+     Cancel the embedder upstream like a caller abort. An undeclared
+     long-poll that would answer beyond
      the bound dies here honestly - the bound is what keeps dead
      channels from parking pages forever (a per-site override is
      the ponytail ceiling). */
@@ -228,10 +248,11 @@ export async function relayFetch(
         cause: "proxy",
         severity: "warning",
         stage: "UPSTREAM_REQUEST",
-        message: "relay header deadline exceeded: treated as a dead channel, caller falls back",
+        message: mayFallback ? "relay header deadline exceeded: treated as a dead channel, caller falls back" :
+          "relay header deadline exceeded: delivery outcome unknown; request not retried",
         url: dest,
       });
-    }, RELAY_HEADER_DEADLINE_MS);
+    }, relayHeaderDeadlineMs(init));
   });
   let first: RelayMsg | null;
   try {
@@ -244,7 +265,7 @@ export async function relayFetch(
   }
   if (!first) {
     cleanup();
-    return null;
+    return failedAfterDispatch("header deadline exceeded");
   }
   if (first.type === "zl:relayError") {
     cleanup();
@@ -258,7 +279,7 @@ export async function relayFetch(
       message: "embedder relay failed: " + first.error,
       url: dest,
     });
-    return null;
+    return failedAfterDispatch(first.error);
   }
   if (first.type !== "zl:relayHead") {
     cleanup();
@@ -272,7 +293,8 @@ export async function relayFetch(
       message: "embedder relay protocol fault: " + first.type,
       url: dest,
     });
-    return null;
+    cancelUpstream();
+    return failedAfterDispatch("invalid relay response");
   }
   const h = new Headers();
   for (const [k, v] of first.headers) h.append(k, v);

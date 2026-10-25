@@ -82,7 +82,19 @@ export const netLog: NetEntry[] = [];
 let netSeq = 0;
 
 export function netLogPush(entry: Omit<NetEntry, "seq" | "ts">): void {
-  netLog.push({ ...entry, clientId: traceClient(entry.traceId), seq: ++netSeq, ts: Date.now() });
+  const headers = (v?: Record<string, string>) => v && Object.fromEntries(Object.entries(v).map(([k, value]) => [k, /^(?:cookie|set-cookie|authorization|proxy-authorization)$/i.test(k) ? "[redacted]" : redactSecrets(value)]));
+  const d = entry.detail;
+  netLog.push({ ...entry,
+    path: redactSecrets(entry.path), dest: redactSecrets(entry.dest),
+    ...(entry.finalDest ? { finalDest: redactSecrets(entry.finalDest) } : {}),
+    ...(entry.err ? { err: redactSecrets(entry.err) } : {}),
+    ...(entry.verdict ? { verdict: redactSecrets(entry.verdict) } : {}),
+    ...(d ? { detail: { ...d, internalUrl: redactSecrets(d.internalUrl),
+      ...(d.initiator ? { initiator: redactSecrets(d.initiator) } : {}),
+      reqHeaders: headers(d.reqHeaders), respHeaders: headers(d.respHeaders),
+    } } : {}),
+    clientId: traceClient(entry.traceId), seq: ++netSeq, ts: Date.now(),
+  });
   if (netLog.length > NET_LIMIT) netLog.shift();
 }
 

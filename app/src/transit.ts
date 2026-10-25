@@ -43,7 +43,7 @@ export type FallbackReason =
    fallback does, so the compat matrix can track the share.
    CDN_CGI_NATIVE is the same explainable demotion for Cloudflare's
    challenge namespace: those bytes serve verbatim. */
-export type NativeReason = "NON_DOCUMENT_RESOURCE" | "POLICY_NATIVE" | "CDN_CGI_NATIVE";
+export type NativeReason = "NON_DOCUMENT_RESOURCE" | "POLICY_NATIVE" | "CDN_CGI_NATIVE" | "CF_CHALLENGE_VERBATIM";
 export type BlockReason = "BLOCKED_RULES" | "BLOCKED_INTERCEPT" | "BLOCKED_WEBREQUEST";
 export type TransitReason = FallbackReason | NativeReason | BlockReason;
 
@@ -165,6 +165,18 @@ export function isCdnCgiUrl(target: string): boolean {
   } catch {
     return false;
   }
+}
+
+/* Cloudflare flags managed-challenge documents with a
+   cf-mitigated: challenge response header. The interstitial is
+   byte-hostile to tampering: its nonce CSP blocks injected
+   scripts and any rewrite corrupts the inline _cf_chl_opt data,
+   so the widget dies on its own "unable to connect".
+   Challenge-flagged documents serve verbatim, exactly like the
+   cdn-cgi resources. Live evidence: claude.ai login interstitial,
+   2026-10-24. Detection only - no bypass, no solve, ever. */
+export function isChallengeMitigated(h: { get(name: string): string | null }): boolean {
+  return (h.get("cf-mitigated") ?? "").trim().toLowerCase() === "challenge";
 }
 
 /** Pre-fetch decision from the destination URL and the request

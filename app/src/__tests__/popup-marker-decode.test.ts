@@ -15,9 +15,11 @@ describe("popup marker oracle parity (#428)", () => {
     }
   });
   it("gives the route-shaped marker precedence over an impostor query handle", () => {
-    setRouteKey(new Uint8Array(32).fill(7));
-    const q = buildQueryHandleUrl("https://unrelated.example/page")!;
-    const tok = new URL(q, ENGINE).searchParams.get("zlNavh")!;
+    setRouteKey(b64uEncode(new Uint8Array(16).fill(7)));
+    const q = buildQueryHandleUrl("https://unrelated.example/page");
+    expect(q).not.toBeNull();
+    const tok = new URL(q!, ENGINE).searchParams.get("zlNavh")!;
+    expect(tok).not.toBeNull();
     const dest = "https://accounts.example/signin";
     // Native marker search remains target-owned, never a different handle's origin.
     expect(decodeClientUrl(new URL(navEncode(dest) + "?zlNavh=" + tok, ENGINE))).toBe(dest + "?zlNavh=" + tok);
