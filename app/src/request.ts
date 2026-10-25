@@ -3137,10 +3137,10 @@ export function handleFetch(e: FetchEvent): void {
                 traceId,
                 requestId: traceId,
                 category: "REWRITE",
-                severity: "warning",
+                severity: shapeOk ? "warning" : "info",
                 stage: "UPSTREAM_RESPONSE",
                 message:
-                  "flat asset recovery miss: " +
+                  (shapeOk ? "flat asset recovery miss: " : "flat asset recovery skipped: ") +
                   (shapeOk
                     ? "every observed base answered badly"
                     : "path shape rejected by the gate") +

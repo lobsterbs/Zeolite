@@ -64,6 +64,13 @@ and UTF-8 reason length before changing state. The bridge may still buffer
 internal messages that race its own open event. Accurate `bufferedAmount`
 needs drain acknowledgments and remains tracked separately in #462.
 
+Diagnostics follow-up (#482): an asset recovery gate rejecting an ineligible
+path is an informational skip. Eligible assets exhausting observed bases
+still produce a warning, and the upstream HTTP status remains recorded.
+Beta reports from the supplied October 25 notes are tracked in #481 and
+LobsterBrowse #216/#217; the notes identify most earlier site tests as
+Scramjet runs, so they cannot establish Zeolite compatibility regressions.
+
 1. Keep a direct-control and proxied-control compatibility fixture for every
    route shape, referrer policy and widget family; distinguish upstream HTTP
    rejections from routing, runtime and transport failures.
