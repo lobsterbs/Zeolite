@@ -171,6 +171,19 @@ export function setQueryRoutes(on: boolean): void {
   queryRoutes = on;
 }
 
+/* #211 (LobsterBrowse): zl:reloadBypass arms a one-shot page-cache
+   bypass consumed by the next document GET (the embedder's
+   Reload-and-bypass-cache). Ephemeral: resets on SW restart. */
+let reloadBypass = false;
+
+export function reloadBypassArmed(): boolean {
+  return reloadBypass;
+}
+
+export function setReloadBypass(on: boolean): void {
+  reloadBypass = on;
+}
+
 /* Lazy images (always on, #413): the rewriter injects
    loading="lazy" on <img> tags that lack one, so below-the-fold
    images defer until they approach the viewport. Ephemeral like

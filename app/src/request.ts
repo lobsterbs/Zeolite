@@ -61,7 +61,7 @@ import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersi
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
    control plane are call sites. */
-import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, pushDocCookieView, queryRoutesEnabled, setHttpsUpgrade, setNavHandles, setRouteKey, siteDisabled, siteProfileFor, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, siteProfileFor, VCTX, ZEOLITE_VERSION } from "./swstate";
 
 import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, serveExtensionAsset } from "./extensions";
 
@@ -2611,8 +2611,17 @@ export function handleFetch(e: FetchEvent): void {
 
         /* Cache-first for proxied GETs. #179: a credential-bearing
            request (Authorization or a jar cookie for the target)
-           never serves from the shared page cache. */
-        if (e.request.method === "GET" && !requestHasCredentials(e.request, target, cookieClientId)) {
+           never serves from the shared page cache.
+           zl:reloadBypass (#211, LB): an armed one-shot bypass is
+           consumed by a document GET, which skips the page cache
+           and takes the live upstream path. */
+        const bypassArmed = e.request.mode === "navigate" && reloadBypassArmed();
+        if (bypassArmed) setReloadBypass(false);
+        if (
+          e.request.method === "GET" &&
+          !bypassArmed &&
+          !requestHasCredentials(e.request, target, cookieClientId)
+        ) {
           const hit = await raceBoot(pageCacheMatch(e.request, (p) => e.waitUntil(p)), "page cache match", PRE_DEADLINE_BOUND_MS);
           if (hit) {
             let dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
