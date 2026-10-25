@@ -519,8 +519,9 @@ impl Rewriter {
                     // per the HTML tokenizer: "<!--" enters escaped,
                     // "<script" inside escaped enters double-escaped,
                     // and a terminated close tag inside double-escaped
-                    // does NOT end the element (only "-->" exits
-                    // back). The plain search closed at the first
+                    // returns to escaped without ending the element.
+                    // "-->" returns either escaped state to plain data.
+                    // The plain search closed at the first
                     // inner </script> of a double-escaped block,
                     // leaving the tail parsed as markup: literal URLs
                     // unrewritten, antiframe skipped.
@@ -902,39 +903,18 @@ fn classify_open(buf: &str) -> Option<(St, String)> {
 /// `;charset=` ignored) is executable; anything else (application/json,
 /// application/ld+json, text/template, importmap, ...) is data.
 fn script_type_is_js(tag: &str) -> bool {
-    let lower = tag.to_ascii_lowercase();
-    let b = lower.as_bytes();
-    let mut i = 0usize;
-    while i + 4 <= b.len() {
-        let at_attr = i > 0 && b[i - 1].is_ascii_whitespace() && &b[i..i + 4] == b"type";
-        let after = b.get(i + 4).copied();
-        if at_attr && matches!(after, Some(c) if c == b'=' || c.is_ascii_whitespace()) {
-            let mut k = i + 4;
-            while k < b.len() && b[k].is_ascii_whitespace() {
-                k += 1;
-            }
-            if k >= b.len() || b[k] != b'=' {
-                return true;
-            }
-            k += 1;
-            while k < b.len() && b[k].is_ascii_whitespace() {
-                k += 1;
-            }
-            let (start, end) = match b.get(k) {
-                Some(&q) if q == b'"' || q == b'\'' => {
-                    let rest = &b[k + 1..];
-                    let len = rest.iter().position(|&c| c == q).unwrap_or(rest.len());
-                    (k + 1, k + 1 + len)
-                }
-                _ => {
-                    let len = b[k..]
-                        .iter()
-                        .position(|c| c.is_ascii_whitespace() || *c == b'>')
-                        .unwrap_or(b.len() - k);
-                    (k, k + len)
-                }
-            };
-            let value = lower[start..end].split(';').next().unwrap_or("").trim();
+    // #448: use the same attribute tokenizer as the markup rewrite.
+    // Searching for " type" also matches text inside a quoted value.
+    let tag = tag.strip_prefix('<').unwrap_or(tag);
+    let name_end = tag
+        .find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+        .unwrap_or(tag.len());
+    let mut rest = &tag[name_end..];
+    while let Some(attr) = next_attr(rest, true) {
+        if attr.name.eq_ignore_ascii_case("type") {
+            let decoded = decode_entities(attr.value.as_deref().unwrap_or(""));
+            let lower = decoded.to_ascii_lowercase();
+            let value = lower.split(';').next().unwrap_or("").trim();
             return matches!(
                 value,
                 "" | "module"
@@ -947,7 +927,7 @@ fn script_type_is_js(tag: &str) -> bool {
                     | "text/livescript"
             );
         }
-        i += 1;
+        rest = &rest[attr.consumed..];
     }
     true
 }
@@ -985,8 +965,10 @@ fn is_event_attr(attr: &str) -> bool {
 /// tokenizer's escaped states: "<!--" enters script-data-escaped,
 /// "<script" inside escaped enters double-escaped, and a terminated
 /// "</script" inside double-escaped does NOT close the element
-/// (only "-->" exits double-escaped back to escaped, and another
-/// "-->" exits escaped). #397: the tag markers match ASCII
+/// but returns to escaped, where a following close tag ends it.
+/// "-->" returns both escaped states to plain script data. #447:
+/// a delimiter must follow the <script marker, so <scripts is text.
+/// #397: the tag markers match ASCII
 /// case-insensitively (the HTML tokenizer compares the
 /// script-data-escaped markers case-insensitively, so a
 /// </SCRIPT> close is a real close); <!-- and --> carry no letters.
@@ -1006,26 +988,32 @@ fn find_script_close(buf: &str) -> Option<(usize, usize)> {
             i += 4;
             continue;
         }
-        if escaped && !double_escaped && starts_ci(&b[i..], b"<script") {
+        if escaped
+            && !double_escaped
+            && starts_ci(&b[i..], b"<script")
+            && b.get(i + 7)
+                .is_some_and(|c| matches!(c, b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>'))
+        {
             double_escaped = true;
             i += 7;
             continue;
         }
-        if double_escaped && starts_ci(&b[i..], b"-->") {
+        if escaped && starts_ci(&b[i..], b"-->") {
             double_escaped = false;
-            i += 3;
-            continue;
-        }
-        if escaped && !double_escaped && starts_ci(&b[i..], b"-->") {
             escaped = false;
             i += 3;
             continue;
         }
-        if !double_escaped && starts_ci(&b[i..], b"</script") {
+        if starts_ci(&b[i..], b"</script") {
             let after = i + 8;
             if after < b.len()
                 && matches!(b[after], b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>')
             {
+                if double_escaped {
+                    double_escaped = false;
+                    i = after;
+                    continue;
+                }
                 let end = buf[after..].find('>').map(|k| after + k + 1)?;
                 return Some((i, end));
             }
@@ -1547,6 +1535,91 @@ mod tests {
         RewriteConfig {
             inject_bootstrap: false,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn script_type_ignores_other_attribute_values() {
+        for (tag, executable) in [
+            (
+                r#"<script title="the type of data" type="application/ld+json">"#,
+                false,
+            ),
+            (
+                r#"<script data-x="a type=application/json" type="module">"#,
+                true,
+            ),
+            (r#"<script type="application/ld+json">"#, false),
+            (r#"<script type="module">"#, true),
+            (
+                r#"<script data-x=' type="application/json"' TYPE=module>"#,
+                true,
+            ),
+            (r#"<script/type=module>"#, true),
+            (r#"<script type type="application/json">"#, true),
+            (r#"<script type="application/json" type="module">"#, false),
+            (r#"<script type="text&#47;javascript">"#, true),
+        ] {
+            assert_eq!(script_type_is_js(tag), executable, "{tag}");
+            let body = r#"const u = "https://api.example/v1";"#;
+            let html = format!("{tag}{body}</script>");
+            // Every split includes splits inside quotes and attribute names.
+            for split in 0..=html.len() {
+                let mut r = Rewriter::new(cfg());
+                let out = format!(
+                    "{}{}{}",
+                    r.process(&html[..split]),
+                    r.process(&html[split..]),
+                    r.finish()
+                );
+                assert_eq!(out.contains(body), !executable, "split {split}: {out}");
+            }
+        }
+    }
+
+    #[test]
+    fn script_escape_transitions_match_html_tokenizer() {
+        for (body, close) in [
+            ("<!-- <script> </script> </script>REST", 24),
+            ("<!-- <scripts> </script>REST", 15),
+            ("<!-- <SCRIPT\t> </ScRiPt > </SCRIPT>REST", 26),
+            ("<!-- <script> --> <script> </script>REST", 27),
+        ] {
+            assert_eq!(
+                find_script_close(body).map(|(start, _)| start),
+                Some(close),
+                "{body}"
+            );
+        }
+        assert_eq!(find_script_close("<!-- <script> </script>REST"), None);
+    }
+
+    #[test]
+    fn double_escape_end_does_not_swallow_following_markup() {
+        let html = r#"<html><body><script><!--
+document.write('<script src=x></script>');
+</script><a href="https://other.example/p">L</a><img src="/i.png"></body></html>"#;
+        for split in 0..=html.len() {
+            let mut r = Rewriter::new(cfg());
+            r.set_base("https://example.com/page.html");
+            let out = format!(
+                "{}{}{}",
+                r.process(&html[..split]),
+                r.process(&html[split..]),
+                r.finish()
+            );
+            assert!(
+                out.contains(&cfg().encode_url("https://other.example/p")),
+                "split {split}: {out}"
+            );
+            assert!(
+                out.contains(&cfg().encode_url("https://example.com/i.png")),
+                "split {split}: {out}"
+            );
+            assert!(
+                !out.contains("https://other.example/p"),
+                "split {split}: {out}"
+            );
         }
     }
 
