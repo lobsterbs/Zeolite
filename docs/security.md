@@ -129,6 +129,13 @@ app/src/__tests__/leak.test.ts):
   structurally prevented by header-name normalization; the hostile
   list is compared lowercase.
 
+  Query-route referrers remove only the verified engine `zlNavh`
+  component and preserve real query components. A request with no
+  referrer continues to send no `Referer`. Scoped widget origin
+  parameters can use the browser-observed client's virtual context;
+  unknown embedding identity leaves the parameter unchanged instead
+  of substituting the provider's origin.
+
 Re-audited at 3.0: the engine-route CORS surgery (2.3, app/src/cors.ts)
 never reflects a request origin: engine routes state the engine's
 own CORS facts, credentialed responses get the engine origin, and
