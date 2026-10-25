@@ -29,6 +29,7 @@ export type WsHeaderPair = [string, string];
 
 /** Fingerprint profile surface the handshake mirrors (Telluride). */
 export interface WsIdentityProfile {
+  matchUserAgent?: boolean;
   userAgent: string;
   languages: string[];
 }
@@ -85,7 +86,8 @@ export function wsIdentityHeaders(
      accept-language matches too (wire surface = document surface). */
   const profile = opts?.profile ?? null;
   if (profile) {
-    out.push(["user-agent", profile.userAgent]);
+    const ua = profile.matchUserAgent === false ? globalThis.navigator?.userAgent : profile.userAgent;
+    if (ua) out.push(["user-agent", ua]);
     out.push(["accept-language", acceptLanguageValue(profile.languages)]);
   } else {
     const uaFor = opts?.uaFor ?? siteUaFor;

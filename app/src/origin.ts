@@ -15,6 +15,7 @@
    Pure code: no self.location, no fetch, trivially testable. */
 
 import { decodeClientUrl, recoverPath, unwrapDest } from "./codec";
+import { clientHintsForUa, formatUaBrands } from "./useragent";
 
 export interface VirtualOriginHeaders {
   /** Origin value to send; absent = send none. */
@@ -191,18 +192,6 @@ export function secFetchHeaders(
    Values are derived from the UA so they cannot contradict it.
    Deletes first, so the final UA's truth always wins over an
    earlier layer's hints. */
-function chPlatform(ua: string): string {
-  if (/Windows NT/.test(ua)) return "Windows";
-  if (/Android/.test(ua)) return "Android";
-  if (/CrOS/.test(ua)) return "Chrome OS";
-  // iOS Chromium UAs carry "like Mac OS X": the iOS check must precede
-  // the Mac branch or iPhone/iPad UAs report themselves as macOS.
-  if (/iPhone|iPad/.test(ua)) return "iOS";
-  if (/Macintosh|Mac OS X/.test(ua)) return "macOS";
-  if (/Linux|X11/.test(ua)) return "Linux";
-  return "";
-}
-
 /* Proxy-injected hop headers. A reverse proxy in front of the SW
    origin (Render adds x-forwarded-for/-proto/-host/-port on every
    inbound request) sees its own bookkeeping headers on the engine
@@ -221,62 +210,27 @@ export const PROXY_INJECTED_HEADERS = [
   "x-real-ip",
 ];
 
-/* Chromium's GREASE brand and the brand-list order are deterministic
-   functions of the major version (verified against
-   components/embedder_support/user_agent_utils.cc:
-   GetGreasedUserAgentBrandVersion, GetRandomOrder, ShuffleBrandList).
-   A fixed "Not_A Brand";v="8" in a fixed order is a list no real
-   Chromium of that major ever sends, a #160-class fingerprint tell. */
-const GREASE_CHARS = [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"];
-const GREASE_VERSIONS = ["8", "99", "24"];
-
-function greasedBrand(major: number): string {
-  return (
-    "Not" +
-    GREASE_CHARS[major % GREASE_CHARS.length] +
-    "A" +
-    GREASE_CHARS[(major + 1) % GREASE_CHARS.length] +
-    "Brand"
-  );
-}
-
-/* Chromium builds [grease, Chromium, own brand] and permutes it with a
-   fixed table indexed by major % 6 (size 3; size 2 uses
-   [seed % 2, (seed + 1) % 2]). Placement direction:
-   out[order[i]] = list[i]. */
-function shuffledBrands(list: string[], major: number): string[] {
-  const orders3 = [
-    [0, 1, 2],
-    [0, 2, 1],
-    [1, 0, 2],
-    [1, 2, 0],
-    [2, 0, 1],
-    [2, 1, 0],
-  ];
-  const order =
-    list.length === 3 ? orders3[major % orders3.length] : [major % 2, (major + 1) % 2];
-  const out: string[] = new Array(list.length);
-  for (let i = 0; i < order.length; i++) out[order[i]] = list[i];
-  return out;
-}
-
-export function applyChUa(headers: Headers, userAgent: string): void {
-  headers.delete("sec-ch-ua");
-  headers.delete("sec-ch-ua-mobile");
-  headers.delete("sec-ch-ua-platform");
-  const m = /(?:Chrome|Chromium)\/(\d+)/.exec(userAgent);
-  if (!m) return;
-  const major = parseInt(m[1], 10);
-  if (!Number.isFinite(major)) return;
-  const brands = [
-    '"' + greasedBrand(major) + '";v="' + GREASE_VERSIONS[major % GREASE_VERSIONS.length] + '"',
-    '"Chromium";v="' + major + '"',
-  ];
-  if (/Chrome\/\d+/.test(userAgent)) brands.push('"Google Chrome";v="' + major + '"');
-  headers.set("sec-ch-ua", shuffledBrands(brands, major).join(", "));
-  headers.set("sec-ch-ua-mobile", /Android.+Mobile|iPhone/.test(userAgent) ? "?1" : "?0");
-  const plat = chPlatform(userAgent);
-  if (plat) headers.set("sec-ch-ua-platform", '"' + plat + '"');
+export function applyChUa(headers: Headers, userAgent: string, preserveNativeHighEntropy = false): void {
+  const requested = new Set<string>();
+  const lowEntropy = new Set(["sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"]);
+  for (const key of [...headers.keys()]) {
+    if (key.startsWith("sec-ch-ua") && (!preserveNativeHighEntropy || lowEntropy.has(key))) {
+      requested.add(key); headers.delete(key);
+    }
+  }
+  const data = clientHintsForUa(userAgent);
+  if (!data) return;
+  headers.set("sec-ch-ua", formatUaBrands(data.brands));
+  headers.set("sec-ch-ua-mobile", data.mobile ? "?1" : "?0");
+  if (data.platform) headers.set("sec-ch-ua-platform", JSON.stringify(data.platform));
+  // Never attach unsolicited high entropy or forward unknown physical facts.
+  const values: Record<string, string | undefined> = {
+    "sec-ch-ua-full-version": data.uaFullVersion === undefined ? undefined : JSON.stringify(data.uaFullVersion),
+    "sec-ch-ua-full-version-list": data.fullVersionList ? formatUaBrands(data.fullVersionList) : undefined,
+    "sec-ch-ua-arch": data.architecture === undefined ? undefined : JSON.stringify(data.architecture),
+    "sec-ch-ua-bitness": data.bitness === undefined ? undefined : JSON.stringify(data.bitness),
+  };
+  for (const [key, value] of Object.entries(values)) if (requested.has(key) && value !== undefined) headers.set(key, value);
 }
 
 /* The navigation Accept a real Chromium of the claimed major sends.

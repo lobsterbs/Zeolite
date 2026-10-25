@@ -181,7 +181,7 @@ jobs:
             sleep 1
           done
           if [ "$code" = "000" ]; then echo "server never came up"; cat server.log; exit 1; fi
-          npm i @mercuryworkshop/epoxy-tls@2.1.18-1 ws
+          npm i @mercuryworkshop/epoxy-tls@2.1.20-1 ws
           node suite/epoxy-diag.mjs
       - name: Commit the patches (skipped when already applied)
         run: |

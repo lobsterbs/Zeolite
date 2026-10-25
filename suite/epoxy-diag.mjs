@@ -1,6 +1,6 @@
 /* Transport gate for the epoxy engine seam (issue #64). CI runs no
  * browser by design; this is the only end-to-end coverage of the
- * vendored @mercuryworkshop/epoxy-tls 2.1.18-1 FULL build: the real
+ * vendored @mercuryworkshop/epoxy-tls 2.1.20-1 FULL build: the real
  * wasm bundle connects to a local zeolite-server wisp endpoint
  * (started with ZL_TEST_ALLOW_PRIVATE_DESTS=1 + ZL_TEST_EGRESS=1, the
  * same test-only policy escape hatch the nightly compat suite uses

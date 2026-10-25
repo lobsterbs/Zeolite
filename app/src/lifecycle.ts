@@ -29,7 +29,8 @@
 declare const self: ServiceWorkerGlobalScope;
 
 import { DIAG } from "./diag";
-import { decodeClientUrl, isEnginePath, NAVH } from "./codec";
+import { decodeClientUrl } from "./codec";
+import { senderIsHostPage } from "./cpgate";
 import type { DownloadOp } from "./extensions/downloads";
 import type { NotifyOp } from "./extensions/notifications";
 import type { ScriptingMessage } from "./extensions/scripting";
@@ -51,13 +52,7 @@ export async function windowClients(): Promise<WinClient[]> {
     engine route. Proxied pages live on those routes; anything that
     fails to parse is treated as untrusted. */
 export function isHostClient(c: WinClient): boolean {
-  try {
-    const u = new URL(c.url, self.location.origin);
-    if (u.pathname.startsWith(NAVH + "/")) return false;
-    return !isEnginePath(u.pathname);
-  } catch {
-    return false;
-  }
+  return senderIsHostPage(c.url, self.location.origin);
 }
 
 /** Decode a client's engine path to its destination (dest + search).

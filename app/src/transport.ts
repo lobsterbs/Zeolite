@@ -31,7 +31,7 @@ import {
   altReset as zlAltReset,
   type TransportEngine,
 } from "./libcurl-transport-vendored";
-import { relayAvailable, relayFetch } from "./relayfetch";
+import { relayAvailable, relayFetch, relayHeaderDeadlineMs, RelayDeliveryUnknownError } from "./relayfetch";
 
 export { currentEngine, openWebSocket, altRegister, altConfigured, altEndpoint, type TransportEngine };
 
@@ -244,7 +244,6 @@ export function transportResetForTests(deadlineMs: number): void {
   curlGeneration = 0;
   curlResetInflight = null;
   altGeneration = 0;
-  altResetInflight = null;
 }
 
 export function wispCoolingForTests(): boolean {
@@ -284,6 +283,8 @@ function retryable(init: RequestInit | undefined, err: unknown): boolean {
   if (/websocket did not open/i.test(String(err))) return true;
   return IDEMPOTENT_METHODS.has((init?.method ?? "GET").toUpperCase());
 }
+
+export { retryable as canReplayAfterFailure };
 
 /* #255: the deadline still races the fetch promise (a transport
    that ignores its abort signal must still fail on time), and
@@ -347,13 +348,16 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
          caller abort stays an honest AbortError; only the
          deadline surfaces as a stall. */
       const ctl = new AbortController();
-      const relayTimer = setTimeout(() => ctl.abort(), WISP_TTFB_DEADLINE_MS);
+      const relayHeaders = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+      const bodyDeadline = relayHeaderDeadlineMs({ headers: relayHeaders, body: init?.body });
+      const relayDeadline = bodyDeadline > 60_000 ? bodyDeadline : WISP_TTFB_DEADLINE_MS;
+      const relayTimer = setTimeout(() => ctl.abort(), relayDeadline);
       const forward = () => ctl.abort();
       init?.signal?.addEventListener("abort", forward, { once: true });
       if (init?.signal?.aborted) ctl.abort();
       const relayInit = {
         method: init?.method ?? "GET",
-        headers: init?.headers instanceof Headers ? init.headers : new Headers(init?.headers),
+        headers: relayHeaders,
         body: init?.body as string | ArrayBuffer | null | undefined,
         signal: ctl.signal,
       };
@@ -367,15 +371,17 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
           url: dest,
         });
       } catch (err) {
-        if (init?.signal?.aborted) throw err;
+        if (init?.signal?.aborted || err instanceof RelayDeliveryUnknownError) throw err;
         /* #400: a stall on the relay arm counts for the storm detector
            too. Without this, stalls seen while the cooldown was active
            never refreshed the window, so a wedged relay looked
            healthy the moment the cooldown expired. */
         recordStall();
+        if (!IDEMPOTENT_METHODS.has((init?.method ?? "GET").toUpperCase()))
+          throw new RelayDeliveryUnknownError("relay delivery outcome unknown; request not retried: header deadline exceeded");
         throw new WispStallError(
           "relay transport stall: no first byte within " +
-            WISP_TTFB_DEADLINE_MS +
+            relayDeadline +
             "ms",
         );
       } finally {
@@ -463,23 +469,12 @@ export const wispTransport: Transport = {
    one reset per alt-client generation; a late failure from an old
    generation rides the already-reset client. */
 let altGeneration = 0;
-let altResetInflight: Promise<void> | null = null;
 async function sharedAltReset(gen: number): Promise<void> {
-  if (gen !== altGeneration) {
-    if (altResetInflight) await altResetInflight.catch(() => {});
-    return;
-  }
-  if (altResetInflight) return altResetInflight;
-  const p = (async () => {
-    try {
-      zlAltReset();
-      altGeneration++;
-    } finally {
-      altResetInflight = null;
-    }
-  })();
-  altResetInflight = p;
-  await p;
+  if (gen !== altGeneration) return;
+  // altReset is synchronous: bump before resetting so concurrent old
+  // failures share the replacement, with no resolved promise to retain.
+  altGeneration++;
+  zlAltReset();
 }
 
 export async function altWispFetch(dest: string, init?: RequestInit): Promise<Response> {

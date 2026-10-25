@@ -71,6 +71,8 @@ export type DiagStage =
   | "REDIRECTED";
 
 export interface DiagEvent {
+  /** Browser-owned source client, assigned at interception. */
+  clientId?: string;
   seq: number;
   ts: number;
   category: DiagCategory;
@@ -97,6 +99,8 @@ const events: DiagEvent[] = [];
 let diagSeq = 0;
 /** traceId -> most recent event seq, bounded independently of events. */
 const traceIndex = new Map<string, number>();
+const traceClients = new Map<string, string>();
+export function traceClient(id?: string): string | undefined { return id ? traceClients.get(id) : undefined; }
 
 let traceCounter = 0;
 
@@ -117,6 +121,8 @@ export function classifyStageFailure(stage: DiagStage): {
 /** Redact secrets from any string before it enters the ring. */
 export function redactSecrets(s: string): string {
   return s
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, "$1[redacted]@")
+    .replace(/([?&#](?:code|state|nonce|code_verifier|id_token|access_token|refresh_token|session_token|credential|g-recaptcha-response|h-captcha-response|cf-turnstile-response)=)[^&#\s]*/gi, "$1[redacted]")
     .replace(/(authorization["'\s:=]+)(\S+)/gi, "$1[redacted]")
     .replace(/(cookie["'\s:=]+)([^;\s]+)/gi, "$1[redacted]")
     .replace(/(bearer\s+)[A-Za-z0-9._\-]+/gi, "$1[redacted]")
@@ -125,15 +131,21 @@ export function redactSecrets(s: string): string {
 
 class Diag {
   /** New trace id, shared with the network log entry. */
-  trace(): string {
+  trace(clientId?: string): string {
     traceCounter++;
-    return "zl-t" + Date.now().toString(36) + "-" + traceCounter.toString(36);
+    const id = "zl-t" + Date.now().toString(36) + "-" + traceCounter.toString(36);
+    if (clientId) {
+      traceClients.set(id, clientId);
+      if (traceClients.size > EVENT_LIMIT) traceClients.delete(traceClients.keys().next().value!);
+    }
+    return id;
   }
 
   /** Record one diagnostic event. Secrets are redacted on entry. */
   emit(e: Omit<DiagEvent, "seq" | "ts">): void {
     const ev: DiagEvent = {
       ...e,
+      clientId: traceClient(e.traceId),
       ts: Date.now(),
       seq: ++diagSeq,
       message: redactSecrets(e.message),
@@ -193,13 +205,13 @@ class Diag {
   }
 
   /** Events with seq strictly greater than the cursor. */
-  eventsSince(since: number): DiagEvent[] {
-    return events.filter((x) => x.seq > since);
+  eventsSince(since: number, clientId?: string): DiagEvent[] {
+    return events.filter((x) => x.seq > since && (clientId === undefined || x.clientId === clientId));
   }
 
   /** Snapshot for the zl:getDiag delta poll. */
-  snapshot(since: number): DiagSnapshot {
-    return { events: this.eventsSince(since), lastSeq: diagSeq };
+  snapshot(since: number, clientId?: string): DiagSnapshot {
+    return { events: this.eventsSince(since, clientId), lastSeq: diagSeq };
   }
 }
 

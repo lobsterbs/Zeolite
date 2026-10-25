@@ -30,6 +30,10 @@ All fields are optional except `userAgent`; everything omitted stays
 native except what can be derived from the UA (`platform`).
 
 - `userAgent` - required, must be a full browser UA string.
+- `matchUserAgent` - boolean, defaults to `true`: the chosen UA owns document
+  and worker UA/appVersion/platform/userAgentData and upstream UA/Client Hints.
+  Set `false` to retain native identity while independent profile controls
+  (languages, timezone, canvas) remain enabled. This does not change TLS.
 - `platform` - derived from the UA when omitted (`Win32` for Windows
   NT, `MacIntel` for Mac, `Linux armv8l` for Android, ...). An explicit
   value that contradicts the UA is rejected.
@@ -60,7 +64,17 @@ The service worker compiles the profile into an init script once and
 prepends it to the `window.__ZL` init chunk it already emits at the
 start of every rewritten HTML document. Engine-initiated upstream
 requests carry the profile `User-Agent` and `Accept-Language`, so the
-document surface and the wire surface agree.
+document surface and the wire surface agree. UA data is patched on the
+browser's existing NavigatorUAData object in documents and workers; the API
+is not created in browsers without it. A non-Chromium profile exposes no
+Chromium UA data. Low-entropy brand/mobile/platform values share the same
+source as upstream headers. Four-part versions explicitly in the UA supply
+full-version fields (the UA version itself may be reduced); explicit CPU
+markers supply architecture/bitness. Unknown platform-version/model and
+other unsupported high-entropy fields are omitted, never copied from the
+physical host. High-entropy request headers are regenerated only when
+originally present; no unsolicited device hints are added. Native high
+entropy remains unchanged when matching is disabled or no identity changes.
 
 Since 2.3 Selenide the same profile is compiled a second time, into a
 worker-context init script prepended to every proxied dedicated,
@@ -75,6 +89,8 @@ a worker matches the document's.
 
 ## Honest limits
 
+- UA-data patches do not recreate every native property descriptor or hide
+  the physical browser engine. Unsupported high-entropy fields stay absent.
 - No per-session randomization by design: the default profile is a
   fixed fingerprint shared by every default-configured session.
 - The timezone is a fixed offset, not a zone database: DST transitions
@@ -109,11 +125,14 @@ TLS. What does flow from the profile on both engines, per request
 and identically: the profile `User-Agent` and the `languages`-
 derived `Accept-Language`. Switching engines (the `zl:transport`
 control message, or the deployment `ZL_TRANSPORT` define) changes
-the handshake fingerprint; that is the whole point of offering two
-stacks, and it is the only way to change it. A profile can bind
+the direct transport's handshake fingerprint. A policy route served through
+an embedder relay uses that embedder's independent TLS/HTTP2 client; changing
+a device profile does not reconfigure it. UA consistency does not guarantee
+browser-identical TLS or CAPTCHA acceptance. A profile can bind
 itself to specific engines with the `engines` field; under an
 unlisted engine `zl:fingerprint` refuses with the reason instead of
-silently applying. Measured JA3 values per engine are pending a
+silently applying. This validates the selected direct engine, not the
+embedder relay's independent persona. Measured JA3 values per engine are pending a
 parity run; none are invented here.
 
 ## Detectability surfaces (#141)

@@ -16,14 +16,14 @@ const anchor = (co: string) =>
   "https://www.google.com/recaptcha/enterprise/anchor?ar=1&k=KEY&co=" + co + "&hl=en&v=V";
 
 describe("virtualRecaptchaCo (#112)", () => {
-  it("rewrites a co= that names the engine origin to the page origin", () => {
-    expect(virtualRecaptchaCo(anchor(b64(ENGINE + ":443")), "", ENGINE))
-      .toBe(anchor(b64("https://www.google.com:443")));
+  it("does not invent a page origin without a referrer or client context (#436)", () => {
+    const input = anchor(b64(ENGINE + ":443"));
+    expect(virtualRecaptchaCo(input, "", ENGINE)).toBe(input);
   });
 
-  it("rewrites the bare engine origin form too", () => {
-    expect(virtualRecaptchaCo(anchor(b64(ENGINE)), "", ENGINE))
-      .toBe(anchor(b64("https://www.google.com:443")));
+  it("uses known client context for the bare engine origin form", () => {
+    expect(virtualRecaptchaCo(anchor(b64(ENGINE)), "", ENGINE, "https://shop.example/login"))
+      .toBe(anchor(b64("https://shop.example:443")));
   });
 
   it("leaves a co= naming another origin alone", () => {
@@ -75,8 +75,8 @@ describe("virtualRecaptchaCo referrer decode (#113)", () => {
       .toBe(anchor(b64("https://www.google.com:443")));
   });
 
-  it("falls back to the anchor origin when the referrer never decodes", () => {
-    expect(virtualRecaptchaCo(anchor(b64(ENGINE + ":443")), ENGINE + "/zl/garbage!!", ENGINE))
-      .toBe(anchor(b64("https://www.google.com:443")));
+  it("keeps unknown embedding identity unchanged when the referrer does not decode", () => {
+    const input = anchor(b64(ENGINE + ":443"));
+    expect(virtualRecaptchaCo(input, ENGINE + "/zl/garbage!!", ENGINE)).toBe(input);
   });
 });
