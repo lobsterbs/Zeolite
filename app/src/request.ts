@@ -47,7 +47,7 @@ import { flatRed, netLogPush, type NetDetail } from "./netlog";
 import { traceDecision } from "./tracing";
 import { siteToken } from "./pageload";
 
-import { altConfigured, altEndpoint, altRegister, altWispFetch, wispTransport } from "./transport";
+import { altConfigured, altEndpoint, altRegister, altWispFetch, canReplayAfterFailure, wispTransport } from "./transport";
 import { normalizeWispUrl, primaryWispOverrideValue, setPrimaryWispOverride } from "./config";
 import { raceBoot } from "./lifecycle";
 
@@ -689,6 +689,9 @@ async function upstreamFetch(
   rtype: ResourceType,
   traceId: string,
 ): Promise<Response> {
+  if (init.signal?.aborted) {
+    throw init.signal.reason ?? new DOMException("request aborted", "AbortError");
+  }
   /* #154: the transport-side match. Behavior rules (native, rewrite)
      must not capture the wire: a native host rule composes with the
      transport rules instead of falling onto the default wisp stack. */
@@ -753,6 +756,24 @@ async function upstreamFetch(
         wispRecord();
         return wr;
       } catch (err) {
+        /* #444: a failed alternate transport may already have delivered
+           the write. An outer fallback must honor the same replay gate
+           as the transport's own retry, including one-shot bodies and
+           cancellation. Only a proven pre-send failure permits a
+           replayable non-idempotent method to try another endpoint. */
+        if (
+          init.signal?.aborted ||
+          (err instanceof Error && err.name === "AbortError") ||
+          !canReplayAfterFailure(init, err)
+        ) {
+          DIAG.emit({
+            traceId, requestId: traceId, category: "TRANSPORT", cause: "proxy",
+            severity: "warning", stage: "UPSTREAM_REQUEST", url: dest,
+            message: 'policy route "wisp" failed: fallback refused because delivery is unknown, the body is one-shot, or the caller cancelled',
+            technicalReason: String(err),
+          });
+          throw err;
+        }
         DIAG.emit({
           traceId,
           requestId: traceId,
