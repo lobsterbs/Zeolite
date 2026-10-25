@@ -685,7 +685,7 @@ describe("redirect hop gates and cross-origin header scoping (#186, #194)", () =
    query-only relative navigation ("?q=..."), so the route search must
    REPLACE the token-encoded query (browser "?x" resolution), never
    concatenate it ("...?a=1?b=2" strands the new question upstream). */
-describe("route search replaces a token-encoded query (Brave Ask strand)", () => {
+describe("route search joins a token-encoded query (Brave Ask / MSAL strands)", () => {
   const ORIGIN = "https://w.example.org";
 
   const mkEvent = (routeUrl: string, clientId: string) => {
@@ -730,7 +730,7 @@ describe("route search replaces a token-encoded query (Brave Ask strand)", () =>
     vi.unstubAllGlobals();
   });
 
-  it("replaces the token-encoded query with the route search", async () => {
+  it("joins the route search onto the token-encoded query, outer winning per key", async () => {
     transportMock.queue = [new Response("ok", { headers: { "content-type": "text/plain" } })];
     const route =
       ORIGIN + encodeDestLegacy("https://site.example/ask?q=old+question&source=web");
@@ -739,8 +739,22 @@ describe("route search replaces a token-encoded query (Brave Ask strand)", () =>
     const served = await armed[0]!;
     expect(served.status).toBe(200);
     expect(transportMock.urls).toEqual([
-      "https://site.example/ask?q=new+question&conversation=",
+      "https://site.example/ask?q=new+question&source=web&conversation=",
     ]);
+  });
+
+  it("keeps the token-encoded query when page JS appends a runtime param with the wrong separator (MSAL AADSTS900144 strand)", async () => {
+    transportMock.queue = [new Response("ok", { headers: { "content-type": "text/plain" } })];
+    const token =
+      "https://login.microsoftonline.com/common/oauth2/v2.0/authorize" +
+      "?client_id=9199bf20-a13f-4107-85dc-02114787ef48" +
+      "&redirect_uri=https%3A%2F%2Foutlook.office.com%2Fmail%2F" +
+      "&response_type=code";
+    const route = ORIGIN + encodeDestLegacy(token);
+    const { ev, armed } = mkEvent(route + "?iframe-request-id=cf4f4f92", "ask-4");
+    handleFetch(ev);
+    await armed[0]!;
+    expect(transportMock.urls).toEqual([token + "&iframe-request-id=cf4f4f92"]);
   });
 
   it("keeps the token-encoded query when the route carries no search", async () => {
@@ -764,10 +778,12 @@ describe("route search replaces a token-encoded query (Brave Ask strand)", () =>
     expect(transportMock.urls).toEqual(["https://site.example/ask?q=x"]);
   });
 
-  it("mergeRouteSearch unit: replace, append, and no-op shapes", () => {
-    expect(mergeRouteSearch("https://s.example/a?b=1", "?c=2")).toBe("https://s.example/a?c=2");
+  it("mergeRouteSearch unit: union, per-key override, and no-op shapes", () => {
+    expect(mergeRouteSearch("https://s.example/a?b=1", "?c=2")).toBe("https://s.example/a?b=1&c=2");
     expect(mergeRouteSearch("https://s.example/a", "?c=2")).toBe("https://s.example/a?c=2");
     expect(mergeRouteSearch("https://s.example/a?b=1", "")).toBe("https://s.example/a?b=1");
+    expect(mergeRouteSearch("https://s.example/a?b=1&d=2", "?b=9")).toBe("https://s.example/a?b=9&d=2");
+    expect(mergeRouteSearch("https://s.example/a?", "?c=2")).toBe("https://s.example/a?c=2");
   });
 });
 
