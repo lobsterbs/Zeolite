@@ -27,6 +27,8 @@
    surface agree. Workers get the worker prelude, not this script:
    fingerprint spoofing applies to documents only (documented). */
 
+import { userAgentDataScript } from "./useragent";
+
 export interface ScreenShape {
   width: number;
   height: number;
@@ -37,6 +39,10 @@ export interface ScreenShape {
 }
 
 export interface FingerprintProfile {
+  /** True by default: match profile UA/platform/Client Hints on page,
+      worker and wire. False leaves these identity surfaces native.
+      Neither mode changes the selected transport's TLS handshake. */
+  matchUserAgent?: boolean;
   userAgent: string;
   platform: string;
   /** navigator.language / languages; also the upstream Accept-Language. */
@@ -74,6 +80,7 @@ export interface FingerprintProfile {
     is internally consistent (Win32 platform, Chrome UA, ANGLE-on-NVIDIA
     renderer strings a real Chrome would report). */
 export const DEFAULT_PROFILE: FingerprintProfile = {
+  matchUserAgent: true,
   userAgent:
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
   platform: "Win32",
@@ -114,6 +121,7 @@ function isPosInt(v: unknown): v is number {
 export function resolveProfile(input: unknown): FingerprintProfile {
   if (typeof input !== "object" || input === null) throw new Error("profile must be an object");
   const p = input as Partial<FingerprintProfile>;
+  if (p.matchUserAgent !== undefined && typeof p.matchUserAgent !== "boolean") throw new Error("matchUserAgent must be a boolean");
   if (typeof p.userAgent !== "string" || !p.userAgent.startsWith("Mozilla/5.0 (")) {
     throw new Error("userAgent must be a full browser UA string");
   }
@@ -217,6 +225,7 @@ export function resolveProfile(input: unknown): FingerprintProfile {
   }
 
   return {
+    matchUserAgent: p.matchUserAgent ?? true,
     userAgent: p.userAgent,
     platform,
     languages,
@@ -268,9 +277,10 @@ export function fingerprintScript(p: FingerprintProfile): string {
 function prop(obj, name, get) {
   try { Object.defineProperty(obj, name, { get: get, configurable: true }); } catch (e) {}
 }
-prop(Navigator.prototype, "userAgent", function () { return ${JSON.stringify(p.userAgent)}; });
+${p.matchUserAgent === false ? "" : `prop(Navigator.prototype, "userAgent", function () { return ${JSON.stringify(p.userAgent)}; });
 prop(Navigator.prototype, "appVersion", function () { return ${JSON.stringify(p.userAgent.slice("Mozilla/".length))}; });
 prop(Navigator.prototype, "platform", function () { return ${JSON.stringify(p.platform)}; });
+${userAgentDataScript(p.userAgent, "Navigator.prototype")}`}
 prop(Navigator.prototype, "language", function () { return ${JSON.stringify(p.languages[0])}; });
 prop(Navigator.prototype, "languages", function () { return ${JSON.stringify(p.languages)}; });`);
 
@@ -440,9 +450,10 @@ function prop(obj, name, get) {
   try { Object.defineProperty(obj, name, { get: get, configurable: true }); } catch (e) {}
 }
 var zlNav = Object.getPrototypeOf(globalThis.navigator);
-prop(zlNav, "userAgent", function () { return ${JSON.stringify(p.userAgent)}; });
+${p.matchUserAgent === false ? "" : `prop(zlNav, "userAgent", function () { return ${JSON.stringify(p.userAgent)}; });
 prop(zlNav, "appVersion", function () { return ${JSON.stringify(p.userAgent.slice("Mozilla/".length))}; });
 prop(zlNav, "platform", function () { return ${JSON.stringify(p.platform)}; });
+${userAgentDataScript(p.userAgent, "zlNav")}`}
 prop(zlNav, "language", function () { return ${JSON.stringify(p.languages[0])}; });
 prop(zlNav, "languages", function () { return ${JSON.stringify(p.languages)}; });`);
 
