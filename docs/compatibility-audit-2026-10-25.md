@@ -58,6 +58,12 @@ CSS, style blocks and inline style attributes. Strings in `type()`, comments
 and unrelated properties remain literal. The scanner retains an incomplete
 image-set function across chunks, with one-shot and split parity fixtures.
 
+WebSocket shim follow-up (#460/#461): page and worker `send()` now throws in
+CONNECTING and silently drops writes after closing. `close()` checks its code
+and UTF-8 reason length before changing state. The bridge may still buffer
+internal messages that race its own open event. Accurate `bufferedAmount`
+needs drain acknowledgments and remains tracked separately in #462.
+
 1. Keep a direct-control and proxied-control compatibility fixture for every
    route shape, referrer policy and widget family; distinguish upstream HTTP
    rejections from routing, runtime and transport failures.
