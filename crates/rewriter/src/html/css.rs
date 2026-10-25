@@ -114,7 +114,9 @@ fn scan(data: &str, enc: &dyn Fn(&str) -> String, final_scan: bool) -> (String, 
             for prefix in ["image-set(", "-webkit-image-set("] {
                 if rest.len() < prefix.len()
                     && !final_scan
-                    && rest.as_bytes().eq_ignore_ascii_case(&prefix.as_bytes()[..rest.len()])
+                    && rest
+                        .as_bytes()
+                        .eq_ignore_ascii_case(&prefix.as_bytes()[..rest.len()])
                 {
                     return (out, Some(i));
                 }
@@ -396,7 +398,8 @@ fn push_image_set(out: &mut String, s: &str, open_end: usize, enc: &dyn Fn(&str)
             i = end;
             continue;
         }
-        if (b[i] == b'u' || b[i] == b'U') && i + 4 <= b.len()
+        if (b[i] == b'u' || b[i] == b'U')
+            && i + 4 <= b.len()
             && b[i..i + 4].eq_ignore_ascii_case(b"url(")
         {
             if let UrlTok::Complete { inner, end } = scan_url(&s[i..]) {
@@ -661,7 +664,10 @@ mod tests {
         assert_eq!(rewrite_stylesheet(css, &enc), expected);
         chunked_eq(css, &all_splits(css));
         let prefixed = "a{background:-webkit-image-set(\"a.png\" 1x)}";
-        assert_eq!(rewrite_stylesheet(prefixed, &enc), "a{background:-webkit-image-set(\"[a.png]\" 1x)}");
+        assert_eq!(
+            rewrite_stylesheet(prefixed, &enc),
+            "a{background:-webkit-image-set(\"[a.png]\" 1x)}"
+        );
         chunked_eq(prefixed, &all_splits(prefixed));
     }
 
