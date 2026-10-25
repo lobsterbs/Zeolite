@@ -1,6 +1,8 @@
 import sys
 
 P = sys.argv[1] if len(sys.argv) > 1 else "/home/sprite/z63/"
+if not P.endswith("/"):
+    P += "/"
 
 def rd(p):
     with open(P + p, "r", encoding="utf-8") as f:

@@ -17,7 +17,7 @@ jobs:
       - name: convert placeholders
         run: python3 -c "s=open('.w64-patch.py').read(); open('.w64-patch.py','w').write(s.replace('@BS@', chr(92)).replace('@BT@', chr(96)))"
       - name: sha gate
-        run: echo "775ea30c061ad7010100e59e3ac81928d58e23ba818345f724369845feafd0eb  .w64-patch.py" | sha256sum -c -
+        run: echo "88e8d4073097cc7c1ca3d5cc47ecab06b9fc6f0f8c7413ea16f73897449cd564  .w64-patch.py" | sha256sum -c -
       - name: apply patch
         run: python3 .w64-patch.py "$PWD"
       - name: rustfmt
