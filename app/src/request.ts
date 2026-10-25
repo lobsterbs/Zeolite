@@ -2308,6 +2308,28 @@ export function handleFetch(e: FetchEvent): void {
         target = hcFixed;
       }
 
+      /* #431: MSAL computes redirect_uri from
+         window.location.origin (LegacyUnforgeable, the #112 co=
+         class), so the AAD authorize request names the engine
+         origin and the OAuth round-trip lands on a native
+         engine-origin URL the proxy never re-enters (Outlook's
+         login chain ends blank). Virtualize a redirect_uri whose
+         origin names this deployment at the seam the engine owns. */
+      const arFixed = virtualAuthorizeRedirect(target, e.request.referrer, self.location.origin, initiator);
+      if (arFixed !== target) {
+        const atid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: atid,
+          requestId: atid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "authorize redirect_uri virtualized to the page origin",
+          url: target,
+        });
+        target = arFixed;
+      }
+
       /* #129: challenge-widget frames stay engine-routed. The #120
          policy redirected these navigations provider-direct, which
          was an IP leak (the #32 class) AND left the widget
@@ -3968,6 +3990,64 @@ export function virtualHcaptchaHost(target: string, referrer: string, engineOrig
     return target;
   }
   return u.href.replace(m[0], m[1] + "host=" + encodeURIComponent(vu.hostname));
+}
+
+/** #431: MSAL and sibling OAuth SPAs compute redirect_uri from
+    window.location.origin (LegacyUnforgeable, the #112 co= class):
+    the AAD authorize request names the ENGINE origin, the token
+    round-trip lands on a native engine-origin URL the proxy never
+    re-enters, and the login chain ends on a blank content-origin
+    page (Outlook). Virtualize a redirect_uri whose origin names
+    this deployment on the Microsoft authorize endpoints; the path
+    and query stay (MSAL appends its own routes to the origin it
+    was given) and the state param round-trips untouched. Auth
+    fidelity only. */
+export function virtualAuthorizeRedirect(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (
+    u.host !== "login.microsoftonline.com" &&
+    u.host !== "login.microsoft.com" &&
+    u.host !== "login.live.com"
+  )
+    return target;
+  if (!u.pathname.includes("/oauth2/") || !u.pathname.endsWith("/authorize"))
+    return target;
+  const m = /([?&])redirect_uri=([^&]*)/.exec(u.search);
+  if (!m || !m[2]) return target;
+  let dec: string;
+  try {
+    dec = decodeURIComponent(m[2]);
+  } catch {
+    return target;
+  }
+  /* The value is a full URL: only a redirect_uri whose ORIGIN names
+     THIS deployment is ours to fix (the #112 match set, compared
+     post-parse so explicit default-port forms normalize); any other
+     value is a page the app genuinely registered. */
+  let du: URL;
+  let eo: URL;
+  try {
+    du = new URL(dec);
+    eo = new URL(engineOrigin);
+  } catch {
+    return target;
+  }
+  if (du.origin !== eo.origin) return target;
+  /* No honest fallback exists: without a decoded page origin the
+     token round-trip has nowhere honest to land, so the request
+     passes through unchanged. */
+  const parent = referrerOrigin(referrer, initiator);
+  if (!parent) return target;
+  return u.href.replace(
+    m[0],
+    m[1] + "redirect_uri=" + encodeURIComponent(parent + du.pathname + (du.search || "")),
+  );
 }
 
 /** A frame fragment is browser-only and never reaches handleFetch.
