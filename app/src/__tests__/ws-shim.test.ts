@@ -83,8 +83,8 @@ describe("page WebSocket shim abnormal close (#61)", () => {
   });
 });
 
-describe("page WebSocket shim bufferedAmount (#293)", () => {
-  it("counts pre-open sends and resets on open", async () => {
+describe("page WebSocket shim send and close states (#460/#461)", () => {
+  it("throws when connecting, sends when open, and discards sends after close", async () => {
     const Real = globalThis.WebSocket;
     if (!Real) return; /* no WebSocket global in this realm */
     vi.stubGlobal("CloseEvent", FakeCloseEvent);
@@ -100,15 +100,39 @@ describe("page WebSocket shim bufferedAmount (#293)", () => {
     const es = new WS("wss://relay.example/ws");
     expect(es.readyState).toBe(0);
     expect(es.bufferedAmount).toBe(0);
-    es.send("a");
-    es.send("b");
-    expect(es.bufferedAmount).toBe(2); /* the pre-handshake queue */
+    expect(() => es.send("a")).toThrowError(expect.objectContaining({ name: "InvalidStateError" }));
     const port = port2 as MessagePort | null;
     port?.postMessage({ ev: "open", protocol: "chat" });
     await new Promise((r) => setTimeout(r, 0)); /* port delivery */
     await new Promise((r) => setTimeout(r, 0)); /* queued events */
     expect(es.readyState).toBe(1);
-    expect(es.bufferedAmount).toBe(0); /* queue drained at open */
+    es.send("open");
+    es.close();
+    expect(es.readyState).toBe(2);
+    expect(() => es.send("discarded")).not.toThrow();
+    port?.postMessage({ ev: "close", code: 1000, clean: true });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(es.readyState).toBe(3);
+    expect(() => es.send("discarded")).not.toThrow();
+  });
+
+  it("rejects invalid close codes and overlong UTF-8 reasons before changing state", () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return;
+    ctlState.ctl = { postMessage() {} };
+    const w: Record<string, unknown> = { WebSocket: Real };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    const es = new WS("wss://relay.example/ws");
+    for (const code of [1001, 2999, 5000]) {
+      expect(() => es.close(code)).toThrowError(expect.objectContaining({ name: "InvalidAccessError" }));
+      expect(es.readyState).toBe(0);
+    }
+    expect(() => es.close(1000, "é".repeat(62))).toThrowError(expect.objectContaining({ name: "SyntaxError" }));
+    expect(es.readyState).toBe(0);
+    expect(() => es.close(3000, "a".repeat(123))).not.toThrow();
+    expect(es.readyState).toBe(2);
+    expect(() => es.close(1001)).toThrowError(expect.objectContaining({ name: "InvalidAccessError" }));
   });
 });
 

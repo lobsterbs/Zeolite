@@ -26,6 +26,7 @@
 
 import { decodePath, encodeDest, setScheme } from "./codec";
 import { siteToken } from "./pageload";
+import { validateWsClose } from "./ws-close";
 
 /** Route one worker-issued URL (an importScripts() argument or a
     fetch() input) through the engine codec, resolved against the
@@ -275,9 +276,6 @@ export function installWorkerPrelude(route: string): void {
       let wsState = 0;
       let binType: "blob" | "arraybuffer" = "blob";
       let proto = "";
-      /* #293: pre-handshake sends queue at the bridge; count them so
-         bufferedAmount is honest state, not a frozen 0. */
-      let pend = 0;
       const ch = new MessageChannel();
       let q = Promise.resolve();
       /* Same contract as the page shim: raw on* handlers fire after
@@ -308,7 +306,6 @@ export function installWorkerPrelude(route: string): void {
         if (m?.ev === "open") {
           if (wsState >= 2) return;
           wsState = 1;
-          pend = 0;
           proto = m.protocol ?? "";
           disp(new Event("open"));
         } else if (m?.ev === "message") {
@@ -364,23 +361,21 @@ export function installWorkerPrelude(route: string): void {
             if (v === "blob" || v === "arraybuffer") binType = v;
           },
         },
-        /* #293: honest pre-handshake queue state (messages, not
-           bytes; the transport depth is unreachable). */
-        bufferedAmount: { get: () => pend },
+        /* Accurate queued bytes need bridge drain acknowledgments (#462). */
+        bufferedAmount: { get: () => 0 },
         extensions: { value: "" },
         close: {
           value: (code?: number, reason?: string) => {
-            if (wsState === 3) return;
+            validateWsClose(code, reason);
+            if (wsState >= 2) return;
             wsState = 2;
             ch.port1.postMessage({ op: "close", code: code ?? 1000, reason });
           },
         },
         send: {
           value: (data: unknown) => {
-            /* Spec: send() while CONNECTING buffers (the bridge queues
-               until the handshake completes); only CLOSING/CLOSED throw. */
-            if (wsState >= 2) throw new DOMException("invalid state", "InvalidStateError");
-            if (wsState === 0) pend++;
+            if (wsState === 0) throw new DOMException("invalid state", "InvalidStateError");
+            if (wsState >= 2) return;
             ch.port1.postMessage({ op: "send", data });
           },
         },
