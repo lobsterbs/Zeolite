@@ -59,6 +59,12 @@ interface RewriterMod {
      frame-buster neutralization), used by the script-destination
      serve seam. */
   rewriteJsBody(js: string, origin: string, base: string, prefix: string, scheme: string, key?: string): string;
+  /* #449: does this script body pin its generated URLs with an
+     anchored ^https?: regex? Pinned bodies skip the URL-literal pass
+     inside rewriteJsBody (the loader validates the literals it
+     builds); the caller uses this to record the skip. Optional:
+     older dist wasm exports nothing. */
+  hasOriginPinningRegex?(js: string): boolean;
   /* #235: cumulative globals-pass counters ("parsed,failed,renamed").
      Optional: older dist wasm exports nothing. */
   globalsStats?(): string;
@@ -466,4 +472,20 @@ export async function rewriteJsBody(js: string, base: string): Promise<string> {
   const out = mod.rewriteJsBody(js, self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined);
   reportGlobals(mod);
   return out;
+}
+
+/* #449: origin-pinning detection for the script-serve seams. A body
+   whose generated URLs are validated against an anchored ^https?:
+   regex keeps its literals verbatim; the caller records the
+   machine-readable skip reason. Never throws: a wasm without the
+   export (older dist) or a failing detector reports false and the
+   literal pass runs. */
+export async function scriptPinsOrigins(js: string): Promise<boolean> {
+  const mod = await rewriter();
+  if (typeof mod.hasOriginPinningRegex !== "function") return false;
+  try {
+    return !!mod.hasOriginPinningRegex(js);
+  } catch {
+    return false;
+  }
 }

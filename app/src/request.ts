@@ -29,7 +29,7 @@ import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, isCdnCgiUrl, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
 import { loadPolicy, policyMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
-import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, workerPrelude } from "./transform";
+import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, siteUaFor, type GhosteryRedirect, type ResourceType } from "./rules";
@@ -43,7 +43,7 @@ import { adoptResponse } from "./downloads";
 /* #89: the network inspector ring lives in ./netlog (bounded storage,
    redaction, generation stamp); the engine and the control plane are
    call sites. */
-import { flatRed, netLogPush, type NetDetail } from "./netlog";
+import { flatRed, netLogAnnotateRewrite, netLogPush, type NetDetail } from "./netlog";
 import { traceDecision } from "./tracing";
 import { siteToken } from "./pageload";
 
@@ -2743,6 +2743,18 @@ export function handleFetch(e: FetchEvent): void {
                 self.location.origin,
                 raw0,
               );
+              /* #449: origin-pinning skip telemetry for the cached
+                 copy (the fresh path's twin). */
+              let pinnedScript = false;
+              try {
+                pinnedScript = await scriptPinsOrigins(src);
+              } catch {
+                pinnedScript = false;
+              }
+              if (pinnedScript) {
+                netLogAnnotateRewrite(traceId, "js-pinned");
+                DIAG.stage(traceId, "PINNED_SCRIPT", { url: target, message: "literal pass skipped: anchored origin-pinning regex (#449)" });
+              }
               try {
                 src = await rewriteJsBody(src, cacheRewriteBase(hit, target));
               } catch (err) {
@@ -3564,6 +3576,25 @@ export function handleFetch(e: FetchEvent): void {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
             let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, decodeBody(await resp.arrayBuffer(), respCt));
+            /* #449: an origin-pinning script body (anchored ^https?:
+               regex, the gapi-class loader) keeps its URL literals
+               verbatim - the rewriter skips the literal pass inside
+               rewriteJsBody; this records the machine-readable skip
+               on the request's netLog row, the tracing ring and the
+               diag stream. The frame-buster and globals passes still
+               run; the runtime seams keep every request on the
+               engine. */
+            let pinnedScript = false;
+            try {
+              pinnedScript = await scriptPinsOrigins(src);
+            } catch {
+              pinnedScript = false;
+            }
+            if (pinnedScript) {
+              netLogAnnotateRewrite(traceId, "js-pinned");
+              traceDecision({ subsystem: "rewriter", rule: "origin-pinning", original: target, result: "literal-skip", resource: rtype, traceId });
+              DIAG.stage(traceId, "PINNED_SCRIPT", { url: target, message: "literal pass skipped: anchored origin-pinning regex (#449)" });
+            }
             /* #46: external script bodies get the URL-literal +
                frame-buster pass inline scripts get. Specifiers run
                first: the routes they emit are root-relative, so the

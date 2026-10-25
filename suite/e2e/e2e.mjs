@@ -1389,6 +1389,54 @@ async function main() {
     return urls.size + " urls swept: " + routes + " opaque routes, " + handles + " keyed handles, " + markers + " nav markers (documented #54 degrade)";
   });
 
+  /* ---- #449: origin-pinning script literal skip --------------------- */
+
+  await check("pinned loader: literal skip, loader validates, nothing escapes the engine (#449)", async () => {
+    const { page: pg, frame, rec } = await openProxied(ORIGIN_A + "/dir/pinned.html", "#zl-pinned");
+    /* Acceptance 1: the loader's own sanity validation passes only
+       when its URL literal survived the body pass verbatim. */
+    const pinned = JSON.parse(await evalIn(frame, "pinned loader state", `() => JSON.stringify(self.__zlPinned)`));
+    assert(pinned && pinned.hint === "validated", "loader sanity failed (literal rewritten?): " + JSON.stringify(pinned));
+    /* Acceptance 2: the plaintext fetch literal rides the engine
+       (#34 canary: /api/data sends no CORS headers, so only an
+       engine-served body is readable). */
+    const fetched = await evalIn(frame, "pinned fetch result", `() => new Promise((res) => { const v = self.__zlPinnedFetch; if (v !== undefined) return res(String(v)); setTimeout(() => res("unset"), 8000); })`);
+    assert(fetched === "api", "plaintext fetch did not ride the engine: " + fetched);
+    /* Acceptance 2: window.open must stay on the engine - a popup at
+       the fixture origin is a direct escape. */
+    const pages = pg.context.pages();
+    const escaped = pages.filter((p) => p.url().startsWith(ORIGIN_A) || p.url().startsWith(ORIGIN_B));
+    assert(escaped.length === 0, "window.open escaped the engine: " + escaped.map((p) => p.url()).join(", "));
+    for (const p of pages) if (p !== pg) await p.close().catch(() => {});
+    /* Acceptance 2: the JS-written anchor click must navigate through
+       the engine, never browser-direct. */
+    await frame.locator("#pa").click();
+    const navFrame = await waitFor("anchor navigation through the engine", 30000, async () => {
+      for (const f of pg.frames()) {
+        const u = f.url();
+        if (!u.startsWith(ENGINE)) continue;
+        try {
+          if ((await f.locator("#zl-ap").count()) > 0) return f;
+        } catch {}
+      }
+      return null;
+    });
+    assert(navFrame && navFrame.url().startsWith(ENGINE), "anchor click escaped the engine: " + (navFrame ? navFrame.url() : "no frame"));
+    /* Wire log: every hit on this fixture's unique paths arrived
+       engine-referered or refererless; an engine-origin Referer means
+       the browser went direct. */
+    await new Promise((r2) => setTimeout(r2, 1500));
+    const hits = (await fixtureHits(fixtureA)).concat(await fixtureHits(fixtureB));
+    const mine = hits.filter((h) => ["/dir/pinned.js", "/dir/pinned.html", "/dir/anchor-pinned.html", "/dir/popup-pinned.html"].includes(h.path));
+    assert(mine.some((h) => h.path === "/dir/pinned.js"), "the engine never fetched the pinned script body");
+    const bads = mine.filter((h) => String(h.referer ?? "").includes("127.0.0.1:6002") || String(h.referer ?? "").includes("/j/"));
+    assert(bads.length === 0, "browser-direct hits on pinned fixture paths: " + JSON.stringify(bads.slice(0, 4)));
+    /* CDP: the browser itself never touched a fixture origin. */
+    const direct = rec.requests.filter((r3) => r3.url.startsWith(ORIGIN_A) || r3.url.startsWith(ORIGIN_B));
+    assert(direct.length === 0, "browser-direct requests to fixture origins: " + JSON.stringify(direct.slice(0, 4).map((r3) => r3.url)));
+    return "validated; fetch engine-served; popup engine-routed; anchor engine-routed; wire clean";
+  });
+
   /* ---- report ------------------------------------------------------ */
 
   const failed = results.filter((r) => !r.ok);
