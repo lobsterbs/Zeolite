@@ -176,7 +176,7 @@ export function startFixture(port) {
           `self.__zlPinnedPopup="unset";`,
           `var w=window.open("http://127.0.0.1:7101/dir/popup-pinned.html");`,
           `if(w){self.__zlPinnedPopup="opened"}else{self.__zlPinnedPopup="null"}`,
-          `var a=document.createElement("a");a.id="pa";a.href=u;document.body.appendChild(a);`,
+          `var a=document.createElement("a");a.id="pa";a.href=u;a.textContent="go";document.body.appendChild(a);`,
         ].join("\n"));
       } else if (path === "/dir/anchor-pinned.html") {
         send(res, "text/html; charset=utf-8", `<!doctype html><p id="zl-ap">anchor-target</p>`);
