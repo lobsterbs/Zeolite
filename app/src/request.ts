@@ -2355,6 +2355,28 @@ export function handleFetch(e: FetchEvent): void {
         target = ogsFixed;
       }
 
+      /* Google Identity Services (accounts.google.com /gsi/*)
+         builds origin= (and ss_domain= on the oauth2 button flows)
+         from window.location.origin (LegacyUnforgeable, the #112
+         co= class): Google's client/origin validation sees the
+         engine origin and the One Tap prompt never renders (#483).
+         Virtualize values that name this deployment at the seam the
+         engine owns. */
+      const gsiFixed = virtualGsiOrigin(target, e.request.referrer, self.location.origin, initiator);
+      if (gsiFixed !== target) {
+        const gtid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: gtid,
+          requestId: gtid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "gsi origin= virtualized to the page origin",
+          url: target,
+        });
+        target = gsiFixed;
+      }
+
       /* The hCaptcha widget (#433) builds its host= from
          window.location.hostname (LegacyUnforgeable, the #112 co=
          class): hCaptcha validates it against the sitekey's
@@ -4027,6 +4049,50 @@ export function virtualOgsOrigin(target: string, referrer: string, engineOrigin:
   const parent = referrerOrigin(referrer, initiator);
   if (!parent) return target;
   return u.href.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
+}
+
+/** The Google Identity Services prompt/picker/button iframes
+    (accounts.google.com /gsi/*) receive an origin= - the oauth2
+    button flows additionally name ss_domain= - built by page JS
+    from window.location.origin (LegacyUnforgeable, the #112 co=
+    class). Google validates the value against the OAuth client's
+    registered JavaScript origins, so upstream always sees the
+    engine origin and the widget never renders (#483). Virtualize
+    values that name this deployment at the seam the engine owns;
+    rendering fidelity only. */
+export function virtualGsiOrigin(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host !== "accounts.google.com") return target;
+  if (!u.pathname.startsWith("/gsi/")) return target;
+  /* Without a verified page origin there is no honest widget-side
+     fallback, so the request passes through unchanged. */
+  const parent = referrerOrigin(referrer, initiator);
+  if (!parent) return target;
+  let out = u.href;
+  let changed = false;
+  for (const key of ["origin", "ss_domain"]) {
+    const m = new RegExp("([?&])" + key + "=([^&]*)").exec(out);
+    if (!m || !m[2]) continue;
+    let dec: string;
+    try {
+      dec = decodeURIComponent(m[2]);
+    } catch {
+      continue;
+    }
+    /* Only a value that names THIS deployment is ours to fix; any
+       other value is an origin the page genuinely chose. */
+    if (dec !== engineOrigin && dec !== engineOrigin + ":443" && dec !== engineOrigin + ":80")
+      continue;
+    out = out.replace(m[0], m[1] + key + "=" + encodeURIComponent(parent));
+    changed = true;
+  }
+  return changed ? out : target;
 }
 
 /** The hCaptcha widget (newassets.hcaptcha.com frames,
