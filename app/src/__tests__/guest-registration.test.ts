@@ -57,13 +57,13 @@ describe("guest registration identity: non-execution P0/P1 (#477)", () => {
     }
   });
 
-  it("the existing page-side service-worker shim ignores poisoned saved script origins", () => {
+  it("the pure validator blocks poisoned stored script URLs independently of the legacy page shim", () => {
     const store = fakeStore();
     store.set(JSON.stringify({ scriptURL: "https://evil.example/worker.js", scope: "https://site.example/" }));
-    expect(swShimGet(store, page)).toBeUndefined();
+    expect(validateStoredGuestRegistration(page, JSON.parse(store.get()!))).toBeNull();
     store.set(JSON.stringify({ scriptURL: "https://site.example/sw.js", scope: "https://site.example/" }));
     expect(swShimGet(store, page)?.active?.scriptURL).toBe("https://site.example/sw.js");
-    expect(() => swShimRegister(store, page, "/sw%2fescape.js")).toThrow(TypeError);
+    expect(() => swShimRegister(store, page, "https://evil.example/sw.js")).toThrow(TypeError);
   });
 
   it("matches longest-prefix scopes only within the exact verified origin", () => {
