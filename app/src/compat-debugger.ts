@@ -17,6 +17,8 @@ export type DebugStep = {
   status?: number;
   decision?: string;
   reason?: string;
+  delivery?: string;
+  transportPath?: string;
 };
 export interface DebugReport {
   schemaVersion: 1;
@@ -55,6 +57,10 @@ const adaptiveStrategies = new Set(["native","light","full","required","blocked"
 const adaptiveEvidence = new Set([
   "default","request-destination","response-content-type","manual-policy","challenge-namespace",
 ]);
+const deliveryStates = new Set([
+  "definitely-not-delivered","delivered-response","delivery-unknown",
+]);
+const deliveryTransports = new Set(["wisp","wisp-route","relay"]);
 
 const fromSet = (v: unknown, allowed: Set<string>, fallback = "unknown") =>
   typeof v === "string" && allowed.has(v) ? v : fallback;
@@ -83,6 +89,8 @@ export function buildCompatibilityReport(args: {
       code: ev.stage ? fromSet(ev.stage, stages) : fromSet(ev.category, categories),
       severity: fromSet(ev.severity, severities),
       cause: fromSet(ev.cause, causes),
+      ...(ev.deliveryState ? { delivery: fromSet(ev.deliveryState, deliveryStates) } : {}),
+      ...(ev.deliveryTransport ? { transportPath: fromSet(ev.deliveryTransport, deliveryTransports) } : {}),
     });
   }
   for (const ev of args.network) {
@@ -139,5 +147,7 @@ export function compatibilityKdl(report: DebugReport): string {
       (s.cause ? ' cause=' + q(s.cause) : '') +
       (s.status !== undefined ? ' status=' + s.status : '') +
       (s.decision ? ' decision=' + q(s.decision) : '') +
-      (s.reason ? ' reason=' + q(s.reason) : '')).join('\n') + '\n}\n';
+      (s.reason ? ' reason=' + q(s.reason) : '') +
+      (s.delivery ? ' delivery=' + q(s.delivery) : '') +
+      (s.transportPath ? ' transport=' + q(s.transportPath) : '')).join('\n') + '\n}\n';
 }
