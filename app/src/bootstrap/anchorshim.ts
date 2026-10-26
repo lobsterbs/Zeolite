@@ -174,17 +174,20 @@ function decodeBatch(routes: string[], more: boolean): void {
     return;
   }
   const ch = new MessageChannel();
-  const to = setTimeout(() => {
-    clear();
-    try {
-      ch.port1.close();
-    } catch {
-      /* an already-closed port stays closed */
-    }
-  }, 5000);
-  ch.port1.onmessage = (ev: MessageEvent) => {
+  let settled = false;
+  const to = setTimeout(() => { settle(); }, 5000);
+  const settle = (): boolean => {
+    if (settled) return false;
+    settled = true;
     clearTimeout(to);
     clear();
+    ch.port1.onmessage = null;
+    try { ch.port1.close(); } catch { /* already detached */ }
+    try { ch.port2.close(); } catch { /* transferred */ }
+    return true;
+  };
+  ch.port1.onmessage = (ev: MessageEvent) => {
+    if (!settle()) return;
     const d = (ev.data ?? {}) as { ok?: boolean; dests?: unknown[] };
     if (!d.ok || !Array.isArray(d.dests)) return;
     for (let i = 0; i < uniq.length && i < d.dests.length; i++) {
@@ -199,8 +202,7 @@ function decodeBatch(routes: string[], more: boolean): void {
   try {
     ctl.postMessage({ type: "zl:decodeRoutes", routes: uniq }, [ch.port2]);
   } catch {
-    clearTimeout(to);
-    clear();
+    settle();
   }
 }
 
