@@ -116,6 +116,20 @@ describe("page WebSocket shim send and close states (#460/#461)", () => {
     expect(() => es.send("discarded")).not.toThrow();
   });
 
+  it("posts converted close arguments to the bridge", async () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return;
+    let port!: MessagePort;
+    ctlState.ctl = { postMessage(_m: unknown, transfers?: unknown[]) { port = transfers![0] as MessagePort; } };
+    const w: Record<string, unknown> = { WebSocket: Real };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    const ws = new WS("wss://relay.example/ws");
+    const received = new Promise<unknown>(resolve => { port.onmessage = e => resolve(e.data); });
+    ws.close("1000" as unknown as number, { toString: () => "bye" } as unknown as string);
+    expect(await received).toEqual({ op: "close", code: 1000, reason: "bye" });
+  });
+
   it("rejects invalid close codes and overlong UTF-8 reasons before changing state", () => {
     const Real = globalThis.WebSocket;
     if (!Real) return;

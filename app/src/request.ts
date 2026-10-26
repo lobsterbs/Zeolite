@@ -289,6 +289,7 @@ function cacheRefreshSkipsEntry(req: Request, hit: Response): boolean {
 export async function pageCacheMatch(
   req: Request,
   keepAlive: (p: Promise<unknown>) => void = () => {},
+  context: CookieRequestContext = {},
 ): Promise<Response | null> {
   let hit: Response | undefined;
   try {
@@ -319,7 +320,7 @@ export async function pageCacheMatch(
       try { await (await caches.open(ZL_PAGES)).delete(req); } catch { /* no storage */ }
       return null;
     }
-    return await revalidateBeforeUse(req, hit);
+    return await revalidateBeforeUse(req, hit, context);
   }
   if (!ttl) return null;
   if (Date.now() - at >= ttl) {
@@ -333,7 +334,8 @@ export async function pageCacheMatch(
        for one entry used to each pay their own upstream fetch; one
        in-flight refresh per cache key coalesces them into a single
        round trip. */
-    let refresh = staleRefreshInFlight.get(req.url);
+    const refreshKey = JSON.stringify([req.url, context.clientId ?? "", req.credentials, context.initiator ?? ""]);
+    let refresh = staleRefreshInFlight.get(refreshKey);
     if (!refresh) {
       refresh = (async () => {
         try {
@@ -355,27 +357,28 @@ export async function pageCacheMatch(
                copy. #184: a redirected entry refreshes against its
                stored final URL and the fetch chases the hops, so the
                entry can actually be updated. */
-            const { resp: fresh, finalUrl: freshUrl } = await wispFetchCacheBypass(
+            const { resp: fresh, finalUrl: freshUrl } = await cacheRefreshFetch(
               req,
               {
                 etag: hit.headers.get("etag"),
                 lastModified: hit.headers.get("last-modified"),
               },
               hit.headers.get(ZL_FINAL_URL) ?? undefined,
+              context,
             );
             if (fresh.status === 304) {
               await bumpStoredEntry(req, fresh);
             } else if (fresh.ok) {
-              await pageCacheStore(req, fresh, false, freshUrl);
+              await pageCacheStore(req, fresh, false, freshUrl, context.clientId);
             }
           }
         } catch {
           /* offline: the stale copy stays served */
         }
       })();
-      staleRefreshInFlight.set(req.url, refresh);
+      staleRefreshInFlight.set(refreshKey, refresh);
       /* the IIFE never rejects: its whole body is one try/catch. */
-      void refresh.then(() => staleRefreshInFlight.delete(req.url));
+      void refresh.then(() => staleRefreshInFlight.delete(refreshKey));
     }
     keepAlive(refresh);
   }
@@ -870,10 +873,11 @@ export async function pageCacheClear(): Promise<void> {
   }
 }
 
-async function wispFetchCacheBypass(
+async function cacheRefreshFetch(
   req: Request,
   validators?: { etag?: string | null; lastModified?: string | null },
   destOverride?: string,
+  context: CookieRequestContext = {},
 ): Promise<{ resp: Response; finalUrl: string }> {
   /* Issue #38: engine routes keep the query outside the encoded
      destination; a foreign (#34) cached entry is keyed by the full
@@ -888,12 +892,21 @@ async function wispFetchCacheBypass(
   if (!route) route = recoverPath(u.pathname);
   let dest = destOverride ?? (route ? mergeRouteSearch(route, u.search) : u.href);
   let finalUrl = dest;
+  const policy = await loadPolicy();
+  const traceId = DIAG.trace(context.clientId);
+  const rtype = classifyRtype(reqDest(req), "").toLowerCase() as ResourceType;
+  const eligible = (target: string) => {
+    if (req.credentials === "omit") return false;
+    if (req.credentials === "include" || !context.initiator) return true;
+    try { return new URL(target).origin === new URL(context.initiator).origin; }
+    catch { return false; }
+  };
   /* ponytail: five hops, the same practical ceiling as the live hop
      chain; the honest 3xx surfaces beyond it. */
   for (let hop = 0; ; hop++) {
     const headers = new Headers();
     /* 1.4 Boride: cache refreshes carry the jar's Cookie header too. */
-    const jarCookie = cookieHeaderFor(dest);
+    const jarCookie = eligible(dest) ? cookieHeaderFor(dest, context) : null;
     if (jarCookie) headers.set("cookie", jarCookie);
     /* #115: send the stored validators so the origin can answer 304
        (they belong to the original destination only). */
@@ -901,7 +914,14 @@ async function wispFetchCacheBypass(
       if (validators?.etag) headers.set("if-none-match", validators.etag);
       if (validators?.lastModified) headers.set("if-modified-since", validators.lastModified);
     }
-    const resp = await wispTransport.fetch(dest, { method: "GET", headers });
+    const resp = await upstreamFetch(dest, { method: "GET", headers, signal: req.signal }, policy, rtype, traceId);
+    if (eligible(dest)) {
+      const admitted = applySetCookie(dest, jarHeaders(resp), context.clientId);
+      if (admitted.some(r => r.stored || r.deleted)) {
+        void pushDocCookieView(context.clientId ?? "");
+        await flushJarPersist();
+      }
+    }
     const loc = resp.headers.get("location");
     if (resp.status >= 300 && resp.status < 400 && loc && hop < 5) {
       /* #201 hygiene: the redirect body is never read - cancel it. */
@@ -948,30 +968,31 @@ async function bumpStoredEntry(req: Request, notModified: Response): Promise<voi
 
 /** #115: the no-cache revalidate-before-use path. The conditional
     fetch is awaited: a 304 serves the stored view, a 200 stores and
-    serves the surgered fresh view (the jar is not fed on this branch,
-    same as the SWR refresh - capture happens on the live path), and
+    serves the surgered fresh view (cookies are admitted on each refresh
+    hop against the requesting profile), and
     anything else (transport failure included) returns null so the
     request bypasses to the live path and gets an honest result.
     ponytail: no coalescing here - concurrent no-cache hits each pay
     their own conditional fetch; a shared in-flight probe keyed by URL
     is the upgrade path if a hot no-cache resource measurably hurts. */
-async function revalidateBeforeUse(req: Request, hit: Response): Promise<Response | null> {
+async function revalidateBeforeUse(req: Request, hit: Response, context: CookieRequestContext): Promise<Response | null> {
   try {
     /* #184: a redirected entry revalidates against its stored final
        URL, and the probe follows hops like the SWR refresh. */
-    const { resp: probe, finalUrl: probeUrl } = await wispFetchCacheBypass(
+    const { resp: probe, finalUrl: probeUrl } = await cacheRefreshFetch(
       req,
       {
         etag: hit.headers.get("etag"),
         lastModified: hit.headers.get("last-modified"),
       },
       hit.headers.get(ZL_FINAL_URL) ?? undefined,
+      context,
     );
     if (probe.status === 304) {
       await bumpStoredEntry(req, probe);
       return hit;
     }
-    if (probe.ok) return (await pageCacheStore(req, probe, true, probeUrl)) ?? null;
+    if (probe.ok) return (await pageCacheStore(req, probe, true, probeUrl, context.clientId)) ?? null;
     return null;
   } catch {
     return null;
@@ -2622,7 +2643,7 @@ export function handleFetch(e: FetchEvent): void {
           !bypassArmed &&
           !requestHasCredentials(e.request, target, cookieClientId)
         ) {
-          const hit = await raceBoot(pageCacheMatch(e.request, (p) => e.waitUntil(p)), "page cache match", PRE_DEADLINE_BOUND_MS);
+          const hit = await raceBoot(pageCacheMatch(e.request, (p) => e.waitUntil(p), { clientId: cookieClientId, initiator: initiator ?? undefined, navigation: e.request.mode === "navigate" }), "page cache match", PRE_DEADLINE_BOUND_MS);
           if (hit) {
             let dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
             if (

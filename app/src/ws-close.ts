@@ -1,10 +1,24 @@
-/** Validate WebSocket.close arguments before changing readyState. */
-export function validateWsClose(code?: number, reason?: string): { code?: number; reason?: string } {
-  if (code !== undefined && (code !== 1000 && (!Number.isInteger(code) || code < 3000 || code > 4999))) {
+/** Apply Web IDL unsigned-short/USVString conversions before close validation. */
+export function validateWsClose(code?: unknown, reason?: unknown): { code?: number; reason?: string } {
+  let normalizedCode: number | undefined;
+  if (code !== undefined) {
+    // Unary + uses ToNumber: unlike Number(), it rejects BigInt.
+    const n = +(code as number);
+    normalizedCode = Number.isFinite(n) ? ((Math.trunc(n) % 65536) + 65536) % 65536 : 0;
+  }
+  let normalizedReason: string | undefined;
+  let reasonBytes: Uint8Array | undefined;
+  if (reason !== undefined) {
+    if (typeof reason === "symbol") throw new TypeError("WebSocket close reason cannot be a Symbol");
+    reasonBytes = new TextEncoder().encode(String(reason));
+    // USVString replaces lone surrogates; preserve an initial BOM.
+    normalizedReason = new TextDecoder("utf-8", { ignoreBOM: true }).decode(reasonBytes);
+  }
+  if (normalizedCode !== undefined && normalizedCode !== 1000 && (normalizedCode < 3000 || normalizedCode > 4999)) {
     throw new DOMException("Invalid WebSocket close code", "InvalidAccessError");
   }
-  if (reason !== undefined && new TextEncoder().encode(String(reason)).byteLength > 123) {
+  if (reasonBytes && reasonBytes.byteLength > 123) {
     throw new DOMException("WebSocket close reason exceeds 123 bytes", "SyntaxError");
   }
-  return { code, reason };
+  return { code: normalizedCode, reason: normalizedReason };
 }

@@ -47,12 +47,12 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::Expression;
+use oxc_ast::ast::{Expression, SimpleAssignmentTarget, UnaryExpression};
 use oxc_ast::ast_kind::AstKind;
-use oxc_ast_visit::Visit;
+use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_semantic::{ReferenceFlags, Semantic, SemanticBuilder};
-use oxc_span::{SourceType, Span};
+use oxc_span::{GetSpan, SourceType, Span};
 
 /// The bootstrap's virtual location global (#236). Short on
 /// purpose: renamed minified bundles carry one occurrence per read.
@@ -145,7 +145,7 @@ fn collect(js: &str) -> Option<Vec<(usize, usize, &'static str)>> {
     let semantic = built.semantic;
     let mut w = Walker {
         sem: &semantic,
-        src: js,
+        native_targets: HashSet::new(),
         shorthand: HashSet::new(),
         edits: Vec::new(),
     };
@@ -156,7 +156,8 @@ fn collect(js: &str) -> Option<Vec<(usize, usize, &'static str)>> {
 
 struct Walker<'a, 's> {
     sem: &'s Semantic<'a>,
-    src: &'s str,
+    /// Direct assignment/update/delete targets must retain their native receiver.
+    native_targets: HashSet<Span>,
     /// Shorthand property values ({ location }): renaming the value
     /// would change the key, so their spans are excluded.
     shorthand: HashSet<Span>,
@@ -164,6 +165,19 @@ struct Walker<'a, 's> {
 }
 
 impl<'a, 's> Visit<'a> for Walker<'a, 's> {
+    fn visit_simple_assignment_target(&mut self, it: &SimpleAssignmentTarget<'a>) {
+        self.native_targets.insert(it.span());
+        walk::walk_simple_assignment_target(self, it);
+    }
+
+    fn visit_unary_expression(&mut self, it: &UnaryExpression<'a>) {
+        if it.operator.as_str() == "delete" {
+            self.native_targets
+                .insert(it.argument.get_inner_expression().span());
+        }
+        walk::walk_unary_expression(self, it);
+    }
+
     fn enter_node(&mut self, kind: AstKind<'a>) {
         match kind {
             AstKind::ObjectProperty(p) => {
@@ -174,7 +188,10 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                 }
             }
             AstKind::IdentifierReference(id) => {
-                if id.name.as_str() == "location" && !self.shorthand.contains(&id.span) {
+                if id.name.as_str() == "location"
+                    && !self.shorthand.contains(&id.span)
+                    && !self.native_targets.contains(&id.span)
+                {
                     let Some(rid) = id.reference_id.get() else {
                         return;
                     };
@@ -195,8 +212,7 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                         && obj.reference_id.get().is_some_and(|rid| {
                             self.sem.scoping().get_reference(rid).symbol_id().is_none()
                         })
-                        && !self.is_write_target(m.span)
-                        && !self.is_delete_target(m.span)
+                        && !self.native_targets.contains(&m.span)
                     {
                         self.edits
                             .push((m.span.start as usize, m.span.end as usize, VLOC));
@@ -215,8 +231,7 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
             // window.URL is the URL constructor.
             AstKind::StaticMemberExpression(m)
                 if matches!(m.property.name.as_str(), "URL" | "documentURI")
-                    && !self.is_write_target(m.span)
-                    && !self.is_delete_target(m.span) =>
+                    && !self.native_targets.contains(&m.span) =>
             {
                 if let Expression::Identifier(obj) = &m.object {
                     if obj.name.as_str() == "document"
@@ -234,9 +249,8 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
             // minified and obfuscated bundles reach for brackets.
             // Only literal keys rename. A computed non-literal
             // (window[x]) is unknowable at rewrite time and stays
-            // native. The write/delete tail peeks are the same ones
-            // the static form runs, so assignments and deletes keep
-            // their native receiver.
+            // native. AST target spans exclude writes and deletes
+            // while retaining reads nested inside computed targets.
             AstKind::ComputedMemberExpression(m) => {
                 if let Expression::StringLiteral(lit) = &m.expression {
                     match lit.value.as_str() {
@@ -246,8 +260,7 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                                     && obj.reference_id.get().is_some_and(|rid| {
                                         self.sem.scoping().get_reference(rid).symbol_id().is_none()
                                     })
-                                    && !self.is_write_target(m.span)
-                                    && !self.is_delete_target(m.span)
+                                    && !self.native_targets.contains(&m.span)
                                 {
                                     self.edits.push((
                                         m.span.start as usize,
@@ -263,8 +276,7 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                                     && obj.reference_id.get().is_some_and(|rid| {
                                         self.sem.scoping().get_reference(rid).symbol_id().is_none()
                                     })
-                                    && !self.is_write_target(m.span)
-                                    && !self.is_delete_target(m.span)
+                                    && !self.native_targets.contains(&m.span)
                                 {
                                     self.edits.push((
                                         m.span.start as usize,
@@ -283,88 +295,42 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
     }
 }
 
-impl Walker<'_, '_> {
-    /// Is the member expression the direct target of an assignment
-    /// or update? A textual peek past the span is exact for the
-    /// operator set: comparison operators (==, ===, !=, !==, >=,
-    /// <=) never match the assignment list, and a following '.' or
-    /// '[' is a deeper property chain, not a write to this member.
-    fn is_write_target(&self, span: Span) -> bool {
-        const OPS: [&[u8]; 16] = [
-            b"=", b"+=", b"-=", b"*=", b"/=", b"%=", b"**=", b"<<=", b">>=", b">>>=", b"&=", b"|=",
-            b"^=", b"&&=", b"||=", b"??=",
-        ];
-        let b = self.src.as_bytes();
-        let mut i = span.end as usize;
-        loop {
-            match b.get(i) {
-                Some(b' ') | Some(0x09) | Some(0x0a) | Some(0x0d) => i += 1,
-                /* #240: a comment between the member and the
-                operator hides the write from a whitespace-only
-                peek. A parsed body has no unterminated comment;
-                an unclosed one falls back to "write", the safe
-                direction that keeps the member native. */
-                Some(b'/') if b.get(i + 1) == Some(&b'*') => {
-                    match b[i + 2..]
-                        .windows(2)
-                        .position(|w| w[0] == b'*' && w[1] == b'/')
-                    {
-                        Some(k) => i += k + 4,
-                        None => return true,
-                    }
-                }
-                Some(b'/') if b.get(i + 1) == Some(&b'/') => {
-                    match b[i + 2..].iter().position(|c| *c == b'\n') {
-                        Some(k) => i += k + 2,
-                        None => return true,
-                    }
-                }
-                _ => break,
-            }
-        }
-        // Postfix ++/--: an update target.
-        if matches!(b.get(i), Some(b'+') | Some(b'-')) && b.get(i) == b.get(i + 1) {
-            return true;
-        }
-        let run = &b[i..(i + 4).min(b.len())];
-        // A trailing "=" extends no assignment op: "==" and "==="
-        // are comparisons, never writes.
-        OPS.iter()
-            .any(|op| run.starts_with(op) && run.get(op.len()) != Some(&b'='))
-    }
-
-    /// delete <member>: the rename would produce a delete of the
-    /// global binding, not the property. Rare, cheap to exclude.
-    fn is_delete_target(&self, span: Span) -> bool {
-        let head = &self.src[..span.start as usize];
-        let trimmed = head.trim_end();
-        match trimmed.len().checked_sub(6) {
-            None => false,
-            // i points AT the "delete" run: the word boundary is the
-            // byte BEFORE it, and a head that IS the word deletes too.
-            Some(i) => {
-                /* #242: a property-access tail (.delete) is not
-                the keyword; only a real boundary before the
-                word deletes. */
-                trimmed.ends_with("delete")
-                    && (i == 0
-                        || (!is_ident_byte(trimmed.as_bytes()[i - 1])
-                            && trimmed.as_bytes()[i - 1] != b'.'))
-            }
-        }
-    }
-}
-
-fn is_ident_byte(b: u8) -> bool {
-    b == b'_' || b == b'$' || b.is_ascii_alphanumeric()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn rw(js: &str) -> String {
         rewrite_globals(js)
+    }
+
+    #[test]
+    fn ast_targets_stay_native_through_comments_and_parentheses() {
+        for js in [
+            "++window.location;",
+            "[window.location] = xs;",
+            "for (window.location of xs) {}",
+            "window.location\u{a0}= next;",
+            "--document.URL;",
+            "++window['location'];",
+            "delete /* gap */ window.location;",
+            "delete (window.location);",
+            "delete ((document['URL']));",
+            "(window.location) = next;",
+            "window.location /* gap */ += next;",
+            "delete /* gap */ location;",
+        ] {
+            assert_eq!(rw(js), js, "{js}");
+        }
+    }
+
+    #[test]
+    fn reads_inside_assignment_and_delete_targets_still_rewrite() {
+        assert_eq!(rw("window[location.href] = x;"), "window[__zl.href] = x;");
+        assert_eq!(
+            rw("delete window[location.href];"),
+            "delete window[__zl.href];"
+        );
+        assert_eq!(rw("++window.location.href;"), "++__zl.href;");
     }
 
     #[test]

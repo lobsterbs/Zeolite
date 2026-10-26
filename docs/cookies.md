@@ -314,3 +314,8 @@ If profile storage cannot be read or its snapshot is malformed, unidentified
 clients receive no cookies and cannot write into the durable jar. A trusted
 host must rebind their root first. The uncertainty marker survives later
 saves and restarts; rebinding one host never authorizes unrelated clients.
+
+Cache refreshes and blocking revalidation use the normal transport policy.
+Redirect and final response cookies are admitted through the requesting
+client's profile, subject to Request.credentials. Background refreshes from
+different clients or credential contexts are not coalesced (#466/#467).
