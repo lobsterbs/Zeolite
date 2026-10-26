@@ -67,16 +67,17 @@ describe("Zeolite Doctor passive evidence model (#495)", () => {
 
   it("rejects credentials in WISP endpoint URLs without returning their values", () => {
     for (const url of [
-      "wss://alice:secret@engine.example/wisp/",
+      "wss://alice:AUTH_CANARY@engine.example/wisp/",
       "wss://engine.example/wisp/#private-fragment",
-      "https://engine.example/wisp/?token=secret",
+      "https://engine.example/wisp/?token=TOKEN_CANARY",
     ]) {
       const report = buildDoctor(evidence({ primaryWisp: url }));
       expect(check(report, "transport.wisp-endpoint").status).toBe("fail");
       expect(report.healthy).toBe(false);
       const serialized = JSON.stringify(report) + doctorKdl(report);
       expect(serialized).not.toContain("alice");
-      expect(serialized).not.toContain("secret");
+      expect(serialized).not.toContain("AUTH_CANARY");
+      expect(serialized).not.toContain("TOKEN_CANARY");
       expect(serialized).not.toContain("private-fragment");
     }
   });
