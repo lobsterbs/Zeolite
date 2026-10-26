@@ -11,10 +11,12 @@
    the last stream settles. */
 let active = 0;
 let heartbeat: ReturnType<typeof setInterval> | null = null;
+let heartbeatChannel: MessageChannel | null = null;
 
 function startHeartbeat(): void {
   if (heartbeat !== null) return;
   const ch = new MessageChannel();
+  heartbeatChannel = ch;
   /* The dispatched message event is what resets the idle timer; the
      no-op listener keeps the port served. */
   ch.port1.onmessage = () => undefined;
@@ -44,6 +46,9 @@ export function streamDone(): void {
   if (active === 0 && heartbeat !== null) {
     clearInterval(heartbeat);
     heartbeat = null;
+    heartbeatChannel?.port1.close();
+    heartbeatChannel?.port2.close();
+    heartbeatChannel = null;
   }
 }
 

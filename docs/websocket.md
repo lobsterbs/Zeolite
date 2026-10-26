@@ -108,3 +108,8 @@ control (a page outside the engine scope fails with error + close
 1006, which matches native offline behavior); subprotocol and
 extension negotiation follow libcurl; targets without TLS fail by
 design (ws:// is upgraded).
+
+Synchronous transport send failures terminate the bridge connection (#485).
+The page receives an error followed by an abnormal 1006 close; the bridge
+detaches the connection before closing the transport, so a reentrant close
+callback cannot report it twice. Failed sends are not counted as transmitted.

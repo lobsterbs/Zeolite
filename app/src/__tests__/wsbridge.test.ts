@@ -83,6 +83,40 @@ function fakeFactory(): {
 }
 
 describe("WsBridge", () => {
+  it.each([false, true])("contains synchronous send failure (queued=%s) and closes transport", queued => {
+    const { hooks, rec } = fakeHooks();
+    let h!: FakeHandlers["h"];
+    let sends = 0;
+    const closes: number[] = [];
+    const factory: WsFactory = { open: (_url, _protocols, handlers) => {
+      h = handlers;
+      return {
+        send() { sends++; throw new Error("transport write failed"); },
+        close(code) { closes.push(code); h.onclose(code, ""); },
+      };
+    } };
+    const bridge = new WsBridge(factory, hooks);
+    const port = fakePort();
+    bridge.open(port, "wss://example.com/", []);
+    if (queued) {
+      port.onmessage?.({ data: { op: "send", data: "first" } });
+      port.onmessage?.({ data: { op: "send", data: "must not send" } });
+      expect(() => h.onopen("")).not.toThrow();
+    } else {
+      h.onopen("");
+      expect(() => port.onmessage?.({ data: { op: "send", data: "first" } })).not.toThrow();
+    }
+    expect(sends).toBe(1);
+    expect(closes).toEqual([1000]);
+    expect(bridge.size).toBe(0);
+    expect(port.closed).toBe(true);
+    expect(port.onmessage).toBeNull();
+    expect(rec.bytes).toEqual([]);
+    expect(rec.closes).toHaveLength(1);
+    expect(port.posted.map(x => (x as { ev: string }).ev)).toEqual(["open", "error", "close"]);
+    expect(port.posted.at(-1)).toMatchObject({ code: 1006, clean: false });
+  });
+
   it("upgrades ws:// to wss:// and records the decision", () => {
     const { hooks, rec } = fakeHooks();
     const { factory, handlers } = fakeFactory();
