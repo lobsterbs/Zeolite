@@ -70,6 +70,28 @@ browser leak checks covering fetch, anchors and `window.open`, plus an
 explainable decision in the network log. A regex match alone must not opt an
 arbitrary script out of URL rewriting.
 
+## Adaptive picker phase 1 (#487)
+
+The live-response and cache-hit code now call the same deterministic
+`planResponseTransit` selector in `app/src/transit.ts`. It records a
+`TransitDecision` plus an internal rewrite strategy and evidence source.
+Required HTML/CSS/document decisions remain required; JavaScript bodies
+remain on their existing passes unless a manually verified native rule
+applies to an eligible page-script request. Workers retain their mandatory
+prelude/specifier handling; Cloudflare's `/cdn-cgi/` bytes remain exempt;
+blocked decisions are never promoted.
+
+Rewrite *behavior* now uses `behaviorMatch`, which considers only
+`native`/`rewrite` rules. `transportMatch` considers only `relay`/`wisp`
+rules. Therefore a high-priority transport route cannot accidentally
+swallow a lower-priority script rewrite rule, and vice versa.
+
+This phase does **not** automatically skip a rewrite based on a filename,
+Content-Type or regex and does **not** learn from failures. The reserved
+`light` strategy, content-aware AST proof, bounded/opt-in compatibility
+learning and safe next-navigation recovery are tracked in issue #487 and
+are not yet implemented. No additional HTML/CSS body buffering occurs.
+
 Behavior routes compose with transport routes (#154): the transport
 selection (upstreamFetch) ignores behavior rules, so a "native"
 host rule rides the transport a relay/wisp rule would pick for the
