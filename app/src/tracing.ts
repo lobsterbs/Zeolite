@@ -47,6 +47,17 @@ export function setTracing(on: boolean): void {
     comparison even when full, URL-bearing tracing is disabled. */
 export function traceDecision(d: Omit<TraceEntry, "seq" | "ts">, shadow = false): void {
   if (!enabled && !shadow) return;
+  /* Forced shadow observations must not enable arbitrary URL-bearing
+     tracing. Accept only exact engine-owned planner enumerations. */
+  if (shadow) {
+    if (d.subsystem !== "transport" || d.rule !== "adaptive-shadow" ||
+        !/^(NativeTransit|RewriteFallback|Blocked)$/.test(d.original) ||
+        !/^(native|light|full|required|blocked):(default|request-destination|response-content-type|manual-policy|challenge-namespace)$/.test(d.result)) return;
+    d = { subsystem: "transport", rule: "adaptive-shadow",
+      original: d.original, result: d.result,
+      traceId: typeof d.traceId === "string" && /^zl-t[a-z0-9]+-[a-z0-9]+$/.test(d.traceId)
+        ? d.traceId : undefined };
+  }
   ring.push({
     ...d,
     original: redactSecrets(d.original),
