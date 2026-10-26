@@ -78,13 +78,24 @@ export function buildDoctor(e: DoctorEvidence, assetChecks: DoctorCheck[] = []):
   ];
   try {
     const u = new URL(e.primaryWisp);
+    const schemeOK = u.protocol === "wss:" || u.protocol === "ws:";
+    const invalidSecret = !!(u.username || u.password);
+    const invalidFragment = !!u.hash;
+    const riskyQuery = !!u.search;
     checks[10] = {
       code: "transport.wisp-endpoint",
-      status: (u.protocol === "wss:" || u.protocol === "ws:") ? (u.protocol === "wss:" ? "pass" : "warn") : "fail",
-      summary: u.protocol === "wss:" ? "A WSS endpoint is configured; reachability is unverified" :
+      status: !schemeOK || invalidSecret || invalidFragment ? "fail" :
+        u.protocol === "ws:" || riskyQuery ? "warn" : "pass",
+      summary: invalidSecret ? "Credentials embedded in the WISP URL are not a supported authentication path" :
+        invalidFragment ? "A WISP WebSocket endpoint URL must not contain a fragment" :
+        !schemeOK ? "Configured endpoint does not use the WISP WebSocket URL scheme" :
         u.protocol === "ws:" ? "An unencrypted WS endpoint is configured; reachability is unverified" :
-        "Configured endpoint does not use the WISP WebSocket URL scheme",
-      remedy: u.protocol === "wss:" ? undefined : "Configure a WSS endpoint when serving credentials or mixed-origin clients",
+        riskyQuery ? "WSS endpoint has query parameters; check that none contain credentials" :
+        "A WSS endpoint is configured; reachability is unverified",
+      remedy: invalidSecret || invalidFragment ? "Remove URL credentials/fragments; configure WISP authentication through a supported host-only protocol" :
+        u.protocol === "ws:" ? "Configure WSS before transmitting credentials" :
+        riskyQuery ? "Avoid credentials, access tokens, or secrets in the WISP endpoint URL" :
+        schemeOK ? undefined : "Set a valid ws:// or wss:// WISP endpoint",
     };
   } catch {
     checks[10] = { code: "transport.wisp-endpoint", status: "fail",
