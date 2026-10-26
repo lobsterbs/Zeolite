@@ -147,8 +147,13 @@ if (typeof self !== "undefined") void relayColdWake();
 
 /** Control-plane half of zl:relayRegister: remember the embedder's
     port and route its answers to the pending fetches. */
-export function relayRegister(port: MessagePort): void {
+let hostCredits = false;
+
+export function relayRegister(port: MessagePort, credits?: unknown): void {
   hostPort = port;
+  /* #470: only an embedder that understands byte credits receives
+     them; a legacy registration keeps the unbounded stream. */
+  hostCredits = credits === 1;
   /* #354: a pending channel-less relay fetch may be waiting for
      exactly this registration; wake it (bounded wait resolves true). */
   const ws = reRegisterWaiters;
@@ -170,6 +175,9 @@ export function relayAvailable(): boolean {
 /** Longest wait for the embedder's first answer on a relayed fetch. */
 export const RELAY_HEADER_DEADLINE_MS = 60_000;
 export const RELAY_UPLOAD_HEADER_DEADLINE_MS = 600_000;
+/** #470: bytes the SW grants a crediting embedder up front and back
+    per drained chunk, so the producer can pace its reads. */
+export const RELAY_CREDIT_BYTES = 2 * 1024 * 1024;
 /** Upload time counts before response headers. Large buffered bodies
     and multipart uploads get a finite budget matching the host relay. */
 export function relayHeaderDeadlineMs(init: { headers: Headers; body?: BodyInit | null }): number {
@@ -255,6 +263,9 @@ export async function relayFetch(
     headers: Array.from(init.headers.entries()),
     body,
   });
+  /* #470: the up-front credit grant; a non-crediting host never
+     receives these frames. */
+  if (hostCredits) port.postMessage({ type: "zl:relayCredit", rid, bytes: RELAY_CREDIT_BYTES });
   /* Header deadline for every relayed fetch, subresources included.
      Without it a silent embedder (or a port it dropped without a
      close event) parks the request until the page gives up. #382:
@@ -344,6 +355,9 @@ export async function relayFetch(
       }
       if (m.type === "zl:relayChunk") {
         controller.enqueue(m.bytes);
+        /* #470: grant the drained bytes back so a crediting embedder
+           can pace its reads. */
+        if (hostCredits) port.postMessage({ type: "zl:relayCredit", rid, bytes: m.bytes.byteLength });
         return;
       }
       cleanup();
