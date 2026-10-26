@@ -40,6 +40,8 @@ serve WebSocket only without TLS will fail; this is deliberate.
   transport `send()` succeeds; failed writes receive no acknowledgment.
   This is deliberately **bridge-queue accounting**, not an assertion
   that data reached the peer or left the underlying TLS/Wisp buffer.
+  Sends discarded in CLOSING/CLOSED still add their payload bytes, matching
+  Chromium. Those discarded bytes receive no bridge acknowledgment.
   Network-level bufferedAmount parity requires transport drain signals
   that the current WsHandle does not expose.
 - Non-ws schemes fall through to the native constructor.

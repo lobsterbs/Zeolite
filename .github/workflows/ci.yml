@@ -467,6 +467,8 @@ jobs:
           cd suite/e2e
           npm install
           npx playwright install --with-deps chromium
+      - name: WebSocket closing buffered bytes vs Chromium (#462)
+        run: node suite/e2e/ws-buffered.mjs
       - name: Location policy Chromium + WASM fixture (#456)
         run: node suite/e2e/location-policy.mjs
       - name: Browser E2E suite (issue #35)

@@ -48,6 +48,9 @@ describe("worker WebSocket shim states (#460/#461)", () => {
     await vi.waitFor(() => expect(ws.bufferedAmount).toBe(0));
     ws.close(4999, "ok");
     expect(ws.readyState).toBe(2);
-    expect(() => ws.send("late")).not.toThrow();
+    expect(() => ws.send("é")).not.toThrow();
+    expect(ws.bufferedAmount).toBe(2);
+    ws.send(new Uint8Array([1, 2, 3]));
+    expect(ws.bufferedAmount).toBe(5);
   });
 });

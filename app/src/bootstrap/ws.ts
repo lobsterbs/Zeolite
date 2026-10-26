@@ -29,7 +29,7 @@ function wsProtocolsList(protocols: unknown): string[] {
   for (const tok of list) {
     const s = String(tok);
     if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(s) || seen.has(s))
-      throw new DOMException("Invalid subprotocol", "SyntaxError");
+      throw new DOMException("subprotocol", "SyntaxError");
     seen.add(s);
     out.push(s);
   }
@@ -153,8 +153,8 @@ const disp = (e: Event) => {
             fire(new MessageEvent("message", { data, origin: u.origin }));
           });
         } else if (m.ev === "drain") {
-          if (typeof m.bytes === "number" && Number.isFinite(m.bytes) && m.bytes >= 0)
-            bufferedBytes = Math.max(0, bufferedBytes - Math.floor(m.bytes));
+          if (typeof m.bytes === "number" && Number.isSafeInteger(m.bytes) && m.bytes >= 0)
+            bufferedBytes = Math.max(0, bufferedBytes - m.bytes);
         } else if (m.ev === "error") {
           disp(new Event("error"));
         } else if (m.ev === "close") {
@@ -202,9 +202,9 @@ const disp = (e: Event) => {
         },
         send: {
           value: (data: unknown) => {
-            if (wsState === 0) throw new DOMException("invalid state", "InvalidStateError");
-            if (wsState >= 2) return;
             const payload = wsPayload(data);
+            if (wsState === 0) throw new DOMException("invalid state", "InvalidStateError");
+            if (wsState >= 2) { bufferedBytes += payload.bytes; return; }
             ch.port1.postMessage({ op: "send", data: payload.data });
             bufferedBytes += payload.bytes;
           },

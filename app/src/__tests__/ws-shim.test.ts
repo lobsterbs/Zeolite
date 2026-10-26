@@ -109,11 +109,15 @@ describe("page WebSocket shim send and close states (#460/#461)", () => {
     es.send("open");
     es.close();
     expect(es.readyState).toBe(2);
-    expect(() => es.send("discarded")).not.toThrow();
+    const beforeCloseSend = es.bufferedAmount;
+    expect(() => es.send("é")).not.toThrow();
+    expect(es.bufferedAmount).toBe(beforeCloseSend + 2);
     port?.postMessage({ ev: "close", code: 1000, clean: true });
     await new Promise((r) => setTimeout(r, 0));
     expect(es.readyState).toBe(3);
-    expect(() => es.send("discarded")).not.toThrow();
+    const beforeClosedSend = es.bufferedAmount;
+    expect(() => es.send("é")).not.toThrow();
+    expect(es.bufferedAmount).toBe(beforeClosedSend + 2);
   });
 
   it("counts bytes queued through the port and drains only after bridge acknowledgement (#462)", async () => {

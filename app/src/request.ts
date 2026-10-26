@@ -790,7 +790,7 @@ async function upstreamFetch(
       });
     } else {
       try {
-        const wr = await altWispFetch(dest, init);
+        const wr = await altWispFetch(dest, init, traceId);
         traceDecision({ subsystem: "policy", rule: rule.id, original: dest, result: "wisp", resource: rtype, traceId });
         wispRecord();
         return wr;
@@ -798,7 +798,7 @@ async function upstreamFetch(
         /* #444: a failed alternate transport may already have delivered
            the write. An outer fallback must honor the same replay gate
            as the transport's own retry, including one-shot bodies and
-           cancellation. Only a proven pre-send failure permits a
+           cancellation. Only engine-owned pre-dispatch evidence permits a
            replayable non-idempotent method to try another endpoint. */
         if (
           init.signal?.aborted ||
