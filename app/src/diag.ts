@@ -71,6 +71,12 @@ export type DiagStage =
   | "REDIRECTED"
   | "PINNED_SCRIPT";
 
+export type DiagDeliveryState =
+  | "definitely-not-delivered"
+  | "delivered-response"
+  | "delivery-unknown";
+export type DiagDeliveryTransport = "wisp" | "wisp-route" | "relay";
+
 export interface DiagEvent {
   /** Browser-owned source client, assigned at interception. */
   clientId?: string;
@@ -85,6 +91,10 @@ export interface DiagEvent {
   url?: string;
   traceId?: string;
   requestId?: string;
+  /** #454: fixed-vocabulary transport evidence. Never infer these
+      from technicalReason/message text. */
+  deliveryState?: DiagDeliveryState;
+  deliveryTransport?: DiagDeliveryTransport;
   stack?: string;
 }
 
