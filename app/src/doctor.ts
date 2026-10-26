@@ -13,7 +13,10 @@ export interface DoctorCheck {
   remedy?: string;
 }
 export interface DoctorReport {
+  /** Request completed; not proof that the environment is healthy. */
   ok: boolean;
+  /** null means unverified/partial; false means confirmed failed checks. */
+  healthy: boolean | null;
   schemaVersion: 1;
   engineVersion: string;
   capturedAt: number;
@@ -121,7 +124,9 @@ export function buildDoctor(e: DoctorEvidence, assetChecks: DoctorCheck[] = []):
     ASSETS.map(a => ({ code: "assets." + a.name, status: "skipped" as const,
       summary: "Passive check: no HTTP asset probe attempted" }))));
   return {
-    ok: checks.every(x => x.status !== "fail") && checks.some(x => x.code === "worker.boot" && x.status === "pass"),
+    ok: true,
+    healthy: checks.some(x => x.status === "fail") ? false :
+      checks.every(x => x.status === "pass" || x.status === "skipped") ? true : null,
     schemaVersion: 1,
     engineVersion: e.engineVersion,
     capturedAt: Date.now(),
@@ -206,7 +211,8 @@ export async function observeDoctorBoot(ready: Promise<unknown>, deadlineMs = 75
 export function doctorKdl(report: DoctorReport): string {
   const q = (value: string) => JSON.stringify(value);
   return "zeolite-doctor version=1 engine=" + q(report.engineVersion) +
-    " captured-at=" + report.capturedAt + " ok=#" + report.ok + " {\n" +
+    " captured-at=" + report.capturedAt + " ok=#" + report.ok +
+    " health=" + q(report.healthy === null ? "unknown" : report.healthy ? "pass" : "fail") + " {\n" +
     report.checks.map(c =>
       "  check " + q(c.code) + " status=" + q(c.status) +
       " summary=" + q(c.summary) + (c.remedy ? " remedy=" + q(c.remedy) : "")
