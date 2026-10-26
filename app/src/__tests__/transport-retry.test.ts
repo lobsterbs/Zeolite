@@ -45,6 +45,7 @@ vi.mock("../libcurl-transport-vendored", () => ({
 }));
 
 import { transportResetForTests, wispTransport } from "../transport";
+import { TransportDeliveryError, deliveryStateOf } from "../delivery";
 
 beforeEach(() => {
   h.calls.length = 0;
@@ -67,6 +68,16 @@ describe("transport retry safety (#251)", () => {
       wispTransport.fetch("https://a.example/", { method: "POST", body: "x=1" }),
     ).rejects.toThrow("failed sending data");
     expect(h.calls.length).toBe(1);
+  });
+
+  it("a failed dispatched POST has an explicit delivery-unknown state and transport", async () => {
+    h.failFirst = "websocket did not open";
+    const err = await wispTransport.fetch("https://a.example/", { method: "POST", body: "x=1" })
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(TransportDeliveryError);
+    expect(deliveryStateOf(err)).toBe("delivery-unknown");
+    expect((err as TransportDeliveryError).transport).toBe("wisp");
+    expect(h.calls).toHaveLength(1);
   });
 
   it("POST error text cannot prove non-delivery", async () => {
