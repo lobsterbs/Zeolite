@@ -258,20 +258,11 @@ export function applyAnchorShim(w: Record<string, unknown>): void {
   if (typeof O !== "function") return;
   nativeGetAttr = O;
   proto.getAttribute = function (this: AnyRecord, n: string) {
-    if (String(n).toLowerCase() === "href") {
-      const tag = String(this.tagName ?? "").toUpperCase();
-      if (tag === "A" || tag === "AREA") {
-        let v: string | null = null;
-        try {
-          v = O.call(this, n);
-        } catch {
-          return O.call(this, n);
-        }
-        const hit = typeof v === "string" ? memo.get(v) : undefined;
-        if (hit !== undefined && hit !== "") return hit;
-      }
-    }
-    return O.call(this, n);
+    const v = O.call(this, n);
+    const tag = this.tagName;
+    if (String(n).toLowerCase() === "href" && (tag === "A" || tag === "AREA") && typeof v === "string")
+      return anchorVirtual(v) ?? v;
+    return v;
   };
   /* #388: SVG anchors read their href through SVGAnimatedString
      (baseVal/animVal), a seam neither the nav guard table nor the
