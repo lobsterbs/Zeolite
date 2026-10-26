@@ -9,7 +9,8 @@ is either implemented there or documents a known gap there (marked as such).
 
 Related documents: `engine-adapter.md` (the embed contract and engine adapter
 API), `policy.md` (the rules engine), `interception.md`, `limitations.md`,
-`transport-lifecycle.md`, `session.md`, `versioning.md`.
+`transport-lifecycle.md`, `doctor.md` (read-only host diagnostics),
+`session.md`, `versioning.md`.
 
 ## Prerequisites
 
