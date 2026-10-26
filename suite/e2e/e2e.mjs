@@ -338,6 +338,20 @@ async function main() {
     return "host-only refusal";
   });
 
+  await check("doctor: standalone DevTools reports unavailable without a controlling worker (#495)", async () => {
+    const isolated = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const pg = await isolated.newPage();
+      await pg.goto(ENGINE + "/devtools.html");
+      eq(await pg.evaluate(() => navigator.serviceWorker.controller === null), true, "blocked context unexpectedly controlled");
+      await pg.locator("#doctorInspect").click();
+      const status = await pg.locator("#doctorStatus").textContent();
+      assert(String(status).startsWith("Unavailable:"), "Doctor UI did not expose unavailable state: " + status);
+      return status;
+    } finally {
+      await isolated.close();
+    }
+  });
   await check("doctor: explicit bundle probe checks fixed same-origin assets only (#495)", async () => {
     const { page, rec } = await openProxied(ORIGIN_A + "/dir/page.html");
     const before = rec.requests.length;
