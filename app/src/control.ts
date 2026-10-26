@@ -12,7 +12,8 @@ import { transportState } from "./transport-lifecycle";
 import { policyDoctorState } from "./policy";
 import { rulesDoctorState } from "./rules";
 import { siteconfigDoctorState } from "./siteconfig";
-import { DIAG } from "./diag";
+import { DIAG, traceClient } from "./diag";
+import { buildCompatibilityReport, compatibilityKdl } from "./compat-debugger";
 /* #90: the download registry instance lives in ./downloads; the
    control plane lists and cancels entries through the subsystem. */
 import { DL } from "./downloads";
@@ -73,6 +74,7 @@ export interface ControlMessage {
     | "zl:openExtPage"
     | "zl:listExt"
     | "zl:getDiag"
+    | "zl:exportDiagnostics"
     | "zl:doctor"
     | "zl:installExt"
     | "zl:installExtFiles"
@@ -151,6 +153,8 @@ export interface ControlMessage {
   since?: number;
   /** Host-only diagnostic scope. */
   clientId?: string;
+  /** #494: only one verified request trace is exportable in V1. */
+  traceId?: string;
   /** zl:wsOpen: page WebSocket bridge destination + protocols. */
   url?: string;
   protocols?: string[];
@@ -299,7 +303,8 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
     /* Doctor is handled BEFORE boot gating and jar inheritance in
        handleControlEvent. This case is a fail-closed registry guard. */
     case "zl:doctor":
-      reply({ ok: false, error: "doctor must use the host-only preflight" });
+    case "zl:exportDiagnostics":
+      reply({ ok: false, error: "host-only diagnostic preflight required" });
       break;
     case "zl:relayRegister": {
       /* #137: the embedder registers its relay port. Host-only by the
@@ -1126,6 +1131,48 @@ export async function handleControlEvent(
     reply({ ...report, kdl: msg.format === "kdl" ? doctorKdl(report) : undefined });
     return;
   }
+  /* #494: live request identity is checked by the worker, never
+     inferred from a user-supplied tab label. Unlike legacy getDiag,
+     a missing client or trace fails closed; no global-ring fallback.
+     This is deliberately a request-scoped V1 exporter, not a claim
+     of document-lifetime isolation. */
+  if (msg?.type === "zl:exportDiagnostics") {
+    if (senderIsProxiedPage(e)) {
+      reply({ ok: false, error: "host-only control message" });
+      return;
+    }
+    const id = msg.clientId;
+    const trace = msg.traceId;
+    if (typeof id !== "string" || id.length < 1 || id.length > 256 ||
+        typeof trace !== "string" || trace.length > 64 ||
+        !/^zl-t[a-z0-9]+-[a-z0-9]+$/.test(trace) ||
+        traceClient(trace) !== id) {
+      reply({ ok: false, status: "identity-unavailable" });
+      return;
+    }
+    const client = await self.clients.get(id);
+    let valid = false;
+    if (client?.url) {
+      try {
+        const u = new URL(client.url);
+        valid = u.origin === self.location.origin &&
+          senderIsProxiedPath(u.pathname, u.search);
+      } catch { /* client URL is not an attributable proxied page */ }
+    }
+    if (!valid) {
+      reply({ ok: false, status: "identity-unavailable" });
+      return;
+    }
+    const report = buildCompatibilityReport({
+      clientId: id, traceId: trace, engineVersion: ZEOLITE_VERSION,
+      generation: netLogGeneration(), now: Date.now(),
+      diagnostics: DIAG.eventsSince(0, id),
+      network: netLogSince(0, id),
+      tracing: tracingSnapshot(0).entries,
+    });
+    reply({ ok: true, ...report, kdl: compatibilityKdl(report) });
+    return;
+  }
   await deps.ready;
 
   /* Bug-scout (#41): a proxied page must not drive the control plane
@@ -1161,7 +1208,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary",
+  "zl:ping", "zl:config", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary",
 ]);
 
 
@@ -1190,7 +1237,8 @@ export function messageListener(deps: ControlDeps) {
       })
         /* #254: keep jar persistence alive for the whole message
            event; flushJarPersist never throws. */
-        .then(() => (e.data as ControlMessage)?.type === "zl:doctor" ? undefined : flushJarPersist()),
+        .then(() => (e.data as ControlMessage)?.type === "zl:doctor" ||
+          (e.data as ControlMessage)?.type === "zl:exportDiagnostics" ? undefined : flushJarPersist()),
     );
   };
 }
