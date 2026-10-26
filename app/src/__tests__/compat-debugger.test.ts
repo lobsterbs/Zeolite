@@ -87,6 +87,44 @@ describe("#494 request debugger with strict evidence only", () => {
     expect(compatibilityKdl(report)).not.toContain("403");
   });
 
+  it("exports only exact allowlisted adaptive-planner decisions and evidence", () => {
+    const report = create({
+      tracing: [
+        tracing({ subsystem: "transport", rule: "adaptive-picker",
+          result: "required:response-content-type", ts: 10 }),
+        tracing({ subsystem: "transport", rule: "adaptive-shadow",
+          result: "native:manual-policy", ts: 11 }),
+        tracing({ subsystem: "transport", rule: "unknown-rule",
+          result: "native:default", ts: 12 }),
+        tracing({ subsystem: "transport", rule: "adaptive-picker",
+          result: "native:default SECRET_AUTH=never-export", ts: 13 }),
+        tracing({ subsystem: "transport", rule: "adaptive-picker",
+          result: "native:https://private.example", ts: 14 }),
+        tracing({ subsystem: "rewriter", rule: "adaptive-picker",
+          result: "native:default", ts: 15 }),
+      ],
+    });
+    expect(report.steps).toHaveLength(6);
+    expect(report.steps[0]).toMatchObject({
+      decision: "required", reason: "response-content-type",
+    });
+    expect(report.steps[1]).toMatchObject({
+      decision: "native", reason: "manual-policy",
+    });
+    for (const step of report.steps.slice(2)) {
+      expect(step.decision).toBeUndefined();
+      expect(step.reason).toBeUndefined();
+    }
+    const kdl = compatibilityKdl(report);
+    const parsed = parseKdl(kdl);
+    expect(parsed[0].children[0].props).toMatchObject({
+      decision: "required", reason: "response-content-type",
+    });
+    expect(kdl).not.toContain("SECRET_AUTH");
+    expect(kdl).not.toContain("private.example");
+    expect(kdl).not.toContain("unknown-rule");
+  });
+
   it("does not leak canary secrets from pre-populated, deliberately unsanitized rings", () => {
     const report = create({
       diagnostics: [event({ message: "raw SECRET-MSG", stage: "CAPTCHA_KEY_DO_NOT_LEAK" as any,
