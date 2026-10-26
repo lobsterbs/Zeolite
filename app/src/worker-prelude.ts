@@ -366,10 +366,10 @@ export function installWorkerPrelude(route: string): void {
         extensions: { value: "" },
         close: {
           value: (code?: number, reason?: string) => {
-            validateWsClose(code, reason);
+            const normalized = validateWsClose(code, reason);
             if (wsState >= 2) return;
             wsState = 2;
-            ch.port1.postMessage({ op: "close", code: code ?? 1000, reason });
+            ch.port1.postMessage({ op: "close", code: normalized.code ?? 1000, reason: normalized.reason });
           },
         },
         send: {

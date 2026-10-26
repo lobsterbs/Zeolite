@@ -74,3 +74,7 @@ around.
 
 SharedWorker names also include worker type and credential mode (#453), so
 classic and module instances cannot accidentally share the same virtual identity.
+
+WebSocket close arguments use Web IDL unsigned-short and USVString conversion
+before validation in both page and worker shims. Converted values are passed
+to the bridge, including replacement of lone surrogate code units.
