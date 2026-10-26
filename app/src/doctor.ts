@@ -42,16 +42,23 @@ export interface DoctorEvidence {
       control plane. Undefined means the host did not request a client check. */
   clientControl?: "pass" | "fail" | "unknown";
 }
-type Asset = { name: string; path: string; mime: "script" | "wasm" };
+type Asset = {
+  name: string;
+  path: string;
+  mime: "script" | "wasm";
+  resolve: "script" | "sibling" | "root";
+};
 const ASSETS: readonly Asset[] = [
-  { name: "service-worker", path: "sw.js", mime: "script" },
-  { name: "bootstrap", path: "bootstrap.js", mime: "script" },
-  { name: "codec", path: "codec.js", mime: "script" },
-  { name: "worker-prelude", path: "worker-prelude.js", mime: "script" },
-  { name: "rewriter-wasm", path: "rewriter_wasm_bg.wasm", mime: "wasm" },
-  { name: "libcurl", path: "libcurl/index.mjs", mime: "script" },
-  { name: "epoxy-js", path: "epoxy/epoxy.js", mime: "script" },
-  { name: "epoxy-wasm", path: "epoxy/epoxy.wasm", mime: "wasm" },
+  { name: "service-worker", path: "", mime: "script", resolve: "script" },
+  { name: "bootstrap", path: "bootstrap.js", mime: "script", resolve: "sibling" },
+  { name: "codec", path: "codec.js", mime: "script", resolve: "sibling" },
+  { name: "worker-prelude", path: "worker-prelude.js", mime: "script", resolve: "sibling" },
+  { name: "rewriter-wasm", path: "rewriter_wasm_bg.wasm", mime: "wasm", resolve: "sibling" },
+  /* Integration-guide contract: transport bundles live at the origin
+     root even when the Service Worker itself is mounted below /zlsw/. */
+  { name: "libcurl", path: "libcurl/index.mjs", mime: "script", resolve: "root" },
+  { name: "epoxy-js", path: "epoxy/epoxy.js", mime: "script", resolve: "root" },
+  { name: "epoxy-wasm", path: "epoxy/epoxy.wasm", mime: "wasm", resolve: "root" },
 ];
 
 /** Outcome uses fixed human-readable labels; no raw secret-bearing URLs,
@@ -139,12 +146,22 @@ export function buildDoctor(e: DoctorEvidence, assetChecks: DoctorCheck[] = []):
         name + ".kdl has not been loaded in this worker instance",
       remedy: state === "loaded" ? undefined : "Verify the host's " + name + ".kdl deployment and KDL syntax" });
   }
-  checks.push({ code: "worker.asset-headers", status: "unknown",
-    summary: "Service-Worker-Allowed and worker response caching headers are not verified by this worker",
-    remedy: "Inspect registration-script response headers from the host" });
+  const swAllowed = assetChecks.find(c => c.code === "worker.service-worker-allowed");
+  const swCache = assetChecks.find(c => c.code === "worker.cache-policy");
+  checks.push(swAllowed ?? {
+    code: "worker.service-worker-allowed", status: "unknown",
+    summary: "Service-Worker-Allowed response header was not actively inspected",
+    remedy: "Run Doctor with probeAssets=true to inspect the served worker response",
+  });
+  checks.push(swCache ?? {
+    code: "worker.cache-policy", status: "unknown",
+    summary: "Service Worker response caching policy was not actively inspected",
+    remedy: "Run Doctor with probeAssets=true to verify Cache-Control on the worker script",
+  });
   checks.push({ code: "build.bootstrap-budget", status: "unknown",
     summary: "Minified bootstrap byte budget is a CI build fact, not a runtime measurement" });
-  checks.push(...(assetChecks.length ? assetChecks.slice(0, ASSETS.length) :
+  const probedAssets = assetChecks.filter(c => c.code.startsWith("assets."));
+  checks.push(...(probedAssets.length ? probedAssets.slice(0, ASSETS.length) :
     ASSETS.map(a => ({ code: "assets." + a.name, status: "skipped" as const,
       summary: "Passive check: no HTTP asset probe attempted" }))));
   return {
@@ -176,9 +193,10 @@ export async function probeDoctorAssets(
   scriptUrl: string,
   doFetch: typeof fetch,
   timeoutMs = 1500,
+  registrationScope?: string,
 ): Promise<DoctorCheck[]> {
   if (activeAssetProbe) return activeAssetProbe;
-  const run = probeDoctorAssetsOnce(scriptUrl, doFetch, timeoutMs);
+  const run = probeDoctorAssetsOnce(scriptUrl, doFetch, timeoutMs, registrationScope);
   activeAssetProbe = run;
   try {
     return await run;
@@ -191,6 +209,7 @@ async function probeDoctorAssetsOnce(
   scriptUrl: string,
   doFetch: typeof fetch,
   timeoutMs: number,
+  registrationScope?: string,
 ): Promise<DoctorCheck[]> {
   let base: URL;
   try {
@@ -200,9 +219,11 @@ async function probeDoctorAssetsOnce(
     return ASSETS.map(a => ({ code: "assets." + a.name, status: "unknown",
       summary: "Worker script URL unavailable; safe same-origin probing skipped" }));
   }
-  return Promise.all(ASSETS.map(async (a): Promise<DoctorCheck> => {
+  const assetChecks = await Promise.all(ASSETS.map(async (a): Promise<DoctorCheck> => {
     const code = "assets." + a.name;
-    const url = new URL(a.path, base);
+    const url = a.resolve === "script" ? new URL(base.href) :
+      a.resolve === "root" ? new URL("/" + a.path.replace(/^\/+/, ""), base.origin) :
+      new URL(a.path, base);
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), Math.max(100, Math.min(3000, timeoutMs)));
     try {
@@ -237,6 +258,77 @@ async function probeDoctorAssetsOnce(
       clearTimeout(timer);
     }
   }));
+
+  /* The worker script's own response has two integration-specific
+     requirements from docs/integration-guide.md. Inspect them only
+     when the explicit active probe was requested. */
+  const swUrl = new URL(base.href);
+  const swResultIndex = ASSETS.findIndex(a => a.name === "service-worker");
+  const swAsset = swResultIndex >= 0 ? assetChecks[swResultIndex] : undefined;
+  let allowedCheck: DoctorCheck = {
+    code: "worker.service-worker-allowed", status: "unknown",
+    summary: "Worker scope header could not be verified",
+  };
+  let cacheCheck: DoctorCheck = {
+    code: "worker.cache-policy", status: "unknown",
+    summary: "Worker cache policy could not be verified",
+  };
+
+  if (swAsset?.status === "pass" || swAsset?.status === "warn") {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), Math.max(100, Math.min(3000, timeoutMs)));
+    try {
+      const r = await doFetch(swUrl.href, { method: "HEAD", cache: "no-store",
+        redirect: "manual", credentials: "omit", signal: abort.signal });
+      const scope = safeUrl(registrationScope);
+      if (scope) {
+        const scopeUrl = new URL(scope);
+        const scriptDir = new URL(".", swUrl);
+        const needsHeader = scopeUrl.origin === swUrl.origin &&
+          !scopeUrl.pathname.startsWith(scriptDir.pathname);
+        const raw = (r.headers.get("service-worker-allowed") ?? "").trim();
+        if (!needsHeader) {
+          allowedCheck = { code: "worker.service-worker-allowed", status: "pass",
+            summary: raw ? "Service-Worker-Allowed is present; current scope is within the script directory" :
+              "Current registration scope is within the worker script directory; no broader-scope header is required" };
+        } else if (!raw) {
+          allowedCheck = { code: "worker.service-worker-allowed", status: "fail",
+            summary: "Worker is registered outside its script directory but Service-Worker-Allowed is missing",
+            remedy: "Serve the worker with Service-Worker-Allowed covering the configured registration scope" };
+        } else {
+          let allowed: URL | null = null;
+          try { allowed = new URL(raw, swUrl); } catch { /* invalid below */ }
+          const covers = !!allowed && allowed.origin === swUrl.origin &&
+            scopeUrl.pathname.startsWith(allowed.pathname);
+          allowedCheck = covers ? {
+            code: "worker.service-worker-allowed", status: "pass",
+            summary: "Service-Worker-Allowed covers the active registration scope",
+          } : {
+            code: "worker.service-worker-allowed", status: "fail",
+            summary: "Service-Worker-Allowed does not cover the active registration scope",
+            remedy: "Set Service-Worker-Allowed to a same-origin path that contains the worker scope",
+          };
+        }
+      }
+
+      const cc = (r.headers.get("cache-control") ?? "").toLowerCase();
+      const fresh = /(?:^|,)\s*(?:no-cache|no-store)(?:\s*(?:,|$)|\s*=)/.test(cc);
+      cacheCheck = fresh ? {
+        code: "worker.cache-policy", status: "pass",
+        summary: "Worker script cache policy requires revalidation or disables storage",
+      } : {
+        code: "worker.cache-policy", status: "warn",
+        summary: "Worker script response did not advertise no-cache or no-store",
+        remedy: "Serve the worker with Cache-Control: no-cache to avoid stale pinned worker bytes",
+      };
+    } catch {
+      /* The asset result already records reachability; preserve these
+         header-specific checks as unknown rather than duplicating it. */
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return [...assetChecks, allowedCheck, cacheCheck];
 }
 
 /** Small deadline independent of transport startup; failed initialization
