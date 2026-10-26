@@ -38,6 +38,9 @@ export interface DoctorEvidence {
   policy: DoctorConfigState;
   rules: DoctorConfigState;
   siteconfig: DoctorConfigState;
+  /** Explicit selected-client verification supplied by the host-only
+      control plane. Undefined means the host did not request a client check. */
+  clientControl?: "pass" | "fail" | "unknown";
 }
 type Asset = { name: string; path: string; mime: "script" | "wasm" };
 const ASSETS: readonly Asset[] = [
@@ -55,8 +58,14 @@ export function buildDoctor(e: DoctorEvidence, assetChecks: DoctorCheck[] = []):
     { code: "worker.boot", status: e.boot === "ready" ? "pass" : e.boot === "failed" ? "fail" : "unknown",
       summary: e.boot === "ready" ? "Boot prerequisites resolved" : e.boot === "failed" ? "Boot prerequisites rejected" : "Boot prerequisites did not resolve within the check deadline",
       remedy: e.boot === "ready" ? undefined : "Inspect engine startup diagnostics and retry after the worker is ready" },
-    { code: "worker.client-control", status: "unknown", summary: "Worker-side host message does not prove the selected tab is controlled",
-      remedy: "Confirm navigator.serviceWorker.controller in the selected host document" },
+    { code: "worker.client-control",
+      status: e.clientControl ?? "unknown",
+      summary: e.clientControl === "pass" ? "Selected proxied client is live and controlled by this Zeolite worker" :
+        e.clientControl === "fail" ? "Selected client is missing, stale, or no longer an engine-owned proxied route" :
+        "No selected proxied client was supplied for verification",
+      remedy: e.clientControl === "pass" ? undefined :
+        e.clientControl === "fail" ? "Refresh/rebind the selected tab, then rerun Doctor with its current Service Worker client ID" :
+        "Supply the selected proxied client's current Service Worker client ID" },
     { code: "worker.scope", status: "unknown", summary: "Expected scope was not supplied by the host",
       remedy: "Send the host's expected service worker scope to compare" },
     { code: "bundle.version", status: "unknown", summary: "No served bundle version was supplied by the host",
