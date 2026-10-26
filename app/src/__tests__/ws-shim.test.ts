@@ -116,6 +116,35 @@ describe("page WebSocket shim send and close states (#460/#461)", () => {
     expect(() => es.send("discarded")).not.toThrow();
   });
 
+  it("counts bytes queued through the port and drains only after bridge acknowledgement (#462)", async () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return;
+    vi.stubGlobal("CloseEvent", FakeCloseEvent);
+    let port!: MessagePort;
+    ctlState.ctl = { postMessage(_m: unknown, transfer?: unknown[]) { port = transfer![0] as MessagePort; } };
+    const w: Record<string, unknown> = { WebSocket: Real };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    const ws = new WS("wss://relay.example/ws");
+    port.postMessage({ ev: "open", protocol: "chat" });
+    await new Promise((r) => setTimeout(r, 0));
+    ws.send("é");
+    expect(ws.bufferedAmount).toBe(2);
+    ws.send(new Uint8Array([1, 2, 3]));
+    expect(ws.bufferedAmount).toBe(5);
+    ws.send(new Blob(["ab"]));
+    expect(ws.bufferedAmount).toBe(7);
+    port.postMessage({ ev: "drain", bytes: 2 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ws.bufferedAmount).toBe(5);
+    port.postMessage({ ev: "drain", bytes: 5 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ws.bufferedAmount).toBe(0);
+    port.postMessage({ ev: "drain", bytes: 500 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ws.bufferedAmount).toBe(0); /* never underflows */
+  });
+
   it("posts converted close arguments to the bridge", async () => {
     const Real = globalThis.WebSocket;
     if (!Real) return;
