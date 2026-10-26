@@ -203,7 +203,7 @@ const disp = (e: Event) => {
         send: {
           value: (data: unknown) => {
             const payload = wsPayload(data);
-            if (wsState === 0) throw new DOMException("invalid state", "InvalidStateError");
+            if (wsState === 0) throw new DOMException("State", "InvalidStateError");
             if (wsState >= 2) { bufferedBytes += payload.bytes; return; }
             ch.port1.postMessage({ op: "send", data: payload.data });
             bufferedBytes += payload.bytes;
