@@ -2344,6 +2344,25 @@ export function handleFetch(e: FetchEvent): void {
         target = ogsFixed;
       }
 
+      /* #483: Google Identity Services One Tap and OAuth button flows
+         carry origin= / ss_domain= constructed from LegacyUnforgeable
+         window.location.origin. Repair only values naming this engine
+         and only in the provider's /gsi/ request family. */
+      const gsiFixed = virtualGsiOrigin(target, e.request.referrer, self.location.origin, initiator);
+      if (gsiFixed !== target) {
+        const gtid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: gtid,
+          requestId: gtid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "gsi origin parameter virtualized to the page origin",
+          url: target,
+        });
+        target = gsiFixed;
+      }
+
       /* The hCaptcha widget (#433) builds its host= from
          window.location.hostname (LegacyUnforgeable, the #112 co=
          class): hCaptcha validates it against the sitekey's
@@ -4016,6 +4035,40 @@ export function virtualOgsOrigin(target: string, referrer: string, engineOrigin:
   const parent = referrerOrigin(referrer, initiator);
   if (!parent) return target;
   return u.href.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
+}
+
+/** #483: Google Identity Services embeds the page origin in the origin=
+    parameter of /gsi/iframe/select, /gsi/select and /gsi/button; the OAuth
+    button flow also uses ss_domain=. A native location read names Zeolite's
+    engine origin, which Google cannot recognize as the embedding page.
+    Re-map only exact engine-origin parameters using a verified page
+    context (or a decodable engine-route referrer). A mismatch, malformed
+    input or unknown context is intentionally left untouched. This repairs
+    request identity, not Google's server-side OAuth registration checks. */
+export function virtualGsiOrigin(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol) || u.host !== "accounts.google.com") return target;
+  if (!u.pathname.startsWith("/gsi/") || !u.search) return target;
+  let parent: string | null | undefined;
+  const fixed = u.search.replace(/([?&])(origin|ss_domain)=([^&]*)/g, (full, sep: string, key: string, raw: string) => {
+    let value: string;
+    try {
+      value = decodeURIComponent(raw);
+    } catch {
+      return full;
+    }
+    if (value !== engineOrigin && value !== engineOrigin + ":443" && value !== engineOrigin + ":80")
+      return full;
+    if (parent === undefined) parent = referrerOrigin(referrer, initiator);
+    if (!parent) return full;
+    return sep + key + "=" + encodeURIComponent(parent);
+  });
+  return fixed === u.search ? target : u.href.replace(u.search, fixed);
 }
 
 /** The hCaptcha widget (newassets.hcaptcha.com frames,
