@@ -2809,7 +2809,7 @@ export function handleFetch(e: FetchEvent): void {
                 DIAG.stage(traceId, "PINNED_SCRIPT", { url: target, message: "literal pass skipped: anchored origin-pinning regex (#449)" });
               }
               try {
-                src = await rewriteJsBody(src, cacheRewriteBase(hit, target));
+                src = await rewriteJsBody(src, cacheRewriteBase(hit, target), initiator);
               } catch (err) {
                 /* A wasm load failure must not break the hit: the
                    specifier output still serves (the fresh path's
@@ -3630,7 +3630,7 @@ export function handleFetch(e: FetchEvent): void {
                literal pass leaves them alone. A wasm load failure must
                not 502 the script - the specifier output still serves. */
             try {
-              src = await rewriteJsBody(src, target);
+              src = await rewriteJsBody(src, target, initiator);
             } catch (err) {
               DIAG.emit({
                 category: "REWRITE",

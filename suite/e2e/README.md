@@ -212,3 +212,13 @@ in BOTH committed-route shapes - queryRoutes off (the NAVH path form) and on
 cargo build -p zeolite-server --release
 ZL_STATIC=app/dist node suite/e2e/differential.mjs
 ```
+
+## Location policy fixture (#456)
+
+`node suite/e2e/location-policy.mjs` runs the generated rewriter WASM in real
+Chromium. It checks legacy/hybrid/off and cap skips against native location
+reads, scoped bindings, and executable inline scripts with unchanged hybrid
+event attributes. It requires the normal generated WASM and Playwright install;
+`ZL_REWRITER_WASM_DIR` can select another generated artifact directory. The
+browser CI job gates this fixture. It is a source-policy fixture, not a claim
+that the full service-worker pipeline or a live site passed the compat suite.

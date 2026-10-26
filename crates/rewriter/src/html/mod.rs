@@ -49,6 +49,7 @@ const BLOCKABLE: &[&str] = &[
 ];
 
 pub struct Rewriter {
+    location_events: std::cell::RefCell<Vec<&'static str>>,
     cfg: RewriteConfig,
     /// Real destination URL of the page being rewritten (page base).
     base: String,
@@ -74,6 +75,7 @@ pub struct Rewriter {
 impl Rewriter {
     pub fn new(cfg: RewriteConfig) -> Self {
         Self {
+            location_events: std::cell::RefCell::new(Vec::new()),
             cfg,
             base: String::new(),
             st: St::Text,
@@ -85,6 +87,37 @@ impl Rewriter {
             base_seen: false,
             depth: 0,
         }
+    }
+
+    /// Set before processing. Unknown modes preserve the deployed legacy policy.
+    pub fn set_location_policy(&mut self, mode: &str, max_bytes: usize) {
+        if !matches!(mode, "legacy" | "hybrid" | "off") {
+            return;
+        }
+        self.cfg.rewrite_globals = mode != "off";
+        self.cfg.location_event_attributes = mode == "legacy";
+        self.cfg.location_max_bytes = max_bytes.clamp(1, crate::js::globals::MAX_BYTES);
+    }
+
+    pub fn take_location_events(&self) -> String {
+        self.location_events
+            .borrow_mut()
+            .drain(..)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn location_body(&self, js: &str) -> String {
+        let (out, reason) = if self.cfg.rewrite_globals {
+            crate::js::globals::rewrite_with_reason(js, self.cfg.location_max_bytes)
+        } else {
+            (js.to_owned(), "disabled")
+        };
+        let mut events = self.location_events.borrow_mut();
+        if events.len() < 32 {
+            events.push(reason);
+        }
+        out
     }
 
     /// Set the page's real destination URL (call before the first chunk).
@@ -331,11 +364,7 @@ impl Rewriter {
         // #235: location reads rename to the virtual location global
         // (#236) after the literal and frame-buster passes, so the
         // parse gate sees the final body.
-        if self.cfg.rewrite_globals {
-            crate::js::globals::rewrite_globals(&neutral)
-        } else {
-            neutral
-        }
+        self.location_body(&neutral)
     }
 
     /// Rewrite an iframe srcdoc document (issue #36). The attribute
@@ -555,11 +584,7 @@ impl Rewriter {
                             let neutral = crate::js::antiframe(&rewritten);
                             // #235: the same globals pass the external
                             // body path runs, on the final body.
-                            let with_globals = if self.cfg.rewrite_globals {
-                                crate::js::globals::rewrite_globals(&neutral)
-                            } else {
-                                neutral
-                            };
+                            let with_globals = self.location_body(&neutral);
                             out.push_str(&with_globals);
                         } else {
                             out.push_str(&raw);
@@ -801,11 +826,13 @@ impl Rewriter {
                         }));
                         // #241: handlers read the same virtual
                         // location as script bodies.
-                        Some(if self.cfg.rewrite_globals {
-                            crate::js::globals::rewrite_globals(&neutral)
-                        } else {
-                            neutral
-                        })
+                        Some(
+                            if self.cfg.rewrite_globals && self.cfg.location_event_attributes {
+                                crate::js::globals::rewrite_globals(&neutral)
+                            } else {
+                                neutral
+                            },
+                        )
                     } else {
                         None
                     };
@@ -1536,6 +1563,34 @@ mod tests {
             inject_bootstrap: false,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn location_policy_modes_caps_and_events() {
+        let mut r = Rewriter::new(cfg());
+        r.set_location_policy("off", 512 * 1024);
+        assert_eq!(r.rewrite_js_body("location.pathname"), "location.pathname");
+        assert_eq!(r.take_location_events(), "disabled");
+        r.set_location_policy("hybrid", 8);
+        assert_eq!(r.rewrite_js_body("location.pathname"), "location.pathname");
+        assert_eq!(r.take_location_events(), "size-cap");
+        r.set_location_policy("hybrid", 512 * 1024);
+        assert_eq!(r.rewrite_js_body("location.pathname"), "__zl.pathname");
+        assert_eq!(r.take_location_events(), "rewritten");
+        assert_eq!(
+            r.rewrite_js_body("const location = 1; location;"),
+            "const location = 1; location;"
+        );
+        assert_eq!(r.take_location_events(), "no-reads");
+        assert_eq!(r.rewrite_js_body("location.["), "location.[");
+        assert_eq!(r.take_location_events(), "parse-failure");
+        let out = r.process("<div onclick=\"location.href\"></div><script>location.href</script>");
+        assert!(out.contains("onclick=\"location.href\""), "{out}");
+        assert!(out.contains("<script>__zl.href</script>"), "{out}");
+        for _ in 0..100 {
+            r.rewrite_js_body("location.href");
+        }
+        assert!(r.take_location_events().split(',').count() <= 32);
     }
 
     #[test]

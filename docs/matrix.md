@@ -55,3 +55,10 @@ Bounded by design: 256 network-log entries, 512 tracing decisions, 512
 diagnostic events, 512KB interception body cap (BODY_LIMIT in
 intercept.ts).
 
+
+## Hybrid location policy
+
+**Partial:** SiteConfig legacy/hybrid/off controls share the owner-page policy
+across inline/external scripts, with bounded AST work and reason diagnostics.
+Default migration, whole-pipeline buffering and browser scoreboard rollout
+remain open. See [hybrid policy](hybrid-location-rewrite.md).
