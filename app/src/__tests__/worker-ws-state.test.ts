@@ -40,6 +40,15 @@ describe("worker WebSocket shim states (#460/#461)", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(ws.readyState).toBe(1);
     ws.send("open");
+    expect(ws.bufferedAmount).toBe(4);
+    ws.send(new Uint8Array([1, 2, 3]));
+    expect(ws.bufferedAmount).toBe(7);
+    port!.postMessage({ ev: "drain", bytes: 4 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ws.bufferedAmount).toBe(3);
+    port!.postMessage({ ev: "drain", bytes: 3 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ws.bufferedAmount).toBe(0);
     ws.close(4999, "ok");
     expect(ws.readyState).toBe(2);
     expect(() => ws.send("late")).not.toThrow();
