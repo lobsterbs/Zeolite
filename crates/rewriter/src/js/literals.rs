@@ -353,6 +353,20 @@ fn looks_like_url(s: &str) -> bool {
     if t.contains(' ') {
         return false;
     }
+    // A userinfo-bearing URI can be application configuration (for example,
+    // a telemetry DSN). Changing its authority to an opaque engine route
+    // corrupts parsers before a browser-owned request is ever made.
+    let authority = t
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .or_else(|| t.strip_prefix("//"));
+    if authority.is_some_and(|a| {
+        a.split(['/', '?', '#'])
+            .next()
+            .is_some_and(|host| host.contains('@'))
+    }) {
+        return false;
+    }
     let lower = t.to_ascii_lowercase();
     if lower.starts_with("http://www.w3.org/") || lower.starts_with("https://www.w3.org/") {
         return false;
@@ -531,6 +545,23 @@ mod tests {
             out
         );
         assert!(out.contains(r#""[https://api.example.com/x]""#), "{}", out);
+    }
+
+    #[test]
+    fn credential_bearing_configuration_urls_remain_parseable() {
+        // #499: the Sentry-style DSN is parsed as configuration, not fetched.
+        // A real browser-owned fetch in the same script must still route.
+        let js = r#"const dsn = "https://publickey@telemetry.example/42";
+            const config = new URL(dsn);
+            fetch("https://api.example/score");"#;
+        let out = rewrite_script(js, &|u| format!("[{u}]"));
+        assert!(out.contains(r#""https://publickey@telemetry.example/42""#), "{out}");
+        assert!(out.contains(r#"fetch("[https://api.example/score]")"#), "{out}");
+
+        // This is a URL-structure rule, not a Sentry or site-specific patch.
+        let other = r#"const cfg = new URL("wss://user:pass@config.example/socket");
+            const target = "//name@config.example/options";"#;
+        assert_eq!(rewrite_script(other, &|u| format!("[{u}]")), other);
     }
 
     #[test]
