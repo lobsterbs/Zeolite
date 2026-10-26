@@ -33,6 +33,26 @@ drive the whole design:
 - the page's controller cannot honestly change: the real
   controller of every engine page is the engine worker itself.
 
+## #477 P0 registration groundwork (PR #480)
+
+A pure, bounded, **non-executing** registration identity registry lives in
+`app/src/kernel/guests/registration.ts`. It uses full canonical virtual
+origin + scope as the key (never a short hash), rejects cross-origin scripts
+and scopes, path-ambiguous encoded separators, query/fragment scope input,
+and invalid persisted registrations. Longest-prefix matching requires an
+already-verified owner page origin, not a user-supplied identity. Its records
+hold only `origin`, `scope` and `scriptURL`; they cannot execute code,
+fetch a guessed script or access the engine's storage or control ports.
+
+The legacy single-registration shim can reuse the canonical validation
+helpers while retaining its existing non-execution behavior. This groundwork
+does **not** implement the multiple-scope persistent registry, worker lifecycle,
+isolated guest realm or synthetic fetch dispatch in a live browser. Browser
+behavior and threat-model review remain required before activating any guest
+execution. Never execute a guest inline in the engine Service Worker global;
+a mere `self` facade cannot isolate `globalThis`, constructors or an infinite
+loop. Untrusted worker code stays disabled.
+
 ## Registration identity and scope mapping
 
 Registration key: (site id, canonical scope). The site id is the
