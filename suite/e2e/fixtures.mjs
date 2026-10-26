@@ -156,6 +156,16 @@ export function startFixture(port) {
         send(res, "text/javascript", `var WLIB_MARKER = "wlib-ok";\n`);
       } else if (path === "/dir/shared.js") {
         send(res, "text/javascript", `self.onconnect = (e) => { const p = e.ports[0]; p.onmessage = () => {}; p.postMessage("shared-ok"); };\n`);
+      } else if (path === "/dir/credential-config.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><head><title>credential config</title></head><body><p id="zl-config">config</p><script src="credential-config.js"></script></body></html>`);
+      } else if (path === "/dir/credential-config.js") {
+        /* #499: URL-shaped configuration is parsed, not fetched. */
+        send(res, "text/javascript", [
+          `const dsn = new URL("https://publickey@telemetry.invalid/42");`,
+          `const other = new URL("wss://user:pass@settings.invalid/events");`,
+          `self.__zlConfig = { dsn: dsn.username === "publickey" && dsn.hostname === "telemetry.invalid" && dsn.pathname === "/42", other: other.username === "user" && other.password === "pass" && other.hostname === "settings.invalid", fetched: "pending" };`,
+          `fetch("http://127.0.0.1:7102/api/data").then(r => r.json()).then(j => { self.__zlConfig.fetched = j.zl; }).catch(() => { self.__zlConfig.fetched = "failed"; });`,
+        ].join("\n"));
       } else if (path === "/dir/pinned.html") {
         /* #449: a page whose loader script pins its generated URLs
            with an anchored origin regex. */
