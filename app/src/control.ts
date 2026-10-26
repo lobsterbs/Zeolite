@@ -1141,7 +1141,7 @@ export async function handleControlEvent(
     }
     const scriptUrl = self.location?.href;
     const assets = msg.probeAssets === true ?
-      await probeDoctorAssets(scriptUrl ?? "", fetch) : [];
+      await probeDoctorAssets(scriptUrl ?? "", fetch, 1500, self.registration?.scope) : [];
     const report = buildDoctor({
       engineVersion: ZEOLITE_VERSION,
       boot,
