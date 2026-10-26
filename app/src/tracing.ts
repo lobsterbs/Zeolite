@@ -43,8 +43,10 @@ export function setTracing(on: boolean): void {
 }
 
 /** Record one decision. No-op (zero allocation) while tracing is off. */
-export function traceDecision(d: Omit<TraceEntry, "seq" | "ts">): void {
-  if (!enabled) return;
+/** A host-selected adaptive shadow may emit its fixed-vocabulary
+    comparison even when full, URL-bearing tracing is disabled. */
+export function traceDecision(d: Omit<TraceEntry, "seq" | "ts">, shadow = false): void {
+  if (!enabled && !shadow) return;
   ring.push({
     ...d,
     original: redactSecrets(d.original),
