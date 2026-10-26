@@ -290,7 +290,9 @@ async function main() {
   await check("doctor: passive report proves only observed host facts and emits KDL (#495)", async () => {
     const { page } = await openProxied(ORIGIN_A + "/dir/page.html");
     const ping = await hostControl(page, { type: "zl:ping" });
+    const transportBefore = await hostControl(page, { type: "zl:transport" });
     assert(ping?.ok === true && typeof ping.version === "string", "ping unavailable: " + JSON.stringify(ping));
+    assert(transportBefore?.ok === true, "transport poll unavailable before Doctor");
     const report = await hostControl(page, {
       type: "zl:doctor", expectedScope: ENGINE + "/", expectedVersion: ping.version, format: "kdl",
     });
@@ -305,6 +307,12 @@ async function main() {
     eq(byCode["assets.bootstrap"]?.status, "skipped", "passive Doctor must not probe assets");
     assert(typeof report.kdl === "string" && report.kdl.startsWith("zeolite-doctor version=1"), "missing Doctor KDL");
     assert(!report.kdl.includes(ORIGIN_A), "Doctor KDL leaked target origin");
+    const pingAfter = await hostControl(page, { type: "zl:ping" });
+    const transportAfter = await hostControl(page, { type: "zl:transport" });
+    for (const key of ["version", "prefix", "scheme", "httpsUpgrade", "imageLazy", "navHandles", "queryRoutes"])
+      eq(pingAfter[key], ping[key], "passive Doctor changed ping field " + key);
+    eq(JSON.stringify(pingAfter.experimental), JSON.stringify(ping.experimental), "passive Doctor changed experimental flags");
+    eq(transportAfter.engine, transportBefore.engine, "passive Doctor changed transport engine");
     const mismatch = await hostControl(page, {
       type: "zl:doctor", expectedScope: ENGINE + "/wrong/", expectedVersion: "definitely-not-" + ping.version,
     });
