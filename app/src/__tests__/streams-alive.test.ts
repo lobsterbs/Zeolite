@@ -44,6 +44,27 @@ describe("streams-alive (#99 keepalive)", () => {
     expect(activeStreams()).toBe(0);
   });
 
+  it("keeps host-scoped loading separate while preserving global keepalive", () => {
+    streamAlive("https://site-a.example/page");
+    streamAlive("https://site-b.example/styles.css");
+    streamAlive("https://site-a.example/assets/app.js");
+    try {
+      expect(activeStreams()).toBe(3);
+      expect(activeStreams("site-a.example")).toBe(2);
+      expect(activeStreams("site-b.example")).toBe(1);
+      expect(activeStreams("site-c.example")).toBe(0);
+      streamDone("https://site-a.example/page");
+      expect(activeStreams("site-a.example")).toBe(1);
+      streamDone("https://site-b.example/styles.css");
+      expect(activeStreams("site-b.example")).toBe(0);
+      expect(activeStreams("site-a.example")).toBe(1);
+    } finally {
+      streamDone("https://site-a.example/assets/app.js");
+      while (activeStreams()) streamDone();
+    }
+    expect(activeStreams()).toBe(0);
+  });
+
   it("arms the heartbeat while active and stops it when the last stream settles", () => {
     expect(heartbeatArmed()).toBe(false);
     streamAlive();
