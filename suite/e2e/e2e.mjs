@@ -305,7 +305,14 @@ async function main() {
     eq(byCode["assets.bootstrap"]?.status, "skipped", "passive Doctor must not probe assets");
     assert(typeof report.kdl === "string" && report.kdl.startsWith("zeolite-doctor version=1"), "missing Doctor KDL");
     assert(!report.kdl.includes(ORIGIN_A), "Doctor KDL leaked target origin");
-    return "passive facts + KDL";
+    const mismatch = await hostControl(page, {
+      type: "zl:doctor", expectedScope: ENGINE + "/wrong/", expectedVersion: "definitely-not-" + ping.version,
+    });
+    const mismatchByCode = Object.fromEntries(mismatch.checks.map((c) => [c.code, c]));
+    eq(mismatchByCode["worker.scope"]?.status, "fail", "wrong expected scope");
+    eq(mismatchByCode["bundle.version"]?.status, "fail", "wrong expected version");
+    assert(mismatch.healthy === false, "confirmed scope/version mismatch must make health false");
+    return "passive facts + KDL + scope/version mismatch";
   });
 
   await check("doctor: verifies live proxied client and rejects fake identity (#495)", async () => {
