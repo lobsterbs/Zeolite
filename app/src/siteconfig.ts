@@ -52,14 +52,17 @@ export function siteconfigDoctorState(): typeof doctorState { return doctorState
 export function siteRules(): Promise<SiteRules> {
   if (!cached) {
     cached = (async () => {
+      let parsing = false;
       try {
         const resp = await fetch("/siteconfig.kdl", { cache: "no-cache" });
         if (!resp.ok) { doctorState = resp.status === 404 ? "missing" : "unavailable"; return {}; }
-        const result = rulesFromNodes(parseKdl(await resp.text()));
+        const body = await resp.text();
+        parsing = true;
+        const result = rulesFromNodes(parseKdl(body));
         doctorState = "loaded";
         return result;
       } catch {
-        doctorState = "invalid";
+        doctorState = parsing ? "invalid" : "unavailable";
         return {};
       }
     })();
