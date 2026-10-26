@@ -2669,6 +2669,10 @@ export function handleFetch(e: FetchEvent): void {
                between first load and reload. */
             const plan = planResponseTransit(decision, hit.headers.get("content-type") ?? "", dest, target, policyRule);
             const dec = plan.decision;
+            /* #487: opt-in evidence, no raw URL added to the planner trace;
+               traceId joins the existing network log for this request. */
+            traceDecision({ subsystem: "transport", rule: "adaptive-picker", original: dec.mode,
+              result: plan.strategy + ":" + plan.evidence, resource: rtype, traceId });
             const chNative = isCdnCgiUrl(target);
             transitRecord(traceId, target, dec);
             /* #95: a decision that leaves the native path is an
@@ -3317,6 +3321,8 @@ export function handleFetch(e: FetchEvent): void {
              transport rules, and never auto-demotes required passes. */
           const plan = planResponseTransit(decision, resp.headers.get("content-type") ?? "", dest, target, policyRule);
           const dec = plan.decision;
+          traceDecision({ subsystem: "transport", rule: "adaptive-picker", original: dec.mode,
+            result: plan.strategy + ":" + plan.evidence, resource: rtype, traceId });
           if (dec.mode === "NativeTransit" && dec.reason === "POLICY_NATIVE")
             traceDecision({ subsystem: "policy", rule: policyRule!.id, original: target, result: "native", resource: rtype, traceId });
           const cdnCgiNative = isCdnCgiUrl(target);
