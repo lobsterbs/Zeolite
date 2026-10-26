@@ -91,7 +91,7 @@ export class GuestRegistrationRegistry {
     let origin: string;
     try {
       const owner = new URL(ownerPageUrl);
-      const client = new URL(clientUrl);
+      const client = new URL(clientUrl, owner.href);
       if (!/^https?:$/.test(owner.protocol) || owner.origin !== client.origin) return null;
       origin = owner.origin;
     } catch {
@@ -99,7 +99,7 @@ export class GuestRegistrationRegistry {
     }
     let best: GuestRegistrationIdentity | null = null;
     for (const rec of this.byKey.values()) {
-      if (rec.origin !== origin || !guestScopeMatches(rec.scope, clientUrl)) continue;
+      if (rec.origin !== origin || !guestScopeMatches(rec.scope, new URL(clientUrl, ownerPageUrl).href)) continue;
       if (!best || rec.scope.length > best.scope.length) best = rec;
     }
     return best ? { ...best } : null;
