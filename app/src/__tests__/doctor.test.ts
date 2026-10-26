@@ -91,7 +91,7 @@ describe("Zeolite Doctor passive evidence model (#495)", () => {
     r.checks.push({
       code: 'x";\\nrogue "injected"',
       status: "warn",
-      summary: "line1\\nline2\\tsemi;\\u0000end",
+      summary: "line1\\nline2\\tsemi;\u0000end",
       remedy: 'quoted \\";\\nextra',
     });
     const source = doctorKdl(r);
