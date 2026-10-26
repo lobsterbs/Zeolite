@@ -38,7 +38,7 @@
    `npx playwright install chromium`). */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, renameSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright";
@@ -366,6 +366,24 @@ async function main() {
   });
 
 
+  await check("doctor: missing rewriter WASM is a named deployment failure (#495)", async () => {
+    const { page } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const wasm = resolve("app/dist/rewriter_wasm_bg.wasm");
+    const held = wasm + ".doctor-missing";
+    assert(existsSync(wasm), "built rewriter WASM fixture is missing before test");
+    renameSync(wasm, held);
+    try {
+      const report = await hostControl(page, { type: "zl:doctor", probeAssets: true });
+      const check = report?.checks?.find((c) => c.code === "assets.rewriter-wasm");
+      eq(check?.status, "fail", "missing rewriter WASM status");
+      assert(String(check?.summary).includes("missing") || String(check?.summary).includes("redirect"),
+        "missing WASM did not produce actionable evidence: " + JSON.stringify(check));
+      assert(report.healthy === false, "known missing runtime asset must make Doctor health false");
+      return "assets.rewriter-wasm=fail";
+    } finally {
+      renameSync(held, wasm);
+    }
+  });
   await check("routing: an absolute cross-origin link navigates through the engine", async () => {
     const { page } = await openProxied(ORIGIN_A + "/dir/page.html");
     await (await waitFor("frame", 10000, () => frameWith(page, "#zl-marker"))).locator("#abs").click();
