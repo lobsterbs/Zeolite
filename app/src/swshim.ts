@@ -39,8 +39,8 @@ function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string
   const pageOrigin = new URL(pageUrl).origin;
   if (scope === undefined) {
     const s = new URL("./", scriptHref);
-    if (s.origin !== pageOrigin) {
-      throw new TypeError("Worker scope must be same-origin");
+    if (s.origin !== pageOrigin || /%2f|%5c/i.test(s.pathname)) {
+      throw new TypeError("Worker scope must be same-origin and safely encoded");
     }
     return s.href;
   }
@@ -50,8 +50,8 @@ function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string
   } catch {
     /* malformed below */
   }
-  if (!s || s.origin !== pageOrigin) {
-    throw new TypeError("Worker scope must be same-origin");
+  if (!s || s.origin !== pageOrigin || /%2f|%5c/i.test(s.pathname)) {
+    throw new TypeError("Worker scope must be same-origin and safely encoded");
   }
   return s.href;
 }
@@ -78,6 +78,7 @@ function registrations(store: SwShimStore, pageUrl: string): StoredRegistration[
       const script = new URL(r.scriptURL);
       const scope = new URL(r.scope);
       if (script.origin !== origin || scope.origin !== origin ||
+          /%2f|%5c/i.test(script.pathname + scope.pathname) ||
           scope.search || scope.hash) continue;
       byScope.set(scope.href, { scriptURL: script.href, scope: scope.href });
     } catch { /* invalid or foreign registration */ }
@@ -126,8 +127,9 @@ export function swShimRegister(
   let script: URL | null = null;
   try { script = new URL(scriptURL + "", pageUrl); }
   catch { /* malformed below */ }
-  if (!script || script.origin !== new URL(pageUrl).origin) {
-    throw new TypeError("The Service Worker script is outside the page origin");
+  if (!script || script.origin !== new URL(pageUrl).origin ||
+      /%2f|%5c/i.test(script.pathname)) {
+    throw new TypeError("The Service Worker script is invalid or outside the page origin");
   }
   const rec = { scriptURL: script.href, scope: scopeFor(pageUrl, options?.scope, script.href) };
   const existing = registrations(store, pageUrl).filter(r => r.scope !== rec.scope);
@@ -176,8 +178,16 @@ export function swShimApply(container: object, store: SwShimStore, pageUrl: stri
       return Promise.reject(e);
     }
   }) as unknown;
-  c.getRegistration = ((s?: string) =>
-    Promise.resolve(swShimGet(store, pageUrl, s))) as unknown;
+  c.getRegistration = ((clientURL?: string) => {
+    try {
+      const u = new URL(clientURL ?? pageUrl, pageUrl);
+      if (u.origin !== new URL(pageUrl).origin)
+        return Promise.reject(new DOMException("Cross-origin client URL", "SecurityError"));
+      return Promise.resolve(swShimGet(store, pageUrl, clientURL));
+    } catch (err) {
+      return Promise.reject(err instanceof DOMException ? err : new TypeError("Invalid client URL"));
+    }
+  }) as unknown;
   c.getRegistrations = (() =>
     Promise.resolve(swShimList(store, pageUrl))) as unknown;
   try {
