@@ -152,22 +152,27 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
     expect(r.every(x => x.status === "unknown")).toBe(true);
   });
 
-  it("checks only four static sibling HEAD endpoints, with no credential transfer", async () => {
+  it("checks the fixed runtime asset set with HEAD, MIME, nosniff and no credential transfer", async () => {
     const seen: Array<[string, RequestInit]> = [];
     const fetcher = vi.fn(async (url: string, init: RequestInit) => {
       seen.push([url, init]);
       return new Response(null, { status: 200, headers: {
         "content-type": url.endsWith(".wasm") ? "application/wasm" : "text/javascript",
+        "x-content-type-options": "nosniff",
       } });
     });
     const r = await probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch);
-    expect(r).toHaveLength(4);
+    expect(r).toHaveLength(8);
     expect(r.every(x => x.status === "pass")).toBe(true);
     expect(seen.map(x => x[0])).toEqual([
+      "https://engine.example/zlsw/sw.js",
       "https://engine.example/zlsw/bootstrap.js",
       "https://engine.example/zlsw/codec.js",
       "https://engine.example/zlsw/worker-prelude.js",
       "https://engine.example/zlsw/rewriter_wasm_bg.wasm",
+      "https://engine.example/zlsw/libcurl/index.mjs",
+      "https://engine.example/zlsw/epoxy/epoxy.js",
+      "https://engine.example/zlsw/epoxy/epoxy.wasm",
     ]);
     for (const [url, init] of seen) {
       expect(new URL(url).origin).toBe("https://engine.example");
@@ -182,12 +187,13 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
     const fetcher = vi.fn(async (url: string) =>
       new Response(null, { status: 200, headers: {
         "content-type": url.endsWith(".wasm") ? "application/wasm" : "text/javascript",
+        "x-content-type-options": "nosniff",
       } }));
     const [one, two] = await Promise.all([
       probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch),
       probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch),
     ]);
-    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(fetcher).toHaveBeenCalledTimes(8);
     expect(one).toEqual(two);
   });
 
@@ -199,8 +205,23 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
       throw new Error("private-token");
     });
     const r = await probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch);
-    expect(r.map(c => c.status)).toEqual(["fail", "fail", "unknown", "unknown"]);
+    const byCode = Object.fromEntries(r.map(c => [c.code, c]));
+    expect(byCode["assets.bootstrap"].status).toBe("fail");
+    expect(byCode["assets.codec"].status).toBe("fail");
+    expect(byCode["assets.worker-prelude"].status).toBe("unknown");
+    expect(byCode["assets.rewriter-wasm"].status).toBe("unknown");
     expect(JSON.stringify(r)).not.toContain("private-token");
+  });
+
+  it("warns when executable assets have the right MIME but no nosniff header", async () => {
+    const fetcher = vi.fn(async (url: string) =>
+      new Response(null, { status: 200, headers: {
+        "content-type": url.endsWith(".wasm") ? "application/wasm" : "text/javascript",
+      } }));
+    const r = await probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch);
+    expect(r).toHaveLength(8);
+    expect(r.every(c => c.status === "warn")).toBe(true);
+    expect(r.every(c => c.summary.includes("nosniff"))).toBe(true);
   });
 
   it("does not claim a successful handshake, configuration, or page identity from asset HEAD responses", async () => {
