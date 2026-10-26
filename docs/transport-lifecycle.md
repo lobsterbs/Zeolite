@@ -33,27 +33,30 @@ Relay credit negotiation is captured per request. Replacing the registered port 
 
 ## Explicit delivery evidence (#454)
 
-The transport seam now represents request-delivery confidence as three typed
-states in `app/src/delivery.ts`:
+The internal result contract distinguishes `definitely-not-delivered`,
+`delivered-response`, and `delivery-unknown`, with the transport path and
+original failure cause. Public fetch methods retain their Response/throw
+contract. Failures retain their original cause inside a typed delivery error; relay
+keeps its terminal unknown-delivery error behavior. A response means headers arrived; body
+completion is separate.
 
-- `definitely-not-delivered`: a verified failure **before** the transport
-  adapter was invoked (e.g. primary Wisp initialization failure).
-- `delivered-response`: an actual response was received.
-- `delivery-unknown`: an adapter was invoked but failed, timed out or lost
-  its channel before a response; error text does **not** prove non-delivery.
+Primary initialization runs before target dispatch and can establish
+non-delivery. Once an adapter is called, all failures (including timeouts and
+errors suggesting an unopened socket) remain delivery-unknown. Alternate
+adapters initialize lazily while sending, so their failures remain unknown.
+Relay no-channel/unsupported-body cases are pre-dispatch; channel failure or
+invalid response after dispatch is unknown. Abort and one-shot bodies never
+replay. Idempotent replay rules remain unchanged. Non-idempotent replay needs
+engine-owned pre-dispatch evidence, stored privately rather than inferred
+from error text or forgeable properties. Adapter-returned pre-dispatch classifications are reclassified as unknown;
+mutable public error properties cannot change private replay evidence.
 
-Wisp and alternate-Wisp failures after dispatch surface typed
-`TransportDeliveryError` errors, and the relay's existing terminal
-`RelayDeliveryUnknownError` now carries the same explicit delivery state and
-its transport identity. Generic untyped adapter errors default to
-`delivery-unknown`. The retry gate requires a replayable body AND either an
-idempotent method or **verified** pre-dispatch non-delivery. Caller aborts
-remain aborts rather than delivery-inference candidates. A synchronous relay
-`MessagePort.postMessage` error cleans up its waiter and abort listener,
-then conservatively treats delivery as unknown.
+Fixed diagnostic messages record state and transport without copying error
+messages, request bodies, tokens or URLs into this evidence log. Relay port
+exceptions and invalid response construction cancel upstream and release
+listeners; a broken cancellation port cannot block local teardown.
 
-This is a safety contract, **not proof of exactly-once delivery**: network
-failures after dispatch cannot generally establish whether the upstream
-committed a write. The contract is in use at the current Wisp/relay seams,
-but full fault-injection coverage at every server-side acceptance boundary,
-including drop-after-upstream-commit, is still required before closing #454.
+This is a safety contract, not proof of exactly-once delivery. Full server-side
+fault injection at every acceptance boundary, including dropping a connection
+after upstream commit, remains required before closing #454. Local adapter
+fault tests and typed outcomes do not establish what a remote server committed.

@@ -1,6 +1,6 @@
 /* #251/#255 acceptance: the automatic reset+retry only rides
-   idempotent requests with replayable bodies ("websocket did not
-   open" is pre-send and safe for any method), and the first-byte
+   idempotent requests with replayable bodies after dispatch. Error
+   messages cannot establish non-delivery. The first-byte
    deadline aborts the abandoned upstream fetch through the signal
    the vendored request accepts. The vendored module is mocked; the
    cancel/backpressure surface of the vendored stream lives in
@@ -11,11 +11,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const h = vi.hoisted(() => ({
   calls: [] as Array<{ dest: string; method?: string; body?: unknown; signal?: AbortSignal | null }>,
   failFirst: null as string | null,
+  initFailure: null as Error | null,
   stall: false,
 }));
 
 vi.mock("../libcurl-transport-vendored", () => ({
-  init: async () => {},
+  init: async () => { if (h.initFailure) throw h.initFailure; },
   fetch: (dest: string, init?: RequestInit) => {
     h.calls.push({ dest, method: init?.method, body: init?.body, signal: init?.signal });
     if (h.failFirst !== null) {
@@ -50,11 +51,22 @@ import { TransportDeliveryError, deliveryStateOf } from "../delivery";
 beforeEach(() => {
   h.calls.length = 0;
   h.failFirst = null;
+  h.initFailure = null;
   h.stall = false;
   transportResetForTests(15);
 });
 
 describe("transport retry safety (#251)", () => {
+  it("marks a primary initialization failure before target dispatch", async () => {
+    const { deliveryState } = await import("../delivery");
+    const error = new Error("initialization failed");
+    h.initFailure = error;
+    const failure = await wispTransport.fetch("https://a.example/", { method: "POST", body: "x" }).catch(e => e);
+    expect(failure.cause).toBe(error);
+    expect(h.calls).toHaveLength(0);
+    expect(deliveryState(failure)).toBe("definitely-not-delivered");
+  });
+
   it("GET is retried once on a connect-class failure", async () => {
     h.failFirst = "failed sending data";
     const r = await wispTransport.fetch("https://a.example/");

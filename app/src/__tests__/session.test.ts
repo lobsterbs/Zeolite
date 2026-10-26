@@ -27,7 +27,9 @@ describe("session export/import", () => {
     expect(blob.iter).toBe(SESSION_ITERATIONS);
     /* no plaintext secrets in the envelope */
     expect(JSON.stringify(blob)).not.toContain("secret-value");
-    expect(JSON.stringify(blob)).not.toContain("sid");
+    // Random base64 can legitimately contain three letters such as sid.
+    // Check the serialized plaintext value, which ciphertext cannot contain.
+    expect(JSON.stringify(blob)).not.toContain(JSON.stringify("sid"));
     const back = (await decryptSession("correct horse battery", blob)) as {
       cookies: Array<[string, Array<{ name: string; value: string }>]>;
       tabs: Array<{ id: number }>;

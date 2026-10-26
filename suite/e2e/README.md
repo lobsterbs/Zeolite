@@ -222,3 +222,10 @@ event attributes. It requires the normal generated WASM and Playwright install;
 `ZL_REWRITER_WASM_DIR` can select another generated artifact directory. The
 browser CI job gates this fixture. It is a source-policy fixture, not a claim
 that the full service-worker pipeline or a live site passed the compat suite.
+
+## WebSocket discarded-send bytes (#462)
+
+`node suite/e2e/ws-buffered.mjs` compares the production page shim (with a
+controlled bridge) against direct Chromium for UTF-8/binary sends while
+CLOSING/CLOSED. Discarded writes add bytes without transmission. The browser
+CI job gates this fixture; it does not measure lower-transport network drain.
