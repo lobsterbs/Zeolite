@@ -44,10 +44,14 @@ export interface DoctorEvidence {
 }
 type Asset = { name: string; path: string; mime: "script" | "wasm" };
 const ASSETS: readonly Asset[] = [
+  { name: "service-worker", path: "sw.js", mime: "script" },
   { name: "bootstrap", path: "bootstrap.js", mime: "script" },
   { name: "codec", path: "codec.js", mime: "script" },
   { name: "worker-prelude", path: "worker-prelude.js", mime: "script" },
   { name: "rewriter-wasm", path: "rewriter_wasm_bg.wasm", mime: "wasm" },
+  { name: "libcurl", path: "libcurl/index.mjs", mime: "script" },
+  { name: "epoxy-js", path: "epoxy/epoxy.js", mime: "script" },
+  { name: "epoxy-wasm", path: "epoxy/epoxy.wasm", mime: "wasm" },
 ];
 
 /** Outcome uses fixed human-readable labels; no raw secret-bearing URLs,
@@ -213,12 +217,20 @@ async function probeDoctorAssetsOnce(
         return { code, status: "unknown", summary: "Asset HEAD request was unsuccessful (not enough evidence to classify missing)" };
       const mime = (r.headers.get("content-type") ?? "").toLowerCase().split(";")[0].trim();
       const allowed = a.mime === "wasm" ? mime === "application/wasm" :
-        mime === "text/javascript" || mime === "application/javascript" || mime === "application/x-javascript";
-      return allowed ? { code, status: "pass", summary: "Asset answered HEAD with expected MIME type" } :
-        { code, status: mime === "text/html" ? "fail" : "warn",
-          summary: mime === "text/html" ? "Asset served HTML instead of the required content type" :
-            "Asset response MIME type is missing or unexpected",
-          remedy: "Verify build artifacts, Content-Type headers and static route fallbacks" };
+        mime === "text/javascript" || mime === "application/javascript" ||
+        mime === "application/x-javascript";
+      const nosniff = (r.headers.get("x-content-type-options") ?? "").toLowerCase() === "nosniff";
+      if (!allowed) return {
+        code, status: mime === "text/html" ? "fail" : "warn",
+        summary: mime === "text/html" ? "Asset served HTML instead of the required content type" :
+          "Asset response MIME type is missing or unexpected",
+        remedy: "Verify build artifacts, Content-Type headers and static route fallbacks",
+      };
+      return nosniff ? { code, status: "pass",
+        summary: "Asset answered HEAD with expected MIME type and nosniff" } :
+        { code, status: "warn",
+          summary: "Asset MIME type is correct but X-Content-Type-Options: nosniff was not observed",
+          remedy: "Serve executable/WASM assets with X-Content-Type-Options: nosniff" };
     } catch {
       return { code, status: "unknown", summary: "Asset HEAD request timed out or failed; availability unverified" };
     } finally {
