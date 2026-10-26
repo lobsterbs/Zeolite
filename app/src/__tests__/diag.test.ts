@@ -35,6 +35,22 @@ describe("diag ring bounds (#95)", () => {
     const since = snap.lastSeq - 10;
     expect(DIAG.snapshot(since).events.length).toBe(10);
   });
+  it("redacts stack traces along with message, URL and technical reason (#494)", () => {
+    const start = DIAG.snapshot(0).lastSeq;
+    DIAG.emit({
+      category: "RUNTIME", severity: "error",
+      message: "failed while reading https://name:password@site.example/path",
+      technicalReason: "Authorization: Bearer testsecrettoken",
+      url: "https://name:password@site.example/path?access_token=abc",
+      stack: "Error: https://name:password@site.example/path?access_token=abc",
+    });
+    const [entry] = DIAG.snapshot(start).events;
+    expect(entry.stack).toContain("[redacted]");
+    expect(JSON.stringify(entry)).not.toContain("password@site.example");
+    expect(JSON.stringify(entry)).not.toContain("access_token=abc");
+    expect(JSON.stringify(entry)).not.toContain("testsecrettoken");
+  });
+
   it("a TRANSPORT_FALLBACK decision event carries the fallback reason", () => {
     DIAG.emit({
       category: "TRANSPORT",
