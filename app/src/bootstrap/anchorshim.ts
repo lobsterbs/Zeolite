@@ -197,8 +197,8 @@ function decodeBatch(routes: string[], more: boolean): void {
     value is not a route (the caller keeps its native read). */
 export function anchorVirtual(v: string): string | undefined {
   const hit = memo.get(v);
-  if (hit !== undefined) return hit === "" ? undefined : hit;
-  if (!routeShaped(v)) return undefined;
+  if (hit !== undefined) return hit || undefined;
+  if (!routeShaped(v)) return;
   if (scanCursor === Infinity && !inflight.has(v)) decodeBatch([v], false);
   else scheduleScan();
   return undefined;
