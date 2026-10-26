@@ -15,7 +15,7 @@ const evidence = (overrides: Partial<DoctorEvidence> = {}): DoctorEvidence => ({
   transport: "idle",
   relay: false,
   alternateWisp: false,
-  primaryWisp: "wss://alice:secret@engine.example/wisp/?access_token=SECRET",
+  primaryWisp: "wss://engine.example/wisp/",
   policy: "not-loaded",
   rules: "not-loaded",
   siteconfig: "not-loaded",
@@ -63,6 +63,30 @@ describe("Zeolite Doctor passive evidence model (#495)", () => {
     }
     expect(check(buildDoctor(evidence({ primaryWisp: "not-a-url" })), "transport.wisp-endpoint").status).toBe("fail");
     expect(check(buildDoctor(evidence({ primaryWisp: "ws://localhost:1234/wisp/" })), "transport.wisp-endpoint").status).toBe("warn");
+  });
+
+  it("rejects credentials in WISP endpoint URLs without returning their values", () => {
+    for (const url of [
+      "wss://alice:secret@engine.example/wisp/",
+      "wss://engine.example/wisp/#private-fragment",
+      "https://engine.example/wisp/?token=secret",
+    ]) {
+      const report = buildDoctor(evidence({ primaryWisp: url }));
+      expect(check(report, "transport.wisp-endpoint").status).toBe("fail");
+      expect(report.healthy).toBe(false);
+      const serialized = JSON.stringify(report) + doctorKdl(report);
+      expect(serialized).not.toContain("alice");
+      expect(serialized).not.toContain("secret");
+      expect(serialized).not.toContain("private-fragment");
+    }
+  });
+
+  it("warns about query-bearing WSS URLs without inventing handshake status", () => {
+    const r = buildDoctor(evidence({ primaryWisp: "wss://engine.example/wisp/?access_token=SECRET" }));
+    expect(check(r, "transport.wisp-endpoint").status).toBe("warn");
+    expect(check(r, "transport.wisp-auth").status).toBe("unknown");
+    expect(JSON.stringify(r)).not.toContain("SECRET");
+    expect(doctorKdl(r)).not.toContain("SECRET");
   });
 
   it("only verifies host version and scope when supplied with comparable observations", () => {
