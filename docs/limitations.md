@@ -47,11 +47,14 @@ that does not follow it sees the submission as hung (the DIAG event
 explains the behavior). An unannounced body that overflows the cap
 mid-buffer fails honestly instead.
 
-## Shared workers are keyed by URL only
+## SharedWorker identity is scoped, not a separate origin
 
-Classic and module shared workers loading from the same URL share one
-key, so their script environments are not isolated from each other.
-Documented in docs/matrix.md; a module/classic-aware key is the fix.
+The constructor wrapper folds the virtual-site token, classic/module script
+type and credentials mode into the native worker name. This prevents
+accidental classic/module and cross-site instance sharing while preserving
+the same scoped identity for repeated same-site, same-type constructions.
+Chromium sharing, teardown and hostile same-engine-page isolation still need
+end-to-end verification for #453. The virtual sites remain browser-same-origin.
 
 ## window.location is not virtualized
 
