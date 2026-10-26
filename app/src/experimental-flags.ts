@@ -18,17 +18,29 @@ const defaults = (): ExperimentalChoices => ({
 });
 let requested = defaults();
 
-/** V1 selections are intentionally non-enforcing, not advertised as
-    active. Existing conservative response planning and per-site KDL
-    hybrid policies remain governed by their original mechanisms. */
+/** Runtime flags must never be inferred from caller-provided
+    messages on the proxied page side. Only host zl:config can write. */
+export function experimentalEnabled(key: ExperimentalFlag): boolean {
+  return requested[key] === true;
+}
+
+/** Effective describes shipped behavior, not a promised complete
+    feature: CSP is limited to deny-only policies; adaptive routing
+    has an observational shadow gate only. Full guest execution and
+    hybrid pre-execution rewriting remain inactive. */
 export function experimentalSnapshot() {
   return {
     requested: { ...requested },
-    effective: defaults(),
+    effective: {
+      adaptiveTransit: false,
+      hybridLocation: false,
+      cspTranslation: requested.cspTranslation,
+      virtualSW: false,
+    },
     status: {
-      adaptiveTransit: "not-wired",
+      adaptiveTransit: requested.adaptiveTransit ? "shadow-only" : "disabled",
       hybridLocation: "not-wired",
-      cspTranslation: "not-implemented",
+      cspTranslation: requested.cspTranslation ? "deny-only" : "disabled",
       virtualSW: "not-implemented",
     } as const,
   };
