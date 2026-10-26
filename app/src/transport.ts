@@ -263,9 +263,8 @@ class WispStallError extends Error {}
    reset. A non-idempotent method or a one-shot (stream) body fails
    honestly on the first error instead of the retry duplicating a
    side effect or dying on an already-consumed stream.
-   "websocket did not open" fails before the request is ever sent,
-   so it is retryable for any method (pre-send is the one safe
-   class). request.ts buffers stream bodies once at its
+   Transport error text cannot prove that a request was never sent.
+   Non-idempotent requests therefore remain terminal after dispatch. request.ts buffers stream bodies once at its
    upstreamFetch choke point (#155), so real traffic arrives here
    replayable; a bare stream means a caller that bypassed that
    seam. */
@@ -278,9 +277,8 @@ function bodyReplayable(init?: RequestInit): boolean {
   return false; /* ReadableStream and anything else one-shot */
 }
 
-function retryable(init: RequestInit | undefined, err: unknown): boolean {
+function retryable(init: RequestInit | undefined, _err: unknown): boolean {
   if (!bodyReplayable(init)) return false;
-  if (/websocket did not open/i.test(String(err))) return true;
   return IDEMPOTENT_METHODS.has((init?.method ?? "GET").toUpperCase());
 }
 

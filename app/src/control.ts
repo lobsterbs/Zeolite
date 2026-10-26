@@ -290,7 +290,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          embedder's handler must tolerate non-relay frames. */
       const rp = e.ports[0];
       if (rp) {
-        relayRegister(rp);
+        relayRegister(rp, (msg as unknown as { credits?: unknown }).credits);
         reply({ ok: true });
       } else {
         reply({ ok: false, error: "relay registration needs a port" });

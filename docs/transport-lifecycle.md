@@ -24,3 +24,9 @@ Frame-buster neutralization (`crates/rewriter/src/js/antiframe.rs`) is
 wired into the streaming rewriter for both script bodies and inline
 event handlers, at feature parity with the sibling server-side pass.
 Its unit tests run under the rust CI job's `cargo test` step.
+
+## Replay and relay bounds
+
+Transport error messages do not prove non-delivery. After dispatch, automatic retries require an idempotent method and a replayable body; POST/PATCH failures remain terminal even when their text describes an unopened WebSocket. This intentionally favors avoiding duplicated side effects.
+
+Relay credit negotiation is captured per request. Replacing the registered port cannot change the credit protocol of existing streams. Pending response queues are bounded to 4 MiB and 4,096 frames, including legacy peers. Overflow cancels upstream and fails the response; it never silently drops body bytes. Legacy peers still lack cooperative backpressure.

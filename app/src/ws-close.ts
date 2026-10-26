@@ -9,16 +9,16 @@ export function validateWsClose(code?: unknown, reason?: unknown): { code?: numb
   let normalizedReason: string | undefined;
   let reasonBytes: Uint8Array | undefined;
   if (reason !== undefined) {
-    if (typeof reason === "symbol") throw new TypeError("WebSocket close reason cannot be a Symbol");
+    if (typeof reason === "symbol") throw new TypeError("Symbol");
     reasonBytes = new TextEncoder().encode(String(reason));
     // USVString replaces lone surrogates; preserve an initial BOM.
     normalizedReason = new TextDecoder("utf-8", { ignoreBOM: true }).decode(reasonBytes);
   }
   if (normalizedCode !== undefined && normalizedCode !== 1000 && (normalizedCode < 3000 || normalizedCode > 4999)) {
-    throw new DOMException("Invalid WebSocket close code", "InvalidAccessError");
+    throw new DOMException("Close code", "InvalidAccessError");
   }
   if (reasonBytes && reasonBytes.byteLength > 123) {
-    throw new DOMException("WebSocket close reason exceeds 123 bytes", "SyntaxError");
+    throw new DOMException("Reason too long", "SyntaxError");
   }
   return { code: normalizedCode, reason: normalizedReason };
 }
