@@ -772,6 +772,47 @@ async function main() {
     return out;
   });
 
+  await check("api: SharedWorker classic/module identities stay isolated (#453)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const values = JSON.parse(await evalIn(frame, "shared identity", `async () => {
+      const held = [];
+      async function identity(type, credentials) {
+        return await new Promise((resolve, reject) => {
+          const options = { name: "zl-identity-453", type };
+          if (credentials) options.credentials = credentials;
+          const w = new SharedWorker("/dir/shared-identity.js", options);
+          held.push(w);
+          const timer = setTimeout(() => reject(new Error("shared worker identity timeout")), 12000);
+          w.port.onmessage = (e) => { if (e.data?.id) { clearTimeout(timer); resolve(e.data.id); } };
+          w.port.onmessageerror = () => { clearTimeout(timer); reject(new Error("shared worker message error")); };
+          w.port.start();
+          w.port.postMessage("id");
+        });
+      }
+      const classic1 = await identity("classic");
+      const classic2 = await identity("classic");
+      const module1 = await identity("module");
+      const module2 = await identity("module");
+      const differentCredentials = await identity("module", "omit");
+      return JSON.stringify({ classicShared: classic1 === classic2, moduleShared: module1 === module2,
+        typeIsolated: classic1 !== module1, credentialsIsolated: module1 !== differentCredentials, first: classic1 });
+    }`, 70000));
+    assert(values.classicShared, "two same-name classic constructions must share an instance");
+    assert(values.moduleShared, "two same-name module constructions must share an instance");
+    assert(values.typeIsolated, "classic and module workers shared an instance");
+    assert(values.credentialsIsolated, "module workers with distinct credentials shared an instance");
+    const { frame: frameB } = await openProxied(ORIGIN_B + "/dir/page.html");
+    const other = await evalIn(frameB, "cross-site shared identity", `() => new Promise((resolve, reject) => {
+      const w = new SharedWorker("/dir/shared-identity.js", { name: "zl-identity-453", type: "classic" });
+      const timer = setTimeout(() => reject(new Error("second site worker timeout")), 12000);
+      w.port.onmessage = e => { if (e.data?.id) { clearTimeout(timer); resolve(e.data.id); } };
+      w.port.start();
+      w.port.postMessage("id");
+    })`, 20000);
+    assert(values.first !== other, "distinct virtual origins shared a worker global");
+    return "same-type reuse, classic/module separation, credential and origin isolation";
+  });
+
   await check("api: localStorage/sessionStorage round-trip inside the virtual origin", async () => {
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "storage", `async () => {
