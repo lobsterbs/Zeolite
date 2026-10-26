@@ -51,6 +51,9 @@ import {
 } from "../control";
 import { EXT_CONTROL_TYPES, dispatchExtControl } from "../extensions/control";
 import { documentCookieRead, documentCookieWrite } from "../cookies";
+import { DIAG } from "../diag";
+import { netLogPush } from "../netlog";
+import { parseKdl } from "../kdl";
 
 /* Derives the case labels from the dispatcher's own source, the way the
    wiring sees it after vitest's transform (unminified). */
@@ -143,6 +146,63 @@ describe("sender gate preserved by the extraction (#41/#48)", () => {
     expect(report.healthy).toBe(false);
     expect(report.checks.find(c => c.code === "worker.boot")?.status).toBe("fail");
     expect(JSON.stringify(report)).not.toContain("do-not-export");
+  });
+
+  it("exports only a worker-verified proxied client request, never worker-global diagnostics", async () => {
+    const traceId = DIAG.trace("page-one");
+    DIAG.stage(traceId, "REQUEST_INTERCEPTED");
+    netLogPush({
+      traceId, method: "GET", path: "/j/secret", dest: "https://private.example/?token=SHOULD-NOT-LEAK",
+      rtype: "DOCUMENT", status: 200, ms: 12, bytes: 48, transport: "RewriteFallback",
+    });
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org" },
+      clients: { get: vi.fn(async (id: string) =>
+        id === "page-one" ? { id, url: "https://w.example.org/j/abc" } : null) },
+    });
+    const { ev, posted } = mkEvent("https://w.example.org/", {
+      type: "zl:exportDiagnostics", clientId: "page-one", traceId,
+    });
+    await handleControlEvent(ev, { ready: new Promise(() => {}), persistRoute: () => { throw Error("no mutations"); } });
+    expect(posted).toHaveLength(1);
+    const report = posted[0] as { ok: boolean; scope: string; steps: unknown[]; kdl: string };
+    expect(report.ok).toBe(true);
+    expect(report.scope).toBe("request");
+    expect(report.steps).toHaveLength(2);
+    expect(parseKdl(report.kdl)[0].children).toHaveLength(2);
+    expect(JSON.stringify(report)).not.toContain("SHOULD-NOT-LEAK");
+    expect(JSON.stringify(report)).not.toContain("private.example");
+    expect(JSON.stringify(report)).not.toContain("page-one");
+  });
+
+  it("refuses exported traces with missing, unrelated, or navigated-away client IDs", async () => {
+    const traceId = DIAG.trace("page-one");
+    const probe = vi.fn(async (id: string) => ({
+      id, url: "https://w.example.org/index.html",
+    }));
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org" }, clients: { get: probe } });
+    const messages: ControlMessage[] = [
+      { type: "zl:exportDiagnostics", clientId: "another-client", traceId },
+      { type: "zl:exportDiagnostics", clientId: "page-one" },
+      { type: "zl:exportDiagnostics", clientId: "page-one", traceId },
+    ];
+    for (const msg of messages) {
+      const { ev, posted } = mkEvent("https://w.example.org/", msg);
+      await handleControlEvent(ev, { ready: new Promise(() => {}), persistRoute: () => { throw Error("no mutations"); } });
+      expect(posted).toEqual([{ ok: false, status: "identity-unavailable" }]);
+    }
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks proxied pages from exporting another site's ring even if trace ID is known", async () => {
+    const traceId = DIAG.trace("page-one");
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org" }, clients: {
+      get: () => { throw Error("must reject before client lookup"); },
+    } });
+    const { ev, posted } = mkEvent("https://w.example.org/j/abc", {
+      type: "zl:exportDiagnostics", clientId: "page-one", traceId,
+    });
+    await handleControlEvent(ev, { ready: new Promise(() => {}), persistRoute: () => { throw Error("no mutations"); } });
+    expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
   });
 
   it("serves a host sender", async () => {
