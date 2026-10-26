@@ -26,8 +26,8 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, isCdnCgiUrl, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
-import { loadPolicy, policyMatch, transportMatch, type CompiledPolicy } from "./policy";
+import { decideTransport, isCdnCgiUrl, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
+import { loadPolicy, behaviorMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
@@ -2550,7 +2550,7 @@ export function handleFetch(e: FetchEvent): void {
            is already the default and required rewrites cannot be
            demoted, so the upgrade is the only effect. */
         const policy = await loadPolicy();
-        const policyRule = policyMatch(policy, target, rtype);
+        const policyRule = behaviorMatch(policy, target, rtype);
         if (policyRule && policyRule.route === "rewrite" && decision.mode === "NativeTransit") {
           decision = {
             mode: "RewriteFallback",
@@ -2664,24 +2664,12 @@ export function handleFetch(e: FetchEvent): void {
         ) {
           const hit = await raceBoot(pageCacheMatch(e.request, (p) => e.waitUntil(p), { clientId: cookieClientId, initiator: initiator ?? undefined, navigation: e.request.mode === "navigate" }), "page cache match", PRE_DEADLINE_BOUND_MS);
           if (hit) {
-            let dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
-            if (
-              dec.mode === "RewriteFallback" &&
-              dec.reason === "JS_LITERAL_REWRITE_REQUIRED" &&
-              policyRule &&
-              policyRule.route === "native" &&
-              (dest === "script" || dest === "")
-            ) {
-              dec = { mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: policyRule.id };
-            }
-            /* Cloudflare's /cdn-cgi/ edge namespace: challenge
-               infrastructure that verifies its own bytes. Cached or
-               fresh, those bodies serve verbatim (the live-path twin
-               below gates the same way). */
+            /* #487: one conservative planner for cache and live responses.
+               MIME, KDL behavior, and CDN-CGI gates must not diverge
+               between first load and reload. */
+            const plan = planResponseTransit(decision, hit.headers.get("content-type") ?? "", dest, target, policyRule);
+            const dec = plan.decision;
             const chNative = isCdnCgiUrl(target);
-            if (chNative && dec.mode === "RewriteFallback") {
-              dec = { mode: "NativeTransit", reason: "CDN_CGI_NATIVE" };
-            }
             transitRecord(traceId, target, dec);
             /* #95: a decision that leaves the native path is an
                explainable event on the always-on diag stream (the
@@ -3324,38 +3312,14 @@ export function handleFetch(e: FetchEvent): void {
           /* #256 contract: onResponse hooks are best-effort observers,
              fired without awaiting (edits ignored, throws isolated). */
           void applyOnResponse(plugins, target, resp.status, outHeaders);
-          let dec = refineWithContent(decision, resp.headers.get("content-type") ?? "", dest);
-          /* #138: a policy rule with route "native" demotes the JS
-             literal pass for a host proven to work with raw
-             bodies: runtime navigation already flows through the
-             patched fetch/XHR/WS seams, so literal hits there are
-             dead code. Workers keep their passes (prelude and
-             specifiers are behavioral, not cosmetic); documents
-             and stylesheets are not demotable at all. */
-          if (
-            dec.mode === "RewriteFallback" &&
-            dec.reason === "JS_LITERAL_REWRITE_REQUIRED" &&
-            policyRule &&
-            policyRule.route === "native" &&
-            (dest === "script" || dest === "")
-          ) {
-            dec = { mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: policyRule.id };
-            traceDecision({ subsystem: "policy", rule: policyRule.id, original: target, result: "native", resource: rtype, traceId });
-          }
-          /* Cloudflare's /cdn-cgi/ edge namespace (challenge-platform
-             scripts, flow API answers, Turnstile wiring): the upstream
-             verifies those bytes. A URL-literal pass over the
-             orchestration script or the document bootstrap injected
-             into an HTML-typed flow answer corrupts the challenge
-             protocol, and the widget dies on its own "unable to
-             connect" for every visitor. ScramJet never transforms
-             subresource bodies and Cloudflare sites work through it;
-             cdn-cgi responses serve verbatim, live and from the
-             cache. */
+          /* #487: same response selector as the page-cache hit path.
+             It keeps rewrite behavior independent from Wisp/relay
+             transport rules, and never auto-demotes required passes. */
+          const plan = planResponseTransit(decision, resp.headers.get("content-type") ?? "", dest, target, policyRule);
+          const dec = plan.decision;
+          if (dec.mode === "NativeTransit" && dec.reason === "POLICY_NATIVE")
+            traceDecision({ subsystem: "policy", rule: policyRule!.id, original: target, result: "native", resource: rtype, traceId });
           const cdnCgiNative = isCdnCgiUrl(target);
-          if (cdnCgiNative && dec.mode === "RewriteFallback") {
-            dec = { mode: "NativeTransit", reason: "CDN_CGI_NATIVE" };
-          }
           /* #95: same explainable-decision event on the response path
              (every document, stylesheet and transformed script body
              lands here, so the reason is in the diag stream, not just
