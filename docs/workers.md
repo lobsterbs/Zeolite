@@ -71,3 +71,6 @@ therefore virtualized by `app/src/swshim.ts` + bootstrap wiring:
 
 These are browser security limits, documented rather than hacked
 around.
+
+SharedWorker names also include worker type and credential mode (#453), so
+classic and module instances cannot accidentally share the same virtual identity.
