@@ -92,6 +92,8 @@ const realmRef: { w: AnyRecord | null } = { w: null };
 let nativeGetAttr: ((this: AnyRecord, n: string) => string | null) | null = null;
 let scanTimer: ReturnType<typeof setTimeout> | null = null;
 let scanning = false;
+let scanCursor = 0;
+let scanExhausted = false;
 
 function scheduleScan(): void {
   if (scanTimer !== null || scanning || !realmRef.w) return;
@@ -118,7 +120,8 @@ function scan(): void {
     if (!doc || typeof doc.querySelectorAll !== "function") return;
     const nodes = doc.querySelectorAll("a[href],area[href]") as ArrayLike<AnyRecord>;
     const batch: string[] = [];
-    for (let i = 0; i < nodes.length && batch.length < 2 * BATCH_MAX; i++) {
+    let i = scanCursor;
+    for (; i < nodes.length; i++) {
       const n = nodes[i];
       const g: unknown = nativeGetAttr ?? n.getAttribute;
       if (typeof g !== "function") continue;
@@ -129,17 +132,27 @@ function scan(): void {
         continue;
       }
       if (typeof a !== "string" || !a) continue;
-      if (!memo.has(a) && !inflight.has(a) && routeShaped(a)) batch.push(a);
+      if (!memo.has(a) && !inflight.has(a) && routeShaped(a)) {
+        if (batch.length >= BATCH_MAX) break;
+        batch.push(a);
+      }
       try {
         const abs = new URL(a, (w.location as AnyRecord).href).href;
-        if (abs !== a && !memo.has(abs) && !inflight.has(abs) && routeShaped(abs)) batch.push(abs);
+        if (abs !== a && !memo.has(abs) && !inflight.has(abs) && routeShaped(abs)) {
+          if (batch.length >= BATCH_MAX) break;
+          batch.push(abs);
+        }
       } catch {
         /* an unparseable base anchors nothing */
       }
+      if (batch.length >= BATCH_MAX) { i++; break; }
     }
-    /* the window filled before the document ended: undecoded
-       anchors may remain past it. */
-    const more = batch.length >= 2 * BATCH_MAX;
+    /* #488: progress must be independent of bounded memo eviction.
+       If a route pair is split at the window edge, revisit that one
+       node on the next scan; the first string is already memoized. */
+    scanCursor = i;
+    const more = i < nodes.length;
+    scanExhausted = !more;
     if (batch.length) decodeBatch(batch, more);
   } finally {
     scanning = false;
@@ -213,7 +226,8 @@ export function anchorVirtual(v: string): string | undefined {
   const hit = memo.get(v);
   if (hit !== undefined) return hit === "" ? undefined : hit;
   if (!routeShaped(v)) return undefined;
-  scheduleScan();
+  if (scanExhausted && !inflight.has(v)) decodeBatch([v], false);
+  else scheduleScan();
   return undefined;
 }
 
@@ -224,6 +238,8 @@ export function anchorVirtual(v: string): string | undefined {
     this module, never the reverse. */
 export function applyAnchorShim(w: Record<string, unknown>): void {
   realmRef.w = w as AnyRecord;
+  scanCursor = 0;
+  scanExhausted = false;
   const doc = (w as AnyRecord).document as AnyRecord | undefined;
   if (doc) {
     if (doc.readyState === "loading" && typeof (w as AnyRecord).addEventListener === "function") {
@@ -241,9 +257,15 @@ export function applyAnchorShim(w: Record<string, unknown>): void {
     | undefined;
   if (MO && doc && doc.documentElement) {
     try {
-      new MO(() => scheduleScan()).observe(doc.documentElement, {
+      new MO(() => {
+        scanCursor = 0;
+        scanExhausted = false;
+        scheduleScan();
+      }).observe(doc.documentElement, {
         childList: true,
         subtree: true,
+        attributes: true,
+        attributeFilter: ["href"],
       });
     } catch {
       /* no observer: the install scan and the getter seam remain */
