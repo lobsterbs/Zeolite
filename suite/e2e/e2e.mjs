@@ -183,6 +183,28 @@ async function evalIn(frame, label, js, timeoutMs = 15000) {
   ]);
 }
 
+async function hostControl(pg, message, timeoutMs = 6000) {
+  return await pg.evaluate(({ message, timeoutMs }) => new Promise((resolve) => {
+    const ctl = navigator.serviceWorker.controller;
+    if (!ctl) return resolve({ ok: false, status: "unavailable", error: "no controller" });
+    const ch = new MessageChannel();
+    let done = false;
+    let timer;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      ch.port1.onmessage = null;
+      ch.port1.close();
+      ch.port2.close();
+      resolve(value);
+    };
+    timer = setTimeout(() => finish({ ok: false, status: "unavailable", error: "timeout" }), timeoutMs);
+    ch.port1.onmessage = (e) => finish(e.data);
+    try { ctl.postMessage(message, [ch.port2]); }
+    catch { finish({ ok: false, status: "unavailable", error: "postMessage failed" }); }
+  }), { message, timeoutMs });
+}
 async function startEngine() {
   const bin = resolve("target/release/zeolite-server");
   if (!existsSync(bin)) {
@@ -263,6 +285,65 @@ async function main() {
     process.exitCode = 1;
     return;
   }
+  /* ---- #495: host-only Zeolite Doctor ----------------------------- */
+
+  await check("doctor: passive report proves only observed host facts and emits KDL (#495)", async () => {
+    const { page } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const ping = await hostControl(page, { type: "zl:ping" });
+    assert(ping?.ok === true && typeof ping.version === "string", "ping unavailable: " + JSON.stringify(ping));
+    const report = await hostControl(page, {
+      type: "zl:doctor", expectedScope: ENGINE + "/", expectedVersion: ping.version, format: "kdl",
+    });
+    assert(report?.ok === true, "doctor refused: " + JSON.stringify(report));
+    eq(report.schemaVersion, 1, "doctor schema");
+    const byCode = Object.fromEntries(report.checks.map((c) => [c.code, c]));
+    eq(byCode["worker.running"]?.status, "pass", "worker.running");
+    eq(byCode["worker.boot"]?.status, "pass", "worker.boot");
+    eq(byCode["worker.scope"]?.status, "pass", "worker.scope");
+    eq(byCode["bundle.version"]?.status, "pass", "bundle.version");
+    eq(byCode["worker.client-control"]?.status, "unknown", "no selected client must remain unknown");
+    eq(byCode["assets.bootstrap"]?.status, "skipped", "passive Doctor must not probe assets");
+    assert(typeof report.kdl === "string" && report.kdl.startsWith("zeolite-doctor version=1"), "missing Doctor KDL");
+    assert(!report.kdl.includes(ORIGIN_A), "Doctor KDL leaked target origin");
+    return "passive facts + KDL";
+  });
+
+  await check("doctor: verifies live proxied client and rejects fake identity (#495)", async () => {
+    const { page } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const logs = await hostControl(page, { type: "zl:getNetLog", since: 0 });
+    assert(Array.isArray(logs?.entries), "netlog unavailable");
+    const row = logs.entries.find((e) => typeof e.clientId === "string" && e.clientId.length > 0);
+    assert(row, "no worker-attributed proxied client in netlog");
+    const live = await hostControl(page, { type: "zl:doctor", clientId: row.clientId });
+    eq(live?.checks?.find((c) => c.code === "worker.client-control")?.status, "pass", "live selected client");
+    const fake = await hostControl(page, { type: "zl:doctor", clientId: "not-a-real-client" });
+    eq(fake?.checks?.find((c) => c.code === "worker.client-control")?.status, "fail", "fake selected client");
+    assert(fake.healthy === false, "confirmed client failure must make health false");
+    return "live=pass fake=fail";
+  });
+
+  await check("doctor: proxied page cannot inspect host integration state (#495)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const report = await evalIn(frame, "Doctor from proxied page", '() => new Promise((res) => { const ch = new MessageChannel(); const ctl = navigator.serviceWorker.controller; if (!ctl) return res({ ok: false, error: "no controller" }); ctl.postMessage({ type: "zl:doctor", format: "kdl" }, [ch.port2]); ch.port1.onmessage = (e) => res(e.data); setTimeout(() => res({ ok: false, error: "timeout" }), 5000); })');
+    eq(report?.ok, false, "proxied doctor call must fail");
+    eq(report?.error, "host-only control message", "Doctor gate reason");
+    assert(report.kdl === undefined, "refused proxied page received Doctor KDL");
+    return "host-only refusal";
+  });
+
+  await check("doctor: explicit bundle probe checks fixed same-origin assets only (#495)", async () => {
+    const { page, rec } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const before = rec.requests.length;
+    const report = await hostControl(page, { type: "zl:doctor", probeAssets: true });
+    assert(report?.ok === true, "Doctor asset probe refused");
+    const assets = report.checks.filter((c) => c.code.startsWith("assets."));
+    eq(assets.length, 4, "asset check count");
+    for (const a of assets) eq(a.status, "pass", a.code + " should be a verified local asset: " + JSON.stringify(a));
+    const requested = rec.requests.slice(before).map((r) => r.url);
+    assert(requested.every((u) => u.startsWith(ENGINE)), "Doctor asset probe contacted non-engine origin: " + JSON.stringify(requested));
+    return assets.map((a) => a.code + "=" + a.status).join(" ");
+  });
+
 
   await check("routing: an absolute cross-origin link navigates through the engine", async () => {
     const { page } = await openProxied(ORIGIN_A + "/dir/page.html");
