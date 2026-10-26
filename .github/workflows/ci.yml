@@ -434,9 +434,9 @@ jobs:
     # the rewriter's page seams or the #32/#34 privacy properties, so
     # browser-only failures survived CI. Fixtures-only (no third-party
     # sites) on purpose; the harness fails loudly with the engine
-    # server's output tail. Skipped on PRs to keep them fast; runs on
-    # every push to main, nightly and dispatch, like compat.
-    if: github.event_name != 'pull_request'
+    # server's output tail. Run on PRs as well: rewrite and security
+    # changes need Chromium acceptance before merge.
+
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: wasm
