@@ -1541,6 +1541,33 @@ async function main() {
     return urls.size + " urls swept: " + routes + " opaque routes, " + handles + " keyed handles, " + markers + " nav markers (documented #54 degrade)";
   });
 
+  /* ---- #499: credential-bearing URL configuration ------------------- */
+
+  await check("rewriter: credential-bearing DSN/config stays parseable while fetch routes (#499)", async () => {
+    const direct = await context.newPage();
+    let expected;
+    try {
+      await direct.goto(ORIGIN_A + "/dir/credential-config.html");
+      expected = await waitFor("direct URL parser", 10000, () =>
+        direct.evaluate(() => self.__zlConfig ? { dsn: self.__zlConfig.dsn, other: self.__zlConfig.other } : null),
+      );
+    } finally {
+      await direct.close();
+    }
+    const { frame, rec } = await openProxied(ORIGIN_A + "/dir/credential-config.html", "#zl-config");
+    const actual = await waitFor("proxied URL parser and fetch", 12000, async () => {
+      const result = await frame.evaluate(() => self.__zlConfig ? { ...self.__zlConfig } : null);
+      return result?.fetched === "pending" ? null : result;
+    });
+    assert(expected.dsn && expected.other, "direct browser failed to parse original configuration URLs");
+    eq(actual.dsn, expected.dsn, "proxied DSN userinfo was rewritten");
+    eq(actual.other, expected.other, "non-Sentry configuration userinfo was rewritten");
+    eq(actual.fetched, "api", "browser-owned fetch failed to route through the engine");
+    const escaped = rec.requests.filter((r) => r.url.startsWith(ORIGIN_A) || r.url.startsWith(ORIGIN_B));
+    assert(escaped.length === 0, "browser-direct request escaped engine: " + JSON.stringify(escaped.slice(0, 3)));
+    return "two URL parsers agree with direct control; fetch engine-served";
+  });
+
   /* ---- #449: origin-pinning script literal skip --------------------- */
 
   await check("pinned loader: literal skip, loader validates, nothing escapes the engine (#449)", async () => {
