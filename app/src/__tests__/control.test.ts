@@ -158,6 +158,46 @@ describe("sender gate preserved by the extraction (#41/#48)", () => {
     expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
   });
 
+  it("doctor proves selected proxied client control and fails closed for stale/host clients", async () => {
+    const get = vi.fn(async (id: string) => {
+      if (id === "live") return { id, url: "https://w.example.org/j/abc" };
+      if (id === "host") return { id, url: "https://w.example.org/" };
+      return undefined;
+    });
+    vi.stubGlobal("self", {
+      location: { origin: "https://w.example.org", href: "https://w.example.org/sw.js" },
+      registration: { scope: "https://w.example.org/" },
+      clients: { get },
+    });
+    for (const [clientId, expected] of [
+      ["live", "pass"],
+      ["gone", "fail"],
+      ["host", "fail"],
+    ] as const) {
+      const { ev, posted } = mkEvent("https://w.example.org/", {
+        type: "zl:doctor", clientId,
+      });
+      await handleControlEvent(ev, deps);
+      const report = posted[0] as { checks: Array<{code: string; status: string}> };
+      expect(report.checks.find(c => c.code === "worker.client-control")?.status).toBe(expected);
+    }
+    expect(get).toHaveBeenCalledTimes(3);
+  });
+
+  it("doctor reports client verification unknown when browser client enumeration fails", async () => {
+    vi.stubGlobal("self", {
+      location: { origin: "https://w.example.org", href: "https://w.example.org/sw.js" },
+      registration: { scope: "https://w.example.org/" },
+      clients: { get: async () => { throw new Error("browser API unavailable"); } },
+    });
+    const { ev, posted } = mkEvent("https://w.example.org/", {
+      type: "zl:doctor", clientId: "live",
+    });
+    await handleControlEvent(ev, deps);
+    const report = posted[0] as { checks: Array<{code: string; status: string}> };
+    expect(report.checks.find(c => c.code === "worker.client-control")?.status).toBe("unknown");
+  });
+
   it("permits zl:doctor to return a bounded passive, redacted report without extra fetching", async () => {
     const fetcher = vi.spyOn(globalThis, "fetch");
     const { ev, posted } = mkEvent("https://w.example.org/", {
