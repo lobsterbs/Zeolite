@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { activeStreams, heartbeatArmed, streamAlive, streamDone } from "../streams-alive";
 
 /* #99: the heartbeat arms while streams pump and stops when the last
@@ -7,6 +7,32 @@ import { activeStreams, heartbeatArmed, streamAlive, streamDone } from "../strea
    disarmed, so no interval outlives the run. */
 
 describe("streams-alive (#99 keepalive)", () => {
+  it("closes both heartbeat ports only after the last stream and recreates them next time", () => {
+    const channels: Array<{ port1: { onmessage: unknown; close: ReturnType<typeof vi.fn> }; port2: { postMessage: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> } }> = [];
+    class Channel {
+      port1 = { onmessage: null as unknown, close: vi.fn() };
+      port2 = { postMessage: vi.fn(), close: vi.fn() };
+      constructor() { channels.push(this); }
+    }
+    vi.stubGlobal("MessageChannel", Channel);
+    try {
+      streamAlive(); streamAlive();
+      expect(channels).toHaveLength(1);
+      streamDone();
+      expect(channels[0].port1.close).not.toHaveBeenCalled();
+      streamDone();
+      expect(channels[0].port1.close).toHaveBeenCalledOnce();
+      expect(channels[0].port2.close).toHaveBeenCalledOnce();
+      streamAlive(); streamDone();
+      expect(channels).toHaveLength(2);
+      expect(channels[1].port1.close).toHaveBeenCalledOnce();
+      expect(channels[1].port2.close).toHaveBeenCalledOnce();
+    } finally {
+      while (activeStreams()) streamDone();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("counts active streams and floors at zero on unbalanced done calls", () => {
     expect(activeStreams()).toBe(0);
     streamAlive();

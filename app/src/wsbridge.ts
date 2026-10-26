@@ -82,10 +82,8 @@ interface Conn {
   url: string;
   ready: boolean;
   t0: number;
-  /** Sends that arrived before the handshake completed. WebSocket
-      semantics: send() while CONNECTING buffers, so pages that write
-      immediately after new WebSocket() do not lose data while the
-      transport initializes or the handshake runs. */
+  /** Internal messages that raced the handshake. The page shim rejects
+      CONNECTING sends; this queue only handles bridge-side races. */
   pending: unknown[];
   /* Keepalive watchdog state (#61): interval handle, consecutive
      unanswered pings, pong timestamp seen at the previous tick. */
@@ -149,9 +147,7 @@ export class WsBridge {
       if (!c) return;
       if (m?.op === "send") {
         if (c.ready) {
-          this.hooks.onBytes(c.token, 0, byteSize(m.data));
-          this.hooks.trace({ subsystem: "websocket", original: "tx", result: c.url, resource: "websocket" });
-          c.handle.send(m.data);
+          this.send(port, c, m.data);
         } else {
           c.pending.push(m.data);
         }
@@ -198,9 +194,7 @@ export class WsBridge {
              open event so page onopen handlers run first (native
              order). */
           for (const d of conn.pending.splice(0)) {
-            this.hooks.onBytes(conn.token, 0, byteSize(d));
-            this.hooks.trace({ subsystem: "websocket", original: "tx", result: conn.url, resource: "websocket" });
-            conn.handle.send(d);
+            if (!this.send(port, conn, d)) break;
           }
         },
         onmessage: (data) => {
@@ -243,12 +237,31 @@ export class WsBridge {
     }
   }
 
+  /** A transport can fail synchronously after open or while flushing a race. */
+  private send(port: PortLike, conn: Conn, data: unknown): boolean {
+    try {
+      conn.handle.send(data);
+    } catch (err) {
+      port.postMessage({ ev: "error", error: String(err) });
+      this.end(port, 1006, false, "send failed");
+      return false;
+    }
+    this.hooks.onBytes(conn.token, 0, byteSize(data));
+    this.hooks.trace({ subsystem: "websocket", original: "tx", result: conn.url, resource: "websocket" });
+    return true;
+  }
+
   private end(port: PortLike, code: number, clean: boolean, reason?: string): void {
     const conn = this.conns.get(port);
     if (!conn) return;
     if (conn.ka !== undefined) clearInterval(conn.ka);
     this.conns.delete(port);
     port.onmessage = null;
+    // Detach first: close() may synchronously report onclose/onerror.
+    // 1006 describes the page outcome and must never be sent on the wire.
+    if (!clean) {
+      try { conn.handle.close(1000, "bridge terminated"); } catch { /* already gone */ }
+    }
     this.hooks.onClose(conn.token, code, clean, Date.now() - conn.t0);
     if (!clean) {
       this.hooks.trace({

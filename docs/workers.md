@@ -78,3 +78,8 @@ classic and module instances cannot accidentally share the same virtual identity
 WebSocket close arguments use Web IDL unsigned-short and USVString conversion
 before validation in both page and worker shims. Converted values are passed
 to the bridge, including replacement of lone surrogate code units.
+
+Rewrite-stream heartbeat channels close both ports after the final active
+stream settles (#486). Concurrent streams share a channel; a later activity
+cycle creates a new one. This resource lifecycle does not change the browser's
+service-worker idle policy.
