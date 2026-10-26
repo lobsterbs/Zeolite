@@ -27,6 +27,7 @@
 import { decodePath, encodeDest, setScheme } from "./codec";
 import { siteToken } from "./pageload";
 import { validateWsClose } from "./ws-close";
+import { wsPayload } from "./ws-payload";
 
 /** Route one worker-issued URL (an importScripts() argument or a
     fetch() input) through the engine codec, resolved against the
@@ -276,6 +277,7 @@ export function installWorkerPrelude(route: string): void {
       let wsState = 0;
       let binType: "blob" | "arraybuffer" = "blob";
       let proto = "";
+      let bufferedBytes = 0;
       const ch = new MessageChannel();
       let q = Promise.resolve();
       /* Same contract as the page shim: raw on* handlers fire after
@@ -299,6 +301,7 @@ export function installWorkerPrelude(route: string): void {
           code?: number;
           clean?: boolean;
           protocol?: string;
+          bytes?: number;
         };
         /* Native parity: once CLOSING/CLOSED no further open or
            message events fire (a late engine open or a message
@@ -317,6 +320,9 @@ export function installWorkerPrelude(route: string): void {
             }
             fire(new MessageEvent("message", { data, origin: u.origin }));
           });
+        } else if (m?.ev === "drain") {
+          if (typeof m.bytes === "number" && Number.isFinite(m.bytes) && m.bytes >= 0)
+            bufferedBytes = Math.max(0, bufferedBytes - Math.floor(m.bytes));
         } else if (m?.ev === "error") {
           disp(new Event("error"));
           /* A terminal error carries the close code: the page relay's
@@ -361,8 +367,9 @@ export function installWorkerPrelude(route: string): void {
             if (v === "blob" || v === "arraybuffer") binType = v;
           },
         },
-        /* Accurate queued bytes need bridge drain acknowledgments (#462). */
-        bufferedAmount: { get: () => 0 },
+        /* Counts bytes pending acceptance by the SW bridge; actual
+           Wisp/network flush completion is not observable. */
+        bufferedAmount: { get: () => bufferedBytes },
         extensions: { value: "" },
         close: {
           value: (code?: number, reason?: string) => {
@@ -376,7 +383,9 @@ export function installWorkerPrelude(route: string): void {
           value: (data: unknown) => {
             if (wsState === 0) throw new DOMException("invalid state", "InvalidStateError");
             if (wsState >= 2) return;
-            ch.port1.postMessage({ op: "send", data });
+            const payload = wsPayload(data);
+            ch.port1.postMessage({ op: "send", data: payload.data });
+            bufferedBytes += payload.bytes;
           },
         },
       });
