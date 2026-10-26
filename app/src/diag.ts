@@ -139,7 +139,7 @@ export function redactSecrets(s: string): string {
     .replace(/(authorization["'\s:=]+)(?:bearer|basic)\s+\S+/gi, "$1[redacted]")
     .replace(/(authorization["'\s:=]+)(\S+)/gi, "$1[redacted]")
     .replace(/(cookie["'\s:=]+)([^;\s]+)/gi, "$1[redacted]")
-    .replace(/(bearer\s+)[A-Za-z0-9._\-]+/gi, "$1[redacted]")
+    .replace(/((?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[redacted]")
     .replace(/((?:token|password|secret|api[_-]?key)["'\s:=]+)([^&\s;]+)/gi, "$1[redacted]");
 }
 
