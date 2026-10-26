@@ -89,21 +89,32 @@ surface equivalent API responses in its own DevTools.
   They distinguish loaded/parsed, 404/missing, invalid KDL, unavailable
   fetch and never loaded. A missing optional KDL file is a warning,
   not a verified engine crash.
-- Worker registration response headers, client-controller status and
-  CI bootstrap size facts are explicitly unknown when not observable.
+- Worker registration response headers and CI bootstrap-size facts are
+  unknown in passive mode. An explicit asset probe can verify the served
+  worker's scope/cache headers; the CI byte budget still remains a build
+  fact and is never inferred at runtime.
 
 ### Opt-in bundle asset checks
 
-`probeAssets: true` sends up to **four concurrent, bounded, same-origin
-HEAD** requests from the engine worker to static, worker-sibling
+`probeAssets: true` performs a bounded set of **same-origin HEAD**
+requests. It verifies the exact worker script, worker-sibling
 `bootstrap.js`, `codec.js`, `worker-prelude.js` and
-`rewriter_wasm_bg.wasm`. Requests omit credentials, forbid automatic
-redirect following and have a maximum 3s deadline each (default 1.5s).
-No provided URL is used as an outbound destination. If an asset returns
-404, redirects to a login page, or returns an HTML SPA fallback in
-place of executable content, the check fails; unsupported HEAD or
-unobservable errors remain unknown. The check validates **status and
-MIME**, not JS/WASM execution or full content integrity.
+`rewriter_wasm_bg.wasm`, plus the transport bundles that the integration
+contract intentionally resolves at the **origin root**:
+`/libcurl/index.mjs`, `/epoxy/epoxy.js` and `/epoxy/epoxy.wasm`.
+This distinction matters when the worker is mounted under a path such as
+`/zlsw/sw.js`: Doctor must not falsely probe `/zlsw/libcurl/`.
+
+For executable/WASM assets Doctor checks status, expected MIME and
+`X-Content-Type-Options: nosniff`. It also re-reads the worker response
+to verify `Service-Worker-Allowed` when the active registration scope is
+broader than the script directory and to verify a revalidating/disabled
+cache policy (`Cache-Control: no-cache` or `no-store`). Requests omit
+credentials, do not follow redirects, and have a maximum 3s deadline each
+(default 1.5s). No provided URL is used as an outbound destination.
+404s, redirects or an HTML SPA fallback in place of executable content
+fail; unsupported HEAD or unobservable network errors remain unknown.
+The probe still does **not** execute JS/WASM or attest content integrity.
 
 The probe does not attempt arbitrary network egress, WISP CONNECT,
 authentication, TLS negotiations or user-selected endpoints. A future
