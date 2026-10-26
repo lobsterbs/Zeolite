@@ -159,10 +159,18 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
       return new Response(null, { status: 200, headers: {
         "content-type": url.endsWith(".wasm") ? "application/wasm" : "text/javascript",
         "x-content-type-options": "nosniff",
+        "service-worker-allowed": "/",
+        "cache-control": "no-cache",
       } });
     });
-    const r = await probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch);
-    expect(r).toHaveLength(8);
+    const r = await probeDoctorAssets(
+      "https://engine.example/zlsw/sw.js",
+      fetcher as unknown as typeof fetch,
+      1500,
+      "https://engine.example/",
+    );
+    expect(r).toHaveLength(10);
+    expect(r.filter(x => x.code.startsWith("assets."))).toHaveLength(8);
     expect(r.every(x => x.status === "pass")).toBe(true);
     expect(seen.map(x => x[0])).toEqual([
       "https://engine.example/zlsw/sw.js",
@@ -170,9 +178,10 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
       "https://engine.example/zlsw/codec.js",
       "https://engine.example/zlsw/worker-prelude.js",
       "https://engine.example/zlsw/rewriter_wasm_bg.wasm",
-      "https://engine.example/zlsw/libcurl/index.mjs",
-      "https://engine.example/zlsw/epoxy/epoxy.js",
-      "https://engine.example/zlsw/epoxy/epoxy.wasm",
+      "https://engine.example/libcurl/index.mjs",
+      "https://engine.example/epoxy/epoxy.js",
+      "https://engine.example/epoxy/epoxy.wasm",
+      "https://engine.example/zlsw/sw.js",
     ]);
     for (const [url, init] of seen) {
       expect(new URL(url).origin).toBe("https://engine.example");
@@ -188,17 +197,25 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
       new Response(null, { status: 200, headers: {
         "content-type": url.endsWith(".wasm") ? "application/wasm" : "text/javascript",
         "x-content-type-options": "nosniff",
+        "service-worker-allowed": "/",
+        "cache-control": "no-cache",
       } }));
     const [one, two] = await Promise.all([
-      probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch),
-      probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch),
+      probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch, 1500, "https://engine.example/"),
+      probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch, 1500, "https://engine.example/"),
     ]);
-    expect(fetcher).toHaveBeenCalledTimes(8);
+    expect(fetcher).toHaveBeenCalledTimes(9);
     expect(one).toEqual(two);
   });
 
   it("detects missing bundle and HTML SPA fallback without treating other network failures as confirmed 404s", async () => {
     const fetcher = vi.fn(async (url: string) => {
+      if (url.endsWith("/sw.js")) return new Response(null, { status: 200, headers: {
+        "content-type": "text/javascript",
+        "x-content-type-options": "nosniff",
+        "service-worker-allowed": "/",
+        "cache-control": "no-cache",
+      } });
       if (url.endsWith("/bootstrap.js")) return new Response(null, { status: 404 });
       if (url.endsWith("/codec.js")) return new Response(null, { status: 200, headers: { "content-type": "text/html" } });
       if (url.endsWith("/worker-prelude.js")) return new Response(null, { status: 405 });
@@ -218,10 +235,53 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
       new Response(null, { status: 200, headers: {
         "content-type": url.endsWith(".wasm") ? "application/wasm" : "text/javascript",
       } }));
-    const r = await probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch);
-    expect(r).toHaveLength(8);
-    expect(r.every(c => c.status === "warn")).toBe(true);
-    expect(r.every(c => c.summary.includes("nosniff"))).toBe(true);
+    const r = await probeDoctorAssets(
+      "https://engine.example/zlsw/sw.js",
+      fetcher as unknown as typeof fetch,
+      1500,
+      "https://engine.example/zlsw/",
+    );
+    const assets = r.filter(c => c.code.startsWith("assets."));
+    expect(assets).toHaveLength(8);
+    expect(assets.every(c => c.status === "warn")).toBe(true);
+    expect(assets.every(c => c.summary.includes("nosniff"))).toBe(true);
+    expect(r.find(c => c.code === "worker.service-worker-allowed")?.status).toBe("pass");
+    expect(r.find(c => c.code === "worker.cache-policy")?.status).toBe("warn");
+  });
+
+  it("fails a subpath worker whose broad scope lacks Service-Worker-Allowed", async () => {
+    const fetcher = vi.fn(async (url: string) =>
+      new Response(null, { status: 200, headers: {
+        "content-type": url.endsWith(".wasm") ? "application/wasm" : "text/javascript",
+        "x-content-type-options": "nosniff",
+        "cache-control": "no-cache",
+      } }));
+    const r = await probeDoctorAssets(
+      "https://engine.example/zlsw/sw.js",
+      fetcher as unknown as typeof fetch,
+      1500,
+      "https://engine.example/",
+    );
+    expect(r.find(c => c.code === "worker.service-worker-allowed")?.status).toBe("fail");
+    expect(JSON.stringify(r)).not.toContain("https://engine.example/");
+  });
+
+  it("accepts Service-Worker-Allowed that covers the active broader scope", async () => {
+    const fetcher = vi.fn(async (url: string) =>
+      new Response(null, { status: 200, headers: {
+        "content-type": url.endsWith(".wasm") ? "application/wasm" : "text/javascript",
+        "x-content-type-options": "nosniff",
+        "service-worker-allowed": "/",
+        "cache-control": "no-store",
+      } }));
+    const r = await probeDoctorAssets(
+      "https://engine.example/zlsw/sw.js",
+      fetcher as unknown as typeof fetch,
+      1500,
+      "https://engine.example/",
+    );
+    expect(r.find(c => c.code === "worker.service-worker-allowed")?.status).toBe("pass");
+    expect(r.find(c => c.code === "worker.cache-policy")?.status).toBe("pass");
   });
 
   it("does not claim a successful handshake, configuration, or page identity from asset HEAD responses", async () => {
