@@ -17,7 +17,14 @@
 import { engineBindingError, resolveProfile, type FingerprintProfile } from "./fingerprint";
 import { parseKdl, type KdlNode } from "./kdl";
 
+export interface LocationPolicy { mode: "legacy" | "hybrid" | "off"; maxBytes: number }
+
+export function locationPolicy(rule: SiteRule): LocationPolicy {
+  return rule.locationRewrite ?? { mode: "legacy", maxBytes: 2 * 1024 * 1024 };
+}
+
 export interface SiteRule {
+  locationRewrite?: LocationPolicy;
   /** Script paths (engine-origin) injected into <head> after the
       bootstrap, userscript-style. */
   inject?: string[];
@@ -73,7 +80,14 @@ export function rulesFromNodes(nodes: KdlNode[]): SiteRules {
     const rule: SiteRule = {};
     for (const child of node.children) {
       const strs = child.args.filter((a): a is string => typeof a === "string");
-      if (child.name === "inject") rule.inject = strs;
+      if (child.name === "location-rewrite") {
+        const mode = child.args[0];
+        const maxBytes = child.props["max-bytes"] ?? (mode === "hybrid" ? 512 * 1024 : 2 * 1024 * 1024);
+        if ((mode === "legacy" || mode === "hybrid" || mode === "off") &&
+            typeof maxBytes === "number" && Number.isInteger(maxBytes) && maxBytes > 0 && maxBytes <= 2 * 1024 * 1024)
+          rule.locationRewrite = { mode, maxBytes };
+      }
+      else if (child.name === "inject") rule.inject = strs;
       else if (child.name === "block") rule.block = strs;
       else if (child.name === "plugins") rule.plugins = strs;
       else if (child.name === "fingerprint") {

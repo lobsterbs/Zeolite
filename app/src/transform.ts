@@ -7,6 +7,7 @@
    site profile script, degraded flag) through initTransform; the
    getters are lazy and resolved at request time, never at module
    eval, so the call may precede the declarations it closes over. */
+import { siteRules, ruleFor, locationPolicy, type SiteRule, type LocationPolicy } from "./siteconfig";
 import { DIAG } from "./diag";
 import { streamAlive, streamDone } from "./streams-alive";
 import { charsetFromHeader, makeDecoder, resolveCharset } from "./headers";
@@ -41,6 +42,10 @@ export function initTransform(d: TransformDeps): void {
 /* ---- Streaming rewriter wiring ------------------------------------- */
 
 interface JsRewriter {
+  set_location_policy?(mode: string, maxBytes: number): void;
+  rewrite_script?(source: string): string;
+  take_location_events?(): string;
+  free?(): void;
   process(chunk: string): string;
   finish(): string;
   add_injection(path: string): void;
@@ -193,7 +198,7 @@ export function rawFrom(
 export function rewriteStream(
   body: ReadableStream<Uint8Array> | ReadableStreamDefaultReader<Uint8Array>,
   base: string,
-  rule: { inject?: string[]; block?: string[] },
+  rule: SiteRule,
   csInject: string[],
   contentType: string,
   onDone?: () => void,
@@ -236,6 +241,7 @@ export function rewriteStream(
         // HTML response with no diag event and no console error.
         const mod = await modP;
         const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
+        configureLocation(rw, locationPolicy(rule));
         for (const path of rule.inject ?? []) rw.add_injection(path);
         if (rule.block?.length) rw.set_blocked_hosts(rule.block);
         if (deps!.lazyImages()) rw.set_lazy_images();
@@ -281,6 +287,7 @@ export function rewriteStream(
             }
             if (rest) emit(rw.process(rest));
             const tail = rw.finish();
+            reportLocation(rw);
             if (tail) controller.enqueue(encoder.encode(tail));
             controller.close();
             onDone?.();
@@ -288,6 +295,7 @@ export function rewriteStream(
           }
           if (injected) {
             emit(rw.process(decoder!.decode(value, { stream: true })));
+            reportLocation(rw);
             continue;
           }
           if (decoder !== null) {
@@ -469,11 +477,47 @@ function reportGlobals(mod: RewriterMod): void {
   });
 }
 
-export async function rewriteJsBody(js: string, base: string): Promise<string> {
+/** Additive WASM methods allow older deployed bundles to stay usable. An
+    explicit policy must never silently run the old, always-on location pass. */
+function configureLocation(rw: JsRewriter, policy: LocationPolicy): boolean {
+  if (!rw.set_location_policy) {
+    if (policy.mode !== "legacy") DIAG.emit({ category: "REWRITE", severity: "warning", message: "location policy unsupported by loaded rewriter" });
+    return false;
+  }
+  rw.set_location_policy(policy.mode, policy.maxBytes);
+  return true;
+}
+
+function reportLocation(rw: JsRewriter): void {
+  const events = rw.take_location_events?.();
+  if (!events) return;
+  // Fixed vocabulary only: no source, destinations or tokens in diagnostics.
+  const counts = new Map<string, number>();
+  for (const reason of events.split(",").slice(0, 32)) {
+    if (["disabled", "size-cap", "no-candidate", "no-reads", "parse-failure", "rewritten"].includes(reason))
+      counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  if (counts.size) DIAG.emit({ category: "REWRITE", severity: "info", message: "location pass: " + [...counts].map(([k, n]) => k + "=" + n).join(", ") });
+}
+
+export async function rewriteJsBody(js: string, base: string, pageBase?: string): Promise<string> {
   const mod = await rewriter();
-  const out = mod.rewriteJsBody(js, self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined);
-  reportGlobals(mod);
-  return out;
+  // The owner page chooses policy; a third-party CDN's hostname must not.
+  const policy = locationPolicy(pageBase ? ruleFor(await siteRules(), pageBase) : {});
+  const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined);
+  try {
+    if (configureLocation(rw, policy) && rw.rewrite_script) {
+      const out = rw.rewrite_script(js);
+      reportLocation(rw);
+      return out;
+    }
+    // Older WASM cannot honor off/hybrid. Preserve source instead of applying
+    // a policy the host explicitly disabled. Modern bundles keep other passes.
+    if (policy.mode !== "legacy") return js;
+    const out = mod.rewriteJsBody(js, self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined);
+    reportGlobals(mod);
+    return out;
+  } finally { rw.free?.(); }
 }
 
 /* #449: origin-pinning detection for the script-serve seams. A body

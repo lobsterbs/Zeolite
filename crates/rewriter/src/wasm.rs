@@ -53,6 +53,18 @@ impl JsRewriter {
         Self { inner }
     }
 
+    pub fn set_location_policy(&mut self, mode: String, max_bytes: usize) {
+        self.inner.set_location_policy(&mode, max_bytes);
+    }
+
+    pub fn rewrite_script(&self, source: String) -> String {
+        self.inner.rewrite_js_body(&source)
+    }
+
+    pub fn take_location_events(&self) -> String {
+        self.inner.take_location_events()
+    }
+
     /// Feed one body chunk, get back everything that can be emitted now.
     pub fn process(&mut self, chunk: String) -> String {
         self.inner.process(&chunk)

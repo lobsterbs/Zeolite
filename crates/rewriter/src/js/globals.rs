@@ -91,24 +91,30 @@ pub fn stats_string() -> String {
 /// unchanged: broken JS is worse than a missed rewrite, and the
 /// runtime paths still own the residual class.
 pub fn rewrite_globals(js: &str) -> String {
+    rewrite_with_reason(js, MAX_BYTES).0
+}
+
+pub fn rewrite_with_reason(js: &str, cap: usize) -> (String, &'static str) {
     // Fast path: nothing to rename without the tokens. The document
     // URL reflection reaches the DOC_URL arm through the static form
     // (document.URL) and the #331 bracket form (document["URL"]);
     // a bare URL token is too common (new URL(), url.searchParams),
     // so the bracket check requires the document token too.
-    if js.len() > MAX_BYTES
-        || !(js.contains("location")
-            || js.contains("documentURI")
-            || (js.contains("document") && js.contains("URL")))
+    if js.len() > cap.min(MAX_BYTES) {
+        return (js.to_string(), "size-cap");
+    }
+    if !(js.contains("location")
+        || js.contains("documentURI")
+        || (js.contains("document") && js.contains("URL")))
     {
-        return js.to_string();
+        return (js.to_string(), "no-candidate");
     }
     let Some(edits) = collect(js) else {
         FAILED.fetch_add(1, Ordering::Relaxed);
-        return js.to_string();
+        return (js.to_string(), "parse-failure");
     };
     if edits.is_empty() {
-        return js.to_string();
+        return (js.to_string(), "no-reads");
     }
     PARSED.fetch_add(1, Ordering::Relaxed);
     RENAMED.fetch_add(edits.len() as u32, Ordering::Relaxed);
@@ -120,7 +126,7 @@ pub fn rewrite_globals(js: &str) -> String {
         pos = *end;
     }
     out.push_str(&js[pos..]);
-    out
+    (out, "rewritten")
 }
 
 /// Parse and collect the (start, end) byte spans to replace, or None
