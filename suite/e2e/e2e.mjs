@@ -38,7 +38,7 @@
    `npx playwright install chromium`). */
 
 import { spawn } from "node:child_process";
-import { existsSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright";
@@ -95,7 +95,7 @@ async function waitFor(label, timeoutMs, fn) {
 function attachRecorder(pg) {
   const rec = { requests: [] };
   (async () => {
-    const cdp = await context.newCDPSession(pg);
+    const cdp = await pg.context().newCDPSession(pg);
     await cdp.send("Network.enable");
     cdp.on("Network.requestWillBeSent", (p) => {
       rec.requests.push({ id: p.requestId, url: p.request.url, fromSW: undefined, failed: false, status: 0 });
@@ -126,8 +126,8 @@ async function frameWith(pg, sel) {
   return null;
 }
 
-async function openProxied(target, marker = "#zl-marker") {
-  const pg = await context.newPage();
+async function openProxied(target, marker = "#zl-marker", ctx = context) {
+  const pg = await ctx.newPage();
   const rec = attachRecorder(pg);
   await pg.goto(ENGINE + "/?url=" + encodeURIComponent(target));
   let frame = null;
@@ -382,6 +382,26 @@ async function main() {
       return "assets.rewriter-wasm=fail";
     } finally {
       renameSync(held, wasm);
+    }
+  });
+  await check("doctor: malformed policy.kdl is a real Chromium config failure (#495)", async () => {
+    const policy = resolve("app/dist/policy.kdl");
+    const hadPolicy = existsSync(policy);
+    const original = hadPolicy ? readFileSync(policy) : null;
+    const isolated = await browser.newContext();
+    writeFileSync(policy, 'rule "broken" {\n', "utf8");
+    try {
+      const { page } = await openProxied(ORIGIN_A + "/dir/page.html", "#zl-marker", isolated);
+      const report = await hostControl(page, { type: "zl:doctor" });
+      const cfg = report?.checks?.find((c) => c.code === "config.policy");
+      eq(cfg?.status, "fail", "malformed policy.kdl");
+      assert(report.healthy === false, "malformed policy must make Doctor health false");
+      assert(!JSON.stringify(report).includes('rule "broken"'), "Doctor leaked malformed KDL contents");
+      return "config.policy=fail";
+    } finally {
+      await isolated.close();
+      if (hadPolicy) writeFileSync(policy, original);
+      else if (existsSync(policy)) unlinkSync(policy);
     }
   });
   await check("routing: an absolute cross-origin link navigates through the engine", async () => {
