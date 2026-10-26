@@ -431,7 +431,8 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
           return null;
         }
       });
-      reply({ ok: true, dests });
+      try { reply({ ok: true, dests }); }
+      finally { port?.close(); }
       break;
     }
     case "zl:navHandle": {
