@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  experimentalSnapshot, resetExperimentalForTests, selectExperimental,
+  experimentalSnapshot, experimentalEnabled, resetExperimentalForTests, selectExperimental,
 } from "../experimental-flags";
 
 afterEach(resetExperimentalForTests);
@@ -21,7 +21,13 @@ describe("experimental flag selection (host preferences, not unsafe runtime feat
     });
     expect(ok).toEqual({ ok: true });
     expect(Object.values(experimentalSnapshot().requested)).toEqual([true,true,true,true]);
-    expect(Object.values(experimentalSnapshot().effective)).toEqual([false,false,false,false]);
+    expect(experimentalSnapshot().effective).toEqual({
+      adaptiveTransit: false, hybridLocation: false,
+      cspTranslation: true, virtualSW: false,
+    });
+    expect(experimentalSnapshot().status.adaptiveTransit).toBe("shadow-only");
+    expect(experimentalSnapshot().status.cspTranslation).toBe("deny-only");
+    expect(experimentalEnabled("cspTranslation")).toBe(true);
     expect(experimentalSnapshot().status.virtualSW).toBe("not-implemented");
   });
 
