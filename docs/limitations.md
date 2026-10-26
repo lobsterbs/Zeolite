@@ -16,6 +16,26 @@ its CSP protection; the engine's origin isolation and hostile-header
 stripping are the remaining guardrails. A CSP pass that rewrites
 directive sources is the only real fix and is deliberately not faked.
 
+### CSP opt-in prototype (#452)
+
+`app/src/csp-translation.ts` contains a **pure, not-yet-enforcing** parser
+and conservative candidate planner. It accepts only a small deny-only subset
+(`object-src 'none'`, `base-uri 'none'`, `form-action 'none'`).
+Origin/path source lists, `'self'`, nonces, hashes, `strict-dynamic`,
+fallback directives, `sandbox`, `frame-ancestors`, report-only policies,
+reports and malformed policies return a typed **unsupported** reason:
+nothing is emitted or silently widened. The current request pipeline still
+strips CSP and CSP meta as before; no new header or browser enforcement has
+been enabled. This is strictly a preparation stage, **not a CSP security
+restoration**.
+
+To enable it safely, #452 still needs origin-scoped engine route matching,
+an injection nonce/hash design, preservation of full policy semantics and
+real Chromium fixtures for allow/block, frames, workers, inline scripts,
+report-only and embedding isolation. A shared engine origin is not
+equivalent to a virtual site's `'self'`; mapping one to the other would
+weaken isolation.
+
 ## Redirect hops with an announced body over the replay cap
 
 The hop chain buffers a request stream body once (cap 32 MiB) and
