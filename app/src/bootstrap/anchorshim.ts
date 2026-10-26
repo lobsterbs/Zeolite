@@ -167,15 +167,11 @@ function scan(): void {
    then schedules the next window so coverage converges (#387). */
 function decodeBatch(routes: string[], more: boolean): void {
   const uniq: string[] = [];
-  let capped = false;
   for (const r of routes) {
     if (memo.has(r) || inflight.has(r)) continue;
     inflight.add(r);
     uniq.push(r);
-    if (uniq.length >= BATCH_MAX) {
-      capped = true;
-      break;
-    }
+    if (uniq.length >= BATCH_MAX) break;
   }
   if (!uniq.length) return;
   const clear = () => {
@@ -187,20 +183,16 @@ function decodeBatch(routes: string[], more: boolean): void {
     return;
   }
   const ch = new MessageChannel();
-  let settled = false;
-  const to = setTimeout(() => { settle(); }, 5000);
-  const settle = (): boolean => {
-    if (settled) return false;
-    settled = true;
+  const to = setTimeout(() => settle(), 5000);
+  const settle = () => {
     clearTimeout(to);
     clear();
     ch.port1.onmessage = null;
-    try { ch.port1.close(); } catch { /* already detached */ }
-    try { ch.port2.close(); } catch { /* transferred */ }
-    return true;
+    ch.port1.close();
+    ch.port2.close();
   };
   ch.port1.onmessage = (ev: MessageEvent) => {
-    if (!settle()) return;
+    settle();
     const d = (ev.data ?? {}) as { ok?: boolean; dests?: unknown[] };
     if (!d.ok || !Array.isArray(d.dests)) return;
     for (let i = 0; i < uniq.length && i < d.dests.length; i++) {
@@ -210,7 +202,7 @@ function decodeBatch(routes: string[], more: boolean): void {
     /* #387: a bounded window left undecoded routes behind; drive
        the next one so a large document virtualizes fully without
        waiting for a mutation or a read miss. */
-    if (capped || more) scheduleScan();
+    if (more) scheduleScan();
   };
   try {
     ctl.postMessage({ type: "zl:decodeRoutes", routes: uniq }, [ch.port2]);
