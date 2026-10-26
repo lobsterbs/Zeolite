@@ -158,7 +158,8 @@ describe("navigator.serviceWorker shim (1.6)", () => {
     swShimRegister(s, "https://a.example/", "sw.js");
     const reg = swShimGet(s, "https://a.example/");
     expect(reg?.active?.state).toBe("activated");
-    expect(swShimGet(s, "https://a.example/", "/other")).toBeUndefined();
+    expect(swShimGet(s, "https://a.example/", "/other")?.scope)
+      .toBe("https://a.example/"); // root scope covers all same-origin paths
   });
 
   it("supports separate scopes, covering client URLs, and ignores query/fragment", async () => {
