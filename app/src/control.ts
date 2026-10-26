@@ -603,7 +603,7 @@ case "zl:loadState": {
      streams number. Refused for proxied-page senders by the gate
      above: the counts must not enumerate other sites. */
   const host = typeof (msg as { host?: unknown }).host === "string" ? (msg as { host?: string }).host : undefined;
-  reply({ ok: true, inflight: loadInflight(host || undefined), streams: activeStreams() });
+  reply({ ok: true, inflight: loadInflight(host || undefined), streams: activeStreams(host || undefined) });
   break;
 }
 case "zl:tracing":
