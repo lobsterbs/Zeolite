@@ -187,9 +187,9 @@ describe("navigator.serviceWorker shim (1.6)", () => {
       .toBe("https://a.example/app/deep/");
     expect(swShimGet(s, "https://a.example/", "/app/sibling")?.scope)
       .toBe("https://a.example/app/");
-    // The scope is a string-prefix match, not a directory-boundary match.
-    expect(swShimGet(s, "https://a.example/", "/appended/page")?.scope)
-      .toBe("https://a.example/app/");
+    // A slash-terminated scope does not cover a sibling path.
+    expect(swShimGet(s, "https://a.example/", "/appended/page"))
+      .toBeUndefined();
   });
 
   it("unregister affects only its scope and returns false when already gone", async () => {
@@ -218,19 +218,19 @@ describe("navigator.serviceWorker shim (1.6)", () => {
       .toBe("https://a.example/old.js");
   });
 
-  it("rejects forged or malformed persisted script origins even with a valid scope", () => {
+  it("rejects forged or malformed persisted script origins even with a valid scope", async () => {
     const s = mkStore();
     s.set(JSON.stringify([
       { scriptURL: "https://a.example.evil/sw.js", scope: "https://a.example/" },
       { scriptURL: 1, scope: "https://a.example/" },
       { scriptURL: "https://a.example/sw.js", scope: "https://a.example/app/" },
     ]));
-    expect(swShimGet(s, "https://a.example/", "/") ).toBeUndefined();
+    expect(swShimGet(s, "https://a.example/", "/")).toBeUndefined();
     expect(swShimGet(s, "https://a.example/", "/app/page")?.scope)
       .toBe("https://a.example/app/");
     const c: Record<string, unknown> = {};
     swShimApply(c, s, "https://a.example/");
-    expect((c.getRegistrations as () => Promise<unknown[]>)()).resolves.toHaveLength(1);
+    await expect((c.getRegistrations as () => Promise<unknown[]>)()).resolves.toHaveLength(1);
   });
 
   it("records are per-origin isolated", () => {
