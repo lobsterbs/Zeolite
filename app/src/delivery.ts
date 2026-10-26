@@ -82,6 +82,7 @@ export const deliveryState = deliveryStateOf;
 function reportDelivery(state: DeliveryState, transport: DeliveryTransport, traceId?: string): void {
   DIAG.emit({ traceId, requestId: traceId, category: "TRANSPORT", severity: "info",
     stage: state === "delivered-response" ? "UPSTREAM_RESPONSE" : "UPSTREAM_REQUEST",
+    deliveryState: state, deliveryTransport: transport,
     message: "request delivery: " + state + "; transport=" + transport });
 }
 
