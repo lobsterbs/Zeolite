@@ -40,7 +40,7 @@ function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string
   if (scope === undefined) {
     const s = new URL("./", scriptHref);
     if (s.origin !== pageOrigin) {
-      throw new TypeError("The Service Worker scope is outside the page origin");
+      throw new TypeError("Service worker scope must share the page origin");
     }
     return s.href;
   }
@@ -51,7 +51,7 @@ function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string
     /* malformed below */
   }
   if (!s || s.origin !== pageOrigin) {
-    throw new TypeError("The Service Worker scope is outside the page origin");
+    throw new TypeError("Service worker scope must share the page origin");
   }
   return s.href;
 }
