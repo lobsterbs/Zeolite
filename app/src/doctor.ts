@@ -147,10 +147,26 @@ function safeUrl(v: string | undefined): string | null {
 /** Only static same-origin worker-sibling assets. Caller must be the
     verified host and explicitly set probeAssets=true. No user-supplied
     URLs, remote WISP probe, header credentials or KDL fetch. */
+let activeAssetProbe: Promise<DoctorCheck[]> | null = null;
 export async function probeDoctorAssets(
   scriptUrl: string,
   doFetch: typeof fetch,
   timeoutMs = 1500,
+): Promise<DoctorCheck[]> {
+  if (activeAssetProbe) return activeAssetProbe;
+  const run = probeDoctorAssetsOnce(scriptUrl, doFetch, timeoutMs);
+  activeAssetProbe = run;
+  try {
+    return await run;
+  } finally {
+    if (activeAssetProbe === run) activeAssetProbe = null;
+  }
+}
+
+async function probeDoctorAssetsOnce(
+  scriptUrl: string,
+  doFetch: typeof fetch,
+  timeoutMs: number,
 ): Promise<DoctorCheck[]> {
   let base: URL;
   try {
