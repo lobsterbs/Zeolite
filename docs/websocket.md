@@ -34,6 +34,14 @@ serve WebSocket only without TLS will fail; this is deliberate.
   framing, masking and fragmentation.
 - Reconnecting libraries see normal error/close sequences and can
   reconnect as usual.
+- `bufferedAmount` (#462) counts UTF-8 text and binary payload bytes
+  while page/worker messages await acceptance at the service-worker
+  bridge. The bridge sends a byte-count acknowledgment only after its
+  transport `send()` succeeds; failed writes receive no acknowledgment.
+  This is deliberately **bridge-queue accounting**, not an assertion
+  that data reached the peer or left the underlying TLS/Wisp buffer.
+  Network-level bufferedAmount parity requires transport drain signals
+  that the current WsHandle does not expose.
 - Non-ws schemes fall through to the native constructor.
 
 ## URL handling (#279)
