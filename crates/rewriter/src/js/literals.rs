@@ -555,8 +555,14 @@ mod tests {
             const config = new URL(dsn);
             fetch("https://api.example/score");"#;
         let out = rewrite_script(js, &|u| format!("[{u}]"));
-        assert!(out.contains(r#""https://publickey@telemetry.example/42""#), "{out}");
-        assert!(out.contains(r#"fetch("[https://api.example/score]")"#), "{out}");
+        assert!(
+            out.contains(r#""https://publickey@telemetry.example/42""#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"fetch("[https://api.example/score]")"#),
+            "{out}"
+        );
 
         // This is a URL-structure rule, not a Sentry or site-specific patch.
         let other = r#"const cfg = new URL("wss://user:pass@config.example/socket");
