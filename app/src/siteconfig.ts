@@ -44,6 +44,8 @@ export interface SiteRule {
 export type SiteRules = Record<string, SiteRule>;
 
 let cached: Promise<SiteRules> | null = null;
+let doctorState: "not-loaded" | "loaded" | "missing" | "invalid" | "unavailable" = "not-loaded";
+export function siteconfigDoctorState(): typeof doctorState { return doctorState; }
 
 /** Fetch (and memoize for the SW lifetime) the site rules. A missing or
     malformed file means "no rules": the engine must still work. */
@@ -52,9 +54,12 @@ export function siteRules(): Promise<SiteRules> {
     cached = (async () => {
       try {
         const resp = await fetch("/siteconfig.kdl", { cache: "no-cache" });
-        if (!resp.ok) return {};
-        return rulesFromNodes(parseKdl(await resp.text()));
+        if (!resp.ok) { doctorState = resp.status === 404 ? "missing" : "unavailable"; return {}; }
+        const result = rulesFromNodes(parseKdl(await resp.text()));
+        doctorState = "loaded";
+        return result;
       } catch {
+        doctorState = "invalid";
         return {};
       }
     })();
