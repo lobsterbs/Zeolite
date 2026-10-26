@@ -2678,7 +2678,7 @@ export function handleFetch(e: FetchEvent): void {
             if (experimentalEnabled("adaptiveTransit"))
               traceDecision({ subsystem: "transport", rule: "adaptive-shadow",
                 original: decision.mode, result: plan.strategy + ":" + plan.evidence,
-                resource: rtype, traceId });
+                resource: rtype, traceId }, true);
             /* #487: opt-in evidence, no raw URL added to the planner trace;
                traceId joins the existing network log for this request. */
             traceDecision({ subsystem: "transport", rule: "adaptive-picker", original: dec.mode,
@@ -3340,7 +3340,7 @@ export function handleFetch(e: FetchEvent): void {
           if (experimentalEnabled("adaptiveTransit"))
             traceDecision({ subsystem: "transport", rule: "adaptive-shadow",
               original: decision.mode, result: plan.strategy + ":" + plan.evidence,
-              resource: rtype, traceId });
+              resource: rtype, traceId }, true);
           traceDecision({ subsystem: "transport", rule: "adaptive-picker", original: dec.mode,
             result: plan.strategy + ":" + plan.evidence, resource: rtype, traceId });
           if (dec.mode === "NativeTransit" && dec.reason === "POLICY_NATIVE")
