@@ -86,6 +86,23 @@ describe("Zeolite Doctor passive evidence model (#495)", () => {
     expect(check(r, "config.rules").status).toBe("unknown");
   });
 
+  it("KDL escapes quotes/newlines and neutralizes hostile control characters without extra nodes", () => {
+    const r = buildDoctor(evidence());
+    r.checks.push({
+      code: 'x";\\nrogue "injected"',
+      status: "warn",
+      summary: "line1\\nline2\\tsemi;\\u0000end",
+      remedy: 'quoted \\";\\nextra',
+    });
+    const source = doctorKdl(r);
+    const doc = parseKdl(source);
+    expect(doc).toHaveLength(1);
+    expect(doc[0].children).toHaveLength(r.checks.length);
+    expect(doc[0].children.at(-1)?.args[0]).toBe('x";\\nrogue "injected"');
+    expect(doc[0].children.at(-1)?.props.summary).toContain("semi;");
+    expect(source).not.toContain("\\u0000");
+  });
+
   it("serializes parseable KDL with no raw endpoint credentials or secret-bearing URL fields", () => {
     const r = buildDoctor(evidence({ expectedVersion: 'bad";\nextra "injected"', primaryWisp: "wss://bob:pw@engine.example/wisp/?password=hunter2" }));
     const src = doctorKdl(r);
@@ -134,6 +151,19 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
       expect(init.redirect).toBe("manual");
       expect(init.cache).toBe("no-store");
     }
+  });
+
+  it("coalesces overlapping asset checks rather than starting duplicate probe sets", async () => {
+    const fetcher = vi.fn(async (url: string) =>
+      new Response(null, { status: 200, headers: {
+        "content-type": url.endsWith(".wasm") ? "application/wasm" : "text/javascript",
+      } }));
+    const [one, two] = await Promise.all([
+      probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch),
+      probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch),
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(one).toEqual(two);
   });
 
   it("detects missing bundle and HTML SPA fallback without treating other network failures as confirmed 404s", async () => {
