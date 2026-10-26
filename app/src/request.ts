@@ -3492,7 +3492,7 @@ export function handleFetch(e: FetchEvent): void {
                 },
               );
             }
-            return new Response(rawFrom(sniffHead, sniffReader), {
+            return new Response(rawFrom(sniffHead, sniffReader, finalDest ?? target), {
               status: resp.status,
               headers: outHeaders,
             });
