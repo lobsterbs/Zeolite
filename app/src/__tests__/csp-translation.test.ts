@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { planCspTranslation, planCspHeaders } from "../csp-translation";
+import { planCspTranslation, planCspHeaders, applyExperimentalCsp } from "../csp-translation";
 import { stripHostile } from "../headers";
 
-describe("CSP translation safety prototype (#452) — not enabled in request serving", () => {
+describe("CSP deny-only translation safety subset (#452)", () => {
   it("constructs only explicit deny-only candidates with no URL widening", () => {
     expect(planCspTranslation("object-src 'none'; base-uri 'none'; form-action 'none'")).toEqual({
       kind: "candidate",
@@ -92,7 +92,34 @@ describe("CSP translation safety prototype (#452) — not enabled in request ser
     });
   });
 
-  it("keeps the deployed response stripping behavior unchanged until browser acceptance", () => {
+  it("restores only safely denied sources to HTML documents when enabled", () => {
+    const raw = new Headers({
+      "content-security-policy": "object-src 'none'; base-uri 'none'",
+      "content-security-policy-report-only": "report-uri https://secret.example/",
+    });
+    const out = stripHostile(raw);
+    expect(applyExperimentalCsp(out, raw, "text/html; charset=utf-8", true)).toBe(true);
+    expect(out.get("content-security-policy")).toBe("object-src 'none'; base-uri 'none'");
+    expect(out.has("content-security-policy-report-only")).toBe(false);
+  });
+
+  it("never copies arbitrary CSP or enforces on non-document resources", () => {
+    for (const value of [
+      "default-src 'none'", "script-src 'self'", "object-src 'self'",
+      "object-src 'none'; script-src https://cdn.example",
+      "object-src 'none', base-uri 'none'",
+    ]) {
+      const original = new Headers({ "content-security-policy": value });
+      const out = stripHostile(original);
+      expect(applyExperimentalCsp(out, original, "text/html", true)).toBe(false);
+      expect(out.has("content-security-policy")).toBe(false);
+    }
+    const raw = new Headers({ "content-security-policy": "object-src 'none'" });
+    for (const [mime, doc] of [["text/css",true],["text/javascript",true],["text/html",false]] as const)
+      expect(applyExperimentalCsp(new Headers(), raw, mime, doc)).toBe(false);
+  });
+
+  it("preserves the default stripping behavior when the experimental flag is off", () => {
     const headers = new Headers({
       "Content-Security-Policy": "object-src 'none'",
       "Content-Security-Policy-Report-Only": "object-src 'none'",
