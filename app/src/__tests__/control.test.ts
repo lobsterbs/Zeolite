@@ -124,13 +124,13 @@ describe("sender gate preserved by the extraction (#41/#48)", () => {
     expect(posted[0]).toMatchObject({
       ok: true, experimental: { requested: selected,
         effective: { adaptiveTransit: false, hybridLocation: false,
-          cspTranslation: false, virtualSW: false } },
+          cspTranslation: true, virtualSW: false } },
     });
     const ping = mkEvent("https://w.example.org/j/token", { type: "zl:ping" });
     await handleControlEvent(ping.ev, deps);
     expect(ping.posted[0]).toMatchObject({
       ok: true, experimental: { requested: selected,
-        effective: { cspTranslation: false, virtualSW: false } },
+        effective: { cspTranslation: true, virtualSW: false } },
     });
     const bad = mkEvent("https://w.example.org/", {
       type: "zl:config", prefix: "/j/", experimental: { virtualSW: "true" },
