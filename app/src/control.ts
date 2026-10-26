@@ -1121,6 +1121,24 @@ export async function handleControlEvent(
       return;
     }
     const boot = await observeDoctorBoot(deps.ready);
+    let clientControl: "pass" | "fail" | "unknown" | undefined;
+    if (msg.clientId !== undefined) {
+      if (typeof msg.clientId !== "string" || msg.clientId.length < 1 || msg.clientId.length > 256) {
+        clientControl = "fail";
+      } else {
+        try {
+          const selected = await self.clients.get(msg.clientId);
+          if (!selected?.url) clientControl = "fail";
+          else {
+            const u = new URL(selected.url);
+            clientControl = u.origin === self.location.origin &&
+              senderIsProxiedPath(u.pathname, u.search) ? "pass" : "fail";
+          }
+        } catch {
+          clientControl = "unknown";
+        }
+      }
+    }
     const scriptUrl = self.location?.href;
     const assets = msg.probeAssets === true ?
       await probeDoctorAssets(scriptUrl ?? "", fetch) : [];
@@ -1140,6 +1158,7 @@ export async function handleControlEvent(
       policy: policyDoctorState(),
       rules: rulesDoctorState(),
       siteconfig: siteconfigDoctorState(),
+      clientControl,
     }, assets);
     reply({ ...report, kdl: msg.format === "kdl" ? doctorKdl(report) : undefined });
     return;
