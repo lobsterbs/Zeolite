@@ -3,8 +3,7 @@ export function validateWsClose(code?: unknown, reason?: unknown): { code?: numb
   let normalizedCode: number | undefined;
   if (code !== undefined) {
     // Unary + uses ToNumber: unlike Number(), it rejects BigInt.
-    const n = +(code as number);
-    normalizedCode = Number.isFinite(n) ? ((Math.trunc(n) % 65536) + 65536) % 65536 : 0;
+    normalizedCode = +(code as number) & 65535;
   }
   let normalizedReason: string | undefined;
   let reasonBytes: Uint8Array | undefined;
@@ -18,7 +17,7 @@ export function validateWsClose(code?: unknown, reason?: unknown): { code?: numb
     throw new DOMException("Close code", "InvalidAccessError");
   }
   if (reasonBytes && reasonBytes.byteLength > 123) {
-    throw new DOMException("Reason too long", "SyntaxError");
+    throw new DOMException("Reason", "SyntaxError");
   }
   return { code: normalizedCode, reason: normalizedReason };
 }
