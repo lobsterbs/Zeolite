@@ -31,7 +31,8 @@ describe("Zeolite Doctor passive evidence model (#495)", () => {
   it("reports unknown instead of claiming all checks passed from a successful boot", () => {
     const r = buildDoctor(evidence());
     expect(r.schemaVersion).toBe(1);
-    expect(r.ok).toBe(true); // no known failures, not a claim that all checks pass
+    expect(r.ok).toBe(true); // RPC completed
+    expect(r.healthy).toBeNull(); // not all checks were observable
     expect(check(r, "worker.running").status).toBe("pass");
     expect(check(r, "worker.client-control").status).toBe("unknown");
     expect(check(r, "engine.initialization").status).toBe("unknown");
@@ -46,7 +47,8 @@ describe("Zeolite Doctor passive evidence model (#495)", () => {
 
   it("reports actual failed initialization and a previously observed dead transport", () => {
     const r = buildDoctor(evidence({ degraded: true, boot: "failed", transport: "dead" }));
-    expect(r.ok).toBe(false);
+    expect(r.ok).toBe(true); // doctor answered despite recorded engine failure
+    expect(r.healthy).toBe(false);
     expect(check(r, "worker.boot").status).toBe("fail");
     expect(check(r, "engine.initialization").status).toBe("fail");
     expect(check(r, "transport.lifecycle").status).toBe("fail");
@@ -116,7 +118,7 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
         "content-type": url.endsWith(".wasm") ? "application/wasm" : "text/javascript",
       } });
     });
-    const r = await probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as typeof fetch);
+    const r = await probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch);
     expect(r).toHaveLength(4);
     expect(r.every(x => x.status === "pass")).toBe(true);
     expect(seen.map(x => x[0])).toEqual([
@@ -141,7 +143,7 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
       if (url.endsWith("/worker-prelude.js")) return new Response(null, { status: 405 });
       throw new Error("private-token");
     });
-    const r = await probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as typeof fetch);
+    const r = await probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch);
     expect(r.map(c => c.status)).toEqual(["fail", "fail", "unknown", "unknown"]);
     expect(JSON.stringify(r)).not.toContain("private-token");
   });
