@@ -236,6 +236,12 @@ jobs:
         # Raised 36352 -> 37888 for registered-embedder popup routing
         # and client/icon metadata (#416/#428). The strict byte gate
         # remains; measure the complete bundle after each change.
+        # Raised 39424 -> 41472 for the #488/#489/#490/#491 anchor
+        # read wave: per-element scan convergence (elMemo + the
+        # read-driven pendingReads refresh), decode-channel settle
+        # teardown, coherent component getters/stringifier, and the
+        # bounded embedder handshake retry; measured 40542, baseline
+        # 38471.
         # Raised 37888 -> 39424 for the scout-wave listener
         # registries: capture-aware wrapper identity (#472 in
         # vorigin/relay) and storage once/signal/capture parity
@@ -243,7 +249,7 @@ jobs:
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 39424 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 39424)"; exit 1; fi
+          if [ "$SIZE" -ge 41472 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 41472)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
