@@ -45,6 +45,21 @@ version cannot attest to the server's separately served files.
 The worker cannot prove that an arbitrary selected host tab is
 controlled merely because its own host-only control message arrived.
 
+## Standalone Zeolite DevTools
+
+Open the engine's own `/devtools.html` under a controlling worker. The
+**Zeolite Doctor** panel offers three explicit actions:
+
+- **Inspect:** passive, read-only checks without extra network requests.
+- **Check bundle assets:** opt-in, bounded, same-origin HEAD probes only.
+- **Export KDL:** downloads the current report as `zeolite-doctor.kdl`
+  locally; if no report exists, first requests a passive one.
+
+Unavailable worker/control replies are labelled unavailable. The UI escapes
+reported strings through DOM `textContent`, never raw HTML. These controls
+do not install or expose an MCP server. LobsterBrowse may independently
+surface equivalent API responses in its own DevTools.
+
 ## Check semantics
 
 - `worker.running`: the control-plane handler responded. **Not proof**
