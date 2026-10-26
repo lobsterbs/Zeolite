@@ -53,7 +53,14 @@ stages, severity, cause, transport/rewriter decision, documented fallback
 reasons, and bounded status/timestamp integers. Raw destination URLs,
 query strings, usernames, headers, cookie/authorization values,
 request/response bodies, error strings, KDL rule names/values and
-untrusted trace results do not appear. This also applies when the
+untrusted trace results do not appear. An exception exists only
+for **fully validated, exact** `adaptive-picker`/`adaptive-shadow` tuples:
+known planner strategy (`native`, `light`, `full`, `required`,
+`blocked`) and fixed evidence code (`default`,
+`request-destination`, `response-content-type`, `manual-policy`,
+`challenge-namespace`). Unrecognized, concatenated, or attacker-
+controlled result strings are discarded rather than truncated.
+This also applies when the
 in-memory diagnostic ring already contains hostile unsanitized strings.
 The report includes a synthetic ordering of the observed events by
 recorded timestamp, but it does not infer causation or unseen steps.
