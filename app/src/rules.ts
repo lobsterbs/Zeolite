@@ -254,6 +254,8 @@ function parseRulesKdl(doc: KdlNode[]): RulesData {
 }
 
 let cached: Promise<CompiledRules> | null = null;
+let doctorState: "not-loaded" | "loaded" | "missing" | "invalid" | "unavailable" = "not-loaded";
+export function rulesDoctorState(): typeof doctorState { return doctorState; }
 
 /** Fetch (and memoize for the SW lifetime) /rules.kdl. A missing or
     malformed file means "no rules": the engine must still work. */
@@ -265,9 +267,12 @@ export function loadRules(): Promise<CompiledRules> {
         /* 5xx is transient: forget the memo so the next call retries.
            A 404 (no rules file) stays memoized. */
         if (resp.status >= 500) cached = null;
-        if (!resp.ok) return compileRules(null);
-        return compileRules(parseRulesKdl(parseKdl(await resp.text())));
+        if (!resp.ok) { doctorState = resp.status === 404 ? "missing" : "unavailable"; return compileRules(null); }
+        const result = compileRules(parseRulesKdl(parseKdl(await resp.text())));
+        doctorState = "loaded";
+        return result;
       } catch {
+        doctorState = "invalid";
         cached = null;
         return compileRules(null);
       }
@@ -340,6 +345,7 @@ export function siteUaFor(url: string): string | null {
 /** Tests only: drop the memoized rules and re-enable. */
 export function rulesResetForTests(): void {
   cached = null;
+  doctorState = "not-loaded";
   rulesEnabled = true;
   overrides = [];
   defaultUa = null;
