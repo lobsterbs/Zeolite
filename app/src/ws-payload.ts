@@ -4,7 +4,7 @@
 export function wsPayload(data: unknown): { data: string | Blob | ArrayBuffer | ArrayBufferView; bytes: number } {
   if (data instanceof Blob) return { data, bytes: data.size };
   if (ArrayBuffer.isView(data) && typeof SharedArrayBuffer !== "undefined" && data.buffer instanceof SharedArrayBuffer)
-    throw new TypeError("SharedArrayBuffer-backed WebSocket payload");
+    throw new TypeError();
   if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return { data, bytes: data.byteLength };
   // Web IDL's USVString conversion rejects Symbols. String() alone does not.
   if (typeof data === "symbol") throw new TypeError("Symbol");
