@@ -2,14 +2,15 @@
 
 Zeolite accepts the four experimental selections below through the
 **existing host-only** `zl:config` request. They are **off by default**,
-are stored only in the current Service Worker lifetime, and do not
-change request handling in this preliminary flag-registration stage.
+are stored in the current Service Worker lifetime. Only the optional
+narrow **CSP deny-only** subset changes response headers today;
+Adaptive NativeTransit runs shadow diagnostics without changing routing.
 
 | Key | Issue | Current execution support |
 | --- | --- | --- |
-| `adaptiveTransit` | #487 | **Not wired** to the existing conservative response planner |
+| `adaptiveTransit` | #487 | **Shadow-only** on live/cache paths; no routing changes |
 | `hybridLocation` | #456 | **Not wired**; existing per-site KDL hybrid location policy remains separate |
-| `cspTranslation` | #452 | **Not implemented** for live response enforcement; pure planner only |
+| `cspTranslation` | #452 | **Deny-only subset** for HTML documents: object-src/base-uri/form-action 'none'; arbitrary policies remain stripped |
 | `virtualSW` | #477 | **Not implemented**; registration groundwork is not guest execution |
 
 ## Protocol
@@ -21,7 +22,7 @@ const message = {
   experimental: {
     adaptiveTransit: true,
     hybridLocation: false,
-    cspTranslation: false,
+    cspTranslation: true,
     virtualSW: false,
   },
 };
@@ -35,19 +36,19 @@ The acknowledgement (and `zl:ping`) includes:
     "requested": {
       "adaptiveTransit": true,
       "hybridLocation": false,
-      "cspTranslation": false,
+      "cspTranslation": true,
       "virtualSW": false
     },
     "effective": {
       "adaptiveTransit": false,
       "hybridLocation": false,
-      "cspTranslation": false,
+      "cspTranslation": true,
       "virtualSW": false
     },
     "status": {
-      "adaptiveTransit": "not-wired",
+      "adaptiveTransit": "shadow-only",
       "hybridLocation": "not-wired",
-      "cspTranslation": "not-implemented",
+      "cspTranslation": "deny-only",
       "virtualSW": "not-implemented"
     }
   }
@@ -56,10 +57,12 @@ The acknowledgement (and `zl:ping`) includes:
 
 `requested` is the operator's selected preference. **`effective`
 is the authoritative execution state**, not an aspirational target.
-Until a feature's own security and Chromium gates are satisfied, these
-choices never activate it. Never infer activation from `ok: true` on
-`zl:config`; that means the request was accepted, not that an
-experimental runtime is available.
+The `cspTranslation` flag enables only validated deny-only upstream CSP
+on HTML documents and disables CSP-less cache reuse for those documents.
+Everything else remains off or non-enforcing: adaptive mode is shadow
+telemetry, guest workers never execute, and hybrid rewriting is not wired.
+A successful `zl:config` acknowledgment does not establish browser
+compatibility or prove that any particular document had a candidate CSP.
 
 Only the four named boolean properties are accepted. Unknown keys,
 invalid values, arrays and non-plain objects are rejected atomically,
