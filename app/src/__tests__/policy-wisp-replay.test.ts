@@ -62,11 +62,10 @@ describe("policy Wisp fallback replay safety (#444)", () => {
     expect(primary).not.toHaveBeenCalled();
   });
 
-  it("allows a replayable POST only for a proven pre-send connection failure", async () => {
+  it("does not infer POST non-delivery from alternate error text", async () => {
     alternate.mockRejectedValue(new Error("websocket did not open"));
-    const response = await fetchUpstream()("https://api.example/write", { method: "POST", headers: new Headers(), body: "change" });
-    expect(await response.text()).toBe("primary");
-    expect(primary).toHaveBeenCalledTimes(1);
+    await expect(fetchUpstream()("https://api.example/write", { method: "POST", headers: new Headers(), body: "change" })).rejects.toThrow("websocket did not open");
+    expect(primary).not.toHaveBeenCalled();
   });
 
   it("keeps missing-endpoint fallback before any alternate request was attempted", async () => {

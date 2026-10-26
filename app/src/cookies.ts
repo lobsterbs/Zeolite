@@ -229,8 +229,8 @@ export function jarProfilesReady(): Promise<void> {
       const c = await caches.open(PROFILE_CACHE);
       const r = await c.match("profiles");
       if (!r) return;
-      const j = (await r.json()) as { profile?: unknown; roots?: unknown; uncertain?: unknown };
-      if (!j || (j.uncertain !== undefined && typeof j.uncertain !== "boolean") || !validProfileName(j.profile) || !j.roots || typeof j.roots !== "object" || Array.isArray(j.roots)) {
+      const j = (await r.json()) as { v?: unknown; profile?: unknown; roots?: unknown; uncertain?: unknown };
+      if (!j || (j.v !== undefined && j.v !== 1) || (j.uncertain !== undefined && typeof j.uncertain !== "boolean") || !validProfileName(j.profile) || !j.roots || typeof j.roots !== "object" || Array.isArray(j.roots)) {
         throw new Error("invalid profile snapshot");
       }
       const roots = Object.entries(j.roots);
@@ -257,7 +257,7 @@ function persistJarProfiles(): void {
     // one root at boot could erase another window's session profile.
     await jarProfilesReady();
     if (typeof caches === "undefined") return;
-    const snapshot = { profile, roots: Object.fromEntries(rootProfiles), uncertain: profileRestoreFailed };
+    const snapshot = { v: 1, profile, roots: Object.fromEntries(rootProfiles), uncertain: profileRestoreFailed };
     const c = await caches.open(PROFILE_CACHE);
     await c.put("profiles", new Response(JSON.stringify(snapshot)));
   }).catch(() => {
@@ -1344,3 +1344,6 @@ export function isPassChallenge(dest: string): boolean {
   }
 }
 
+
+/** Wait for queued profile snapshot writes. */
+export function jarProfilePersistDrain(): Promise<void> { return profilePersistChain; }

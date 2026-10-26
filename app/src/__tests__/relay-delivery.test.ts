@@ -41,7 +41,7 @@ describe("relay delivery safety (#442)", () => {
     port.reply({ type: "zl:relayHead", rid: port.sent[0].rid, status: 204, statusText: "", headers: [] });
     port.reply({ type: "zl:relayEnd", rid: port.sent[0].rid });
     expect((await pending)?.status).toBe(204);
-    expect(port.sent.some(m => m.type === "zl:relayCancel")).toBe(false);
+    expect(port.sent.some(m => m.type === "zl:relayCancel")).toBe(true);
   });
   it("still bounds a large upload and preserves caller cancellation", async () => {
     vi.useFakeTimers(); const port = reg();

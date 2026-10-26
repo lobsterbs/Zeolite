@@ -147,8 +147,13 @@ if (typeof self !== "undefined") void relayColdWake();
 
 /** Control-plane half of zl:relayRegister: remember the embedder's
     port and route its answers to the pending fetches. */
-export function relayRegister(port: MessagePort): void {
+let hostCredits = false;
+
+export function relayRegister(port: MessagePort, credits?: unknown): void {
   hostPort = port;
+  /* #470: only an embedder that understands byte credits receives
+     them; a legacy registration keeps the unbounded stream. */
+  hostCredits = credits === 1;
   /* #354: a pending channel-less relay fetch may be waiting for
      exactly this registration; wake it (bounded wait resolves true). */
   const ws = reRegisterWaiters;
@@ -170,6 +175,9 @@ export function relayAvailable(): boolean {
 /** Longest wait for the embedder's first answer on a relayed fetch. */
 export const RELAY_HEADER_DEADLINE_MS = 60_000;
 export const RELAY_UPLOAD_HEADER_DEADLINE_MS = 600_000;
+/** #470: bytes the SW grants a crediting embedder up front and back
+    per drained chunk, so the producer can pace its reads. */
+export const RELAY_CREDIT_BYTES = 2 * 1024 * 1024;
 /** Upload time counts before response headers. Large buffered bodies
     and multipart uploads get a finite budget matching the host relay. */
 export function relayHeaderDeadlineMs(init: { headers: Headers; body?: BodyInit | null }): number {
@@ -190,6 +198,7 @@ export async function relayFetch(
   traceId: string,
 ): Promise<Response | null> {
   const port = hostPort;
+  const crediting = hostCredits;
   if (!port) return null;
   const body = init.body;
   if (body !== undefined && body !== null && typeof body !== "string" && !(body instanceof ArrayBuffer)) {
@@ -214,11 +223,27 @@ export async function relayFetch(
   if (signal?.aborted) throw abortErr();
   const rid = ++ridSeq;
   const queue: RelayMsg[] = [];
+  let queuedBytes = 0;
+  let terminal = false;
   let wake: (() => void) | null = null;
   let aborted = false;
   const cancelUpstream = () => port.postMessage({ type: "zl:relayCancel", rid });
   waiters.set(rid, (m) => {
-    queue.push(m);
+    if (terminal) return;
+    const bytes = m.type === "zl:relayChunk" ? m.bytes.byteLength : 0;
+    // Bound both payload memory and zero-byte/control frame floods, including
+    // legacy peers that cannot participate in the credit protocol.
+    if (queuedBytes + bytes > RELAY_CREDIT_BYTES * 2 || queue.length >= 4096) {
+      terminal = true;
+      waiters.delete(rid);
+      queue.length = 0;
+      queuedBytes = 0;
+      queue.push({ type: "zl:relayError", rid, error: "relay response queue limit exceeded" });
+      try { cancelUpstream(); } catch { /* local failure still wakes the reader */ }
+    } else {
+      queuedBytes += bytes;
+      queue.push(m);
+    }
     const w = wake;
     wake = null;
     w?.();
@@ -237,15 +262,20 @@ export async function relayFetch(
     waiters.delete(rid);
     signal?.removeEventListener("abort", onAbort);
   };
+  const shift = (): RelayMsg => {
+    const m = queue.shift()!;
+    if (m?.type === "zl:relayChunk") queuedBytes -= m.bytes.byteLength;
+    return m;
+  };
   const take = (): Promise<RelayMsg> =>
     new Promise((resolve, reject) => {
       if (aborted) {
         reject(abortErr());
         return;
       }
-      const m = queue.shift();
+      const m = shift();
       if (m) resolve(m);
-      else wake = () => (aborted ? reject(abortErr()) : resolve(queue.shift() as RelayMsg));
+      else wake = () => (aborted ? reject(abortErr()) : resolve(shift()));
     });
   port.postMessage({
     type: "zl:fetchRelay",
@@ -255,6 +285,9 @@ export async function relayFetch(
     headers: Array.from(init.headers.entries()),
     body,
   });
+  /* #470: the up-front credit grant; a non-crediting host never
+     receives these frames. */
+  if (crediting) port.postMessage({ type: "zl:relayCredit", rid, bytes: RELAY_CREDIT_BYTES });
   /* Header deadline for every relayed fetch, subresources included.
      Without it a silent embedder (or a port it dropped without a
      close event) parks the request until the page gives up. #382:
@@ -331,8 +364,14 @@ export async function relayFetch(
   const h = new Headers();
   for (const [k, v] of first.headers) h.append(k, v);
   for (const c of first.setCookies ?? []) h.append("set-cookie", c);
-  const nullBody = first.status === 204 || first.status === 205 || first.status === 304;
-  const stream = new ReadableStream<Uint8Array>({
+  const nullBody = init.method.toUpperCase() === "HEAD" || first.status === 204 || first.status === 205 || first.status === 304;
+  if (nullBody) {
+    cleanup();
+    queue.length = 0;
+    queuedBytes = 0;
+    cancelUpstream();
+  }
+  const stream = nullBody ? null : new ReadableStream<Uint8Array>({
     async pull(controller) {
       let m: RelayMsg;
       try {
@@ -344,6 +383,9 @@ export async function relayFetch(
       }
       if (m.type === "zl:relayChunk") {
         controller.enqueue(m.bytes);
+        /* #470: grant the drained bytes back so a crediting embedder
+           can pace its reads. */
+        if (crediting) port.postMessage({ type: "zl:relayCredit", rid, bytes: m.bytes.byteLength });
         return;
       }
       cleanup();

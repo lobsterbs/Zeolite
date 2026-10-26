@@ -28,10 +28,8 @@ function wsProtocolsList(protocols: unknown): string[] {
   const out: string[] = [];
   for (const tok of list) {
     const s = String(tok);
-    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(s))
-      throw new DOMException("The subprotocol '" + s + "' is invalid.", "SyntaxError");
-    if (seen.has(s))
-      throw new DOMException("The subprotocol '" + s + "' is invalid.", "SyntaxError");
+    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(s) || seen.has(s))
+      throw new DOMException("Invalid subprotocol", "SyntaxError");
     seen.add(s);
     out.push(s);
   }

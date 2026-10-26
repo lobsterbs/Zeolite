@@ -69,11 +69,10 @@ describe("transport retry safety (#251)", () => {
     expect(h.calls.length).toBe(1);
   });
 
-  it("POST is retried when the request was never sent (websocket did not open)", async () => {
+  it("POST error text cannot prove non-delivery", async () => {
     h.failFirst = "websocket did not open";
-    const r = await wispTransport.fetch("https://a.example/", { method: "POST", body: "x=1" });
-    expect(r.status).toBe(200);
-    expect(h.calls.length).toBe(2);
+    await expect(wispTransport.fetch("https://a.example/", { method: "POST", body: "x=1" })).rejects.toThrow("websocket did not open");
+    expect(h.calls.length).toBe(1);
   });
 
   it("a stream body is never retried, even on a GET", async () => {
