@@ -83,6 +83,26 @@ function fakeFactory(): {
 }
 
 describe("WsBridge", () => {
+  it("acknowledges accepted UTF-8 and binary bytes after open, including queued bridge races (#462)", () => {
+    const { hooks } = fakeHooks();
+    const { factory, handlers, sent } = fakeFactory();
+    const b = new WsBridge(factory, hooks);
+    const p = fakePort();
+    b.open(p, "wss://example.com/", []);
+    p.onmessage?.({ data: { op: "send", data: "é" } });
+    expect(p.posted.filter(x => (x as { ev?: string }).ev === "drain")).toEqual([]);
+    handlers[0].h.onopen("");
+    expect(sent).toEqual(["é"]);
+    expect(p.posted).toContainEqual({ ev: "drain", bytes: 2 });
+    const binary = new Uint8Array([1, 2, 3]);
+    p.onmessage?.({ data: { op: "send", data: binary } });
+    expect(sent).toEqual(["é", binary]);
+    expect(p.posted).toContainEqual({ ev: "drain", bytes: 3 });
+    const blob = new Blob(["okay"]);
+    p.onmessage?.({ data: { op: "send", data: blob } });
+    expect(p.posted).toContainEqual({ ev: "drain", bytes: 4 });
+  });
+
   it.each([false, true])("contains synchronous send failure (queued=%s) and closes transport", queued => {
     const { hooks, rec } = fakeHooks();
     let h!: FakeHandlers["h"];
