@@ -8,8 +8,8 @@
 
 use bytes::BytesMut;
 use wasm_bindgen::prelude::*;
-use wisp_core::{encode_packet, CloseReason, Frame, Packet, PacketType, StreamKind};
 use wisp_core::extension::{password_auth_client, ExtensionId};
+use wisp_core::{encode_packet, CloseReason, Frame, Packet, PacketType, StreamKind};
 
 pub const WISP_VERSION_MAJOR: u8 = 2;
 pub const WISP_VERSION_MINOR: u8 = 1;
@@ -88,11 +88,7 @@ pub fn handshake_info() -> Vec<u8> {
 /// Invalid credentials fail closed (None), never become URL parameters.
 #[wasm_bindgen(js_name = "handshakeInfoPassword")]
 pub fn handshake_info_password(username: String, password: String) -> Option<Vec<u8>> {
-    if username.is_empty()
-        || username.len() > 255
-        || password.is_empty()
-        || password.len() > 4096
-    {
+    if username.is_empty() || username.len() > 255 || password.is_empty() || password.len() > 4096 {
         return None;
     }
     let payload = password_auth_client(&username, &password).ok()?;
@@ -206,7 +202,12 @@ mod tests {
         let mut bytes = BytesMut::from(wire.as_slice());
         let frame = Frame::decode(&mut bytes).unwrap().unwrap();
         match frame.parse_packet().unwrap() {
-            Packet::Info { stream_id, major, minor, extensions } => {
+            Packet::Info {
+                stream_id,
+                major,
+                minor,
+                extensions,
+            } => {
                 assert_eq!((stream_id, major, minor), (0, 2, 1));
                 assert_eq!(extensions.len(), 1);
                 assert_eq!(extensions[0].0, ExtensionId::PasswordAuth as u8);
