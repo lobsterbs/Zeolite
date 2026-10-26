@@ -200,6 +200,15 @@ const disp = (e: Event) => {
         },
         send: {
           value: (data: unknown) => {
+            /* #493: native BufferSource conversion rejects
+               SharedArrayBuffer-backed views before the state check:
+               a CLOSING socket still throws TypeError for them, never
+               InvalidStateError. Reject before counting or posting. */
+            if (
+              ArrayBuffer.isView(data) &&
+              (data as ArrayBufferView).buffer instanceof SharedArrayBuffer
+            )
+              throw new TypeError("SharedArrayBuffer-backed views are not valid WebSocket payload data.");
             /* Spec: send() while CONNECTING buffers at the bridge; only
                CLOSING/CLOSED throw. */
             if (wsState >= 2) throw new DOMException("invalid state", "InvalidStateError");

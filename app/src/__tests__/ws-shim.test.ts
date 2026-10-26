@@ -194,3 +194,73 @@ describe("page WebSocket shim relative URLs (#279)", () => {
     expect(nativeErr).not.toBeNull();
   });
 });
+
+/* #493: native BufferSource conversion rejects SharedArrayBuffer-backed
+   views before the state check. The shim must throw TypeError for them
+   without posting to the bridge or counting bufferedAmount, and must
+   keep accepting unshared buffers/views on any socket state. */
+describe("page WebSocket shim shared-backed views (#493)", () => {
+  it("rejects SAB-backed views without posting or counting; unshared payloads flow", async () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return; /* no WebSocket global in this realm */
+    vi.stubGlobal("CloseEvent", FakeCloseEvent);
+    let port2: MessagePort | null = null;
+    ctlState.ctl = {
+      postMessage(_msg: unknown, transfer?: unknown[]) {
+        port2 = (transfer?.[0] as MessagePort) ?? null;
+      },
+    };
+    const w: Record<string, unknown> = { WebSocket: Real };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    const es = new WS("wss://relay.example/ws");
+    const port = port2 as MessagePort | null;
+    const posted: unknown[] = [];
+    if (port) port.onmessage = (ev: MessageEvent) => {
+      posted.push(ev.data);
+    };
+    /* CONNECTING: the shared view throws and never counts */
+    expect(() => es.send(new Uint8Array(new SharedArrayBuffer(4)))).toThrow(TypeError);
+    expect((es as unknown as { bufferedAmount: number }).bufferedAmount).toBe(0);
+    es.send("queued"); /* queued like native */
+    expect((es as unknown as { bufferedAmount: number }).bufferedAmount).toBe(1);
+    port?.postMessage({ ev: "open", protocol: "chat" });
+    await new Promise((r) => setTimeout(r, 0));
+    /* OPEN: shared views still throw, unshared payloads still post */
+    expect(() => es.send(new Uint8Array(new SharedArrayBuffer(4)))).toThrow(TypeError);
+    expect(() => es.send(new DataView(new SharedArrayBuffer(8)))).toThrow(TypeError);
+    es.send("text");
+    es.send(new ArrayBuffer(4));
+    es.send(new Uint8Array(new ArrayBuffer(4)));
+    await new Promise((r) => setTimeout(r, 0));
+    const sends = posted.filter((m) => (m as { op?: string })?.op === "send");
+    expect(sends).toHaveLength(4);
+  });
+
+  it("throws TypeError over InvalidStateError on a closing socket (native order)", async () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return; /* no WebSocket global in this realm */
+    vi.stubGlobal("CloseEvent", FakeCloseEvent);
+    let port2: MessagePort | null = null;
+    ctlState.ctl = {
+      postMessage(_msg: unknown, transfer?: unknown[]) {
+        port2 = (transfer?.[0] as MessagePort) ?? null;
+      },
+    };
+    const w: Record<string, unknown> = { WebSocket: Real };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    const es = new WS("wss://relay.example/ws");
+    const port = port2 as MessagePort | null;
+    port?.postMessage({ ev: "open", protocol: "chat" });
+    await new Promise((r) => setTimeout(r, 0));
+    (es as WebSocket).close();
+    let err: unknown = null;
+    try {
+      es.send(new Uint8Array(new SharedArrayBuffer(4)));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(TypeError); /* conversion beats the state check */
+  });
+});
