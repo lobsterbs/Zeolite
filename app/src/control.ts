@@ -6,6 +6,12 @@ import { buildNavHandleUrl, buildQueryHandleUrl, currentPrefix, decodeClientUrl,
 import type { JarConflictRule } from "./cookies";
 import { documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
+import { buildDoctor, doctorKdl, observeDoctorBoot, probeDoctorAssets } from "./doctor";
+import { primaryWispUrl } from "./config";
+import { transportState } from "./transport-lifecycle";
+import { policyDoctorState } from "./policy";
+import { rulesDoctorState } from "./rules";
+import { siteconfigDoctorState } from "./siteconfig";
 import { DIAG } from "./diag";
 /* #90: the download registry instance lives in ./downloads; the
    control plane lists and cancels entries through the subsystem. */
@@ -24,8 +30,8 @@ import { decryptSession, encryptSession } from "./session";
 import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled } from "./swstate";
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
-import { relayRegister } from "./relayfetch";
-import { altRegister, currentEngine, engineReady, setPrimaryWisp, wispTransport } from "./transport";
+import { relayAvailable, relayRegister } from "./relayfetch";
+import { altConfigured, altRegister, currentEngine, engineReady, setPrimaryWisp, wispTransport } from "./transport";
 import { loadInflight } from "./loadstate";
 import { activeStreams } from "./streams-alive";
 import { contextOf } from "./vctx";
@@ -67,6 +73,7 @@ export interface ControlMessage {
     | "zl:openExtPage"
     | "zl:listExt"
     | "zl:getDiag"
+    | "zl:doctor"
     | "zl:installExt"
     | "zl:installExtFiles"
     | "zl:extEnable"
@@ -100,6 +107,13 @@ export interface ControlMessage {
     | "zl:clearJar"
     | "zl:transport"
   | "zl:loadState";
+  /** Doctor: the host supplies version/scope expectations; no guessed values. */
+  expectedScope?: string;
+  expectedVersion?: string;
+  /** Opt-in, same-origin HEAD probes for static bundle assets only. */
+  probeAssets?: boolean;
+  /** Return parseable versioned KDL in addition to typed check data. */
+  format?: "kdl";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -282,6 +296,11 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
     }
   }
   switch (msg?.type) {
+    /* Doctor is handled BEFORE boot gating and jar inheritance in
+       handleControlEvent. This case is a fail-closed registry guard. */
+    case "zl:doctor":
+      reply({ ok: false, error: "doctor must use the host-only preflight" });
+      break;
     case "zl:relayRegister": {
       /* #137: the embedder registers its relay port. Host-only by the
          #41 gate (not in PAGE_MESSAGES); the port carries policy-
@@ -1071,10 +1090,43 @@ export async function handleControlEvent(
      cold-start ping must not report the default shape mid-restore.
      Registry-dependent answers also wait for the restart-safe
      init, so a just-restarted worker serves real state. */
-  await deps.ready;
   const msg = e.data as ControlMessage;
   const port = e.ports[0];
   const reply = (payload: unknown) => port?.postMessage(payload);
+  /* #495: Doctor must answer even when boot is wedged. It is never
+     reachable from a proxied page, and it avoids dispatchCore's
+     legacy cookie-context bookkeeping and all outbound traffic by
+     default. The host owns any optional MCP exposure. */
+  if (msg?.type === "zl:doctor") {
+    if (senderIsProxiedPage(e)) {
+      reply({ ok: false, error: "host-only control message" });
+      return;
+    }
+    const boot = await observeDoctorBoot(deps.ready);
+    const scriptUrl = self.location?.href;
+    const assets = msg.probeAssets === true ?
+      await probeDoctorAssets(scriptUrl ?? "", fetch) : [];
+    const report = buildDoctor({
+      engineVersion: ZEOLITE_VERSION,
+      boot,
+      scriptUrl,
+      registrationScope: self.registration?.scope,
+      expectedScope: typeof msg.expectedScope === "string" && msg.expectedScope.length <= 1024 ? msg.expectedScope : undefined,
+      expectedVersion: typeof msg.expectedVersion === "string" && msg.expectedVersion.length <= 96 ? msg.expectedVersion : undefined,
+      degraded: getEngineDegraded() !== null,
+      transport: transportState(),
+      selectedEngine: currentEngine(),
+      relay: relayAvailable(),
+      alternateWisp: altConfigured(),
+      primaryWisp: primaryWispUrl(),
+      policy: policyDoctorState(),
+      rules: rulesDoctorState(),
+      siteconfig: siteconfigDoctorState(),
+    }, assets);
+    reply({ ...report, kdl: msg.format === "kdl" ? doctorKdl(report) : undefined });
+    return;
+  }
+  await deps.ready;
 
   /* Bug-scout (#41): a proxied page must not drive the control plane
      (read the net log, flip the jar, tear the engine down). Page-facing
@@ -1109,7 +1161,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary",
+  "zl:ping", "zl:config", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary",
 ]);
 
 
@@ -1138,7 +1190,7 @@ export function messageListener(deps: ControlDeps) {
       })
         /* #254: keep jar persistence alive for the whole message
            event; flushJarPersist never throws. */
-        .then(() => flushJarPersist()),
+        .then(() => (e.data as ControlMessage)?.type === "zl:doctor" ? undefined : flushJarPersist()),
     );
   };
 }
