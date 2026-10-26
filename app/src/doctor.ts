@@ -198,7 +198,7 @@ export async function observeDoctorBoot(ready: Promise<unknown>, deadlineMs = 75
   try {
     return await Promise.race<DoctorBoot>([
       ready.then(() => "ready" as const, () => "failed" as const),
-      new Promise(resolve => { timer = setTimeout(() => resolve("timeout"), deadlineMs); }),
+      new Promise<DoctorBoot>(resolve => { timer = setTimeout(() => resolve("timeout"), deadlineMs); }),
     ]);
   } finally {
     if (timer) clearTimeout(timer);
