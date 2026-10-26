@@ -264,7 +264,7 @@ export interface AdaptiveTransitPlan {
     routes excluded at the call site via behaviorMatch(). */
 export interface BehaviorOverride {
   id: string;
-  route: "native" | "rewrite";
+  route: string;
 }
 
 /** One response planner, called after MIME is known; the resulting
