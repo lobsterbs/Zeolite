@@ -166,6 +166,13 @@ export function startFixture(port) {
           `self.__zlConfig = { dsn: dsn.username === "publickey" && dsn.hostname === "telemetry.invalid" && dsn.pathname === "/42", other: other.username === "user" && other.password === "pass" && other.hostname === "settings.invalid", fetched: "pending" };`,
           `fetch("http://127.0.0.1:7102/api/data").then(r => r.json()).then(j => { self.__zlConfig.fetched = j.zl; }).catch(() => { self.__zlConfig.fetched = "failed"; });`,
         ].join("\n"));
+      } else if (path === "/dir/shared-identity.js") {
+        /* #453: one random ID per actual worker global, returned to each
+           connecting client. The same worker instance reuses its ID. */
+        send(res, "text/javascript", [
+          `const sharedId = Date.now().toString(36) + "." + Math.random().toString(36);`,
+          `self.onconnect = (e) => { const p = e.ports[0]; p.onmessage = (m) => { if (m.data === "id") p.postMessage({ id: sharedId }); }; p.start(); };`,
+        ].join("\n"));
       } else if (path === "/dir/pinned.html") {
         /* #449: a page whose loader script pins its generated URLs
            with an anchored origin regex. */
