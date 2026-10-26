@@ -358,7 +358,7 @@ async function main() {
     const report = await hostControl(page, { type: "zl:doctor", probeAssets: true });
     assert(report?.ok === true, "Doctor asset probe refused");
     const assets = report.checks.filter((c) => c.code.startsWith("assets."));
-    eq(assets.length, 4, "asset check count");
+    eq(assets.length, 8, "asset check count");
     for (const a of assets) eq(a.status, "pass", a.code + " should be a verified local asset: " + JSON.stringify(a));
     const requested = rec.requests.slice(before).map((r) => r.url);
     assert(requested.every((u) => u.startsWith(ENGINE)), "Doctor asset probe contacted non-engine origin: " + JSON.stringify(requested));
