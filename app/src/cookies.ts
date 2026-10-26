@@ -151,6 +151,9 @@ let profile = PROFILE_DEFAULT;
 const clientRoots = new Map<string, string>();
 const rootProfiles = new Map<string, string>();
 const unboundClients = new Set<string>();
+/* #471: set when a profile-cache restore fails or the record is
+   corrupt; session clients must fail closed, not ride the global jar. */
+let profilesRestoreFailed = false;
 
 function rootOf(clientId?: string): string | null {
   if (!clientId) return null;
@@ -167,6 +170,10 @@ function activeProfile(clientId?: string): string {
        a root that lost its profile (worker restart) fails closed. */
     return rootProfiles.get(root) ?? (anySessionProfileActive() ? PROFILE_UNBOUND : PROFILE_DEFAULT);
   }
+  /* #471: a failed restore fails closed for any client without a
+     root binding (session deployments) instead of silently riding
+     the global jar. */
+  if (clientId && profilesRestoreFailed && !clientRoots.has(clientId)) return PROFILE_UNBOUND;
   if (clientId && unboundClients.has(clientId)) return PROFILE_UNBOUND;
   return profile;
 }
@@ -215,7 +222,24 @@ export function jarProfilesReady(): Promise<void> {
       const c = await caches.open(PROFILE_CACHE);
       const r = await c.match("profiles");
       if (!r) return;
-      const j = (await r.json()) as { profile?: unknown; roots?: Record<string, unknown> };
+      const text = await r.text();
+      /* #471: only text that was plausibly a profile record can poison
+         the restore - a foreign entry for the key keeps the documented
+         memory-only defaults. */
+      if (!text.startsWith("{")) return;
+      let j: { v?: unknown; profile?: unknown; roots?: Record<string, unknown> };
+      try {
+        j = JSON.parse(text) as { v?: unknown; profile?: unknown; roots?: Record<string, unknown> };
+      } catch {
+        /* corrupt record: fail closed for unbound clients */
+        profilesRestoreFailed = true;
+        return;
+      }
+      /* #471: a future-version record is a corrupt restore too. */
+      if (!j || typeof j !== "object" || (j.v !== undefined && j.v !== 1)) {
+        profilesRestoreFailed = true;
+        return;
+      }
       if (
         typeof j.profile === "string" &&
         j.profile.length > 0 &&
@@ -237,22 +261,37 @@ export function jarProfilesReady(): Promise<void> {
         }
       }
     })().catch(() => {
-      /* a failed restore keeps the in-memory defaults; any push
-         re-persists */
+      /* #471: an infrastructure failure keeps the documented
+         memory-only defaults; only a corrupt RECORD fails closed. */
     });
   }
   return jarProfilesPromise;
 }
 
+/* #471: profile persistence is a serialized chain. Two quick
+   profile switches used to race their cache puts, so an older
+   snapshot could land last and a restart restored a stale profile
+   (incognito cross-talk). The seq skips snapshots superseded before
+   their turn; the chain keeps the puts in FIFO order. */
+let jarPersistSeq = 0;
+let jarPersistChain: Promise<void> = Promise.resolve();
 function persistJarProfiles(): void {
-  const snapshot = { profile, roots: Object.fromEntries(rootProfiles) };
-  void (async () => {
-    if (typeof caches === "undefined") return;
-    const c = await caches.open(PROFILE_CACHE);
-    await c.put("profiles", new Response(JSON.stringify(snapshot)));
-  })().catch(() => {
-    /* storage unavailable: memory-only semantics for this lifetime */
-  });
+  const seq = ++jarPersistSeq;
+  const snapshot = { v: 1, profile, roots: Object.fromEntries(rootProfiles) };
+  jarPersistChain = jarPersistChain
+    .then(async () => {
+      if (seq !== jarPersistSeq) return; /* superseded by a newer snapshot */
+      if (typeof caches === "undefined") return;
+      const c = await caches.open(PROFILE_CACHE);
+      await c.put("profiles", new Response(JSON.stringify(snapshot)));
+    })
+    .catch(() => {
+      /* storage unavailable: memory-only semantics for this lifetime */
+    });
+}
+/** Tests only: resolve when every queued profile snapshot has settled. */
+export function jarProfilePersistDrain(): Promise<void> {
+  return jarPersistChain;
 }
 
 function profileNameForNamespace(namespace: string): string {
@@ -1315,6 +1354,9 @@ export function cookiesResetForTests(): void {
   rootProfiles.clear();
   navHandleRoots.clear();
   unboundClients.clear();
+  profilesRestoreFailed = false;
+  jarPersistSeq = 0;
+  jarPersistChain = Promise.resolve();
   persistChain = Promise.resolve();
 }
 
