@@ -51,21 +51,13 @@ function routeShaped(v: string): boolean {
   if (v.startsWith("/__zl_")) return true;
   let p = v;
   let q = "";
-  if (/^https?:/i.test(v)) {
-    try {
-      const u = new URL(v);
-      p = u.pathname;
-      q = u.search;
-    } catch {
-      return false;
-    }
-  } else {
-    /* #418: relative forms can still carry the query part */
-    try {
-      q = new URL(v, "http://zeolite.invalid").search;
-    } catch {
-      /* unparseable: no query to inspect */
-    }
+  const abs = /^https?:/i.test(v);
+  try {
+    const u = new URL(v, "http://zeolite.invalid");
+    if (abs) p = u.pathname;
+    q = u.search;
+  } catch {
+    if (abs) return false;
   }
   if (p.startsWith("/__zl_")) return true;
   /* #418: query-shape routes carry the handle in zlNavh with the
