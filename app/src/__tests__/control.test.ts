@@ -193,6 +193,18 @@ describe("sender gate preserved by the extraction (#41/#48)", () => {
     expect(probe).toHaveBeenCalledTimes(1);
   });
 
+  it("failed client enumeration refuses export without disclosing worker-global events", async () => {
+    const traceId = DIAG.trace("page-one");
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org" },
+      clients: { get: async () => { throw Error("client gone"); } },
+    });
+    const { ev, posted } = mkEvent("https://w.example.org/", {
+      type: "zl:exportDiagnostics", clientId: "page-one", traceId,
+    });
+    await handleControlEvent(ev, { ready: new Promise(() => {}), persistRoute: () => {} });
+    expect(posted).toEqual([{ ok: false, status: "identity-unavailable" }]);
+  });
+
   it("blocks proxied pages from exporting another site's ring even if trace ID is known", async () => {
     const traceId = DIAG.trace("page-one");
     vi.stubGlobal("self", { location: { origin: "https://w.example.org" }, clients: {
