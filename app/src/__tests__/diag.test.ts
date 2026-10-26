@@ -42,13 +42,15 @@ describe("diag ring bounds (#95)", () => {
       message: "failed while reading https://name:password@site.example/path",
       technicalReason: "Authorization: Bearer testsecrettoken",
       url: "https://name:password@site.example/path?access_token=abc",
-      stack: "Error: https://name:password@site.example/path?access_token=abc",
+      stack: "Error: https://name:password@site.example/path?access_token=abc; Bearer abc+def/ghi==; Basic abcd+efg==",
     });
     const [entry] = DIAG.snapshot(start).events;
     expect(entry.stack).toContain("[redacted]");
     expect(JSON.stringify(entry)).not.toContain("password@site.example");
     expect(JSON.stringify(entry)).not.toContain("access_token=abc");
     expect(JSON.stringify(entry)).not.toContain("testsecrettoken");
+    expect(JSON.stringify(entry)).not.toContain("abc+def/ghi==");
+    expect(JSON.stringify(entry)).not.toContain("abcd+efg==");
   });
 
   it("a TRANSPORT_FALLBACK decision event carries the fallback reason", () => {
