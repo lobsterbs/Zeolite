@@ -162,6 +162,7 @@ class Diag {
       message: redactSecrets(e.message),
       technicalReason: e.technicalReason ? redactSecrets(e.technicalReason) : undefined,
       url: e.url ? redactSecrets(e.url) : undefined,
+      stack: e.stack ? redactSecrets(e.stack) : undefined,
     };
     events.push(ev);
     if (events.length > EVENT_LIMIT) events.shift();
