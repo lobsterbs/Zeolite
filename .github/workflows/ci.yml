@@ -236,6 +236,9 @@ jobs:
         # Raised 36352 -> 37888 for registered-embedder popup routing
         # and client/icon metadata (#416/#428). The strict byte gate
         # remains; measure the complete bundle after each change.
+        # #497 retains the 39424 gate after reconciling main's anchor
+        # and embedder recovery fixes. Share control-query cleanup rather
+        # than accepting the integration's transient 41566-byte bundle.
         # Raised 37888 -> 39424 for the scout-wave listener
         # registries: capture-aware wrapper identity (#472 in
         # vorigin/relay) and storage once/signal/capture parity
