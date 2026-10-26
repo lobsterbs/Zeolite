@@ -368,6 +368,10 @@ async function main() {
     const assets = report.checks.filter((c) => c.code.startsWith("assets."));
     eq(assets.length, 8, "asset check count");
     for (const a of assets) eq(a.status, "pass", a.code + " should be a verified local asset: " + JSON.stringify(a));
+    eq(report.checks.find((c) => c.code === "worker.service-worker-allowed")?.status, "pass",
+      "Service-Worker-Allowed deployment contract");
+    eq(report.checks.find((c) => c.code === "worker.cache-policy")?.status, "pass",
+      "worker cache revalidation deployment contract");
     const requested = rec.requests.slice(before).map((r) => r.url);
     assert(requested.every((u) => u.startsWith(ENGINE)), "Doctor asset probe contacted non-engine origin: " + JSON.stringify(requested));
     return assets.map((a) => a.code + "=" + a.status).join(" ");
