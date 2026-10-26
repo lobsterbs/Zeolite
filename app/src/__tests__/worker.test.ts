@@ -279,6 +279,38 @@ describe("navigator.serviceWorker shim (1.6)", () => {
     expect(reg.scope).toBe("https://a.example/");
   });
 
+  it("rejects forbidden encoded slash and backslash in registration paths", async () => {
+    const s = mkStore();
+    expect(() => swShimRegister(s, "https://a.example/", "/dir%2Fother/sw.js"))
+      .toThrow(TypeError);
+    expect(() => swShimRegister(s, "https://a.example/", "/dir%5cother/sw.js"))
+      .toThrow(TypeError);
+    expect(() => swShimRegister(s, "https://a.example/", "/sw.js", { scope: "/dir%2fother/" }))
+      .toThrow(TypeError);
+    const c: Record<string, unknown> = {};
+    swShimApply(c, s, "https://a.example/");
+    await expect((c.register as (u: string) => Promise<unknown>)("/foo%5cbar/sw.js"))
+      .rejects.toThrow(TypeError);
+  });
+
+  it("getRegistration rejects foreign origins as SecurityError and malformed client URLs", async () => {
+    const s = mkStore();
+    swShimRegister(s, "https://a.example/", "/sw.js");
+    const c: Record<string, unknown> = {};
+    swShimApply(c, s, "https://a.example/");
+    const get = c.getRegistration as (u?: string) => Promise<unknown>;
+    await expect(get("https://a.example.evil/page")).rejects.toMatchObject({
+      name: "SecurityError",
+    });
+    await expect(get("http://a.example/page")).rejects.toMatchObject({
+      name: "SecurityError",
+    });
+    await expect(get("http://[invalid")).rejects.toThrow(TypeError);
+    await expect(get("/page?x=1#fragment")).resolves.toMatchObject({
+      scope: "https://a.example/",
+    });
+  });
+
   it("a cross-origin script URL is a native-style TypeError (#474)", () => {
     const s = mkStore();
     expect(() => swShimRegister(s, "https://a.example/", "https://evil.example/sw.js")).toThrow(TypeError);
