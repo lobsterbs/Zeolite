@@ -80,3 +80,28 @@ export function planCspHeaders(headers: { get(name: string): string | null }): {
     reportOnly: report === null ? null : planCspTranslation(report, { reportOnly: true }),
   };
 }
+
+/** #452 opt-in runtime subset. This is ONLY a monotonic-denial
+    restoration after the engine's normal stripping of unsafe upstream
+    headers. The planner rejects origins, paths, fallbacks, nonces,
+    wildcard sources, reporting, or any other directive. A rejected
+    upstream CSP stays stripped, never copied through unmodified.
+    Only a proxied HTML document may receive this experimental header. */
+export function applyExperimentalCsp(
+  downstream: Headers,
+  upstream: { get(name: string): string | null },
+  contentType: string,
+  isDocument: boolean,
+): boolean {
+  if (!isDocument || !/^(?:text\/html|application\/xhtml\+xml)(?:\s*;|\s*$)/i.test(contentType.trim()))
+    return false;
+  const raw = upstream.get("content-security-policy");
+  if (!raw) return false;
+  const plan = planCspTranslation(raw);
+  if (plan.kind !== "candidate") return false;
+  downstream.set("content-security-policy", plan.policy);
+  /* Report-only endpoints can leak from the browser to upstream
+     reports; the generic hostile-header stripper keeps removing it. */
+  downstream.delete("content-security-policy-report-only");
+  return true;
+}
