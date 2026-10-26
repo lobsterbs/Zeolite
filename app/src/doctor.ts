@@ -226,7 +226,7 @@ export async function observeDoctorBoot(ready: Promise<unknown>, deadlineMs = 75
     diagnostic exporter when that schema becomes available. */
 export function doctorKdl(report: DoctorReport): string {
   const q = (value: string) =>
-    JSON.stringify(value.replace(/[\\u0000-\\u0008\\u000b\\u000e-\\u001f\\u007f]/g, "\\uFFFD"));
+    JSON.stringify(value.replace(/[\u0000-\u0008\u000b\u000e-\u001f\u007f]/g, "\uFFFD"));
   return "zeolite-doctor version=1 engine=" + q(report.engineVersion) +
     " captured-at=" + report.capturedAt + " ok=#" + report.ok +
     " health=" + q(report.healthy === null ? "unknown" : report.healthy ? "pass" : "fail") + " {\n" +
