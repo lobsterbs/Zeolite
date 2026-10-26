@@ -56,6 +56,9 @@ export function mintRoute(dest: string, timeout = 5000): Promise<string | null> 
       if (done) return;
       done = true;
       clearTimeout(timer);
+      ch.port1.onmessage = null;
+      ch.port1.close();
+      ch.port2.close();
       resolve(route);
     };
     const timer = setTimeout(() => fin(null), timeout);
