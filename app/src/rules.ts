@@ -262,17 +262,20 @@ export function rulesDoctorState(): typeof doctorState { return doctorState; }
 export function loadRules(): Promise<CompiledRules> {
   if (!cached) {
     cached = (async () => {
+      let parsing = false;
       try {
         const resp = await fetch("/rules.kdl", { cache: "no-cache" });
         /* 5xx is transient: forget the memo so the next call retries.
            A 404 (no rules file) stays memoized. */
         if (resp.status >= 500) cached = null;
         if (!resp.ok) { doctorState = resp.status === 404 ? "missing" : "unavailable"; return compileRules(null); }
-        const result = compileRules(parseRulesKdl(parseKdl(await resp.text())));
+        const body = await resp.text();
+        parsing = true;
+        const result = compileRules(parseRulesKdl(parseKdl(body)));
         doctorState = "loaded";
         return result;
       } catch {
-        doctorState = "invalid";
+        doctorState = parsing ? "invalid" : "unavailable";
         cached = null;
         return compileRules(null);
       }
