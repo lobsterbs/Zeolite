@@ -216,6 +216,8 @@ export function transportMatch(p: CompiledPolicy, url: string, rtype: ResourceTy
    missing file means "no policy" (the default); a malformed file
    is rejected loudly and the defaults stay active. */
 let cached: Promise<CompiledPolicy> | null = null;
+let doctorState: "not-loaded" | "loaded" | "missing" | "invalid" | "unavailable" = "not-loaded";
+export function policyDoctorState(): typeof doctorState { return doctorState; }
 
 export function loadPolicy(): Promise<CompiledPolicy> {
   if (!cached) {
@@ -225,9 +227,12 @@ export function loadPolicy(): Promise<CompiledPolicy> {
         /* A 5xx is a transient failure, not a missing file: forget the
            memo so the next request retries. A 404 stays memoized. */
         if (resp.status >= 500) cached = null;
-        if (!resp.ok) return { rules: [] };
-        return compilePolicy(await resp.text());
+        if (!resp.ok) { doctorState = resp.status === 404 ? "missing" : "unavailable"; return { rules: [] }; }
+        const result = compilePolicy(await resp.text());
+        doctorState = "loaded";
+        return result;
       } catch (e) {
+        doctorState = "invalid";
         cached = null;
         DIAG.emit({
           category: "TRANSPORT",
@@ -246,4 +251,5 @@ export function loadPolicy(): Promise<CompiledPolicy> {
 /** Tests only: drop the memoized policy. */
 export function policyResetForTests(): void {
   cached = null;
+  doctorState = "not-loaded";
 }
