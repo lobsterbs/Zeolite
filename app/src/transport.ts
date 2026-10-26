@@ -32,6 +32,7 @@ import {
   type TransportEngine,
 } from "./libcurl-transport-vendored";
 import { relayAvailable, relayFetch, relayHeaderDeadlineMs, RelayDeliveryUnknownError } from "./relayfetch";
+import { afterDispatchError, beforeDispatchFailure, deliveryAllowsReplay, deliveryStateOf } from "./delivery";
 
 export { currentEngine, openWebSocket, altRegister, altConfigured, altEndpoint, type TransportEngine };
 
@@ -277,9 +278,12 @@ function bodyReplayable(init?: RequestInit): boolean {
   return false; /* ReadableStream and anything else one-shot */
 }
 
-function retryable(init: RequestInit | undefined, _err: unknown): boolean {
+function retryable(init: RequestInit | undefined, err: unknown): boolean {
   if (!bodyReplayable(init)) return false;
-  return IDEMPOTENT_METHODS.has((init?.method ?? "GET").toUpperCase());
+  return deliveryAllowsReplay(
+    deliveryStateOf(err),
+    IDEMPOTENT_METHODS.has((init?.method ?? "GET").toUpperCase()),
+  );
 }
 
 export { retryable as canReplayAfterFailure };
@@ -394,7 +398,13 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
     if (transportState() === "dead") {
       await waitForTransportState("connected", WAIT_FOR_RECONNECT_MS);
     }
-    await ensureCurl();
+    /* Before invoking the adapter, this request has not been dispatched.
+       This is the sole safe pre-dispatch evidence boundary (#454). */
+    try {
+      await ensureCurl();
+    } catch (err) {
+      throw beforeDispatchFailure("wisp", err);
+    }
     /* #415: remember which client generation serves this request */
     const curlGen = curlGeneration;
     try {
@@ -404,7 +414,8 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
       stallClear();
       return resp;
     } catch (err) {
-      if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw err;
+      if (init?.signal?.aborted || (err instanceof Error && err.name === "AbortError")) throw err;
+      if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw afterDispatchError("wisp", err);
       /* #251: a non-idempotent method or a one-shot body must not
          ride the reset+retry: the side effect may already have
          happened upstream. Record the stall for the storm detector
@@ -414,11 +425,11 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
         DIAG.emit({
           category: "TRANSPORT",
           severity: "warning",
-          message: "transport failure not retried: non-idempotent method or one-shot body",
+          message: "transport failure not retried: non-idempotent method or one-shot body (delivery unknown)",
           technicalReason: String(err),
           url: dest,
         });
-        throw err;
+        throw afterDispatchError("wisp", err);
       }
       if (err instanceof WispStallError) recordStall();
       DIAG.emit({
@@ -440,7 +451,7 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
            evidence the socket is wedged; count it before rethrowing
            so the storm detector does not undercount. */
         if (err2 instanceof WispStallError) recordStall();
-        throw err2;
+        throw err2 instanceof Error && err2.name === "AbortError" ? err2 : afterDispatchError("wisp", err2);
       }
     }
   } finally {
@@ -483,17 +494,18 @@ export async function altWispFetch(dest: string, init?: RequestInit): Promise<Re
     try {
       return await fetchWithDeadline(zlAltFetch, dest, init);
     } catch (err) {
-      if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw err;
+      if (init?.signal?.aborted || (err instanceof Error && err.name === "AbortError")) throw err;
+      if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw afterDispatchError("wisp-route", err);
       /* #251: same retry-safety gate as the primary path */
       if (!retryable(init, err)) {
         DIAG.emit({
           category: "TRANSPORT",
           severity: "warning",
-          message: "wisp-route failure not retried: non-idempotent method or one-shot body",
+          message: "wisp-route failure not retried: non-idempotent method or one-shot body (delivery unknown)",
           technicalReason: String(err),
           url: dest,
         });
-        throw err;
+        throw afterDispatchError("wisp-route", err);
       }
       DIAG.emit({
         category: "TRANSPORT",
@@ -506,7 +518,12 @@ export async function altWispFetch(dest: string, init?: RequestInit): Promise<Re
         url: dest,
       });
       await sharedAltReset(altGen);
-      return fetchWithDeadline(zlAltFetch, dest, init);
+      try {
+        return await fetchWithDeadline(zlAltFetch, dest, init);
+      } catch (err2) {
+        if (init?.signal?.aborted || (err2 instanceof Error && err2.name === "AbortError")) throw err2;
+        throw afterDispatchError("wisp-route", err2);
+      }
     }
   } finally {
     loadLeave(dest);
