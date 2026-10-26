@@ -22,7 +22,7 @@
    the worker settles can succeed. */
 
 import { makeRel, tokenShaped } from "./navguard";
-import { swc } from "./siteid";
+import { controlQuery } from "./controlquery";
 
 type AnyRecord = Record<string, any>;
 
@@ -45,32 +45,9 @@ export function mintRoute(dest: string, timeout = 5000): Promise<string | null> 
     return hit;
   }
   const p = new Promise<string | null>((resolve) => {
-    const ctl = swc();
-    if (!ctl) {
-      resolve(null);
-      return;
-    }
-    const ch = new MessageChannel();
-    let done = false;
-    const fin = (route: string | null) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      ch.port1.onmessage = null;
-      ch.port1.close();
-      ch.port2.close();
-      resolve(route);
-    };
-    const timer = setTimeout(() => fin(null), timeout);
-    ch.port1.onmessage = (ev) => {
-      const m = ev.data as { ok?: boolean; route?: unknown };
-      fin(typeof m?.route === "string" ? m.route : null);
-    };
-    try {
-      ctl.postMessage({ type: "zl:mint", dest }, [ch.port2]);
-    } catch {
-      fin(null);
-    }
+    controlQuery({ type: "zl:mint", dest }, (m) => {
+      resolve(typeof m?.route === "string" ? m.route : null);
+    }, timeout);
   });
   if (memo.size >= MINT_MEMO_CAP) {
     const oldest = memo.keys().next();
