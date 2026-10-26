@@ -1,8 +1,8 @@
 /* Per-origin cookie jars + virtual-origin registry (Phase 4, 1.4).
 
    One cookie store partitioned by the virtual-origin registry:
-   each target origin gets a stable internal id (the FNV1a hash
-   the bootstrap uses for storage scoping). Cookies attach to a
+   each target origin gets a collision-free internal id from
+   its canonical origin. Cookies attach to a
    request only when their own Domain/Path/Secure attributes say
    so (RFC 6265 matching): never admitted or attached outside
    their domain scope, so unrelated origins are isolated by
@@ -26,7 +26,7 @@ import { decodeNavHandleRoot, encodeDest } from "./codec";
 import { DIAG } from "./diag";
 import { traceDecision } from "./tracing";
 import { openDb, idbGet, idbPut, STORE_COOKIES } from "./extensions/idb";
-import { fnv1a } from "./bootstrap/siteid";
+
 import { getDomain, getPublicSuffix } from "tldts";
 
 export type SameSite = "strict" | "lax" | "none";
@@ -85,7 +85,7 @@ export interface Cookie {
 
 export interface VirtualOrigin {
   origin: string;
-  /** Stable internal id (FNV1a base36, same as bootstrap storage). */
+  /** Collision-free canonical-origin id, independent of page storage tokens. */
   id: string;
   /** Zeolite-internal representation: engine path base of the origin. */
   pathBase: string;
@@ -113,10 +113,15 @@ const originById = new Map<string, string>();
    for distinct origins (same bug the page-side token had). */
 
 /** Register (memoized) a target origin and its internal representation. */
+function originJarId(origin: string): string {
+  return "o" + Array.from(new TextEncoder().encode(new URL(origin).origin), b => b.toString(16).padStart(2, "0")).join("");
+}
+
 export function registerOrigin(origin: string): VirtualOrigin {
+  origin = new URL(origin).origin;
   let e = registry.get(origin);
   if (!e) {
-    e = { origin, id: fnv1a(origin), pathBase: encodeDest(origin) };
+    e = { origin, id: originJarId(origin), pathBase: encodeDest(origin) };
     registry.set(origin, e);
     originById.set(e.id, origin);
   }
@@ -1166,15 +1171,11 @@ export async function jarLoad(): Promise<void> {
         }
       }
     }
-    /* #270 migration: records persisted before the Math.imul fnv1a fix
-       are keyed by the old double-precision hash. The origins record
-       maps those old ids back to real origins, so rekey every jar
-       under the corrected id; an originless (id-only) record keeps its
-       key as-is. The same remap applies to the in-memory originById
-       view so enumeration names origins under the new ids. */
+    /* #465: legacy hash keys migrate through the persisted origin map.
+       Unattributed legacy records retain their unreachable old keys. */
     const oldOrigins = new Map(originById);
     const migrated = new Map<string, string>();
-    for (const [id, o] of oldOrigins) migrated.set(fnv1a(o), o);
+    for (const [id, o] of oldOrigins) migrated.set(originJarId(o), new URL(o).origin);
     originById.clear();
     for (const [k, v] of migrated) originById.set(k, v);
     if (Array.isArray(rec)) {
@@ -1189,7 +1190,7 @@ export async function jarLoad(): Promise<void> {
           const pid = sep < 0 ? "" : entry[0].slice(0, sep);
           const id = sep < 0 ? entry[0] : entry[0].slice(sep + SEP.length);
           const origin = oldOrigins.get(id);
-          const newId = origin ? fnv1a(origin) : id;
+          const newId = origin ? originJarId(origin) : id;
           if (pid === "") {
             /* default-profile records are bare origin ids, predating
                profiles; they keep that shape. */
