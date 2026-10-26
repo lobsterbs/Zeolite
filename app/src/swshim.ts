@@ -12,6 +12,8 @@
  `controller` stays the engine's real worker, and the fake states skip
  the real waiting periods. */
 
+import { canonicalGuestRegistration, validateStoredGuestRegistration } from "./kernel/guests/registration";
+
 export interface VirtualWorker {
   scriptURL: string;
   state: string;
@@ -28,32 +30,6 @@ export interface SwShimStore {
   get(): string | null;
   set(v: string): void;
   clear(): void;
-}
-
-/* #474: exact-origin compare - the old startsWith(origin) prefix test
-   admitted lookalike hosts (https://a.example.evil/). #473: the
-   DEFAULT scope is the script directory, like the native container;
-   an explicit scope resolves against the page. Cross-origin or
-   malformed inputs throw TypeError like the native register. */
-function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string): string {
-  const pageOrigin = new URL(pageUrl).origin;
-  if (scope === undefined) {
-    const s = new URL("./", scriptHref);
-    if (s.origin !== pageOrigin) {
-      throw new TypeError("The Service Worker scope is outside the page origin");
-    }
-    return s.href;
-  }
-  let s: URL | null = null;
-  try {
-    s = new URL(scope, pageUrl);
-  } catch {
-    /* malformed below */
-  }
-  if (!s || s.origin !== pageOrigin) {
-    throw new TypeError("The Service Worker scope is outside the page origin");
-  }
-  return s.href;
 }
 
 function registration(scriptURL: string, scope: string, store: SwShimStore, settled: boolean): VirtualRegistration {
@@ -87,18 +63,11 @@ export function swShimRegister(
   scriptURL: string | URL,
   options?: { scope?: string },
 ): VirtualRegistration {
-  /* #474: a cross-origin or malformed script URL is a native-style
-     TypeError, never a foreign registration. */
-  let script: URL | null = null;
-  try {
-    script = new URL(scriptURL + "", pageUrl);
-  } catch {
-    /* malformed below */
-  }
-  if (!script || script.origin !== new URL(pageUrl).origin) {
-    throw new TypeError("The Service Worker script is outside the page origin");
-  }
-  const rec = { scriptURL: script.href, scope: scopeFor(pageUrl, options?.scope, script.href) };
+  /* #477: shared, canonical guest identity guards both the initial
+     registration and stored record readback. Never trust raw JSON as
+     verified page context, and never fetch or execute the script. */
+  const identity = canonicalGuestRegistration(pageUrl, String(scriptURL), options?.scope);
+  const rec = { scriptURL: identity.scriptURL, scope: identity.scope };
   store.set(JSON.stringify(rec));
   return registration(rec.scriptURL, rec.scope, store, false);
 }
@@ -119,24 +88,20 @@ export function swShimGet(
   } catch {
     return undefined;
   }
-  /* Defense in depth: a record that scopes a foreign origin is not
-     this page's registration, even if it landed in this store.
-     #474: exact-origin compare - a prefix test admitted lookalikes. */
-  let scopeUrl: URL | null = null;
-  try {
-    scopeUrl = new URL(rec.scope);
-  } catch {
-    return undefined;
-  }
-  if (scopeUrl.origin !== new URL(pageUrl).origin) return undefined;
+  /* #477: both script and scope origins, exact canonical URLs, and
+     ambiguous encoded slash inputs must validate. A poisoned site
+     record cannot advertise a foreign script under a local scope. */
+  const identity = validateStoredGuestRegistration(pageUrl, rec);
+  if (!identity) return undefined;
   if (scope != null) {
     try {
-      if (rec.scope !== scopeFor(pageUrl, scope, rec.scriptURL)) return undefined;
+      if (identity.scope !== canonicalGuestRegistration(pageUrl, identity.scriptURL, scope).scope)
+        return undefined;
     } catch {
       return undefined;
     }
   }
-  return registration(rec.scriptURL, rec.scope, store, true);
+  return registration(identity.scriptURL, identity.scope, store, true);
 }
 
 /** Patch a real ServiceWorkerContainer in place: register,
