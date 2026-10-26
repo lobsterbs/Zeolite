@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { relayFetch, relayRegister, RELAY_HEADER_DEADLINE_MS, RELAY_UPLOAD_HEADER_DEADLINE_MS, RelayDeliveryUnknownError } from "../relayfetch";
+import { deliveryStateOf } from "../delivery";
 class Port {
   sent: Array<{ type: string; rid: number }> = [];
   onmessage: ((e: MessageEvent) => void) | null = null;
@@ -23,7 +24,10 @@ describe("relay delivery safety (#442)", () => {
     const port = reg();
     const pending = outcome(relayFetch("https://api.example/write", { method: "PATCH", headers: new Headers(), body: "{}" }, "patch-error"));
     port.reply({ type: "zl:relayError", rid: port.sent[0].rid, error: "connection lost" });
-    expect((await pending).error).toBeInstanceOf(RelayDeliveryUnknownError);
+    const err = (await pending).error as RelayDeliveryUnknownError;
+    expect(err).toBeInstanceOf(RelayDeliveryUnknownError);
+    expect(deliveryStateOf(err)).toBe("delivery-unknown");
+    expect(err.transport).toBe("relay");
   });
   it("keeps idempotent GET deadline fallback and cancellation", async () => {
     vi.useFakeTimers(); const port = reg();
