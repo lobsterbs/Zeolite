@@ -15,6 +15,7 @@ vi.mock("../transport", () => ({
   currentEngine: () => "libcurl",
   wispTransport: { ready: async () => {} },
   altRegister: () => {},
+  altConfigured: () => false,
 }));
 
 /* #279: capture wsBridge.open destinations for the retarget tests. */
@@ -103,6 +104,45 @@ describe("sender gate preserved by the extraction (#41/#48)", () => {
     const { ev, posted } = mkEvent("https://w.example.org/j/abc", { type: "zl:config", prefix: "/k/" });
     await handleControlEvent(ev, deps);
     expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
+  });
+
+  it("rejects zl:doctor from proxied pages before examining boot state", async () => {
+    const stalled = new Promise(() => {});
+    const { ev, posted } = mkEvent("https://w.example.org/j/abc", { type: "zl:doctor" });
+    await handleControlEvent(ev, { ready: stalled, persistRoute: () => { throw new Error("must not write"); } });
+    expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
+  });
+
+  it("permits zl:doctor to return a bounded passive, redacted report without extra fetching", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    const { ev, posted } = mkEvent("https://w.example.org/", {
+      type: "zl:doctor", expectedVersion: "wrong version", format: "kdl",
+    });
+    await handleControlEvent(ev, { ready: Promise.resolve(), persistRoute: () => { throw new Error("must not write"); } });
+    expect(posted).toHaveLength(1);
+    const report = posted[0] as { ok: boolean; healthy: boolean | null; checks: Array<{code: string; status: string}>; kdl: string };
+    expect(report.ok).toBe(true);
+    expect(report.healthy).toBe(false); // version mismatch is proven
+    expect(report.checks.find(c => c.code === "bundle.version")?.status).toBe("fail");
+    expect(report.checks.find(c => c.code === "assets.bootstrap")?.status).toBe("skipped");
+    expect(report.checks.find(c => c.code === "worker.client-control")?.status).toBe("unknown");
+    expect(report.kdl).toContain('zeolite-doctor version=1');
+    expect(fetcher).not.toHaveBeenCalled();
+    fetcher.mockRestore();
+  });
+
+  it("doctor reports failed boot rather than hanging behind the normal control-plane gate", async () => {
+    const { ev, posted } = mkEvent("https://w.example.org/", { type: "zl:doctor" });
+    await handleControlEvent(ev, {
+      ready: Promise.reject(new Error("private credential password=do-not-export")),
+      persistRoute: () => { throw new Error("must not write"); },
+    });
+    expect(posted).toHaveLength(1);
+    const report = posted[0] as { ok: boolean; healthy: boolean | null; checks: Array<{code: string; status: string}> };
+    expect(report.ok).toBe(true);
+    expect(report.healthy).toBe(false);
+    expect(report.checks.find(c => c.code === "worker.boot")?.status).toBe("fail");
+    expect(JSON.stringify(report)).not.toContain("do-not-export");
   });
 
   it("serves a host sender", async () => {
