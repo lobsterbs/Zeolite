@@ -76,6 +76,12 @@ surface equivalent API responses in its own DevTools.
   `connected` event supports that observation but does not imply an
   authenticated upstream request succeeded. Credential negotiation is
   `transport.wisp-auth=unknown` until separately proven.
+- `transport.wisp-endpoint`: WSS scheme/configuration only; a correctly
+  formed endpoint does not prove reachability or authenticated WISP.
+  Userinfo credentials and fragments are rejected as invalid URL-based
+  authentication; query-bearing URLs produce a warning because they
+  might contain sensitive tokens. No URL, query value or credential is
+  emitted in Doctor JSON or KDL.
 - `transport.relay`: registered host port; missing relay is a warning
   because a WISP-only deployment can be valid.
 - `config.policy`, `config.rules`, `config.siteconfig`: **state
