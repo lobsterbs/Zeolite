@@ -54,6 +54,7 @@ import { documentCookieRead, documentCookieWrite } from "../cookies";
 import { DIAG } from "../diag";
 import { netLogPush } from "../netlog";
 import { parseKdl } from "../kdl";
+import { experimentalSnapshot, resetExperimentalForTests } from "../experimental-flags";
 
 /* Derives the case labels from the dispatcher's own source, the way the
    wiring sees it after vitest's transform (unminified). */
@@ -107,6 +108,47 @@ describe("sender gate preserved by the extraction (#41/#48)", () => {
     const { ev, posted } = mkEvent("https://w.example.org/j/abc", { type: "zl:config", prefix: "/k/" });
     await handleControlEvent(ev, deps);
     expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
+  });
+
+  it("accepts only host-selected experimental preferences, and reports inactive capabilities", async () => {
+    resetExperimentalForTests();
+    const selected = {
+      adaptiveTransit: true, hybridLocation: true,
+      cspTranslation: true, virtualSW: true,
+    };
+    const { ev, posted } = mkEvent("https://w.example.org/", {
+      type: "zl:config", prefix: "/j/", experimental: selected,
+    });
+    await handleControlEvent(ev, deps);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
+      ok: true, experimental: { requested: selected,
+        effective: { adaptiveTransit: false, hybridLocation: false,
+          cspTranslation: false, virtualSW: false } },
+    });
+    const ping = mkEvent("https://w.example.org/j/token", { type: "zl:ping" });
+    await handleControlEvent(ping.ev, deps);
+    expect(ping.posted[0]).toMatchObject({
+      ok: true, experimental: { requested: selected,
+        effective: { cspTranslation: false, virtualSW: false } },
+    });
+    const bad = mkEvent("https://w.example.org/", {
+      type: "zl:config", prefix: "/j/", experimental: { virtualSW: "true" },
+    });
+    await handleControlEvent(bad.ev, deps);
+    expect(bad.posted[0]).toMatchObject({ ok: false, error: "unknown or non-boolean experimental flag" });
+    expect(experimentalSnapshot().requested).toEqual(selected);
+    resetExperimentalForTests();
+  });
+
+  it("refuses proxied attempts to enable an experimental feature", async () => {
+    resetExperimentalForTests();
+    const { ev, posted } = mkEvent("https://w.example.org/j/abc", {
+      type: "zl:config", experimental: { virtualSW: true },
+    });
+    await handleControlEvent(ev, deps);
+    expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
+    expect(experimentalSnapshot().requested.virtualSW).toBe(false);
   });
 
   it("rejects zl:doctor from proxied pages before examining boot state", async () => {
