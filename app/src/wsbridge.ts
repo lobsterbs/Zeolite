@@ -246,7 +246,12 @@ export class WsBridge {
       this.end(port, 1006, false, "send failed");
       return false;
     }
-    this.hooks.onBytes(conn.token, 0, byteSize(data));
+    const sentBytes = byteSize(data);
+    this.hooks.onBytes(conn.token, 0, sentBytes);
+    /* #462: acknowledge acceptance by the transport's send() seam.
+       This drains the page/worker bridge queue; the lower-level Wisp
+       socket's actual network buffer is not observable here. */
+    port.postMessage({ ev: "drain", bytes: sentBytes });
     this.hooks.trace({ subsystem: "websocket", original: "tx", result: conn.url, resource: "websocket" });
     return true;
   }
