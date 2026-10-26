@@ -222,17 +222,20 @@ export function policyDoctorState(): typeof doctorState { return doctorState; }
 export function loadPolicy(): Promise<CompiledPolicy> {
   if (!cached) {
     cached = (async () => {
+      let parsing = false;
       try {
         const resp = await fetch("/policy.kdl", { cache: "no-cache" });
         /* A 5xx is a transient failure, not a missing file: forget the
            memo so the next request retries. A 404 stays memoized. */
         if (resp.status >= 500) cached = null;
         if (!resp.ok) { doctorState = resp.status === 404 ? "missing" : "unavailable"; return { rules: [] }; }
-        const result = compilePolicy(await resp.text());
+        const body = await resp.text();
+        parsing = true;
+        const result = compilePolicy(body);
         doctorState = "loaded";
         return result;
       } catch (e) {
-        doctorState = "invalid";
+        doctorState = parsing ? "invalid" : "unavailable";
         cached = null;
         DIAG.emit({
           category: "TRANSPORT",
