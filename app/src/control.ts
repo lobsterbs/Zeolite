@@ -1150,7 +1150,9 @@ export async function handleControlEvent(
       reply({ ok: false, status: "identity-unavailable" });
       return;
     }
-    const client = await self.clients.get(id);
+    let client: Client | undefined;
+    try { client = await self.clients.get(id); }
+    catch { /* client enumeration unavailable or stale: fail closed */ }
     let valid = false;
     if (client?.url) {
       try {
