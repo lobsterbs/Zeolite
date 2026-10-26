@@ -146,6 +146,7 @@ function cat(chunks: Uint8Array[]): Uint8Array {
 export function rawFrom(
   head: Uint8Array | undefined,
   reader: ReadableStreamDefaultReader<Uint8Array>,
+  base = "",
 ): ReadableStream<Uint8Array> {
   /* #201: a cancelled consumer must reach the upstream reader;
      without a cancel() the vendored transport keeps buffering into
@@ -153,7 +154,7 @@ export function rawFrom(
   let cancelled = false;
   return new ReadableStream<Uint8Array>({
     async start(c) {
-      streamAlive(); // #99: the pump below dispatches no events; keep the worker alive
+      streamAlive(base); // #99: the pump below dispatches no events; keep the worker alive
       try {
         if (head) c.enqueue(head);
         for (;;) {
@@ -168,7 +169,7 @@ export function rawFrom(
            stream. */
         if (!cancelled) throw e;
       } finally {
-        streamDone();
+        streamDone(base);
       }
     },
     async cancel() {
@@ -221,7 +222,7 @@ export function rewriteStream(
   let cancelled = false;
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      streamAlive(); // #99: the pump below dispatches no events; keep the worker alive
+      streamAlive(base); // #99: the pump below dispatches no events; keep the worker alive
       try {
         /* #201: inside the try - a routeReady or siteScript rejection
            must settle the heartbeat instead of escaping with it
@@ -328,7 +329,7 @@ export function rewriteStream(
           controller.error(e);
         }
       } finally {
-        streamDone(); // #99: every exit path settles the stream
+        streamDone(base); // #99: every exit path settles the stream
       }
     },
     async cancel() {
@@ -369,7 +370,7 @@ export function cssRewriteStream(
   let cancelled = false;
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      streamAlive(); // #99: the pump below dispatches no events; keep the worker alive
+      streamAlive(base); // #99: the pump below dispatches no events; keep the worker alive
       try {
         const mod = await modP;
         const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
@@ -426,7 +427,7 @@ export function cssRewriteStream(
           controller.error(e);
         }
       } finally {
-        streamDone(); // #99: every exit path settles the stream
+        streamDone(base); // #99: every exit path settles the stream
       }
     },
     async cancel() {
