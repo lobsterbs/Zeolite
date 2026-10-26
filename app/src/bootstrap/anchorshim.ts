@@ -250,8 +250,7 @@ export function applyAnchorShim(w: Record<string, unknown>): void {
   nativeGetAttr = O;
   proto.getAttribute = function (this: AnyRecord, n: string) {
     const v = O.call(this, n);
-    const tag = String(this.tagName ?? "").toUpperCase();
-    if (String(n).toLowerCase() === "href" && (tag === "A" || tag === "AREA") && typeof v === "string")
+    if (String(n).toLowerCase() === "href" && /^(a|area)$/i.test(this.tagName) && typeof v === "string")
       return anchorVirtual(v) ?? v;
     return v;
   };
