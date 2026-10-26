@@ -109,10 +109,38 @@ describe("delivery evidence (#454)", () => {
     await attemptDelivery("wisp-route", async () => new Response("private-response"), b);
     const own = DIAG.snapshot(start, "delivery-client-a").events;
     expect(own).toHaveLength(1);
+    expect(own[0]).toMatchObject({
+      deliveryState: "delivery-unknown",
+      deliveryTransport: "wisp",
+    });
     expect(own[0].message).toContain("delivery-unknown; transport=wisp");
     expect(JSON.stringify(own)).not.toContain("wisp-route");
     expect(JSON.stringify(DIAG.snapshot(start))).not.toContain("private-body-and-credential-value");
     expect(JSON.stringify(DIAG.snapshot(start))).not.toContain("private-response");
+  });
+
+  it("records pre-dispatch and delivered-response certainty as structured evidence", async () => {
+    const { DIAG } = await import("../diag");
+    const start = DIAG.snapshot(0).lastSeq;
+    const pre = DIAG.trace("delivery-pre-client");
+    const ok = DIAG.trace("delivery-ok-client");
+    await prepareDelivery("wisp", async () => { throw new Error("AUTH_CANARY"); }, pre).catch(() => {});
+    await attemptDelivery("relay", async () => new Response("PRIVATE_BODY"), ok);
+    const preEvents = DIAG.snapshot(start, "delivery-pre-client").events;
+    const okEvents = DIAG.snapshot(start, "delivery-ok-client").events;
+    expect(preEvents.at(-1)).toMatchObject({
+      deliveryState: "definitely-not-delivered",
+      deliveryTransport: "wisp",
+      stage: "UPSTREAM_REQUEST",
+    });
+    expect(okEvents.at(-1)).toMatchObject({
+      deliveryState: "delivered-response",
+      deliveryTransport: "relay",
+      stage: "UPSTREAM_RESPONSE",
+    });
+    const exported = JSON.stringify({ preEvents, okEvents });
+    expect(exported).not.toContain("AUTH_CANARY");
+    expect(exported).not.toContain("PRIVATE_BODY");
   });
 
   it("does not trust mutable public state fields for retry decisions", () => {
