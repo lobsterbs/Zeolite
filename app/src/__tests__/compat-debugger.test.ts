@@ -66,6 +66,53 @@ describe("#494 request debugger with strict evidence only", () => {
     expect(doc[0].children[0].props.code).toBe("REQUEST_INTERCEPTED");
   });
 
+  it("exports delivery certainty and transport as fixed KDL fields, never parsed prose", () => {
+    const report = create({
+      diagnostics: [
+        event({
+          stage: "UPSTREAM_REQUEST",
+          deliveryState: "delivery-unknown",
+          deliveryTransport: "relay",
+          message: "AUTH_CANARY definitely-not-delivered transport=wisp",
+          ts: 20,
+        }),
+        event({
+          stage: "UPSTREAM_RESPONSE",
+          deliveryState: "delivered-response",
+          deliveryTransport: "wisp-route",
+          ts: 21,
+        }),
+        event({
+          stage: "UPSTREAM_REQUEST",
+          deliveryState: "PRIVATE_DELIVERY" as any,
+          deliveryTransport: "PRIVATE_TRANSPORT" as any,
+          ts: 22,
+        }),
+      ],
+    });
+    expect(report.steps[0]).toMatchObject({
+      delivery: "delivery-unknown", transportPath: "relay",
+    });
+    expect(report.steps[1]).toMatchObject({
+      delivery: "delivered-response", transportPath: "wisp-route",
+    });
+    expect(report.steps[2]).toMatchObject({
+      delivery: "unknown", transportPath: "unknown",
+    });
+    const kdl = compatibilityKdl(report);
+    const doc = parseKdl(kdl);
+    expect(doc[0].children[0].props).toMatchObject({
+      delivery: "delivery-unknown", transport: "relay",
+    });
+    expect(doc[0].children[1].props).toMatchObject({
+      delivery: "delivered-response", transport: "wisp-route",
+    });
+    expect(kdl).not.toContain("AUTH_CANARY");
+    expect(kdl).not.toContain("PRIVATE_DELIVERY");
+    expect(kdl).not.toContain("PRIVATE_TRANSPORT");
+    expect(kdl).not.toContain("definitely-not-delivered transport=wisp");
+  });
+
   it("never exports another client's diagnostic or network evidence", () => {
     const report = create({
       diagnostics: [
