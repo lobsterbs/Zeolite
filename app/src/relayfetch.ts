@@ -24,6 +24,7 @@
      fall back (#382); unknown POST/PATCH delivery fails without
      replay (#442). Large/multipart uploads have a finite 10min bound. */
 
+import { TransportDeliveryError } from "./delivery";
 import { DIAG } from "./diag";
 import { isHostClient, type WinClient } from "./lifecycle";
 
@@ -188,8 +189,11 @@ export function relayHeaderDeadlineMs(init: { headers: Headers; body?: BodyInit 
 }
 /** Dispatch happened, so a POST/PATCH may already have succeeded.
     This terminal error prevents a second transport from duplicating it. */
-export class RelayDeliveryUnknownError extends Error {
-  name = "RelayDeliveryUnknownError";
+export class RelayDeliveryUnknownError extends TransportDeliveryError {
+  override name = "RelayDeliveryUnknownError";
+  constructor(reason: string) {
+    super("delivery-unknown", "relay", reason);
+  }
 }
 
 export async function relayFetch(
