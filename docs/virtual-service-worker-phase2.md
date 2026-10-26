@@ -53,6 +53,42 @@ execution. Never execute a guest inline in the engine Service Worker global;
 a mere `self` facade cannot isolate `globalThis`, constructors or an infinite
 loop. Untrusted worker code stays disabled.
 
+## #477 capability probe verdict (observed, real Chromium)
+
+Probe: suite/e2e/sw-capability.mjs (Playwright, dedicated fixture
+server, a bare registered service worker; committed with this change).
+Facts observed in the service worker global: Worker and SharedWorker
+are UNDEFINED. importScripts, eval, Function, OffscreenCanvas,
+WebAssembly, setTimeout, caches, indexedDB and WebSocket are available.
+
+Consequence for the stage-2 sandbox: the plain dedicated Worker on the
+engine origin in the model below cannot be created BY the engine
+service worker, because the service worker global exposes no Worker
+constructor at all. The only execution surfaces inside the service
+worker (eval, Function, importScripts) run in the kernel own global
+with no enforceable termination, which gate 2 forbids. Guest execution
+therefore stays unsupported on this platform. P4 (worker-per-guest) is
+likewise blocked from the worker side: the creator must be a page
+context on the engine origin, bridged to the service worker, which is
+a kernel architecture decision, not a shim change. Until that decision
+is made and reviewed, untrusted guest execution stays disabled.
+
+## #477 P1 facade fidelity, native shape (observed)
+
+Native ServiceWorkerRegistration, captured from the same live
+registration in real Chromium: scope, updateViaCache, installing,
+waiting, active, update(), onupdatefound, unregister, navigationPreload,
+showNotification, getNotifications, pushManager, sync, periodicSync,
+backgroundFetch, cookies, paymentManager. The probe also confirms
+controller === active and that controllerchange fires on claim. The
+phase-1 VirtualRegistration ships scope, installing, active and
+unregister. The S1 gaps are waiting, update(), onupdatefound and
+updateViaCache; each addition is paid from the strict bootstrap byte
+budget, so shipping them is a budget decision, not a mechanical fix.
+controller, controllerchange, onmessage and ready stay the real
+container own surface (the engine worker is the controller); the shim
+intentionally does not fake them.
+
 ## Registration identity and scope mapping
 
 Registration key: (site id, canonical scope). The site id is the
