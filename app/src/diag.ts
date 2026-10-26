@@ -134,6 +134,9 @@ export function redactSecrets(s: string): string {
   return s
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, "$1[redacted]@")
     .replace(/([?&#](?:code|state|nonce|code_verifier|id_token|access_token|refresh_token|session_token|credential|g-recaptcha-response|h-captcha-response|cf-turnstile-response)=)[^&#\s]*/gi, "$1[redacted]")
+    // Match the whole authorization value: redacting only the word
+    // "Bearer" would leave its actual credential in diagnostic text.
+    .replace(/(authorization["'\s:=]+)(?:bearer|basic)\s+\S+/gi, "$1[redacted]")
     .replace(/(authorization["'\s:=]+)(\S+)/gi, "$1[redacted]")
     .replace(/(cookie["'\s:=]+)([^;\s]+)/gi, "$1[redacted]")
     .replace(/(bearer\s+)[A-Za-z0-9._\-]+/gi, "$1[redacted]")
