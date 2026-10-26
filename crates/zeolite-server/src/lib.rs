@@ -1043,8 +1043,8 @@ pub fn build_app(shared: Arc<Shared>) -> Router {
                 );
                 if path == "/sw.js" {
                     /* docs/integration-guide.md: the engine worker must
-                       be eligible for root scope and revalidated rather
-                       than pinned stale by intermediary/browser caches. */
+                    be eligible for root scope and revalidated rather
+                    than pinned stale by intermediary/browser caches. */
                     resp.headers_mut().insert(
                         "service-worker-allowed",
                         axum::http::HeaderValue::from_static("/"),
