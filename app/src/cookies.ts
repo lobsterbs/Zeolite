@@ -170,9 +170,10 @@ function activeProfile(clientId?: string): string {
        zl:jarProfile), so it rides the default jar there. The
        PROFILE_UNBOUND fallback stays for a session deployment, where
        a root that lost its profile (worker restart) fails closed. */
-    return rootProfiles.get(root) ?? (anySessionProfileActive() ? PROFILE_UNBOUND : PROFILE_DEFAULT);
+    return rootProfiles.get(root) ?? (profileRestoreFailed || anySessionProfileActive() ? PROFILE_UNBOUND : PROFILE_DEFAULT);
   }
   if (clientId && unboundClients.has(clientId)) return PROFILE_UNBOUND;
+  if (profileRestoreFailed && !globalProfileAssigned) return PROFILE_UNBOUND;
   return profile;
 }
 
@@ -212,51 +213,55 @@ export function anySessionProfileActive(): boolean {
    documented restart semantics. */
 const PROFILE_CACHE = "zeolite-jar-profile-v1";
 let jarProfilesPromise: Promise<void> | null = null;
+let profilePersistChain: Promise<void> = Promise.resolve();
+let profileRestoreFailed = false;
+let globalProfileAssigned = false;
+const assignedRoots = new Set<string>();
+
+function validProfileName(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 64 && !value.includes(SEP);
+}
 
 export function jarProfilesReady(): Promise<void> {
   if (!jarProfilesPromise) {
     jarProfilesPromise = (async () => {
-      if (typeof caches === "undefined") return;
+      if (typeof caches === "undefined") throw new Error("profile storage unavailable");
       const c = await caches.open(PROFILE_CACHE);
       const r = await c.match("profiles");
       if (!r) return;
-      const j = (await r.json()) as { profile?: unknown; roots?: Record<string, unknown> };
-      if (
-        typeof j.profile === "string" &&
-        j.profile.length > 0 &&
-        j.profile.length <= 64 &&
-        !j.profile.includes(SEP)
-      ) {
-        profile = j.profile;
+      const j = (await r.json()) as { profile?: unknown; roots?: unknown; uncertain?: unknown };
+      if (!j || (j.uncertain !== undefined && typeof j.uncertain !== "boolean") || !validProfileName(j.profile) || !j.roots || typeof j.roots !== "object" || Array.isArray(j.roots)) {
+        throw new Error("invalid profile snapshot");
       }
-      if (j.roots && typeof j.roots === "object") {
-        for (const [root, pid] of Object.entries(j.roots)) {
-          if (
-            typeof pid === "string" &&
-            pid.length > 0 &&
-            pid.length <= 64 &&
-            !pid.includes(SEP)
-          ) {
-            rootProfiles.set(root, pid);
-          }
-        }
+      const roots = Object.entries(j.roots);
+      if (roots.some(([root, pid]) => !root || !validProfileName(pid))) throw new Error("invalid root profile");
+      if (j.uncertain === true) profileRestoreFailed = true;
+      // A fresh trusted assignment wins over a slower disk restore.
+      if (!globalProfileAssigned) profile = j.profile;
+      for (const [root, pid] of roots) {
+        if (!assignedRoots.has(root)) rootProfiles.set(root, pid as string);
       }
     })().catch(() => {
-      /* a failed restore keeps the in-memory defaults; any push
-         re-persists */
+      // The unreadable snapshot may describe an incognito session.
+      // Only explicitly assigned roots (or a legacy global assignment)
+      // may use cookies until the host rebinds the remaining clients.
+      profileRestoreFailed = true;
     });
   }
   return jarProfilesPromise;
 }
 
 function persistJarProfiles(): void {
-  const snapshot = { profile, roots: Object.fromEntries(rootProfiles) };
-  void (async () => {
+  profilePersistChain = profilePersistChain.then(async () => {
+    // Restore untouched roots before writing, otherwise a host pushing
+    // one root at boot could erase another window's session profile.
+    await jarProfilesReady();
     if (typeof caches === "undefined") return;
+    const snapshot = { profile, roots: Object.fromEntries(rootProfiles), uncertain: profileRestoreFailed };
     const c = await caches.open(PROFILE_CACHE);
     await c.put("profiles", new Response(JSON.stringify(snapshot)));
-  })().catch(() => {
-    /* storage unavailable: memory-only semantics for this lifetime */
+  }).catch(() => {
+    // Preserve memory state and allow a later trusted push to retry.
   });
 }
 
@@ -364,6 +369,7 @@ export function pruneJarClients(activeClientIds: ReadonlySet<string>): void {
   for (const [id, root] of clientRoots) if (activeClientIds.has(id)) liveRoots.add(root);
   for (const [root, pid] of rootProfiles) {
     if (!activeClientIds.has(root) && !liveRoots.has(root)) {
+      assignedRoots.add(root);
       rootProfiles.delete(root);
       prunedProfiles = true;
       if (pid !== PROFILE_DEFAULT) clearNamespace(namespaceForProfile(pid, root));
@@ -403,6 +409,7 @@ export function setJarProfile(p: unknown, clientId?: string): { ok: boolean; pro
   if (clientId) {
     const root = rootOf(clientId) ?? clientId;
     const prev = rootProfiles.get(root) ?? PROFILE_DEFAULT;
+    assignedRoots.add(root);
     rootProfiles.set(root, next);
     clientRoots.set(clientId, root);
     if (prev !== PROFILE_DEFAULT && prev !== next) {
@@ -411,6 +418,7 @@ export function setJarProfile(p: unknown, clientId?: string): { ok: boolean; pro
     persistJarProfiles();
     return { ok: true, profile: next };
   }
+  globalProfileAssigned = true;
   const prev = profile;
   if (prev !== PROFILE_DEFAULT && prev !== next) {
     clearNamespace(namespaceForProfile(prev, null));
@@ -1317,6 +1325,11 @@ export function cookiesResetForTests(): void {
   navHandleRoots.clear();
   unboundClients.clear();
   persistChain = Promise.resolve();
+  profilePersistChain = Promise.resolve();
+  jarProfilesPromise = null;
+  profileRestoreFailed = false;
+  globalProfileAssigned = false;
+  assignedRoots.clear();
 }
 
 /* #52 detect-only: recognize an Anubis pass-challenge endpoint so the

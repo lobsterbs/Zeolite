@@ -29,6 +29,7 @@ vi.mock("../transport", () => ({
 }));
 
 import { handleFetch } from "../request";
+import { cookiesResetForTests } from "../cookies";
 import { encodeDestLegacy } from "../codec";
 
 const ORIGIN = "https://sh.test";
@@ -63,13 +64,15 @@ const stubSelf = () =>
 
 const noCache = () =>
   vi.stubGlobal("caches", {
-    open: async () => {
+    open: async (name: string) => {
+      if (name === "zeolite-jar-profile-v1") return { match: async () => undefined, put: async () => {} };
       throw new Error("no cache storage");
     },
   });
 
 describe("script destination body honesty (#158/#159)", () => {
   beforeEach(() => {
+    cookiesResetForTests();
     transportMock.calls = 0;
     transportMock.queue = [];
     stubSelf();
@@ -122,8 +125,8 @@ describe("script destination body honesty (#158/#159)", () => {
 
   it("serves the JS-typed comment from a cache hit as well, never the document rewrite", async () => {
     vi.stubGlobal("caches", {
-      open: async () => ({
-        match: async () =>
+      open: async (name: string) => ({
+        match: async () => name === "zeolite-jar-profile-v1" ? undefined :
           new Response("<html>cached shell</html>", {
             headers: {
               "content-type": "text/html; charset=utf-8",
