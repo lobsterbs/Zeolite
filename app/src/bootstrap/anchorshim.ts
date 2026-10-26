@@ -11,8 +11,9 @@
    (zl:decodeRoutes) to decode routes the page's own markup already
    carries, memoizes route -> virtual destination, and serves the
    read seams: the nav guard's swap-row property getter (A and
-   AREA href), Element.getAttribute, and the SVG anchor's
-   animated href object (#388).
+   AREA href), Element.getAttribute, the component getters and
+   stringifier (#490), and the SVG anchor's animated href object
+   (#388).
 
    Honest limits: the first read before the decode reply lands
    returns the native route value (a race, not a hang); detached
@@ -23,7 +24,12 @@
    collection spends its bounded window only on undecoded routes,
    and a reply that leaves undecoded routes behind schedules the
    next window, so anchors deep in the document virtualize without
-   waiting for a mutation or a read miss. */
+   waiting for a mutation or a read miss. #488: scan progress is
+   tracked per element (elMemo), not per route string, so the
+   memo's LRU window can no longer restart collection from the
+   document prefix; a route evicted from the string memo refreshes
+   through the read that missed it (pendingReads), never through a
+   document rescan. */
 
 import { swc } from "./siteid";
 
@@ -31,9 +37,28 @@ type AnyRecord = Record<string, any>;
 
 /* route -> virtual destination; "" marks a route the worker could
    not decode (a memoized negative so it never re-asks). LRU-capped
-   with delete-then-set on touch, first key evicted (#358 lesson). */
+   with delete-then-set on touch, first key evicted (#358 lesson).
+   #488: reads of an evicted entry no longer strand - see elMemo
+   and pendingReads. */
 const memo = new Map<string, string>();
 const MEMO_MAX = 512;
+/* #488: element-associated decode results. Keyed by the NODE with
+   the href attribute string it was collected under, so an element
+   already processed never becomes a scan candidate again merely
+   because another node evicted its route from the string memo;
+   the getAttribute seam answers from here first, so the eviction
+   cannot strand the read either. WeakMap: dead nodes are the GC's
+   problem, the page's live set is the bound. A real href mutation
+   (attr differs) recollects honestly. dest "" is a memoized
+   negative for that attr value. */
+const elMemo = new WeakMap<AnyRecord, { attr: string; dest: string }>();
+/* #488: routes whose property read missed the string memo re-ask
+   through the read itself, bounded by real read activity. The
+   scan drains this set after the document window (routes the
+   window already collected leave the queue); the document
+   prefix is never rescanned for them. */
+const pendingReads = new Set<string>();
+const PENDING_READS_MAX = 64;
 /* routes of the in-flight batch; cleared when the reply (or the
    timeout) settles, so a lost reply stays retryable. */
 const inflight = new Set<string>();
@@ -108,7 +133,12 @@ function scheduleScan(): void {
    values are skipped, so the window is spent only on undecoded
    routes (#387: without the skip every scan replayed the same
    document prefix and anchors past the first window never
-   virtualized). */
+   virtualized). #488: an ELEMENT whose href attr is unchanged was
+   already collected - elMemo answers its reads whether or not the
+   string memo still holds the route - so it is skipped for good;
+   only a real href mutation recollects. Without this, a document
+   with more candidate strings than MEMO_MAX made every scan
+   recollect the evicted prefix and the collection never converged. */
 function scan(): void {
   scanning = true;
   try {
@@ -116,9 +146,14 @@ function scan(): void {
     if (!w) return;
     const doc = w.document as AnyRecord | undefined;
     if (!doc || typeof doc.querySelectorAll !== "function") return;
-    const nodes = doc.querySelectorAll("a[href],area[href]") as ArrayLike<AnyRecord>;
     const batch: string[] = [];
-    for (let i = 0; i < nodes.length && batch.length < 2 * BATCH_MAX; i++) {
+    const nodes = doc.querySelectorAll("a[href],area[href]") as ArrayLike<AnyRecord>;
+    /* per-scan route -> collected elements (elMemo seeding), and
+       element -> its raw attr string at collection time. */
+    const els = new Map<string, AnyRecord[]>();
+    const attrOf = new Map<AnyRecord, string>();
+    let more = false;
+    for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
       const g: unknown = nativeGetAttr ?? n.getAttribute;
       if (typeof g !== "function") continue;
@@ -129,18 +164,58 @@ function scan(): void {
         continue;
       }
       if (typeof a !== "string" || !a) continue;
-      if (!memo.has(a) && !inflight.has(a) && routeShaped(a)) batch.push(a);
+      const prev = elMemo.get(n);
+      if (prev && prev.attr === a) continue;
+      if (batch.length >= 2 * BATCH_MAX) {
+        more = true;
+        break;
+      }
+      if (!memo.has(a) && !inflight.has(a) && routeShaped(a)) {
+        batch.push(a);
+        attrOf.set(n, a);
+        const list = els.get(a);
+        if (list) list.push(n);
+        else els.set(a, [n]);
+      }
       try {
         const abs = new URL(a, (w.location as AnyRecord).href).href;
-        if (abs !== a && !memo.has(abs) && !inflight.has(abs) && routeShaped(abs)) batch.push(abs);
+        if (abs !== a && !memo.has(abs) && !inflight.has(abs) && routeShaped(abs)) {
+          batch.push(abs);
+          if (!attrOf.has(n)) attrOf.set(n, a);
+          const list2 = els.get(abs);
+          if (list2) list2.push(n);
+          else els.set(abs, [n]);
+        }
       } catch {
         /* an unparseable base anchors nothing */
       }
     }
-    /* the window filled before the document ended: undecoded
-       anchors may remain past it. */
-    const more = batch.length >= 2 * BATCH_MAX;
-    if (batch.length) decodeBatch(batch, more);
+    /* #488: read-refresh routes join after the document window:
+       they were evicted from the string memo by an active read, and
+       the read itself is their only honest re-ask (the scan never
+       recollects processed elements). Routes this window already
+       collected, or that the memo or in-flight set now answers,
+       leave the queue; a full window keeps the rest queued. */
+    if (pendingReads.size) {
+      for (const r of pendingReads) {
+        if (memo.has(r) || inflight.has(r) || batch.includes(r)) {
+          pendingReads.delete(r);
+          continue;
+        }
+        if (batch.length >= 2 * BATCH_MAX) break;
+        pendingReads.delete(r);
+        batch.push(r);
+      }
+    }
+    const fill =
+      els.size > 0
+        ? (route: string, dest: string | null): void => {
+            for (const el of els.get(route) ?? []) {
+              elMemo.set(el, { attr: attrOf.get(el) ?? "", dest: dest ?? "" });
+            }
+          }
+        : undefined;
+    if (batch.length) decodeBatch(batch, more, fill);
   } finally {
     scanning = false;
   }
@@ -151,8 +226,16 @@ function scan(): void {
    clears the in-flight set so a lost reply stays retryable; a page
    without a controller keeps the native degrade. more/capped mean
    undecoded routes were left behind by a window bound; the reply
-   then schedules the next window so coverage converges (#387). */
-function decodeBatch(routes: string[], more: boolean): void {
+   then schedules the next window so coverage converges (#387).
+   #489: one idempotent settle owns the complete teardown - timer
+   cleared, in-flight released, listener detached, locally held
+   endpoints closed (the un-transferred port2 too when the
+   synchronous send throws) - and every exit path runs it. */
+function decodeBatch(
+  routes: string[],
+  more: boolean,
+  fill?: (route: string, dest: string | null) => void,
+): void {
   const uniq: string[] = [];
   let capped = false;
   for (const r of routes) {
@@ -165,31 +248,35 @@ function decodeBatch(routes: string[], more: boolean): void {
     }
   }
   if (!uniq.length) return;
-  const clear = () => {
-    for (const r of uniq) inflight.delete(r);
-  };
   const ctl = swc();
   if (!ctl) {
-    clear();
+    for (const r of uniq) inflight.delete(r);
     return;
   }
   const ch = new MessageChannel();
-  const to = setTimeout(() => {
-    clear();
+  let settled = false;
+  let to: ReturnType<typeof setTimeout> | undefined;
+  const settle = (): void => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(to);
+    ch.port1.onmessage = null;
+    for (const r of uniq) inflight.delete(r);
     try {
       ch.port1.close();
     } catch {
       /* an already-closed port stays closed */
     }
-  }, 5000);
+  };
+  to = setTimeout(settle, 5000);
   ch.port1.onmessage = (ev: MessageEvent) => {
-    clearTimeout(to);
-    clear();
+    settle();
     const d = (ev.data ?? {}) as { ok?: boolean; dests?: unknown[] };
     if (!d.ok || !Array.isArray(d.dests)) return;
     for (let i = 0; i < uniq.length && i < d.dests.length; i++) {
       const dst = d.dests[i];
       memoSet(uniq[i], typeof dst === "string" ? dst : "");
+      if (fill) fill(uniq[i], typeof dst === "string" ? dst : null);
     }
     /* #387: a bounded window left undecoded routes behind; drive
        the next one so a large document virtualizes fully without
@@ -199,27 +286,36 @@ function decodeBatch(routes: string[], more: boolean): void {
   try {
     ctl.postMessage({ type: "zl:decodeRoutes", routes: uniq }, [ch.port2]);
   } catch {
-    clearTimeout(to);
-    clear();
+    settle();
+    try {
+      ch.port2.close();
+    } catch {
+      /* already transferred: nothing to close */
+    }
   }
 }
 
 /** The nav guard's swap-row getter seam: the virtual destination
     when it is already decoded; undefined while pending or when the
-    value is not a route (the caller keeps its native read). */
+    value is not a route (the caller keeps its native read). #488:
+    a miss of an evicted entry registers a read-driven refresh
+    (pendingReads) - the scan never recollects processed elements,
+    so the read itself is the only honest re-ask. */
 export function anchorVirtual(v: string): string | undefined {
   const hit = memo.get(v);
   if (hit !== undefined) return hit === "" ? undefined : hit;
   if (!routeShaped(v)) return undefined;
+  if (pendingReads.size < PENDING_READS_MAX) pendingReads.add(v);
   scheduleScan();
   return undefined;
 }
 
 /** Install: realm capture, the install-time scan (or one
     DOMContentLoaded scan while loading), a mutation observer for
-    later markup, the Element.getAttribute wrap and the SVG
-    animated-href read wrap. One-way dependency: navguard imports
-    this module, never the reverse. */
+    later markup, the Element.getAttribute wrap, the component
+    getters and stringifier (#490), and the SVG animated-href read
+    wrap. One-way dependency: navguard imports this module, never
+    the reverse. */
 export function applyAnchorShim(w: Record<string, unknown>): void {
   realmRef.w = w as AnyRecord;
   const doc = (w as AnyRecord).document as AnyRecord | undefined;
@@ -263,16 +359,96 @@ export function applyAnchorShim(w: Record<string, unknown>): void {
         } catch {
           return O.call(this, n);
         }
-        const hit = typeof v === "string" ? memo.get(v) : undefined;
-        if (hit !== undefined && hit !== "") return hit;
+        if (typeof v === "string") {
+          /* #488: the element-associated result answers first: an
+             LRU eviction from the string memo must not strand this
+             element's read back on the opaque route. */
+          const e = elMemo.get(this);
+          if (e && e.attr === v) {
+            return e.dest === "" ? O.call(this, n) : e.dest;
+          }
+          const hit = memo.get(v);
+          if (hit !== undefined && hit !== "") return hit;
+        }
       }
     }
     return O.call(this, n);
   };
+  /* #490: coherent component reads. The swap-row href getter
+     virtualizes once the decode reply lands, but the native
+     component getters and the stringifier still serialized the
+     browser's underlying engine route (hostname = the engine host,
+     pathname = the opaque token, String(a) = the route), so pages
+     deriving labels, domain icons or endpoint parameters from
+     components disagreed with the virtual href even after decoding.
+     Components now parse whatever the CURRENT href getter returns:
+     virtual once decoded, the native route while pending (exactly
+     the native read), native descriptor fallback when unparseable.
+     Setters stay native - a component write keeps the browser's
+     own href mutation semantics untouched. */
+  const comps: Array<"protocol" | "host" | "hostname" | "port" | "pathname" | "search" | "hash"> = [
+    "protocol",
+    "host",
+    "hostname",
+    "port",
+    "pathname",
+    "search",
+    "hash",
+  ];
+  for (const C of [(w as AnyRecord).HTMLAnchorElement, (w as AnyRecord).HTMLAreaElement] as Array<
+    AnyRecord | undefined
+  >) {
+    if (!C || !C.prototype) continue;
+    const hp = C.prototype as AnyRecord;
+    for (const prop of comps) {
+      const d = Object.getOwnPropertyDescriptor(hp, prop);
+      if (!d || typeof d.get !== "function") continue;
+      const nativeGet = d.get as (this: AnyRecord) => string;
+      const desc: PropertyDescriptor = {
+        configurable: true,
+        enumerable: true,
+        get(this: AnyRecord) {
+          try {
+            return new URL(String(this.href))[prop];
+          } catch {
+            return nativeGet.call(this);
+          }
+        },
+      };
+      if (typeof d.set === "function") {
+        const nativeSet = d.set as (this: AnyRecord, v: string) => void;
+        desc.set = function (this: AnyRecord, v: string) {
+          nativeSet.call(this, v);
+        };
+      }
+      Object.defineProperty(hp, prop, desc);
+    }
+    const od = Object.getOwnPropertyDescriptor(hp, "origin");
+    if (od && typeof od.get === "function") {
+      const nativeOrigin = od.get as (this: AnyRecord) => string;
+      Object.defineProperty(hp, "origin", {
+        configurable: true,
+        enumerable: true,
+        get(this: AnyRecord) {
+          try {
+            return new URL(String(this.href)).origin;
+          } catch {
+            return nativeOrigin.call(this);
+          }
+        },
+      });
+    }
+    const td = Object.getOwnPropertyDescriptor(hp, "toString");
+    if (td && typeof td.value === "function") {
+      hp.toString = function (this: AnyRecord): string {
+        return String(this.href);
+      };
+    }
+  }
   /* #388: SVG anchors read their href through SVGAnimatedString
-     (baseVal/animVal), a seam neither the nav guard table nor the
-     getAttribute wrap covers (the nav guard wraps the anchor and
-     area property rows; the SVG animated object is a different
+     (baseVal/animVal), a seam neither the nav guard table nor
+     the getAttribute wrap covers (the nav guard wraps the anchor
+     and area property rows; the SVG animated object is a different
      prototype). Virtualize the read on a memo hit; every pending
      or non-route read keeps the native object, and a baseVal write
      forwards to it. Honest limit: the virtual view is a plain

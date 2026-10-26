@@ -431,7 +431,11 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
           return null;
         }
       });
+      /* #489: the decode reply is one-shot - close the reply port
+         so the channel does not linger open in the worker after
+         the page-side settle already ran. */
       reply({ ok: true, dests });
+      try { port?.close(); } catch { /* already closed */ }
       break;
     }
     case "zl:navHandle": {
