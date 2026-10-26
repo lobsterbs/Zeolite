@@ -53,7 +53,7 @@ function routeShaped(v: string): boolean {
   let q = "";
   const abs = /^https?:/i.test(v);
   try {
-    const u = new URL(v, "http://zeolite.invalid");
+    const u = new URL(v, "http://z/");
     if (abs) p = u.pathname;
     q = u.search;
   } catch {
@@ -64,8 +64,7 @@ function routeShaped(v: string): boolean {
      real pathname untouched; the worker decode stays the judge (a
      real-site path that false-positives decodes to null and
      memoizes negative). */
-  if (/[?&]zlNavh=([A-Za-z0-9_-]{12,})/.test(q)) return true;
-  return /^[A-Za-z0-9_-]{12,}$/.test(p.split("/")[2] ?? "");
+  return /[?&]zlNavh=([A-Za-z0-9_-]{12,})/.test(q) || /^[A-Za-z0-9_-]{12,}$/.test(p.split("/")[2] ?? "");
 }
 
 function memoSet(k: string, v: string): void {
