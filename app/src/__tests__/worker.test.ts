@@ -161,6 +161,78 @@ describe("navigator.serviceWorker shim (1.6)", () => {
     expect(swShimGet(s, "https://a.example/", "/other")).toBeUndefined();
   });
 
+  it("supports separate scopes, covering client URLs, and ignores query/fragment", async () => {
+    const s = mkStore();
+    swShimRegister(s, "https://a.example/", "/app/worker.js");
+    swShimRegister(s, "https://a.example/", "/shop/worker.js");
+    expect(swShimGet(s, "https://a.example/", "/app/page.html?q=secret#top")?.scope)
+      .toBe("https://a.example/app/");
+    expect(swShimGet(s, "https://a.example/", "/shop/checkout")?.scope)
+      .toBe("https://a.example/shop/");
+    expect(swShimGet(s, "https://a.example/", "/outside")).toBeUndefined();
+    expect(swShimGet(s, "https://a.example/", "https://a.example.evil/app/page"))
+      .toBeUndefined();
+    const c: Record<string, unknown> = {};
+    swShimApply(c, s, "https://a.example/home");
+    const getAll = c.getRegistrations as () => Promise<Array<{scope: string}>>;
+    expect((await getAll()).map(r => r.scope).sort())
+      .toEqual(["https://a.example/app/", "https://a.example/shop/"]);
+  });
+
+  it("uses longest-covering scope rather than exact equality", () => {
+    const s = mkStore();
+    swShimRegister(s, "https://a.example/", "/app/base.js", { scope: "/app/" });
+    swShimRegister(s, "https://a.example/", "/app/deep/worker.js");
+    expect(swShimGet(s, "https://a.example/", "/app/deep/page")?.scope)
+      .toBe("https://a.example/app/deep/");
+    expect(swShimGet(s, "https://a.example/", "/app/sibling")?.scope)
+      .toBe("https://a.example/app/");
+    // The scope is a string-prefix match, not a directory-boundary match.
+    expect(swShimGet(s, "https://a.example/", "/appended/page")?.scope)
+      .toBe("https://a.example/app/");
+  });
+
+  it("unregister affects only its scope and returns false when already gone", async () => {
+    const s = mkStore();
+    const first = swShimRegister(s, "https://a.example/", "/one/sw.js");
+    const second = swShimRegister(s, "https://a.example/", "/two/sw.js");
+    expect(await first.unregister()).toBe(true);
+    expect(await first.unregister()).toBe(false);
+    expect(swShimGet(s, "https://a.example/", "/one/a")).toBeUndefined();
+    expect(swShimGet(s, "https://a.example/", "/two/b")?.active?.scriptURL)
+      .toBe("https://a.example/two/sw.js");
+    expect(await second.unregister()).toBe(true);
+    expect(s.get()).toBeNull();
+  });
+
+  it("updates one scope without clearing others and migrates legacy records", () => {
+    const s = mkStore();
+    s.set(JSON.stringify({ scriptURL: "https://a.example/old.js", scope: "https://a.example/" }));
+    swShimRegister(s, "https://a.example/", "/tools/sw.js");
+    expect(swShimGet(s, "https://a.example/", "/")?.active?.scriptURL)
+      .toBe("https://a.example/old.js");
+    swShimRegister(s, "https://a.example/", "/tools/new.js", { scope: "/tools/" });
+    expect(swShimGet(s, "https://a.example/", "/tools/page")?.active?.scriptURL)
+      .toBe("https://a.example/tools/new.js");
+    expect(swShimGet(s, "https://a.example/", "/")?.active?.scriptURL)
+      .toBe("https://a.example/old.js");
+  });
+
+  it("rejects forged or malformed persisted script origins even with a valid scope", () => {
+    const s = mkStore();
+    s.set(JSON.stringify([
+      { scriptURL: "https://a.example.evil/sw.js", scope: "https://a.example/" },
+      { scriptURL: 1, scope: "https://a.example/" },
+      { scriptURL: "https://a.example/sw.js", scope: "https://a.example/app/" },
+    ]));
+    expect(swShimGet(s, "https://a.example/", "/") ).toBeUndefined();
+    expect(swShimGet(s, "https://a.example/", "/app/page")?.scope)
+      .toBe("https://a.example/app/");
+    const c: Record<string, unknown> = {};
+    swShimApply(c, s, "https://a.example/");
+    expect((c.getRegistrations as () => Promise<unknown[]>)()).resolves.toHaveLength(1);
+  });
+
   it("records are per-origin isolated", () => {
     const s1 = mkStore();
     const s2 = mkStore();
