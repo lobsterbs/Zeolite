@@ -7,6 +7,7 @@ import type { JarConflictRule } from "./cookies";
 import { documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
 import { buildDoctor, doctorKdl, observeDoctorBoot, probeDoctorAssets } from "./doctor";
+import { experimentalSnapshot, selectExperimental } from "./experimental-flags";
 import { primaryWispUrl } from "./config";
 import { transportState } from "./transport-lifecycle";
 import { policyDoctorState } from "./policy";
@@ -109,6 +110,8 @@ export interface ControlMessage {
     | "zl:clearJar"
     | "zl:transport"
   | "zl:loadState";
+  /** Experimental selections are preferences only, not security bypasses. */
+  experimental?: unknown;
   /** Doctor: the host supplies version/scope expectations; no guessed values. */
   expectedScope?: string;
   expectedVersion?: string;
@@ -372,6 +375,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         navHandles: navHandlesEnabled(),
         /* Injector phase 2: the live query-shape opt-in. */
         queryRoutes: queryRoutesEnabled(),
+        experimental: experimentalSnapshot(),
         profile: jarProfileState((e.source as { id?: string } | null)?.id),
       });
       break;
@@ -385,6 +389,15 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         reply({ ok: false, error: "scheme removed: routes are b64u only (#32)" });
         break;
       }
+      /* Validate all experimental selections atomically before changing
+         existing settings. Selections never activate unfinished code. */
+      if (msg.experimental !== undefined) {
+        const accepted = selectExperimental(msg.experimental);
+        if (!accepted.ok) {
+          reply({ ok: false, error: accepted.error });
+          break;
+        }
+      }
       /* #53: absent leaves the persisted choice (old embedders). */
       if (typeof msg.httpsUpgrade === "boolean") setHttpsUpgrade(msg.httpsUpgrade);
       /* Lazy images: same rule - absent keeps the live choice. */
@@ -396,7 +409,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       setScheme(msg.prefix ?? "/j/");
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
-      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled() });
+      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled(), experimental: experimentalSnapshot() });
       break;
     }
     case "zl:reloadBypass":
