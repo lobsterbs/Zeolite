@@ -302,3 +302,15 @@ persistence, document.cookie, import scoping) and
 
 Legacy hash cookie ids migrate through the persisted origin map (#465).
 Cookie jar ids are independent of the short page-side storage token.
+
+## Profile recovery (#471)
+
+Profile snapshots are written serially. Restoration merges untouched roots
+before a new snapshot is saved, so a host window rebinding during startup
+cannot erase another window's session profile. Fresh trusted assignments win
+over older stored assignments.
+
+If profile storage cannot be read or its snapshot is malformed, unidentified
+clients receive no cookies and cannot write into the durable jar. A trusted
+host must rebind their root first. The uncertainty marker survives later
+saves and restarts; rebinding one host never authorizes unrelated clients.
