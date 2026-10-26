@@ -27,11 +27,12 @@ describe("read-only KDL source diagnostics (#495)", () => {
   for (const which of ["policy", "rules", "siteconfig"] as const) {
     it(`reports unobserved/loaded/missing/invalid/unavailable for ${which}`, async () => {
       const read = async (response: () => Promise<Response>, expected: string) => {
-        vi.stubGlobal("fetch", vi.fn(response));
+        const mockFetch = vi.fn(response);
+        vi.stubGlobal("fetch", mockFetch);
         const p = await loader(which);
         expect(p.state()).toBe("not-loaded");
         // Pure passive reads do not fetch anything.
-        expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
+        expect(mockFetch).not.toHaveBeenCalled();
         await p.load();
         expect(p.state()).toBe(expected);
       };
