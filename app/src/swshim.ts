@@ -56,6 +56,35 @@ function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string
   return s.href;
 }
 
+type StoredRegistration = { scriptURL: string; scope: string };
+
+/** Read old single-record storage and new multi-scope storage alike.
+    A page-controlled store must never forge cross-origin registrations.
+    Keep parsing and enumeration bounded; a corrupt record is ignored. */
+function registrations(store: SwShimStore, pageUrl: string): StoredRegistration[] {
+  const raw = store.get();
+  if (!raw || raw.length > 131072) return [];
+  let value: unknown;
+  try { value = JSON.parse(raw); }
+  catch { return []; }
+  const candidates = Array.isArray(value) ? value.slice(0, 64) : [value];
+  const origin = new URL(pageUrl).origin;
+  const byScope = new Map<string, StoredRegistration>();
+  for (const item of candidates) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    if (typeof r.scriptURL !== "string" || typeof r.scope !== "string") continue;
+    try {
+      const script = new URL(r.scriptURL);
+      const scope = new URL(r.scope);
+      if (script.origin !== origin || scope.origin !== origin ||
+          scope.search || scope.hash) continue;
+      byScope.set(scope.href, { scriptURL: script.href, scope: scope.href });
+    } catch { /* invalid or foreign registration */ }
+  }
+  return [...byScope.values()];
+}
+
 function registration(scriptURL: string, scope: string, store: SwShimStore, settled: boolean): VirtualRegistration {
   const worker: VirtualWorker = { scriptURL, state: settled ? "activated" : "installing" };
   const reg: VirtualRegistration = {
@@ -63,8 +92,14 @@ function registration(scriptURL: string, scope: string, store: SwShimStore, sett
     installing: settled ? null : worker,
     active: settled ? worker : null,
     unregister: () => {
-      store.clear();
-      return Promise.resolve(true);
+      const list = registrations(store, scriptURL);
+      const remaining = list.filter(r => r.scope !== scope);
+      const removed = remaining.length !== list.length;
+      if (removed) {
+        if (remaining.length) store.set(JSON.stringify(remaining));
+        else store.clear();
+      }
+      return Promise.resolve(removed);
     },
   };
   if (!settled) {
@@ -79,64 +114,51 @@ function registration(scriptURL: string, scope: string, store: SwShimStore, sett
   return reg;
 }
 
-/** register(): record the (per-origin) registration and return a live
-    one whose worker settles installing -> activated. */
+/** Each virtual origin can own multiple independent scopes, like a
+    native ServiceWorkerContainer. Re-registering one scope updates it
+    without deleting unrelated registrations. */
 export function swShimRegister(
   store: SwShimStore,
   pageUrl: string,
   scriptURL: string | URL,
   options?: { scope?: string },
 ): VirtualRegistration {
-  /* #474: a cross-origin or malformed script URL is a native-style
-     TypeError, never a foreign registration. */
   let script: URL | null = null;
-  try {
-    script = new URL(scriptURL + "", pageUrl);
-  } catch {
-    /* malformed below */
-  }
+  try { script = new URL(scriptURL + "", pageUrl); }
+  catch { /* malformed below */ }
   if (!script || script.origin !== new URL(pageUrl).origin) {
     throw new TypeError("The Service Worker script is outside the page origin");
   }
   const rec = { scriptURL: script.href, scope: scopeFor(pageUrl, options?.scope, script.href) };
-  store.set(JSON.stringify(rec));
+  const existing = registrations(store, pageUrl).filter(r => r.scope !== rec.scope);
+  if (existing.length >= 64) throw new TypeError("Virtual worker registration limit reached");
+  store.set(JSON.stringify([...existing, rec]));
   return registration(rec.scriptURL, rec.scope, store, false);
 }
 
-/** getRegistration(): the recorded registration in its settled shape.
-    Undefined when this origin never registered, the record scopes a
-    foreign origin, or the requested scope does not match. */
+/** Native getRegistration(clientURL) selects the longest *covering*
+    registration scope, not a record whose scope equals clientURL.
+    Same-origin URL resolution and scope comparison are both required. */
 export function swShimGet(
   store: SwShimStore,
   pageUrl: string,
-  scope?: string,
+  clientURL?: string,
 ): VirtualRegistration | undefined {
-  const raw = store.get();
-  if (raw === null) return undefined;
-  let rec: { scriptURL: string; scope: string };
-  try {
-    rec = JSON.parse(raw) as { scriptURL: string; scope: string };
-  } catch {
-    return undefined;
-  }
-  /* Defense in depth: a record that scopes a foreign origin is not
-     this page's registration, even if it landed in this store.
-     #474: exact-origin compare - a prefix test admitted lookalikes. */
-  let scopeUrl: URL | null = null;
-  try {
-    scopeUrl = new URL(rec.scope);
-  } catch {
-    return undefined;
-  }
-  if (scopeUrl.origin !== new URL(pageUrl).origin) return undefined;
-  if (scope != null) {
-    try {
-      if (rec.scope !== scopeFor(pageUrl, scope, rec.scriptURL)) return undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  return registration(rec.scriptURL, rec.scope, store, true);
+  let url: URL;
+  try { url = new URL(clientURL ?? pageUrl, pageUrl); }
+  catch { return undefined; }
+  if (url.origin !== new URL(pageUrl).origin) return undefined;
+  const requested = url.origin + url.pathname;
+  const match = registrations(store, pageUrl)
+    .filter(r => requested.startsWith(new URL(r.scope).origin + new URL(r.scope).pathname))
+    .sort((a, b) => b.scope.length - a.scope.length)[0];
+  return match ? registration(match.scriptURL, match.scope, store, true) : undefined;
+}
+
+/** Native getRegistrations() enumerates *all* same-origin scopes.
+    This API is separate from current-page coverage checks. */
+export function swShimList(store: SwShimStore, pageUrl: string): VirtualRegistration[] {
+  return registrations(store, pageUrl).map(r => registration(r.scriptURL, r.scope, store, true));
 }
 
 /** Patch a real ServiceWorkerContainer in place: register,
@@ -156,10 +178,8 @@ export function swShimApply(container: object, store: SwShimStore, pageUrl: stri
   }) as unknown;
   c.getRegistration = ((s?: string) =>
     Promise.resolve(swShimGet(store, pageUrl, s))) as unknown;
-  c.getRegistrations = (() => {
-    const r = swShimGet(store, pageUrl);
-    return Promise.resolve(r ? [r] : []);
-  }) as unknown;
+  c.getRegistrations = (() =>
+    Promise.resolve(swShimList(store, pageUrl))) as unknown;
   try {
     Object.defineProperty(c, "ready", {
       configurable: true,
