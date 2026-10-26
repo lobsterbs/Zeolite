@@ -8,7 +8,7 @@ Adaptive NativeTransit runs shadow diagnostics without changing routing.
 
 | Key | Issue | Current execution support |
 | --- | --- | --- |
-| `adaptiveTransit` | #487 | **Shadow-only** on live/cache paths; no routing changes |
+| `adaptiveTransit` | #487 | **Shadow-only** on live/cache paths; emits fixed-vocabulary tracing records even with verbose tracing off, without changing routing |
 | `hybridLocation` | #456 | **Not wired**; existing per-site KDL hybrid location policy remains separate |
 | `cspTranslation` | #452 | **Deny-only subset** for HTML documents: object-src/base-uri/form-action 'none'; arbitrary policies remain stripped |
 | `virtualSW` | #477 | **Not implemented**; registration groundwork is not guest execution |
