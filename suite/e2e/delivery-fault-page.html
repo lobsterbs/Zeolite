@@ -1,0 +1,14 @@
+<!doctype html><title>fault page</title>
+<p id=zl>fault</p>
+<script>
+window.__zl_fault = null;
+const post = fetch("http://127.0.0.1:7103/commit", { method: "POST", body: "payload-zl-64" })
+  .then((r) => ({ kind: "post", ok: r.ok, status: r.status }), (e) => ({ kind: "post", err: String(e) }));
+const get = fetch("http://127.0.0.1:7103/commit", { method: "GET" })
+  .then((r) => ({ kind: "get", ok: r.ok, status: r.status }), (e) => ({ kind: "get", err: String(e) }));
+const control = fetch("http://127.0.0.1:7103/ok", { method: "POST", body: "c" })
+  .then((r) => ({ kind: "control", ok: r.ok, status: r.status }), (e) => ({ kind: "control", err: String(e) }));
+Promise.allSettled([post, get, control]).then((v) => {
+  window.__zl_fault = v.map((x) => x.status === "fulfilled" ? x.value : String(x.reason));
+});
+</script>
