@@ -51,6 +51,10 @@ const fallbackReasons = new Set([
 ]);
 const rewrites = new Set(["html","css","js","js-pinned"]);
 const subsystems = new Set(["rules","intercept","transport","rewriter","websocket"]);
+const adaptiveStrategies = new Set(["native","light","full","required","blocked"]);
+const adaptiveEvidence = new Set([
+  "default","request-destination","response-content-type","manual-policy","challenge-namespace",
+]);
 
 const fromSet = (v: unknown, allowed: Set<string>, fallback = "unknown") =>
   typeof v === "string" && allowed.has(v) ? v : fallback;
@@ -95,11 +99,18 @@ export function buildCompatibilityReport(args: {
   for (const ev of args.tracing) {
     if (ev.traceId !== args.traceId) continue;
     if (steps.length >= 160) break;
+    /* Only a fixed, complete planner tuple is meaningful evidence.
+       A raw trace result or user-defined rule label is NEVER exported. */
+    const planner = ev.subsystem === "transport" &&
+      (ev.rule === "adaptive-picker" || ev.rule === "adaptive-shadow") &&
+      typeof ev.result === "string" && ev.result.length <= 64
+        ? /^([a-z-]+):([a-z-]+)$/.exec(ev.result) : null;
+    const known = planner && adaptiveStrategies.has(planner[1]) &&
+      adaptiveEvidence.has(planner[2]);
     steps.push({
       source: "decision", ts: safeNumber(ev.ts, 9e15),
       code: fromSet(ev.subsystem, subsystems),
-      /* Rule, original and result contain arbitrary URLs/site text.
-         Even a redactSecrets() string is not export-safe. */
+      ...(known ? { decision: planner[1], reason: planner[2] } : {}),
     });
   }
   steps.sort((a,b) => a.ts - b.ts);
