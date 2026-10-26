@@ -18,6 +18,8 @@ import { b64uDecode, b64uEncode, buildNavHandleUrl, buildQueryHandleUrl, decodeC
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
+import { applyExperimentalCsp } from "./csp-translation";
+import { experimentalEnabled } from "./experimental-flags";
 import { loadRouteHistory, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
 import { NAV, NAVP } from "./bootstrap/navguard";
@@ -2663,12 +2665,20 @@ export function handleFetch(e: FetchEvent): void {
           !requestHasCredentials(e.request, target, cookieClientId)
         ) {
           const hit = await raceBoot(pageCacheMatch(e.request, (p) => e.waitUntil(p), { clientId: cookieClientId, initiator: initiator ?? undefined, navigation: e.request.mode === "navigate" }), "page cache match", PRE_DEADLINE_BOUND_MS);
-          if (hit) {
+          /* A cache entry may predate CSP opt-in and has already lost
+             the upstream CSP during header sanitation. For HTML
+             documents, opt-in CSP must fetch the live response rather
+             than silently serve a CSP-free cached copy. */
+          if (hit && !(experimentalEnabled("cspTranslation") && DOC_DESTS.has(dest.toLowerCase()))) {
             /* #487: one conservative planner for cache and live responses.
                MIME, KDL behavior, and CDN-CGI gates must not diverge
                between first load and reload. */
             const plan = planResponseTransit(decision, hit.headers.get("content-type") ?? "", dest, target, policyRule);
             const dec = plan.decision;
+            if (experimentalEnabled("adaptiveTransit"))
+              traceDecision({ subsystem: "transport", rule: "adaptive-shadow",
+                original: decision.mode, result: plan.strategy + ":" + plan.evidence,
+                resource: rtype, traceId });
             /* #487: opt-in evidence, no raw URL added to the planner trace;
                traceId joins the existing network log for this request. */
             traceDecision({ subsystem: "transport", rule: "adaptive-picker", original: dec.mode,
@@ -3288,6 +3298,12 @@ export function handleFetch(e: FetchEvent): void {
              the response header set the page will see. */
           const rHeaders = WEBREQ.headersReceived(wrDetailsFinal, resp.status, headers);
           const outHeaders = rHeaders ?? headers;
+          /* #452: opt-in, strictly deny-only CSP on HTML documents.
+             The live response carries original headers; every
+             unsupported policy is left stripped (not passed through). */
+          if (experimentalEnabled("cspTranslation"))
+            applyExperimentalCsp(outHeaders, resp.headers,
+              resp.headers.get("content-type") ?? "", DOC_DESTS.has(dest.toLowerCase()));
           outHeaders.set("x-zl-proxy", "1");
           /* Finding 1: a 3xx that reached the page (hop cap reached, no
              Location, or a hop whose one-shot body cannot replay) must not
@@ -3321,6 +3337,10 @@ export function handleFetch(e: FetchEvent): void {
              transport rules, and never auto-demotes required passes. */
           const plan = planResponseTransit(decision, resp.headers.get("content-type") ?? "", dest, target, policyRule);
           const dec = plan.decision;
+          if (experimentalEnabled("adaptiveTransit"))
+            traceDecision({ subsystem: "transport", rule: "adaptive-shadow",
+              original: decision.mode, result: plan.strategy + ":" + plan.evidence,
+              resource: rtype, traceId });
           traceDecision({ subsystem: "transport", rule: "adaptive-picker", original: dec.mode,
             result: plan.strategy + ":" + plan.evidence, resource: rtype, traceId });
           if (dec.mode === "NativeTransit" && dec.reason === "POLICY_NATIVE")
