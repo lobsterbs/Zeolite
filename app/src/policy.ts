@@ -188,6 +188,16 @@ export function policyMatch(p: CompiledPolicy, url: string, rtype: ResourceType)
   return best;
 }
 
+/* #487: behavior rules must not compete with network transport rules.
+   Previously policyMatch() could choose a high-priority relay/wisp
+   rule ahead of a lower-priority native/rewrite rule, accidentally
+   disabling the intended content behavior. Transport selection still
+   uses transportMatch() independently below. */
+export function behaviorMatch(p: CompiledPolicy, url: string, rtype: ResourceType): PolicyRule | null {
+  const behaviors = p.rules.filter((r) => r.route === "native" || r.route === "rewrite");
+  return behaviors.length === 0 ? null : policyMatch({ rules: behaviors }, url, rtype);
+}
+
 /* #154: transport-side view of the same rules. route "native" and
    route "rewrite" choose a response's rewrite behavior (literal pass
    demotion, rewrite upgrade); route "relay" and route "wisp" choose
