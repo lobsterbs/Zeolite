@@ -281,17 +281,34 @@ export async function relayFetch(
       if (m) resolve(m);
       else wake = () => (aborted ? reject(abortErr()) : resolve(shift()));
     });
-  port.postMessage({
-    type: "zl:fetchRelay",
-    rid,
-    dest,
-    method: init.method,
-    headers: Array.from(init.headers.entries()),
-    body,
-  });
-  /* #470: the up-front credit grant; a non-crediting host never
-     receives these frames. */
-  if (crediting) port.postMessage({ type: "zl:relayCredit", rid, bytes: RELAY_CREDIT_BYTES });
+  /* #454: an already-closed MessagePort or a structured-clone error
+     may throw synchronously. The first frame may or may not have
+     reached an embedder, so never infer non-delivery. Do not leak a
+     waiter or an abort listener; GET-like callers may fall back while
+     non-idempotent writes must fail terminally. */
+  try {
+    port.postMessage({
+      type: "zl:fetchRelay",
+      rid,
+      dest,
+      method: init.method,
+      headers: Array.from(init.headers.entries()),
+      body,
+    });
+    /* #470: the up-front credit grant; a non-crediting host never
+       receives these frames. */
+    if (crediting) port.postMessage({ type: "zl:relayCredit", rid, bytes: RELAY_CREDIT_BYTES });
+  } catch {
+    cleanup();
+    try { cancelUpstream(); } catch { /* cannot signal a dead port */ }
+    DIAG.emit({
+      traceId, requestId: traceId, category: "TRANSPORT", cause: "proxy",
+      severity: "warning", stage: "UPSTREAM_REQUEST",
+      message: "relay dispatch channel rejected request; delivery unknown",
+      url: dest,
+    });
+    return failedAfterDispatch("relay channel dispatch rejected");
+  }
   /* Header deadline for every relayed fetch, subresources included.
      Without it a silent embedder (or a port it dropped without a
      close event) parks the request until the page gives up. #382:
