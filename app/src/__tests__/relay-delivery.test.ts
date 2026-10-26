@@ -29,6 +29,34 @@ describe("relay delivery safety (#442)", () => {
     expect(deliveryStateOf(err)).toBe("delivery-unknown");
     expect(err.transport).toBe("relay");
   });
+  it("contains a synchronous relay port failure without replaying POST", async () => {
+    const port = reg();
+    const spy = vi.spyOn(port, "postMessage").mockImplementation(() => {
+      throw new Error("MessagePort has been closed");
+    });
+    const result = await outcome(relayFetch(
+      "https://api.example/create",
+      { method: "POST", headers: new Headers(), body: "value=1" },
+      "sync-relay-error",
+    ));
+    expect(result.error).toBeInstanceOf(RelayDeliveryUnknownError);
+    expect(deliveryStateOf(result.error)).toBe("delivery-unknown");
+    expect((result.error as RelayDeliveryUnknownError).transport).toBe("relay");
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it("allows a GET fallback when the relay channel throws synchronously", async () => {
+    const port = reg();
+    vi.spyOn(port, "postMessage").mockImplementation(() => {
+      throw new Error("closed");
+    });
+    expect(await relayFetch(
+      "https://api.example/read",
+      { method: "GET", headers: new Headers() },
+      "sync-get-error",
+    )).toBeNull();
+  });
+
   it("keeps idempotent GET deadline fallback and cancellation", async () => {
     vi.useFakeTimers(); const port = reg();
     const pending = relayFetch("https://api.example/read", { method: "GET", headers: new Headers() }, "get-timeout");
