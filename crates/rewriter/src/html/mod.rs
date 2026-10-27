@@ -201,6 +201,19 @@ impl Rewriter {
         self.enc_route(url, false, true)
     }
 
+    /// #499: true when the absolute URL carries userinfo before the
+    /// first path, query or fragment byte (scheme://user[:pass]@host).
+    /// A @ elsewhere (path, query, fragment) is not userinfo.
+    fn userinfo_in_authority(abs: &str) -> bool {
+        let Some((_, rest)) = abs.split_once("://") else {
+            return false;
+        };
+        let end = rest
+            .find(['/', '?', '#'])
+            .unwrap_or(rest.len());
+        rest[..end].contains("@")
+    }
+
     fn enc_route(&self, url: &str, literal: bool, script: bool) -> String {
         // Already engine-local (nested rewriting): keep as-is. An empty
         // origin matches every URL, so it must not take this branch.
@@ -245,6 +258,20 @@ impl Rewriter {
         // destination at all (issue #12: every same-page anchor link
         // navigated to 404 "zeolite: bad route").
         if abs.is_empty() || abs.starts_with('#') {
+            return abs;
+        }
+        // #499: a userinfo-carrying absolute URL (scheme://key@host)
+        // is configuration-shaped data, not a navigation sink:
+        // Sentry DSNs and credential-bearing config strings are
+        // parsed by application JS as written, and an engine route
+        // fails those parsers (Invalid Sentry Dsn). JS literals
+        // are data until a runtime sink consumes them, and the
+        // runtime seams still route the eventual request, so the
+        // literal keeps its verbatim value. Only the authority is
+        // inspected: an @ in a path or query is not userinfo.
+        // HTML attributes and script srcs are browser-owned sinks
+        // and keep routing (the literal gate below).
+        if literal && Self::userinfo_in_authority(&abs) {
             return abs;
         }
         // Opaque absolute URLs (data:, blob:, about:, javascript:,
@@ -3407,5 +3434,53 @@ document.write('<script src=x></script>');
         out.push_str(&r.finish());
         assert!(out.contains("var x = 1;"), "script body survives");
         assert!(out.contains("done"));
+    }
+    #[test]
+    fn userinfo_url_literals_stay_verbatim() {
+        // #499: a Sentry DSN is URL-shaped configuration parsed by
+        // application JS as written; an engine route fails the DSN
+        // parse. The literal must keep its verbatim value while a
+        // browser-owned fetch URL in the same bundle still routes.
+        let r = Rewriter::new(cfg());
+        let dsn = "https://abc123@o456.ingest.sentry.io/42";
+        let js = format!(
+            "Sentry.init({{ dsn: '{}' }}); fetch('https://example.com/api');",
+            dsn
+        );
+        let out = r.rewrite_js_body(&js);
+        assert!(out.contains(dsn), "DSN literal must stay verbatim: {out}");
+        let route = format!("/j/{}", crate::encode::b64u_encode(b"https://example.com/api"));
+        assert!(out.contains(&route), "browser-owned fetch URL must still route: {out}");
+    }
+    #[test]
+    fn userinfo_gate_is_authority_only() {
+        let r = Rewriter::new(cfg());
+        // An @ in the query is not userinfo: the literal still routes.
+        let out = r.rewrite_js_body("fetch('https://example.com/mail?to=a@b.com')");
+        let route = format!(
+            "/j/{}",
+            crate::encode::b64u_encode(b"https://example.com/mail?to=a@b.com")
+        );
+        assert!(out.contains(&route), "query @ must not gate: {out}");
+        // The inline handler path uses the same literal gate.
+        let mut r2 = Rewriter::new(cfg());
+        let html = r#"<a onclick="send('https://key@host.example/42')">u</a>"#;
+        let out2 = r2.process(html);
+        assert!(
+            out2.contains("https://key@host.example/42"),
+            "inline handler literal keeps verbatim value: {out2}"
+        );
+    }
+    #[test]
+    fn userinfo_html_attributes_still_route() {
+        // Browser-owned sinks (href) are not gated: only JS string
+        // literals (enc_literal) take the #499 verbatim branch.
+        let mut r = Rewriter::new(cfg());
+        let out = r.process(r#"<a href="https://user:pw@example.com/x">u</a>"#);
+        let route = format!(
+            "/j/{}",
+            crate::encode::b64u_encode(b"https://user:pw@example.com/x")
+        );
+        assert!(out.contains(&route), "href routing must not change: {out}");
     }
 }
