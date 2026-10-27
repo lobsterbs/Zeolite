@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   GUEST_HANDSHAKE_MS,
   GUEST_SCRIPT_MAX,
@@ -8,7 +9,6 @@ import {
   type GuestReply,
   type GuestSpawnMessage,
 } from "../kernel/guests/executor";
-
 /* #477 wave 1: the guest kernel state machine. Every fix and honest
    limit in the kernel ships with a unit proof here; the live worker
    spawn needs the guest-host page in a real browser, so this suite
@@ -234,5 +234,19 @@ describe("guest harness prelude", () => {
   it("ends with a newline so the guest body starts on its own line", () => {
     const h = guestHarness("https://a.example/", "https://a.example/sw.js");
     expect(h.endsWith("})();\n")).toBe(true);
+  });
+});
+
+
+describe("guest host page contract", () => {
+  it("registers with the control-plane type field, not a foreign shape", () => {
+    const html = readFileSync(new URL("../../guest-host.html", import.meta.url), "utf8");
+    /* handleControlEvent dispatches on msg.type; a kind field would
+       be silently ignored and the host page would never register. */
+    expect(html).toContain('postMessage({ type: "zl:guestHost" }');
+    expect(html).not.toContain('kind: "zl:guestHost"');
+    /* The kernel frames arrive on the port with the op field. */
+    expect(html).toContain('d.op === "spawn"');
+    expect(html).toContain('d.op === "terminate"');
   });
 });
