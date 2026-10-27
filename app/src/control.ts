@@ -6,6 +6,7 @@ import { buildNavHandleUrl, buildQueryHandleUrl, currentPrefix, decodeClientUrl,
 import type { JarConflictRule } from "./cookies";
 import { documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
+import { guestRegisterHost, guestSpawn, guestTerminate, type GuestPortLike } from "./kernel/guests/executor";
 import { buildDoctor, doctorKdl, observeDoctorBoot, probeDoctorAssets } from "./doctor";
 import { experimentalSnapshot, selectExperimental } from "./experimental-flags";
 import { primaryWispUrl } from "./config";
@@ -102,6 +103,9 @@ export interface ControlMessage {
     | "zl:importSession"
     | "zl:sameSite"
     | "zl:relayRegister"
+    | "zl:guestHost"
+    | "zl:guestSpawn"
+    | "zl:guestTerminate"
     | "zl:wispRegister"
     | "zl:wispPrimary"
     | "zl:fingerprint"
@@ -330,6 +334,49 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       }
       break;
     }
+    case "zl:guestHost": {
+      /* #477 wave 1: the guest host page (app/guest-host.html, same
+         pattern as zlsw-register) bridges its Worker-creator realm to
+         the kernel over this port. Host-only by the #41 gate (not in
+         PAGE_MESSAGES): the SW itself cannot create workers
+         (suite/e2e/sw-capability.mjs), so guest realms are created
+         by this engine-origin page. */
+      const gp = e.ports[0];
+      if (gp) {
+        guestRegisterHost(gp as unknown as GuestPortLike);
+        reply({ ok: true });
+      } else {
+        reply({ ok: false, error: "guest host registration needs a port" });
+      }
+      break;
+    }
+    case "zl:guestSpawn": {
+      /* #477 wave 1: spawn is a host-only control message. Proxied
+         pages still get virtual registrations only (swshim); the
+         page register capture is a later phase. */
+      const gm = msg as unknown as {
+        pageUrl?: unknown;
+        scriptURL?: unknown;
+        scope?: unknown;
+        script?: unknown;
+      };
+      guestSpawn(
+        {
+          pageUrl: typeof gm.pageUrl === 'string' ? gm.pageUrl : '',
+          scriptURL: typeof gm.scriptURL === 'string' ? gm.scriptURL : '',
+          scope: typeof gm.scope === 'string' ? gm.scope : undefined,
+          script: typeof gm.script === 'string' ? gm.script : '',
+        },
+        reply,
+      );
+      break;
+    }
+    case "zl:guestTerminate": {
+      const gt = msg as unknown as { origin?: unknown };
+      guestTerminate(typeof gt.origin === 'string' ? gt.origin : '', reply);
+      break;
+    }
+
     case "zl:wispPrimary": {
       /* LobsterBrowse Settings: the active WISP server carries all
          traffic. "" restores the build-time endpoint. Persisted with
@@ -1272,7 +1319,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary",
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate",
 ]);
 
 
