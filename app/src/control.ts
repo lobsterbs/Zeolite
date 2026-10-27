@@ -9,6 +9,7 @@ import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
 import { buildDoctor, doctorKdl, observeDoctorBoot, probeDoctorAssets } from "./doctor";
 import { experimentalSnapshot, selectExperimental } from "./experimental-flags";
 import { primaryWispUrl } from "./config";
+import { clearWispAuth, configureWispAuth, wispAuthStatus } from "./wisp-auth";
 import { transportState } from "./transport-lifecycle";
 import { policyDoctorState } from "./policy";
 import { rulesDoctorState } from "./rules";
@@ -56,6 +57,7 @@ const DECODE_ROUTES_MAX = 64;
 export interface ControlMessage {
   type:
     | "zl:config"
+    | "zl:wispAuth"
     | "zl:reloadBypass"
     | "zl:mint"
     | "zl:decodeRoutes"
@@ -158,6 +160,10 @@ export interface ControlMessage {
   clientId?: string;
   /** #494: only one verified request trace is exportable in V1. */
   traceId?: string;
+  /** zl:wispAuth (#496): host-only password credentials for one wisp
+      endpoint. Memory-only (a worker restart drops them); the reply
+      echoes the redacted status, never the secret. */
+  wispAuth?: { op: "set" | "clear"; endpoint?: string; username?: string; password?: string };
   /** zl:wsOpen: page WebSocket bridge destination + protocols. */
   url?: string;
   protocols?: string[];
@@ -354,6 +360,29 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       }
       break;
     }
+    case "zl:wispAuth": {
+      /* #496: host-only credential seam. The #41 gate keeps this type
+         out of PAGE_MESSAGES, so no proxied page can set credentials.
+         Memory-only: a worker restart drops the state and the host
+         re-pushes. The reply never echoes the secret. */
+      const w = msg.wispAuth;
+      if (!w || w.op === "clear") {
+        clearWispAuth();
+        reply({ ok: true, wispAuth: wispAuthStatus() });
+        break;
+      }
+      if (w.op !== "set") {
+        reply({ ok: false, error: "zl:wispAuth requires op set or clear" });
+        break;
+      }
+      const res = configureWispAuth(
+        w.endpoint ?? primaryWispUrl(),
+        w.username ?? "",
+        w.password ?? "",
+      );
+      reply({ ok: res.ok, error: res.error, wispAuth: wispAuthStatus() });
+      break;
+    }
     case "zl:ping":
       /* Issue #17: echo the live route shape so embedders can detect a
          revert to defaults (worker restart, storage wipe) and re-push
@@ -377,6 +406,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         queryRoutes: queryRoutesEnabled(),
         experimental: experimentalSnapshot(),
         profile: jarProfileState((e.source as { id?: string } | null)?.id),
+        wispAuth: wispAuthStatus(),
       });
       break;
     case "zl:config": {
@@ -1242,7 +1272,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary",
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary",
 ]);
 
 
