@@ -371,6 +371,16 @@ fn looks_like_url(s: &str) -> bool {
     if lower.starts_with("http://www.w3.org/") || lower.starts_with("https://www.w3.org/") {
         return false;
     }
+    // A bare scheme fragment ("http://", "https://", "ws://",
+    // "wss://") is a concatenation prefix, not a URL: minting a
+    // route for it leaves a token where the scheme was and the
+    // runtime concatenation glues the host straight onto the token
+    // (the live startpage ads-iframe strand:
+    // /j/<token>www.startpage.com/...). Keep the fragment verbatim;
+    // the runtime request seams see the fully-built absolute URL.
+    if lower == "http://" || lower == "https://" || lower == "ws://" || lower == "wss://" {
+        return false;
+    }
     if lower.starts_with("http://")
         || lower.starts_with("https://")
         || lower.starts_with("ws://")
@@ -568,6 +578,17 @@ mod tests {
         let other = r#"const cfg = new URL("wss://user:pass@config.example/socket");
             const target = "//name@config.example/options";"#;
         assert_eq!(rewrite_script(other, &|u| format!("[{u}]")), other);
+    }
+
+    #[test]
+    fn scheme_fragment_literals_stay_verbatim() {
+        // A bare scheme fragment is a concatenation prefix, not a
+        // URL: minting a route for it leaves a token where the
+        // scheme was and the runtime concatenation glues the host
+        // straight onto the token (the live startpage ads iframe).
+        let js = r#"var base = "http://"; var u = base + "www.startpage.com/sp/afs/i.js";"#;
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains(r#""http://""#), "{}", out);
     }
 
     #[test]
