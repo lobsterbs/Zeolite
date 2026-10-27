@@ -146,16 +146,51 @@ export async function bootExtension(
       const bytes = await extensions.getResource(live.id, bg.serviceWorker, { fromWeb: false });
       if (!bytes) throw new Error("background service worker missing from package: " + bg.serviceWorker);
       code.push(new TextDecoder().decode(bytes));
+    } else if (live.background?.page) {
+      /* #505: MV2 background.page. Chrome hosts the page in a real
+         DOM document; this engine's background sandbox has no DOM, so
+         the page's classic scripts are extracted and executed
+         instead, in document order, and background.page takes
+         precedence over background.scripts exactly as in Chrome. A
+         page script that touches document or window throws at boot
+         and fails the background with the error recorded; the
+         compatibility matrix states that limit instead of hiding it.
+         A page with no scripts is a valid inert background (Chrome
+         parity). */
+      const pagePath = live.background.page;
+      const pageBytes = await extensions.getResource(live.id, pagePath, { fromWeb: false });
+      if (!pageBytes) {
+        throw new Error("background page missing from package: " + pagePath);
+      }
+      const page = new TextDecoder().decode(pageBytes);
+      const dir = pagePath.includes("/") ? pagePath.slice(0, pagePath.lastIndexOf("/") + 1) : "";
+      const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+      let m: RegExpExecArray | null;
+      while ((m = scriptRe.exec(page)) !== null) {
+        const attrs = m[1];
+        const srcMatch = /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(attrs);
+        if (srcMatch) {
+          const raw = (srcMatch[1] || srcMatch[2] || "").split("?")[0].split("#")[0];
+          if (!raw) continue;
+          const target = raw.startsWith("/") ? raw : dir + raw;
+          const bytes = await extensions.getResource(live.id, target, { fromWeb: false });
+          if (!bytes) throw new Error("background script missing from package: " + raw);
+          code.push(new TextDecoder().decode(bytes));
+          continue;
+        }
+        /* Inline scripts: classic only. ES modules cannot resolve
+           imports inside the Function sandbox, and data blocks such
+           as ld+json are not code. */
+        const typeMatch = /\btype\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(attrs);
+        const type = (typeMatch?.[1] || typeMatch?.[2] || "").toLowerCase();
+        if (type && type !== "text/javascript" && type !== "application/javascript") continue;
+        if (m[2].trim()) code.push(m[2]);
+      }
     } else {
       for (const s of bg?.scripts ?? []) {
         const bytes = await extensions.getResource(live.id, s, { fromWeb: false });
         if (!bytes) throw new Error("background script missing from package: " + s);
         code.push(new TextDecoder().decode(bytes));
-      }
-      if (code.length === 0 && live.background?.page) {
-        throw new Error(
-          "background.page is not supported yet (Firefox-style background scripts are)",
-        );
       }
     }
     /* Function-scope execution: the scripts see only the API objects.
