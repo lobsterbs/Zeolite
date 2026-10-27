@@ -208,9 +208,7 @@ impl Rewriter {
         let Some((_, rest)) = abs.split_once("://") else {
             return false;
         };
-        let end = rest
-            .find(['/', '?', '#'])
-            .unwrap_or(rest.len());
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
         rest[..end].contains("@")
     }
 
@@ -3449,8 +3447,14 @@ document.write('<script src=x></script>');
         );
         let out = r.rewrite_js_body(&js);
         assert!(out.contains(dsn), "DSN literal must stay verbatim: {out}");
-        let route = format!("/j/{}", crate::encode::b64u_encode(b"https://example.com/api"));
-        assert!(out.contains(&route), "browser-owned fetch URL must still route: {out}");
+        let route = format!(
+            "/j/{}",
+            crate::encode::b64u_encode(b"https://example.com/api")
+        );
+        assert!(
+            out.contains(&route),
+            "browser-owned fetch URL must still route: {out}"
+        );
     }
     #[test]
     fn userinfo_gate_is_authority_only() {
