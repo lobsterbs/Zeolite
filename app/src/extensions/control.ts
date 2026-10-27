@@ -13,6 +13,7 @@ import { NOTIFY } from "./notifications";
 import { normalizeExtensionPath } from "./origin";
 import { handleExtPageCall } from "./pageapi";
 import { EXT_ROUTE, mintPageToken, pageClientOf } from "./serve";
+import type { ExtensionRecord } from "./types";
 import type { ExtensionStorageArea } from "./storage";
 import { TABS, tabView } from "./tabs";
 import { WEBNAV } from "./webnavigation";
@@ -22,6 +23,22 @@ export interface ExtCtx {
   reply: (data: any) => void;
 }
 
+/* #504: engine-provided icon URL for the UI list. The manifest's
+   largest icon, served under the extension route with a page token
+   minted for exactly that (extension, path) pair: the UI panel is
+   not a web_accessible_resources caller, so the token is the narrow
+   gate (same registry and 5-minute TTL as options/popup opens).
+   Null when the manifest declares no icon or its path is unsafe. */
+function iconUrlFor(rec: ExtensionRecord): string | null {
+  const sizes = Object.keys(rec.icons);
+  if (sizes.length === 0) return null;
+  let best = sizes[0];
+  for (const s of sizes) if (Number(s) > Number(best)) best = s;
+  const iconPath = rec.icons[best];
+  const norm = normalizeExtensionPath(iconPath.startsWith("/") ? iconPath : "/" + iconPath);
+  if (!norm) return null;
+  return EXT_ROUTE + rec.id + norm + "?zlPageTok=" + mintPageToken(rec.id, norm);
+}
 export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Promise<void> {
   const { e, reply } = ctx;
   switch (msg?.type) {
@@ -87,6 +104,7 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
           state: r.state,
           enabled: r.enabled,
           lastError: r.lastError,
+          iconPath: iconUrlFor(r),
         })),
       });
       break;
@@ -206,6 +224,7 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
           hostPermissions: rec.hostPermissions,
           contentScripts: rec.contentScripts.length,
           optionsPath: rec.options ? rec.options.page : null,
+          iconPath: iconUrlFor(rec),
         },
       });
       break;

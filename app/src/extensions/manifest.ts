@@ -289,3 +289,78 @@ export function parseManifest(
   };
   return { ok: diags.errors.length === 0, parsed, diags };
 }
+
+
+/* #504: Chrome and Firefox resolve __MSG_<name>__ placeholders in
+   manifest strings against _locales/<locale>/messages.json. The
+   engine's honest equivalent is the manifest's own default_locale
+   (the browser UI locale is not observable from a worker). Resolves
+   the surfaced name and description in place, on the parsed record
+   and the raw manifest copy the detail surfaces read; an unresolved
+   placeholder (missing file, missing key, bad JSON) keeps its
+   literal bytes and reports one warning per field. Message-name
+   substitution only: $placeholder$ variables inside the message
+   text are left as written (extName-class fields do not use them).
+   Identity is untouched: the digest is over package bytes, so i18n
+   resolution never changes the extension id. */
+export function resolveManifestI18n(
+  raw: Record<string, unknown>,
+  parsed: ParsedExtension,
+  readFile: (path: string) => Uint8Array | undefined,
+  diags: ManifestDiagnostics,
+): void {
+  const sub = (value: string): { text: string; unresolved: boolean } => {
+    if (!value.includes("__MSG_")) return { text: value, unresolved: false };
+    let messages: Record<string, unknown> | null = null;
+    const locale = typeof raw.default_locale === "string" ? raw.default_locale : "";
+    if (locale) {
+      for (const p of ["_locales/" + locale + "/messages.json", "/_locales/" + locale + "/messages.json"]) {
+        const bytes = readFile(p);
+        if (!bytes) continue;
+        try {
+          const v = JSON.parse(new TextDecoder().decode(bytes));
+          if (isObj(v)) messages = v;
+        } catch {
+          messages = null;
+        }
+        break;
+      }
+    }
+    if (!messages) return { text: value, unresolved: true };
+    let unresolved = false;
+    const text = value.replace(/__MSG_([A-Za-z0-9_@]+)__/g, (full, key: string): string => {
+      const entry = messages![key];
+      const msg =
+        isObj(entry) && typeof entry.message === "string"
+          ? entry.message
+          : typeof entry === "string"
+            ? entry
+            : null;
+      if (msg === null) {
+        unresolved = true;
+        return full;
+      }
+      return msg;
+    });
+    return { text, unresolved };
+  };
+  const localeName = typeof raw.default_locale === "string" ? raw.default_locale : "(no default_locale)";
+  const name = sub(parsed.name);
+  if (name.unresolved) {
+    diags.warnings.push(
+      "name: __MSG_*__ placeholder could not be resolved from _locales/" + localeName + "; the literal placeholder is kept"
+    );
+  } else if (name.text !== parsed.name) {
+    parsed.name = name.text;
+  }
+  if (typeof raw.description === "string") {
+    const desc = sub(raw.description);
+    if (desc.unresolved) {
+      diags.warnings.push(
+        "description: __MSG_*__ placeholder could not be resolved from _locales/" + localeName + "; the literal placeholder is kept"
+      );
+    } else if (desc.text !== raw.description) {
+      raw.description = desc.text;
+    }
+  }
+}
