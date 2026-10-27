@@ -26,6 +26,18 @@
    This harness therefore PINS THE CONTRACT: POST===1 fails today
    with the message naming the vendored root cause, and goes green
    once the seam is fixed. It is not CI-gated on PR workflows.
+   2026-10-27 fix verdict: the reachable seam is fixed in
+   libcurl-transport-vendored.ts (libcurlRequest): every non-idempotent
+   request now rides a per-request HTTPSession - a fresh wasm curl
+   multi handle with an empty connection cache, so the request opens a
+   brand-new connection and libcurl never re-sends it (its dead
+   connection retry fires only for REUSED connections; a fresh one
+   surfaces error 52 honestly). POST===1 is expected GREEN and stays
+   as the pinned contract against regressions. The idempotent GET
+   bound is 3 wire attempts: the original, at most one wasm-level
+   re-send after a reused pooled connection dies, and one SW-level
+   retry - all replay-safe by method parity (transport.ts
+   IDEMPOTENT_METHODS).
 
    Flow mirrors differential.mjs: controlledHost at the engine root
    (explicit /sw.js module registration fallback), a zl:navHandle
@@ -167,7 +179,7 @@ try {
   const failures = [];
   if (log.counts.POST !== 1)
     failures.push("POST attempts " + log.counts.POST + " (expected exactly 1). If the count is 2, this is the vendored libcurl.js v0.7.4 pooled-connection re-send: a non-idempotent request on a reused connection that dies before any response byte is silently re-dispatched by libcurl itself (see the header comment). Fix needs the vendored wasm seam, not the engine gates - they already refuse this replay.");
-  if (log.counts.GET < 1 || log.counts.GET > 2) failures.push("GET attempts " + log.counts.GET + " outside [1,2] (at most one honest idempotent retry)");
+  if (log.counts.GET < 1 || log.counts.GET > 3) failures.push("GET attempts " + log.counts.GET + " outside [1,3] (one SW-level retry plus at most one wasm-level pooled re-send, both idempotent-legal)");
   if (honestFailure(post)) failures.push("POST drop answered as success: " + JSON.stringify(post));
   if (honestFailure(get)) failures.push("GET drop answered as success: " + JSON.stringify(get));
   if (!control.ok || control.status !== 200) failures.push("healthy POST control failed: " + JSON.stringify(control));
