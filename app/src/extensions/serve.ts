@@ -318,6 +318,18 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
     const own = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
     return own ? assetResponse(own, sr.path) : notFound();
   }
+  /* #504: a non-navigation fetch with a valid page token for exactly
+     this (extension, path) serves one asset without the WAR gate.
+     The host-only control plane mints icon URLs this way; the token
+     binds to the single minted path on the same 5-minute TTL, so
+     this grants exactly that resource and nothing else. */
+  if (!nav) {
+    const tok = url.searchParams.get("zlPageTok") ?? "";
+    if (tok && checkPageToken(sr.id, sr.path, tok)) {
+      const own = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
+      return own ? assetResponse(own, sr.path) : notFound();
+    }
+  }
 
   /* web_accessible_resources: WAR globs and MV3 "matches" scopes are
      checked inside getResource against the SW-observed page
