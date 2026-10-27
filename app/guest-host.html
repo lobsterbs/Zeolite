@@ -56,7 +56,7 @@
             if (d.op === "spawn") spawn(d);
             else if (d.op === "terminate") terminate(String(d.origin));
           };
-          sw.controller.postMessage({ kind: "zl:guestHost" }, [channel.port2]);
+          sw.controller.postMessage({ type: "zl:guestHost" }, [channel.port2]);
           setStatus("guest host ready");
         }
 
