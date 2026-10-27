@@ -1,3 +1,5 @@
+import { installWispAuthSocket } from "./wisp-auth";
+
 /* libcurl-transport adapter (vendored seam).
 
    The package is AGPL-3.0-only and its dist is 2.1 MB, so it is
@@ -1178,6 +1180,10 @@ export function installWispWatcher(g: WatcherGlobal = globalThis as WatcherGloba
 }
 
 installWispWatcher();
+
+/* #496: credentialed wisp sockets carry the PasswordAuth extension
+   in their client INFO; without credentials this is a pass-through. */
+installWispAuthSocket();
 
 export async function init(cfg: { websocket: string }): Promise<void> {
   lastCfg = cfg;
