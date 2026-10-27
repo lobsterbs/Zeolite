@@ -1217,11 +1217,39 @@ export async function persistRoute(prefix: string): Promise<void> {
    failure is visible in the embedder's DevTools network panel and
    joinable with the diagnostics rings - a strand is never a silent
    404. */
+/** #492-class parked challenge handoff: the SW serves the completed
+    challenge's content for the pass-challenge request, so a GET
+    navigation would commit the engine-owned challenge URL and park
+    there - every relative URL and every navguard prel then resolves
+    against the wrong base (the live startpage favicon and ads-iframe
+    strands). Mint the visible handle form of the repaired redir
+    destination - the query shape when the host opted in, the NAVH
+    path shape otherwise, the plain opaque route as the no-key
+    fallback - and hand the browser a same-origin 302 instead: the
+    re-navigation rides the ordinary pipeline with the clearance
+    cookie already in the jar, and the document commits a URL its
+    own code can read. Null = no repairable redir destination. */
+export function challengeReanchorUrl(fixed: string, rootBinding?: string): string | null {
+  let d: string | null = null;
+  try {
+    const raw = new URL(fixed).searchParams.get("redir");
+    if (raw && /^https?:\/\//i.test(raw)) d = new URL(raw).href;
+  } catch {
+    return null;
+  }
+  if (!d) return null;
+  const q = queryRoutesEnabled() ? buildQueryHandleUrl(d, NAVH_TTL_MS, rootBinding) : null;
+  if (q) return q;
+  const h = buildNavHandleUrl(d, NAVH_TTL_MS, rootBinding);
+  if (h) return h;
+  return encodeDest(d);
+}
+
 /** #101/#157: resolve a <parent route>/__zl_prel__/<encoded input>
     path to its destination. The parent may be a scheme route or a
     NAVH handle (decodeClientUrl) or a NAV navigation route (legacy
     b64 marker payload). Null = bad route, never a guess. */
-export function navpResolve(pathname: string, engineOrigin?: string): string | null {
+export function navpResolve(pathname: string, engineOrigin?: string, baseFallback?: string | null): string | null {
   /* #157/#159: emitters that predate the own-origin re-anchor (or
      unpatched realms) can still pass an absolute engine-origin URL
      as the tail; resolved as absolute it would fetch the engine
@@ -1262,7 +1290,21 @@ export function navpResolve(pathname: string, engineOrigin?: string): string | n
           ?.destination ?? null;
     }
   }
-  if (!base) return null;
+  /* #508/#492-class parked prels: the parent path can be an
+     engine-owned page URL (the pass-challenge strand the SW served
+     content at, so the frame parked there and its prels inherit
+     the parked parent). The parked URL's own query carries the
+     MAC-verified handle the navigation rode (zlNavh); the caller
+     extracts it and passes the decoded destination here, and the
+     prel resolves against that - the page's virtual home.
+     Fail-closed: no handle, no base, null as before. */
+  if (!base) {
+    if (baseFallback && /^https?:\/\//i.test(baseFallback)) {
+      base = baseFallback;
+    } else {
+      return null;
+    }
+  }
   let rel: string | null = null;
   try {
     const after = pathname.slice(cut + NAVP.length);
@@ -1273,6 +1315,18 @@ export function navpResolve(pathname: string, engineOrigin?: string): string | n
     rel = decodeURIComponent((after.startsWith("/") ? after.slice(1) : after).split(/[?#]/)[0]);
   } catch {
     return null;
+  }
+  /* The candidate itself can be an engine route, including a
+     concatenated one (<token><plaintext>: the JS literal pass once
+     minted bare scheme fragments, and the runtime concatenation
+     glued the host straight onto the token - the live startpage
+     ads-iframe strand). Resolving a route against the parent base
+     would bind it to the parent host; decode it as the route it
+     is. MAC-verified or fail-closed; a candidate that is not a
+     decodable route resolves against the base as before. */
+  if (rel.startsWith(currentPrefix())) {
+    const r = decodePath(rel) ?? recoverPath(rel);
+    if (r && (r.startsWith("http://") || r.startsWith("https://"))) return r;
   }
   try {
     const dest = new URL(rel, base);
@@ -1812,7 +1866,30 @@ export function handleFetch(e: FetchEvent): void {
            resolve it into the upstream path), and the parent decode
            covers scheme routes, NAVH handles and NAV navigation
            routes. A bad route is never guessed. */
-        const navpDest = navpResolve(url.pathname);
+        /* #508-class: a parked parent decodes to nothing; the parked
+           URL's own zlNavh names the page's virtual home. */
+        const navpTok = queryHandleToken(url.search);
+        let navpBase = navpTok ? decodeNavHandle(navpTok) : null;
+        /* #492-class parked parent: the prel request itself carries no
+           handle; the parked document URL (the referrer) carries zlNavh,
+           and the client's own established context names its virtual
+           home. MAC-verified handle decode or the frame's own context,
+           never a guess. */
+        if (!navpBase) {
+          let refTok: string | null = null;
+          try {
+            const ref = e.request.referrer;
+            refTok = ref ? queryHandleToken(new URL(ref).search) : null;
+          } catch {
+            refTok = null;
+          }
+          navpBase = refTok ? decodeNavHandle(refTok) : null;
+          if (!navpBase) {
+            const ctx = contextOf(VCTX, e.clientId);
+            navpBase = ctx && /^https?:/i.test(ctx.targetOrigin) ? ctx.targetOrigin : null;
+          }
+        }
+        const navpDest = navpResolve(url.pathname, undefined, navpBase);
         if (!navpDest) return navOutcome(e, url, 404, "route", "zeolite: bad route");
         /* URL fidelity (the Google sei reload class): a GET
            navigation on a NAVH-parent prel tail resolves correctly,
@@ -2236,6 +2313,10 @@ export function handleFetch(e: FetchEvent): void {
          maps the redirect back to an engine route through the
          ordinary pipeline. The CHALLENGE event is the log line hosts
          see when this fires. */
+      /* #492-class: set when this navigation is a repaired
+         pass-challenge handoff; the response seam re-anchors the
+         browser instead of committing the parked challenge URL. */
+      let challengeReanchor: string | null = null;
       if (isPassChallenge(target)) {
         /* #258: the challenge page's virtual home. The frame's
            established context names the post-redirect final
@@ -2259,6 +2340,15 @@ export function handleFetch(e: FetchEvent): void {
             url: target,
           });
           target = fixed;
+          /* #492-class re-anchor: a GET navigation must not park on
+             the challenge URL once the handoff is repaired. The
+             request's own zlNavh lineage carries the cookie-profile
+             root binding into the fresh mint. */
+          if (e.request.mode === "navigate" && e.request.method === "GET") {
+            const navhTok = queryHandleToken(url.search);
+            const root = navhTok ? decodeNavHandleRoot(navhTok) ?? undefined : undefined;
+            challengeReanchor = challengeReanchorUrl(fixed, root);
+          }
         }
       }
 
@@ -3470,6 +3560,24 @@ export function handleFetch(e: FetchEvent): void {
              and HTML-fragment fetches are application data: document
              rewriting would inject bootstrap scripts into their return
              values. The cached path uses this same destination gate. */
+          /* #492-class: the challenge completed upstream (the
+             clearance cookie landed with the fetch); commit the
+             re-anchor instead of parking the document on the
+             engine-owned challenge URL. */
+          if (challengeReanchor && resp.status >= 200 && resp.status < 400) {
+            const ratid = DIAG.trace(e.resultingClientId || e.clientId);
+            DIAG.emit({
+              requestId: ratid,
+              traceId: ratid,
+              category: "CHALLENGE",
+              cause: "challenge",
+              severity: "info",
+              stage: "RESPONSE_RECEIVED",
+              message: "pass-challenge navigation re-anchored to the page handle",
+              url: challengeReanchor,
+            });
+            return new Response(null, { status: 302, headers: { location: challengeReanchor } });
+          }
           if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body && !cdnCgiNative) {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
@@ -3727,6 +3835,7 @@ export function handleFetch(e: FetchEvent): void {
              stream - a counting passthrough forwards every chunk
              untouched, so the browser keeps writing the file to disk
              and nothing is buffered whole. */
+
           const dl = adoptResponse(target, resp, outHeaders, resp.status);
           if (dl) return dl;
           return new Response(resp.body, { status: resp.status, headers: outHeaders });
