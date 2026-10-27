@@ -1,54 +1,79 @@
-# WISP v2.1 client authentication — #496 implementation boundary
+# Wisp password-auth client (#496)
 
-Zeolite's standalone server already supports password (INFO extension
-0x02) and key (INFO extension 0x03) authentication. The production
-browser transport currently runs through **vendored libcurl-transport
-2.0.5 or Epoxy** with a configured WebSocket URL. Their actual
-WISP INFO-frame construction and credential-extension seam has not
-been shown to accept host-owned auth material.
+The service worker's wisp transport can now carry wisp v2.1
+PasswordAuth credentials against a zeolite-server that sets
+`ZL_WISP_USER` / `ZL_WISP_PASSWORD`. The credentials never leave the
+worker's memory and never appear in URLs, subprotocols, diagnostics or
+control replies.
 
-## Newly implemented, but NOT yet used by the vendored transport
+## Host surface
 
-`crates/wisp-wasm/src/lib.rs` now exports
-`handshakeInfoPassword(username, password)`. This creates a WISP
-v2 INFO packet using `wisp_core::extension::password_auth_client`
-and the common packet encoder. It fails closed for missing or
-oversized credentials, returns no log, never encodes a secret in
-the WebSocket URL or subprotocol, and has unit tests that parse the
-generated INFO frame through the canonical WISP decoder.
+- `zl:wispAuth` (host-only, never accepted from proxied pages):
+  `{ type: "zl:wispAuth", wispAuth: { op: "set", endpoint, username, password } }`
+  arms the client; `{ op: "clear" }` disarms it. The reply is the redacted
+  status: mode, endpoint (origin + pathname), secure, lastOutcome.
+- `zl:ping` carries the same redacted `wispAuth` block.
 
-**This alone does not authenticate Zeolite's HTTP/WebSocket traffic.**
-The vended libcurl/Epoxy clients own their own live WISP sessions,
-and do not call the Zeolite `wisp-wasm` helper. Do not claim a
-credentialed `/wisp/` deployment works, do not enable a runtime
-password picker, and do not silently downgrade to unauthenticated
-WISP endpoints.
+Rules, fail-closed:
 
-## Required verified production integration (open)
+- Credentials are memory-only. A worker restart drops them; the host
+  re-pushes after `controllerchange` or on boot. This is by design:
+  no secret ever hits IndexedDB or the cache.
+- `wss://` is required everywhere except loopback `ws://` (local
+  test fixtures). The status reports `secure: false` honestly for
+  loopback.
+- The endpoint is matched on origin + pathname. The engine's own
+  `?zlgen` cache-bust query (see #133) does not defeat the match.
+- A credentialed socket that cannot finish an authenticated v2
+  handshake within 10 s is closed with outcome
+  `auth-unsupported`. No silent unauthenticated downgrade.
 
-1. Audit the exact pinned vendored client source: locate and test the
-   real WISP v2 client INFO serialization and server INFO extension
-   negotiation. Confirm whether it already exposes password/key auth
-   hooks; if it does not, port/fork or extend the vendor WISP layer
-   instead of using unsafe `WebSocket.send` interception.
-2. Pass an ephemeral credential capability through a **host-only**
-   control plane. Credentials are neither URL params nor ordinary
-   `zl:config` fields and must not persist in localStorage, Cache
-   API, tracing, KDL, diagnostics, or host-page-readable shims.
-3. Check server INFO requirements **before** sending credentials,
-   prevent endpoint-reuse credential confusion, never downgrade
-   after auth was required, and enforce WSS. Ensure disconnect,
-   worker teardown and endpoint switching clear credentials.
-4. Run a real Chromium -> authenticated `zeolite-server` fixture:
-   good password -> WISP handshake + HTTP fetch + WebSocket stream;
-   wrong/missing password -> explicit rejection; worker restart
-   and transport reconnection; endpoint switching and TLS failure.
-   Repeat key authentication only after verifying an actual Ed25519
-   signing seam in the production client.
+Server close reasons map to stable outcomes: 0xc0
+`invalid-credential`, 0xc2 `auth-required`, 0xc1 `auth-unsupported`.
+Repeated stall + reset cycles with `lastOutcome: null` mean the
+handshake succeeded and the problem is elsewhere.
 
-No username/password, signing key or sensitive handshake frames are
-exposed in `zl:doctor`, `zl:exportDiagnostics`, KDL or MCP.
+## The adapter seam and its two modes
 
-Until these checks pass, #496 remains **partially implemented** and
-the integration guide's limitation about authenticated WASM client
-traffic remains accurate.
+The shipped wisp client lives inside the vendored
+libcurl-transport bundle and is never forked. It creates its wisp
+WebSocket through the worker scope's `WebSocket` constructor, the same
+seam the #74 wisp watcher wraps, and it opens streams with wisp v1
+CONNECT packets. `installWispAuthSocket()` (called after the watcher,
+so the auth wrapper is outermost) subclasses that constructor:
+
+1. v1 upgrade (both shipped engines): the caller passed no
+   subprotocol, so the wrapper appends `"wisp"` to negotiate v2,
+   answers the server's opening INFO itself with a PasswordAuth
+   client INFO, holds every vendor frame until the server's
+   handshake CONTINUE, then releases them in order with CONNECTs
+   translated from the v1 to the v2 hostname layout (the only wire
+   difference: a u8 host length prefix). The handshake frames
+   propagate to the vendor: its v1 state machine tolerates them (an
+   unknown INFO type is a warning, a stream-0 CONTINUE sets its
+   send buffer size) and it flips connected on its first message,
+   which is what unblocks the engine's stream creation. The vendor's
+   v1 flow has no CONTINUE frames, so the wrapper also grants the
+   v2 server per-stream send credits on the vendor's behalf
+   (zeolite-server spends one credit per DATA packet and without
+   client CONTINUE credits it relays no DATA at all), topping the
+   window up at half.
+2. v2 native (a future vendor that requests `"wisp"` itself): the
+   wrapper rewrites only the first outgoing frame when it is a
+   decodable v2 client INFO, preserving the vendor's own extensions
+   and appending PasswordAuth; everything else passes untouched.
+
+The unit suite pins the codec byte-exactly and the wrapper state
+machine on a fake WebSocket; `suite/e2e/wisp-auth.mjs` is the live
+probe (real zeolite-server with auth env, real chromium SW): raw
+no-credential and wrong-credential refusals, credential set without
+secret echo, transport re-init, a proxied fixture page rendering
+through the authenticated session, and the redacted afterwards ping.
+
+## Honest gaps
+
+- No worker-restart persistence: by design, the host re-pushes.
+- The live probe covers loopback `ws://`; production `wss://` is
+  enforced by rule but not probed here.
+- A v1-only server (no INFO) on a credentialed endpoint fails closed
+  as `auth-unsupported`; that is the correct behavior, not a gap.
