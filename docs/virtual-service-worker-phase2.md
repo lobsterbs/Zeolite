@@ -194,3 +194,55 @@ supported, kept honest.
 
 The emulation boundary is the contract: what is not listed as
 supported stays visibly absent rather than silently faked.
+
+## Wave 1 decision: guest execution via a page-created Worker
+
+Issue #477. Decision recorded 2026-10-27, implemented on branch
+fix/html-bom-478. The isolation gate settled it: the engine's
+service worker cannot create any realm of its own
+(ServiceWorkerGlobalScope exposes no Worker constructor, proven by
+suite/e2e/sw-capability.mjs), so the only proven-isolated,
+terminable realm available to the engine is a DedicatedWorker
+created by a page context on the engine origin.
+
+Mechanism, as shipped:
+
+- app/guest-host.html is an engine-served page the embedding
+  application keeps open, the same pattern as the zlsw-register
+  page. It never runs guest code itself.
+- The page sends the host-only control message zl:guestHost to the
+  engine worker with one end of a MessageChannel; the kernel
+  (app/src/kernel/guests/executor.ts) registers it as its guest
+  host port. The kind is deliberately absent from PAGE_MESSAGES,
+  so proxied pages cannot send it.
+- Spawn (zl:guestSpawn, host-only) validates the registration
+  identity through canonicalGuestRegistration, caps the script
+  body at 256 KiB, wraps it in a harness prelude, and asks the
+  host page to build a Worker from a blob. The host transfers one
+  MessagePort into the worker and reports zl:guestSpawned,
+  zl:guestSpawnFailed, zl:guestError and zl:guestTerminated back.
+- The kernel never touches the guest realm directly: install and
+  activate are dispatched on the guest port in that order, guest
+  messages route through an injectable listener, and a terminate
+  request is confirmed by the host before the record is dropped.
+- Dead handshakes are reaped lazily on the next kernel interaction
+  against a 10 s deadline; no timer runs inside the kernel.
+
+Honest deviations of wave 1, all deliberate:
+
+- Guests are network-blind: fetch, XMLHttpRequest, WebSocket and
+  importScripts are shadowed to undefined at spawn. Guest fetch
+  routing is stage 2 of the staged plan above, not started.
+- Guests receive no kernel storage handles: caches and indexedDB
+  are shadowed to undefined.
+- No fetch events are dispatched to guests; the engine owns
+  interception.
+- controllerchange and push remain unsupported, as listed above.
+- waitUntil is accepted and not awaited.
+- The spawn trigger is a host-only control message: the
+  proxied-page register capture (routing a page's
+  navigator.serviceWorker.register to a guest spawn) is a later
+  phase; the shim stays virtual-only.
+- The registration facade stays honest: update() rejects,
+  unregister routes to the kernel, getNotifications returns an
+  empty list.
