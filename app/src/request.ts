@@ -2739,7 +2739,7 @@ export function handleFetch(e: FetchEvent): void {
             method: e.request.method, traceId,
             path: internalUrl,
             dest: target,
-            status: ghosteryResponse ? 200 : 403,
+            status: ghosteryResponse ? 200 : e.request.mode === "navigate" ? 403 : 0,
             rtype: rtype.toUpperCase(),
             ms: Date.now() - t0,
             bytes: -1,
@@ -2760,6 +2760,13 @@ export function handleFetch(e: FetchEvent): void {
             }
             return ghosteryResponse;
           }
+          /* #500: a real blocker fails the request at the network level
+             (ERR_BLOCKED_BY_CLIENT; fetch rejects with TypeError).
+             Block-tester probes count only rejections, and a page
+             cannot distinguish the synthetic 403 from a real origin
+             403, so non-navigate blocked requests answer with a
+             network error; navigations keep the honest engine page. */
+          if (e.request.mode !== "navigate") return Response.error();
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
         }
         if (ruleDec.url || ic.url) target = destUpgraded(ic.url ?? ruleDec.url ?? target);
