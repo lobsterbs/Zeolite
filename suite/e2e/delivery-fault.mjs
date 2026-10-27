@@ -34,8 +34,8 @@
    pooled connection dying before any response byte, silently
    re-dispatched by libcurl itself) is eliminated at that seam.
    - SW-level gates are proven correct by probe runs: a POST in
-     delivery-unknown state is refused at the retry gate, a GET is
-     retried at most once, and drops surface as honest 502s.
+   delivery-unknown state is refused at the retry gate, a GET is
+   retried at most once, and drops surface as honest 502s.
    - Residual, below every Zeolite seam, now DETERMINISTIC on the full
    three-phase fixture: the vendored libcurl build re-dispatches a
    request when its connection dies in the complete-upload /
