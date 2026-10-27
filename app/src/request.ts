@@ -2387,6 +2387,29 @@ export function handleFetch(e: FetchEvent): void {
         target = hcFixed;
       }
 
+      /* #506: the Twitch embed library builds parent= from
+         window.location.hostname (LegacyUnforgeable, the #112 co=
+         class): a virtualized page names the engine hostname,
+         Twitch validates parent against the domain actually serving
+         the embed, and the player iframe is refused. Virtualize a
+         parent= that names this deployment at the seam the engine
+         owns. */
+      const twFixed = virtualTwitchParent(target, e.request.referrer, self.location.origin, initiator);
+      if (twFixed !== target) {
+        const ttid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: ttid,
+          requestId: ttid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "twitch parent= virtualized to the page origin",
+          url: target,
+        });
+        target = twFixed;
+      }
+
+
       /* #431: MSAL computes redirect_uri from
          window.location.origin (LegacyUnforgeable, the #112 co=
          class), so the AAD authorize request names the engine
@@ -4131,6 +4154,66 @@ export function virtualHcaptchaHost(target: string, referrer: string, engineOrig
     return target;
   }
   return u.href.replace(m[0], m[1] + "host=" + encodeURIComponent(vu.hostname));
+}
+
+/** #506: the Twitch player/embed library builds the parent= param
+    from window.location.hostname (LegacyUnforgeable, the #112 co=
+    class): a virtualized page names the engine hostname, Twitch
+    validates parent against the domain actually serving the embed,
+    and the player iframe is refused ("embed.twitch.tv refused to
+    connect"). Virtualize a parent= that names this deployment at
+    the seam the engine owns; parent takes bare domains and one
+    parent key is used per domain, so every engine-hostname-valued
+    occurrence is rewritten. Rendering fidelity only. */
+export function virtualTwitchParent(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  const player = u.host === "player.twitch.tv" && u.pathname === "/";
+  const embed = u.host === "embed.twitch.tv" && u.pathname.startsWith("/embed/");
+  if (!player && !embed) return target;
+  let engineHost = "";
+  let engineHostname = "";
+  try {
+    const eo = new URL(engineOrigin);
+    engineHost = eo.host;
+    engineHostname = eo.hostname;
+  } catch {
+    return target;
+  }
+  let home: string | null | undefined;
+  const fixed = u.search.replace(/([?&])parent=([^&]*)/g, (full, sep: string, raw: string) => {
+    let value: string;
+    try {
+      value = decodeURIComponent(raw);
+    } catch {
+      return full;
+    }
+    if (
+      value !== engineHostname &&
+      value !== engineHost &&
+      value !== engineOrigin &&
+      value !== engineOrigin + ":443" &&
+      value !== engineOrigin + ":80" &&
+      value !== engineHost + ":443" &&
+      value !== engineHost + ":80"
+    )
+      return full;
+    if (home === undefined) home = referrerOrigin(referrer, initiator);
+    if (!home) return full;
+    let vu: URL;
+    try {
+      vu = new URL(home);
+    } catch {
+      return full;
+    }
+    return sep + "parent=" + encodeURIComponent(vu.hostname);
+  });
+  return fixed === u.search ? target : u.href.replace(u.search, fixed);
 }
 
 /** #431: MSAL and sibling OAuth SPAs compute redirect_uri from
