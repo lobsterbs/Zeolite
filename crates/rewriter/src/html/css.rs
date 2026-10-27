@@ -27,7 +27,7 @@
 /// Rewrite every `url(...)` token and `@import "..."` string through
 /// `enc`.
 pub fn rewrite_stylesheet(css: &str, enc: &dyn Fn(&str) -> String) -> String {
-    scan(css, enc, true).0
+    scan(css, enc, true, None).0
 }
 
 /// Incremental url() rewriter for streamed stylesheets.
@@ -36,6 +36,11 @@ pub struct CssRewriter {
     /// (`url(`, `@import`, a comment, a string) to the end of the data
     /// seen so far.
     tail: String,
+    /// The byte immediately preceding `tail` in the original stream
+    /// (#507): an `image-set(` at the start of a chunk is
+    /// boundary-checked against this byte, not against a missing
+    /// buffer predecessor.
+    prev: Option<u8>,
     enc: Box<dyn Fn(&str) -> String>,
 }
 
@@ -44,6 +49,7 @@ impl CssRewriter {
     pub fn new(enc: Box<dyn Fn(&str) -> String>) -> Self {
         Self {
             tail: String::new(),
+            prev: None,
             enc,
         }
     }
@@ -51,10 +57,25 @@ impl CssRewriter {
     /// Feed one body chunk, get back everything that can be emitted now.
     pub fn process(&mut self, chunk: &str) -> String {
         let mut data = std::mem::take(&mut self.tail);
+        let prev = self.prev;
         data.push_str(chunk);
-        match scan(&data, &self.enc, false) {
-            (out, None) => out,
+        match scan(&data, &self.enc, false, prev) {
+            // All input consumed: the next chunk starts after this
+            // data last byte. Empty input consumes nothing, so the
+            // carried byte stays (#507).
+            (out, None) => {
+                if let Some(last) = data.as_bytes().last() {
+                    self.prev = Some(*last);
+                }
+                out
+            }
+            // The retained tail starts at `hold`, preceded by
+            // data[hold - 1] in the original stream; a zero hold
+            // consumes nothing and keeps the carried byte.
             (out, Some(hold)) => {
+                if hold > 0 {
+                    self.prev = Some(data.as_bytes()[hold - 1]);
+                }
                 self.tail = data[hold..].to_string();
                 out
             }
@@ -66,7 +87,8 @@ impl CssRewriter {
     /// pass over the same complete input.
     pub fn finish(&mut self) -> String {
         let data = std::mem::take(&mut self.tail);
-        scan(&data, &self.enc, true).0
+        let prev = self.prev;
+        scan(&data, &self.enc, true, prev).0
     }
 }
 
@@ -101,14 +123,31 @@ enum ImportTok<'a> {
 /// Shared scanner. Returns the rewritten output and, when `final_scan`
 /// is false, the byte index of a possibly-incomplete token to hold back
 /// for the next chunk. With `final_scan` true the input is treated as
-/// complete and the hold is always None.
-fn scan(data: &str, enc: &dyn Fn(&str) -> String, final_scan: bool) -> (String, Option<usize>) {
+/// complete and the hold is always None. `prev` is the byte preceding
+/// `data` in the original stream (None only for the one-shot pass,
+/// where index 0 is a true boundary): it keeps the identifier check of
+/// the image-set branch chunk-independent (#507).
+fn scan(
+    data: &str,
+    enc: &dyn Fn(&str) -> String,
+    final_scan: bool,
+    prev: Option<u8>,
+) -> (String, Option<usize>) {
     let bytes = data.as_bytes();
     let mut out = String::with_capacity(data.len() + 64);
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        if (b == b'i' || b == b'I' || b == b'-') && (i == 0 || !is_ident_byte(bytes[i - 1])) {
+        // #507: at the start of a streamed buffer the previous byte
+        // is no longer in `bytes`, so boundary-check against the byte
+        // carried from the consumed prefix instead of assuming a
+        // token boundary at index 0.
+        let ident_boundary = if i > 0 {
+            !is_ident_byte(bytes[i - 1])
+        } else {
+            prev.is_none_or(|p| !is_ident_byte(p))
+        };
+        if (b == b'i' || b == b'I' || b == b'-') && ident_boundary {
             let rest = &data[i..];
             let mut consumed = None;
             for prefix in ["image-set(", "-webkit-image-set("] {
@@ -643,6 +682,26 @@ mod tests {
             .map(|(i, _)| i)
             .filter(|&i| i > 0)
             .collect()
+    }
+
+    /// #507: an `image-set(` that is the tail of a longer identifier
+    /// (`pngimage-set(` here) is not a rewrite candidate, and a chunk
+    /// boundary landing exactly before the token must not turn it
+    /// into one: the streaming pass boundary-checks against the
+    /// carried byte, not the missing buffer predecessor.
+    #[test]
+    fn image_set_identifier_tail_is_chunk_invariant() {
+        let css = r#"}}//h.example/px.pngimage-set("a.png" 1x, 'b' 2x)"#;
+        assert_eq!(rewrite_stylesheet(css, &enc), css);
+        chunked_eq(css, &all_splits(css));
+        // A real boundary still rewrites, including when the split
+        // lands directly before the token.
+        let real = r#";image-set("a.png" 1x)"#;
+        assert_eq!(
+            rewrite_stylesheet(real, &enc),
+            r#";image-set("[a.png]" 1x)"#
+        );
+        chunked_eq(real, &all_splits(real));
     }
 
     #[test]
