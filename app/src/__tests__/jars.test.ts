@@ -100,6 +100,15 @@ describe("jar clear (#41 zl:clearJar)", () => {
 });
 
 describe("jar persistence hardening (2026-10 audit)", () => {
+  it("clears colliding legacy-hash origins independently (#465)", () => {
+    const a = "https://s148wn8p16wm2fp.example";
+    const b = "https://s1gy7nc0dalatx.example";
+    documentCookieWrite(a, "a=1; Path=/");
+    documentCookieWrite(b, "b=2; Path=/");
+    expect(registerOrigin(a).id).not.toBe(registerOrigin(b).id);
+    expect(jarClearScope("default", registerOrigin(a).id).cookies).toBe(1);
+    expect(jarEnumeration()[0].origins.map(o => o.origin)).toEqual([b]);
+  });
   it("drops corrupted persisted records instead of admitting them", async () => {
     const id = registerOrigin("https://a.example").id;
     const valid = {

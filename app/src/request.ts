@@ -18,6 +18,8 @@ import { b64uDecode, b64uEncode, buildNavHandleUrl, buildQueryHandleUrl, decodeC
 
 import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
+import { applyExperimentalCsp } from "./csp-translation";
+import { experimentalEnabled } from "./experimental-flags";
 import { loadRouteHistory, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
 import { NAV, NAVP } from "./bootstrap/navguard";
@@ -26,8 +28,8 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, isCdnCgiUrl, refineWithContent, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
-import { loadPolicy, policyMatch, transportMatch, type CompiledPolicy } from "./policy";
+import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
+import { loadPolicy, behaviorMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
@@ -46,6 +48,7 @@ import { adoptResponse } from "./downloads";
 import { flatRed, netLogAnnotateRewrite, netLogPush, type NetDetail } from "./netlog";
 import { traceDecision } from "./tracing";
 import { siteToken } from "./pageload";
+import { guestDispatchFetchForUrl } from "./kernel/guests/executor";
 
 import { altConfigured, altEndpoint, altRegister, altWispFetch, canReplayAfterFailure, wispTransport } from "./transport";
 import { normalizeWispUrl, primaryWispOverrideValue, setPrimaryWispOverride } from "./config";
@@ -61,7 +64,8 @@ import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersi
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
    control plane are call sites. */
-import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, siteProfileFor, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, siteProfileFor, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome } from "./adaptive-evidence";
 
 import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, serveExtensionAsset } from "./extensions";
 
@@ -289,7 +293,7 @@ function cacheRefreshSkipsEntry(req: Request, hit: Response): boolean {
 export async function pageCacheMatch(
   req: Request,
   keepAlive: (p: Promise<unknown>) => void = () => {},
-  owner?: CookieRequestContext,
+  context: CookieRequestContext = {},
 ): Promise<Response | null> {
   let hit: Response | undefined;
   try {
@@ -320,7 +324,7 @@ export async function pageCacheMatch(
       try { await (await caches.open(ZL_PAGES)).delete(req); } catch { /* no storage */ }
       return null;
     }
-    return await revalidateBeforeUse(req, hit, owner);
+    return await revalidateBeforeUse(req, hit, context);
   }
   if (!ttl) return null;
   if (Date.now() - at >= ttl) {
@@ -334,7 +338,8 @@ export async function pageCacheMatch(
        for one entry used to each pay their own upstream fetch; one
        in-flight refresh per cache key coalesces them into a single
        round trip. */
-    let refresh = staleRefreshInFlight.get(req.url);
+    const refreshKey = JSON.stringify([req.url, context.clientId ?? "", req.credentials, context.initiator ?? ""]);
+    let refresh = staleRefreshInFlight.get(refreshKey);
     if (!refresh) {
       refresh = (async () => {
         try {
@@ -356,28 +361,28 @@ export async function pageCacheMatch(
                copy. #184: a redirected entry refreshes against its
                stored final URL and the fetch chases the hops, so the
                entry can actually be updated. */
-            const { resp: fresh, finalUrl: freshUrl } = await wispFetchCacheBypass(
+            const { resp: fresh, finalUrl: freshUrl } = await cacheRefreshFetch(
               req,
               {
                 etag: hit.headers.get("etag"),
                 lastModified: hit.headers.get("last-modified"),
               },
               hit.headers.get(ZL_FINAL_URL) ?? undefined,
-              owner,
+              context,
             );
             if (fresh.status === 304) {
               await bumpStoredEntry(req, fresh);
             } else if (fresh.ok) {
-              await pageCacheStore(req, fresh, false, freshUrl);
+              await pageCacheStore(req, fresh, false, freshUrl, context.clientId);
             }
           }
         } catch {
           /* offline: the stale copy stays served */
         }
       })();
-      staleRefreshInFlight.set(req.url, refresh);
+      staleRefreshInFlight.set(refreshKey, refresh);
       /* the IIFE never rejects: its whole body is one try/catch. */
-      void refresh.then(() => staleRefreshInFlight.delete(req.url));
+      void refresh.then(() => staleRefreshInFlight.delete(refreshKey));
     }
     keepAlive(refresh);
   }
@@ -789,7 +794,7 @@ async function upstreamFetch(
       });
     } else {
       try {
-        const wr = await altWispFetch(dest, init);
+        const wr = await altWispFetch(dest, init, traceId);
         traceDecision({ subsystem: "policy", rule: rule.id, original: dest, result: "wisp", resource: rtype, traceId });
         wispRecord();
         return wr;
@@ -797,7 +802,7 @@ async function upstreamFetch(
         /* #444: a failed alternate transport may already have delivered
            the write. An outer fallback must honor the same replay gate
            as the transport's own retry, including one-shot bodies and
-           cancellation. Only a proven pre-send failure permits a
+           cancellation. Only engine-owned pre-dispatch evidence permits a
            replayable non-idempotent method to try another endpoint. */
         if (
           init.signal?.aborted ||
@@ -872,11 +877,11 @@ export async function pageCacheClear(): Promise<void> {
   }
 }
 
-async function wispFetchCacheBypass(
+async function cacheRefreshFetch(
   req: Request,
   validators?: { etag?: string | null; lastModified?: string | null },
   destOverride?: string,
-  owner?: CookieRequestContext,
+  context: CookieRequestContext = {},
 ): Promise<{ resp: Response; finalUrl: string }> {
   /* Issue #38: engine routes keep the query outside the encoded
      destination; a foreign (#34) cached entry is keyed by the full
@@ -891,37 +896,21 @@ async function wispFetchCacheBypass(
   if (!route) route = recoverPath(u.pathname);
   let dest = destOverride ?? (route ? mergeRouteSearch(route, u.search) : u.href);
   let finalUrl = dest;
-  /* #466: refreshes and revalidations used to read the DEFAULT jar and
-     drop every Set-Cookie on the refresh response, so a session
-     rotation died at the seam. The requesting client's context rides
-     the whole refresh: the jar read honors request.credentials and
-     the response's Set-Cookie admits into that same jar. */
-  const creds = req.credentials;
-  const refreshCredsEligible = (destUrl: string): boolean => {
-    if (creds === "include") return true;
-    if (creds === "omit") return false;
-    if (!owner?.initiator) return true;
-    try {
-      return new URL(destUrl).origin === new URL(owner.initiator).origin;
-    } catch {
-      return true;
-    }
-  };
-  const admitRefreshCookies = (resp: Response, url: string): void => {
-    if (!refreshCredsEligible(url)) return;
-    const admitted = applySetCookie(url, jarHeaders(resp), owner?.clientId);
-    if (admitted.some((r) => r.stored || r.deleted)) {
-      if (owner?.clientId) void pushDocCookieView(owner.clientId);
-      void flushJarPersist();
-    }
+  const policy = await loadPolicy();
+  const traceId = DIAG.trace(context.clientId);
+  const rtype = classifyRtype(reqDest(req), "").toLowerCase() as ResourceType;
+  const eligible = (target: string) => {
+    if (req.credentials === "omit") return false;
+    if (req.credentials === "include" || !context.initiator) return true;
+    try { return new URL(target).origin === new URL(context.initiator).origin; }
+    catch { return false; }
   };
   /* ponytail: five hops, the same practical ceiling as the live hop
      chain; the honest 3xx surfaces beyond it. */
   for (let hop = 0; ; hop++) {
     const headers = new Headers();
-    /* 1.4 Boride: cache refreshes carry the jar's Cookie header too.
-       #466: through the requesting client's jar and credentials. */
-    const jarCookie = refreshCredsEligible(dest) ? cookieHeaderFor(dest, owner) : null;
+    /* 1.4 Boride: cache refreshes carry the jar's Cookie header too. */
+    const jarCookie = eligible(dest) ? cookieHeaderFor(dest, context) : null;
     if (jarCookie) headers.set("cookie", jarCookie);
     /* #115: send the stored validators so the origin can answer 304
        (they belong to the original destination only). */
@@ -929,10 +918,14 @@ async function wispFetchCacheBypass(
       if (validators?.etag) headers.set("if-none-match", validators.etag);
       if (validators?.lastModified) headers.set("if-modified-since", validators.lastModified);
     }
-    const resp = await wispTransport.fetch(dest, { method: "GET", headers });
-    /* #466: every refresh hop and the final response admit their
-       Set-Cookie into the requesting client's jar. */
-    admitRefreshCookies(resp, dest);
+    const resp = await upstreamFetch(dest, { method: "GET", headers, signal: req.signal }, policy, rtype, traceId);
+    if (eligible(dest)) {
+      const admitted = applySetCookie(dest, jarHeaders(resp), context.clientId);
+      if (admitted.some(r => r.stored || r.deleted)) {
+        void pushDocCookieView(context.clientId ?? "");
+        await flushJarPersist();
+      }
+    }
     const loc = resp.headers.get("location");
     if (resp.status >= 300 && resp.status < 400 && loc && hop < 5) {
       /* #201 hygiene: the redirect body is never read - cancel it. */
@@ -979,31 +972,31 @@ async function bumpStoredEntry(req: Request, notModified: Response): Promise<voi
 
 /** #115: the no-cache revalidate-before-use path. The conditional
     fetch is awaited: a 304 serves the stored view, a 200 stores and
-    serves the surgered fresh view (the jar is not fed on this branch,
-    same as the SWR refresh - capture happens on the live path), and
+    serves the surgered fresh view (cookies are admitted on each refresh
+    hop against the requesting profile), and
     anything else (transport failure included) returns null so the
     request bypasses to the live path and gets an honest result.
     ponytail: no coalescing here - concurrent no-cache hits each pay
     their own conditional fetch; a shared in-flight probe keyed by URL
     is the upgrade path if a hot no-cache resource measurably hurts. */
-async function revalidateBeforeUse(req: Request, hit: Response, owner?: CookieRequestContext): Promise<Response | null> {
+async function revalidateBeforeUse(req: Request, hit: Response, context: CookieRequestContext): Promise<Response | null> {
   try {
     /* #184: a redirected entry revalidates against its stored final
        URL, and the probe follows hops like the SWR refresh. */
-    const { resp: probe, finalUrl: probeUrl } = await wispFetchCacheBypass(
+    const { resp: probe, finalUrl: probeUrl } = await cacheRefreshFetch(
       req,
       {
         etag: hit.headers.get("etag"),
         lastModified: hit.headers.get("last-modified"),
       },
       hit.headers.get(ZL_FINAL_URL) ?? undefined,
-      owner,
+      context,
     );
     if (probe.status === 304) {
       await bumpStoredEntry(req, probe);
       return hit;
     }
-    if (probe.ok) return (await pageCacheStore(req, probe, true, probeUrl)) ?? null;
+    if (probe.ok) return (await pageCacheStore(req, probe, true, probeUrl, context.clientId)) ?? null;
     return null;
   } catch {
     return null;
@@ -1226,11 +1219,39 @@ export async function persistRoute(prefix: string): Promise<void> {
    failure is visible in the embedder's DevTools network panel and
    joinable with the diagnostics rings - a strand is never a silent
    404. */
+/** #492-class parked challenge handoff: the SW serves the completed
+    challenge's content for the pass-challenge request, so a GET
+    navigation would commit the engine-owned challenge URL and park
+    there - every relative URL and every navguard prel then resolves
+    against the wrong base (the live startpage favicon and ads-iframe
+    strands). Mint the visible handle form of the repaired redir
+    destination - the query shape when the host opted in, the NAVH
+    path shape otherwise, the plain opaque route as the no-key
+    fallback - and hand the browser a same-origin 302 instead: the
+    re-navigation rides the ordinary pipeline with the clearance
+    cookie already in the jar, and the document commits a URL its
+    own code can read. Null = no repairable redir destination. */
+export function challengeReanchorUrl(fixed: string, rootBinding?: string): string | null {
+  let d: string | null = null;
+  try {
+    const raw = new URL(fixed).searchParams.get("redir");
+    if (raw && /^https?:\/\//i.test(raw)) d = new URL(raw).href;
+  } catch {
+    return null;
+  }
+  if (!d) return null;
+  const q = queryRoutesEnabled() ? buildQueryHandleUrl(d, NAVH_TTL_MS, rootBinding) : null;
+  if (q) return q;
+  const h = buildNavHandleUrl(d, NAVH_TTL_MS, rootBinding);
+  if (h) return h;
+  return encodeDest(d);
+}
+
 /** #101/#157: resolve a <parent route>/__zl_prel__/<encoded input>
     path to its destination. The parent may be a scheme route or a
     NAVH handle (decodeClientUrl) or a NAV navigation route (legacy
     b64 marker payload). Null = bad route, never a guess. */
-export function navpResolve(pathname: string, engineOrigin?: string): string | null {
+export function navpResolve(pathname: string, engineOrigin?: string, baseFallback?: string | null): string | null {
   /* #157/#159: emitters that predate the own-origin re-anchor (or
      unpatched realms) can still pass an absolute engine-origin URL
      as the tail; resolved as absolute it would fetch the engine
@@ -1271,7 +1292,21 @@ export function navpResolve(pathname: string, engineOrigin?: string): string | n
           ?.destination ?? null;
     }
   }
-  if (!base) return null;
+  /* #508/#492-class parked prels: the parent path can be an
+     engine-owned page URL (the pass-challenge strand the SW served
+     content at, so the frame parked there and its prels inherit
+     the parked parent). The parked URL's own query carries the
+     MAC-verified handle the navigation rode (zlNavh); the caller
+     extracts it and passes the decoded destination here, and the
+     prel resolves against that - the page's virtual home.
+     Fail-closed: no handle, no base, null as before. */
+  if (!base) {
+    if (baseFallback && /^https?:\/\//i.test(baseFallback)) {
+      base = baseFallback;
+    } else {
+      return null;
+    }
+  }
   let rel: string | null = null;
   try {
     const after = pathname.slice(cut + NAVP.length);
@@ -1282,6 +1317,18 @@ export function navpResolve(pathname: string, engineOrigin?: string): string | n
     rel = decodeURIComponent((after.startsWith("/") ? after.slice(1) : after).split(/[?#]/)[0]);
   } catch {
     return null;
+  }
+  /* The candidate itself can be an engine route, including a
+     concatenated one (<token><plaintext>: the JS literal pass once
+     minted bare scheme fragments, and the runtime concatenation
+     glued the host straight onto the token - the live startpage
+     ads-iframe strand). Resolving a route against the parent base
+     would bind it to the parent host; decode it as the route it
+     is. MAC-verified or fail-closed; a candidate that is not a
+     decodable route resolves against the base as before. */
+  if (rel.startsWith(currentPrefix())) {
+    const r = decodePath(rel) ?? recoverPath(rel);
+    if (r && (r.startsWith("http://") || r.startsWith("https://"))) return r;
   }
   try {
     const dest = new URL(rel, base);
@@ -1821,7 +1868,30 @@ export function handleFetch(e: FetchEvent): void {
            resolve it into the upstream path), and the parent decode
            covers scheme routes, NAVH handles and NAV navigation
            routes. A bad route is never guessed. */
-        const navpDest = navpResolve(url.pathname);
+        /* #508-class: a parked parent decodes to nothing; the parked
+           URL's own zlNavh names the page's virtual home. */
+        const navpTok = queryHandleToken(url.search);
+        let navpBase = navpTok ? decodeNavHandle(navpTok) : null;
+        /* #492-class parked parent: the prel request itself carries no
+           handle; the parked document URL (the referrer) carries zlNavh,
+           and the client's own established context names its virtual
+           home. MAC-verified handle decode or the frame's own context,
+           never a guess. */
+        if (!navpBase) {
+          let refTok: string | null = null;
+          try {
+            const ref = e.request.referrer;
+            refTok = ref ? queryHandleToken(new URL(ref).search) : null;
+          } catch {
+            refTok = null;
+          }
+          navpBase = refTok ? decodeNavHandle(refTok) : null;
+          if (!navpBase) {
+            const ctx = contextOf(VCTX, e.clientId);
+            navpBase = ctx && /^https?:/i.test(ctx.targetOrigin) ? ctx.targetOrigin : null;
+          }
+        }
+        const navpDest = navpResolve(url.pathname, undefined, navpBase);
         if (!navpDest) return navOutcome(e, url, 404, "route", "zeolite: bad route");
         /* URL fidelity (the Google sei reload class): a GET
            navigation on a NAVH-parent prel tail resolves correctly,
@@ -2245,6 +2315,10 @@ export function handleFetch(e: FetchEvent): void {
          maps the redirect back to an engine route through the
          ordinary pipeline. The CHALLENGE event is the log line hosts
          see when this fires. */
+      /* #492-class: set when this navigation is a repaired
+         pass-challenge handoff; the response seam re-anchors the
+         browser instead of committing the parked challenge URL. */
+      let challengeReanchor: string | null = null;
       if (isPassChallenge(target)) {
         /* #258: the challenge page's virtual home. The frame's
            established context names the post-redirect final
@@ -2268,6 +2342,15 @@ export function handleFetch(e: FetchEvent): void {
             url: target,
           });
           target = fixed;
+          /* #492-class re-anchor: a GET navigation must not park on
+             the challenge URL once the handoff is repaired. The
+             request's own zlNavh lineage carries the cookie-profile
+             root binding into the fresh mint. */
+          if (e.request.mode === "navigate" && e.request.method === "GET") {
+            const navhTok = queryHandleToken(url.search);
+            const root = navhTok ? decodeNavHandleRoot(navhTok) ?? undefined : undefined;
+            challengeReanchor = challengeReanchorUrl(fixed, root);
+          }
         }
       }
 
@@ -2355,13 +2438,10 @@ export function handleFetch(e: FetchEvent): void {
         target = ogsFixed;
       }
 
-      /* Google Identity Services (accounts.google.com /gsi/*)
-         builds origin= (and ss_domain= on the oauth2 button flows)
-         from window.location.origin (LegacyUnforgeable, the #112
-         co= class): Google's client/origin validation sees the
-         engine origin and the One Tap prompt never renders (#483).
-         Virtualize values that name this deployment at the seam the
-         engine owns. */
+      /* #483: Google Identity Services One Tap and OAuth button flows
+         carry origin= / ss_domain= constructed from LegacyUnforgeable
+         window.location.origin. Repair only values naming this engine
+         and only in the provider's /gsi/ request family. */
       const gsiFixed = virtualGsiOrigin(target, e.request.referrer, self.location.origin, initiator);
       if (gsiFixed !== target) {
         const gtid = DIAG.trace(e.resultingClientId || e.clientId);
@@ -2371,7 +2451,7 @@ export function handleFetch(e: FetchEvent): void {
           category: "REWRITE",
           severity: "info",
           stage: "REQUEST_INTERCEPTED",
-          message: "gsi origin= virtualized to the page origin",
+          message: "gsi origin parameter virtualized to the page origin",
           url: target,
         });
         target = gsiFixed;
@@ -2399,6 +2479,29 @@ export function handleFetch(e: FetchEvent): void {
         target = hcFixed;
       }
 
+      /* #506: the Twitch embed library builds parent= from
+         window.location.hostname (LegacyUnforgeable, the #112 co=
+         class): a virtualized page names the engine hostname,
+         Twitch validates parent against the domain actually serving
+         the embed, and the player iframe is refused. Virtualize a
+         parent= that names this deployment at the seam the engine
+         owns. */
+      const twFixed = virtualTwitchParent(target, e.request.referrer, self.location.origin, initiator);
+      if (twFixed !== target) {
+        const ttid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: ttid,
+          requestId: ttid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "twitch parent= virtualized to the page origin",
+          url: target,
+        });
+        target = twFixed;
+      }
+
+
       /* #431: MSAL computes redirect_uri from
          window.location.origin (LegacyUnforgeable, the #112 co=
          class), so the AAD authorize request names the engine
@@ -2419,6 +2522,29 @@ export function handleFetch(e: FetchEvent): void {
           url: target,
         });
         target = arFixed;
+      }
+
+      /* #509: the Telegram Login widget loader builds
+         oauth.telegram.org/auth with an origin= minted from
+         window.location.origin (LegacyUnforgeable, the #112 co=
+         class); Telegram validates it against the bot registered
+         Allowed URLs and answers NOT_AUTHORIZED for the engine
+         origin. Virtualize an origin= naming this deployment at
+         the seam the engine owns; return_to is the redirect-target
+         class and stays out of scope. */
+      const tgFixed = virtualTelegramOrigin(target, e.request.referrer, self.location.origin, initiator);
+      if (tgFixed !== target) {
+        const tgid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: tgid,
+          requestId: tgid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "telegram origin= virtualized to the page origin",
+          url: target,
+        });
+        target = tgFixed;
       }
 
       /* #129: challenge-widget frames stay engine-routed. The #120
@@ -2468,6 +2594,59 @@ export function handleFetch(e: FetchEvent): void {
       if (e.request.mode === "navigate" || isWorkerDestination(e.request.destination)) {
         const newClient = e.resultingClientId || e.clientId;
         if (newClient && establishContext(VCTX, newClient, target)) capContexts(VCTX, VCTX_CAP);
+      }
+
+      /* #477 P3: fetch bridging into the guest realm. The request has
+         decoded to its real virtual-site URL and passed the
+         disabled-site gate; if a running guest service worker owns
+         that URL scope, the engine asks it first under the hard
+         250 ms fail-closed budget. A handled guest answer becomes the
+         served Response verbatim minus privileged cookie headers (an
+         invalid status/body combination fails closed); every other
+         outcome falls through to the ordinary engine path unchanged.
+         Recursion is provably impossible: guests are network-blind, so
+         a guest answer never originates an engine fetch event, and the
+         pending-id one-shot marker consumes exactly one response per
+         dispatch. An already-aborted request never reaches the guest. */
+      if (!(e.request.signal && e.request.signal.aborted)) {
+        try {
+          const gHeaders: Record<string, string> = {};
+          for (const [hk, hv] of e.request.headers) gHeaders[hk] = hv;
+          const gOutcome = await guestDispatchFetchForUrl(target, {
+            url: target,
+            method: e.request.method,
+            headers: gHeaders,
+            destination: e.request.destination || undefined,
+            mode: e.request.mode,
+            clientId: e.resultingClientId || e.clientId || undefined,
+          });
+          if (gOutcome.handled) {
+            const gH = new Headers(gOutcome.headers);
+            /* A guest response must not stamp cookies onto the engine
+               origin; virtual-site cookies belong to the jar at request
+               time. */
+            gH.delete("set-cookie");
+            gH.delete("set-cookie2");
+            try {
+              const gResp = new Response(gOutcome.body, { status: gOutcome.status, headers: gH });
+              const gt = DIAG.trace(e.resultingClientId || e.clientId);
+              DIAG.emit({
+                traceId: gt,
+                requestId: gt,
+                category: "SERVICE_WORKER",
+                severity: "info",
+                stage: "REQUEST_INTERCEPTED",
+                message: "guest fetch handler served the request (#477 P3)",
+                url: target,
+              });
+              return gResp;
+            } catch {
+              /* Invalid status/body combination fails closed below. */
+            }
+          }
+        } catch {
+          /* Guest bridging never breaks the ordinary engine path. */
+        }
       }
 
       return (async () => {
@@ -2564,7 +2743,7 @@ export function handleFetch(e: FetchEvent): void {
            is already the default and required rewrites cannot be
            demoted, so the upgrade is the only effect. */
         const policy = await loadPolicy();
-        const policyRule = policyMatch(policy, target, rtype);
+        const policyRule = behaviorMatch(policy, target, rtype);
         if (policyRule && policyRule.route === "rewrite" && decision.mode === "NativeTransit") {
           decision = {
             mode: "RewriteFallback",
@@ -2638,7 +2817,7 @@ export function handleFetch(e: FetchEvent): void {
             method: e.request.method, traceId,
             path: internalUrl,
             dest: target,
-            status: ghosteryResponse ? 200 : 403,
+            status: ghosteryResponse ? 200 : e.request.mode === "navigate" ? 403 : 0,
             rtype: rtype.toUpperCase(),
             ms: Date.now() - t0,
             bytes: -1,
@@ -2659,6 +2838,13 @@ export function handleFetch(e: FetchEvent): void {
             }
             return ghosteryResponse;
           }
+          /* #500: a real blocker fails the request at the network level
+             (ERR_BLOCKED_BY_CLIENT; fetch rejects with TypeError).
+             Block-tester probes count only rejections, and a page
+             cannot distinguish the synthetic 403 from a real origin
+             403, so non-navigate blocked requests answer with a
+             network error; navigations keep the honest engine page. */
+          if (e.request.mode !== "navigate") return Response.error();
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
         }
         if (ruleDec.url || ic.url) target = destUpgraded(ic.url ?? ruleDec.url ?? target);
@@ -2676,26 +2862,26 @@ export function handleFetch(e: FetchEvent): void {
           !bypassArmed &&
           !requestHasCredentials(e.request, target, cookieClientId)
         ) {
-          const hit = await raceBoot(pageCacheMatch(e.request, (p) => e.waitUntil(p), { clientId: cookieClientId }), "page cache match", PRE_DEADLINE_BOUND_MS);
-          if (hit) {
-            let dec = refineWithContent(decision, hit.headers.get("content-type") ?? "", dest);
-            if (
-              dec.mode === "RewriteFallback" &&
-              dec.reason === "JS_LITERAL_REWRITE_REQUIRED" &&
-              policyRule &&
-              policyRule.route === "native" &&
-              (dest === "script" || dest === "")
-            ) {
-              dec = { mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: policyRule.id };
-            }
-            /* Cloudflare's /cdn-cgi/ edge namespace: challenge
-               infrastructure that verifies its own bytes. Cached or
-               fresh, those bodies serve verbatim (the live-path twin
-               below gates the same way). */
+          const hit = await raceBoot(pageCacheMatch(e.request, (p) => e.waitUntil(p), { clientId: cookieClientId, initiator: initiator ?? undefined, navigation: e.request.mode === "navigate" }), "page cache match", PRE_DEADLINE_BOUND_MS);
+          /* A cache entry may predate CSP opt-in and has already lost
+             the upstream CSP during header sanitation. For HTML
+             documents, opt-in CSP must fetch the live response rather
+             than silently serve a CSP-free cached copy. */
+          if (hit && !(experimentalEnabled("cspTranslation") && DOC_DESTS.has(dest.toLowerCase()))) {
+            /* #487: one conservative planner for cache and live responses.
+               MIME, KDL behavior, and CDN-CGI gates must not diverge
+               between first load and reload. */
+            const plan = planResponseTransit(decision, hit.headers.get("content-type") ?? "", dest, target, policyRule);
+            const dec = plan.decision;
+            if (experimentalEnabled("adaptiveTransit"))
+              traceDecision({ subsystem: "transport", rule: "adaptive-shadow",
+                original: decision.mode, result: plan.strategy + ":" + plan.evidence,
+                resource: rtype, traceId }, true);
+            /* #487: opt-in evidence, no raw URL added to the planner trace;
+               traceId joins the existing network log for this request. */
+            traceDecision({ subsystem: "transport", rule: "adaptive-picker", original: dec.mode,
+              result: plan.strategy + ":" + plan.evidence, resource: rtype, traceId });
             const chNative = isCdnCgiUrl(target);
-            if (chNative && dec.mode === "RewriteFallback") {
-              dec = { mode: "NativeTransit", reason: "CDN_CGI_NATIVE" };
-            }
             transitRecord(traceId, target, dec);
             /* #95: a decision that leaves the native path is an
                explainable event on the always-on diag stream (the
@@ -2834,20 +3020,38 @@ export function handleFetch(e: FetchEvent): void {
                 netLogAnnotateRewrite(traceId, "js-pinned");
                 DIAG.stage(traceId, "PINNED_SCRIPT", { url: target, message: "literal pass skipped: anchored origin-pinning regex (#449)" });
               }
-              try {
-                src = await rewriteJsBody(src, cacheRewriteBase(hit, target));
-              } catch (err) {
-                /* A wasm load failure must not break the hit: the
-                   specifier output still serves (the fresh path's
-                   rule). */
-                DIAG.emit({
-                  category: "REWRITE",
-                  severity: "error",
-                  message: "cache-hit script body pass failed",
-                  technicalReason: String(err),
-                  url: target,
-                });
+              /* #487 phase 4: the fresh path's twin recovery gate. */
+              const afterSpecifiers = src;
+              let literalOut: string | null = src;
+              if (adaptiveTransitEnabled() && literalPassDemotion(target)) {
+                netLogAnnotateRewrite(traceId, "js-adaptive-recovery");
+                DIAG.stage(traceId, "ADAPTIVE_RECOVERY", { url: target, message: "cache-hit literal pass skipped: corroborated body-pass failures (#487 phase 4)" });
+                noteDemotionServed(target);
+                literalOut = null;
+              } else {
+                try {
+                  src = await rewriteJsBody(src, cacheRewriteBase(hit, target), initiator);
+                  literalOut = src;
+                } catch (err) {
+                  /* A wasm load failure must not break the hit: the
+                     specifier output still serves (the fresh path's
+                     rule). */
+                  literalOut = null;
+                  recordBodyPassFailure(target, traceId);
+                  DIAG.emit({
+                    category: "REWRITE",
+                    severity: "error",
+                    message: "cache-hit script body pass failed",
+                    technicalReason: String(err),
+                    url: target,
+                  });
+                }
               }
+              const jsOutcome = planJsServeOutcome(raw0, afterSpecifiers, literalOut);
+              recordJsServeOutcome(target, jsOutcome);
+              if (jsOutcome.provenUnchanged) netLogAnnotateRewrite(traceId, "js-proven-unchanged");
+              else if (jsOutcome.literalChanged) netLogAnnotateRewrite(traceId, "js-literal-rewritten");
+              else if (jsOutcome.specifierChanged) netLogAnnotateRewrite(traceId, "js-specifier-rewritten");
               hitHeaders.set("content-type", utf8ContentType(jsCt));
               const out = new Response(src, { status: hit.status, headers: hitHeaders });
               if (src !== raw0) void pageCacheStore(e.request, out.clone(), false, undefined, cookieClientId);
@@ -3191,10 +3395,10 @@ export function handleFetch(e: FetchEvent): void {
                 traceId,
                 requestId: traceId,
                 category: "REWRITE",
-                severity: "warning",
+                severity: shapeOk ? "warning" : "info",
                 stage: "UPSTREAM_RESPONSE",
                 message:
-                  "flat asset recovery miss: " +
+                  (shapeOk ? "flat asset recovery miss: " : "flat asset recovery skipped: ") +
                   (shapeOk
                     ? "every observed base answered badly"
                     : "path shape rejected by the gate") +
@@ -3310,6 +3514,12 @@ export function handleFetch(e: FetchEvent): void {
              the response header set the page will see. */
           const rHeaders = WEBREQ.headersReceived(wrDetailsFinal, resp.status, headers);
           const outHeaders = rHeaders ?? headers;
+          /* #452: opt-in, strictly deny-only CSP on HTML documents.
+             The live response carries original headers; every
+             unsupported policy is left stripped (not passed through). */
+          if (experimentalEnabled("cspTranslation"))
+            applyExperimentalCsp(outHeaders, resp.headers,
+              resp.headers.get("content-type") ?? "", DOC_DESTS.has(dest.toLowerCase()));
           outHeaders.set("x-zl-proxy", "1");
           /* Finding 1: a 3xx that reached the page (hop cap reached, no
              Location, or a hop whose one-shot body cannot replay) must not
@@ -3338,38 +3548,20 @@ export function handleFetch(e: FetchEvent): void {
           /* #256 contract: onResponse hooks are best-effort observers,
              fired without awaiting (edits ignored, throws isolated). */
           void applyOnResponse(plugins, target, resp.status, outHeaders);
-          let dec = refineWithContent(decision, resp.headers.get("content-type") ?? "", dest);
-          /* #138: a policy rule with route "native" demotes the JS
-             literal pass for a host proven to work with raw
-             bodies: runtime navigation already flows through the
-             patched fetch/XHR/WS seams, so literal hits there are
-             dead code. Workers keep their passes (prelude and
-             specifiers are behavioral, not cosmetic); documents
-             and stylesheets are not demotable at all. */
-          if (
-            dec.mode === "RewriteFallback" &&
-            dec.reason === "JS_LITERAL_REWRITE_REQUIRED" &&
-            policyRule &&
-            policyRule.route === "native" &&
-            (dest === "script" || dest === "")
-          ) {
-            dec = { mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: policyRule.id };
-            traceDecision({ subsystem: "policy", rule: policyRule.id, original: target, result: "native", resource: rtype, traceId });
-          }
-          /* Cloudflare's /cdn-cgi/ edge namespace (challenge-platform
-             scripts, flow API answers, Turnstile wiring): the upstream
-             verifies those bytes. A URL-literal pass over the
-             orchestration script or the document bootstrap injected
-             into an HTML-typed flow answer corrupts the challenge
-             protocol, and the widget dies on its own "unable to
-             connect" for every visitor. ScramJet never transforms
-             subresource bodies and Cloudflare sites work through it;
-             cdn-cgi responses serve verbatim, live and from the
-             cache. */
+          /* #487: same response selector as the page-cache hit path.
+             It keeps rewrite behavior independent from Wisp/relay
+             transport rules, and never auto-demotes required passes. */
+          const plan = planResponseTransit(decision, resp.headers.get("content-type") ?? "", dest, target, policyRule);
+          const dec = plan.decision;
+          if (experimentalEnabled("adaptiveTransit"))
+            traceDecision({ subsystem: "transport", rule: "adaptive-shadow",
+              original: decision.mode, result: plan.strategy + ":" + plan.evidence,
+              resource: rtype, traceId }, true);
+          traceDecision({ subsystem: "transport", rule: "adaptive-picker", original: dec.mode,
+            result: plan.strategy + ":" + plan.evidence, resource: rtype, traceId });
+          if (dec.mode === "NativeTransit" && dec.reason === "POLICY_NATIVE")
+            traceDecision({ subsystem: "policy", rule: policyRule!.id, original: target, result: "native", resource: rtype, traceId });
           const cdnCgiNative = isCdnCgiUrl(target);
-          if (cdnCgiNative && dec.mode === "RewriteFallback") {
-            dec = { mode: "NativeTransit", reason: "CDN_CGI_NATIVE" };
-          }
           /* #95: same explainable-decision event on the response path
              (every document, stylesheet and transformed script body
              lands here, so the reason is in the diag stream, not just
@@ -3471,6 +3663,24 @@ export function handleFetch(e: FetchEvent): void {
              and HTML-fragment fetches are application data: document
              rewriting would inject bootstrap scripts into their return
              values. The cached path uses this same destination gate. */
+          /* #492-class: the challenge completed upstream (the
+             clearance cookie landed with the fetch); commit the
+             re-anchor instead of parking the document on the
+             engine-owned challenge URL. */
+          if (challengeReanchor && resp.status >= 200 && resp.status < 400) {
+            const ratid = DIAG.trace(e.resultingClientId || e.clientId);
+            DIAG.emit({
+              requestId: ratid,
+              traceId: ratid,
+              category: "CHALLENGE",
+              cause: "challenge",
+              severity: "info",
+              stage: "RESPONSE_RECEIVED",
+              message: "pass-challenge navigation re-anchored to the page handle",
+              url: challengeReanchor,
+            });
+            return new Response(null, { status: 302, headers: { location: challengeReanchor } });
+          }
           if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body && !cdnCgiNative) {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
@@ -3516,7 +3726,7 @@ export function handleFetch(e: FetchEvent): void {
                 },
               );
             }
-            return new Response(rawFrom(sniffHead, sniffReader), {
+            return new Response(rawFrom(sniffHead, sniffReader, finalDest ?? target), {
               status: resp.status,
               headers: outHeaders,
             });
@@ -3654,7 +3864,8 @@ export function handleFetch(e: FetchEvent): void {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
-            let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, decodeBody(await resp.arrayBuffer(), respCt));
+            const jsRaw = decodeBody(await resp.arrayBuffer(), respCt);
+            let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, jsRaw);
             /* #449: an origin-pinning script body (anchored ^https?:
                regex, the gapi-class loader) keeps its URL literals
                verbatim - the rewriter skips the literal pass inside
@@ -3679,17 +3890,43 @@ export function handleFetch(e: FetchEvent): void {
                first: the routes they emit are root-relative, so the
                literal pass leaves them alone. A wasm load failure must
                not 502 the script - the specifier output still serves. */
-            try {
-              src = await rewriteJsBody(src, target);
-            } catch (err) {
-              DIAG.emit({
-                category: "REWRITE",
-                severity: "error",
-                message: "script body pass failed",
-                technicalReason: String(err),
-                url: target,
-              });
+            /* #487 phase 4: corroborated, opt-in learned recovery may
+               skip the literal pass on the NEXT serve for this origin
+               (never a replay, never mid-document; the specifier pass
+               and the runtime seams stay). A manual KDL native rule
+               already won at policyNativeJs above. */
+            const afterSpecifiers = src;
+            let literalOut: string | null = src;
+            if (adaptiveTransitEnabled() && literalPassDemotion(target)) {
+              netLogAnnotateRewrite(traceId, "js-adaptive-recovery");
+              DIAG.stage(traceId, "ADAPTIVE_RECOVERY", { url: target, message: "literal pass skipped: corroborated body-pass failures (#487 phase 4)" });
+              noteDemotionServed(target);
+              literalOut = null;
+            } else {
+              try {
+                src = await rewriteJsBody(src, target, initiator);
+                literalOut = src;
+              } catch (err) {
+                literalOut = null;
+                recordBodyPassFailure(target, traceId);
+                DIAG.emit({
+                  category: "REWRITE",
+                  severity: "error",
+                  message: "script body pass failed",
+                  technicalReason: String(err),
+                  url: target,
+                });
+              }
             }
+            /* #487 phase 2: the ACTUAL transformation class, proven by
+               the rewriter's own outputs. A proven-unchanged body still
+               serves through this pipeline and is never reclassified
+               native: a textual no-diff is not site-level proof. */
+            const jsOutcome = planJsServeOutcome(jsRaw, afterSpecifiers, literalOut);
+            recordJsServeOutcome(target, jsOutcome);
+            if (jsOutcome.provenUnchanged) netLogAnnotateRewrite(traceId, "js-proven-unchanged");
+            else if (jsOutcome.literalChanged) netLogAnnotateRewrite(traceId, "js-literal-rewritten");
+            else if (jsOutcome.specifierChanged) netLogAnnotateRewrite(traceId, "js-specifier-rewritten");
             WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             /* Issue B: the decoded-with-upstream-charset body is
                re-encoded UTF-8 by the string Response constructor;
@@ -3728,6 +3965,7 @@ export function handleFetch(e: FetchEvent): void {
              stream - a counting passthrough forwards every chunk
              untouched, so the browser keeps writing the file to disk
              and nothing is buffered whole. */
+
           const dl = adoptResponse(target, resp, outHeaders, resp.status);
           if (dl) return dl;
           return new Response(resp.body, { status: resp.status, headers: outHeaders });
@@ -4051,16 +4289,16 @@ export function virtualOgsOrigin(target: string, referrer: string, engineOrigin:
   return u.href.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
 }
 
-/** The Google Identity Services prompt/picker/button iframes
-    (accounts.google.com /gsi/*) receive an origin= - the oauth2
-    button flows additionally name ss_domain= - built by page JS
-    from window.location.origin (LegacyUnforgeable, the #112 co=
-    class). Google validates the value against the OAuth client's
-    registered JavaScript origins, so upstream always sees the
-    engine origin and the widget never renders (#483). Virtualize
-    values that name this deployment at the seam the engine owns;
-    rendering fidelity only. */
-export function virtualGsiOrigin(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+/** #509: the Telegram Login widget loader builds oauth.telegram.org/auth
+    with an origin= parameter minted from window.location.origin
+    (LegacyUnforgeable, the #112 co= class). Telegram validates origin=
+    against the bot pre-registered Allowed URLs, so a virtualized page
+    names the engine origin and the login answers NOT_AUTHORIZED. Re-map
+    only exact engine-origin parameters using a verified page context;
+    everything else is intentionally left untouched. return_to is the
+    redirect-target class, a separate issue, and stays as the page sent
+    it. */
+export function virtualTelegramOrigin(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
   let u: URL;
   try {
     u = new URL(target);
@@ -4068,31 +4306,59 @@ export function virtualGsiOrigin(target: string, referrer: string, engineOrigin:
     return target;
   }
   if (!/^https?:$/.test(u.protocol)) return target;
-  if (u.host !== "accounts.google.com") return target;
-  if (!u.pathname.startsWith("/gsi/")) return target;
+  if (u.host !== "oauth.telegram.org") return target;
+  if (u.pathname !== "/auth") return target;
+  const m = /([?&])origin=([^&]*)/.exec(u.search);
+  if (!m || !m[2]) return target;
+  let dec: string;
+  try {
+    dec = decodeURIComponent(m[2]);
+  } catch {
+    return target;
+  }
+  /* Only an origin= that names THIS deployment is ours to fix; any
+     other value is an origin the page genuinely chose. */
+  if (dec !== engineOrigin && dec !== engineOrigin + ":443" && dec !== engineOrigin + ":80")
+    return target;
   /* Without a verified page origin there is no honest widget-side
      fallback, so the request passes through unchanged. */
   const parent = referrerOrigin(referrer, initiator);
   if (!parent) return target;
-  let out = u.href;
-  let changed = false;
-  for (const key of ["origin", "ss_domain"]) {
-    const m = new RegExp("([?&])" + key + "=([^&]*)").exec(out);
-    if (!m || !m[2]) continue;
-    let dec: string;
-    try {
-      dec = decodeURIComponent(m[2]);
-    } catch {
-      continue;
-    }
-    /* Only a value that names THIS deployment is ours to fix; any
-       other value is an origin the page genuinely chose. */
-    if (dec !== engineOrigin && dec !== engineOrigin + ":443" && dec !== engineOrigin + ":80")
-      continue;
-    out = out.replace(m[0], m[1] + key + "=" + encodeURIComponent(parent));
-    changed = true;
+  return u.href.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
+}
+
+/** #483: Google Identity Services embeds the page origin in the origin=
+    parameter of /gsi/iframe/select, /gsi/select and /gsi/button; the OAuth
+    button flow also uses ss_domain=. A native location read names Zeolite's
+    engine origin, which Google cannot recognize as the embedding page.
+    Re-map only exact engine-origin parameters using a verified page
+    context (or a decodable engine-route referrer). A mismatch, malformed
+    input or unknown context is intentionally left untouched. This repairs
+    request identity, not Google's server-side OAuth registration checks. */
+export function virtualGsiOrigin(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
   }
-  return changed ? out : target;
+  if (!/^https?:$/.test(u.protocol) || u.host !== "accounts.google.com") return target;
+  if (!u.pathname.startsWith("/gsi/") || !u.search) return target;
+  let parent: string | null | undefined;
+  const fixed = u.search.replace(/([?&])(origin|ss_domain)=([^&]*)/g, (full, sep: string, key: string, raw: string) => {
+    let value: string;
+    try {
+      value = decodeURIComponent(raw);
+    } catch {
+      return full;
+    }
+    if (value !== engineOrigin && value !== engineOrigin + ":443" && value !== engineOrigin + ":80")
+      return full;
+    if (parent === undefined) parent = referrerOrigin(referrer, initiator);
+    if (!parent) return full;
+    return sep + key + "=" + encodeURIComponent(parent);
+  });
+  return fixed === u.search ? target : u.href.replace(u.search, fixed);
 }
 
 /** The hCaptcha widget (newassets.hcaptcha.com frames,
@@ -4165,6 +4431,66 @@ export function virtualHcaptchaHost(target: string, referrer: string, engineOrig
     return target;
   }
   return u.href.replace(m[0], m[1] + "host=" + encodeURIComponent(vu.hostname));
+}
+
+/** #506: the Twitch player/embed library builds the parent= param
+    from window.location.hostname (LegacyUnforgeable, the #112 co=
+    class): a virtualized page names the engine hostname, Twitch
+    validates parent against the domain actually serving the embed,
+    and the player iframe is refused ("embed.twitch.tv refused to
+    connect"). Virtualize a parent= that names this deployment at
+    the seam the engine owns; parent takes bare domains and one
+    parent key is used per domain, so every engine-hostname-valued
+    occurrence is rewritten. Rendering fidelity only. */
+export function virtualTwitchParent(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  const player = u.host === "player.twitch.tv" && u.pathname === "/";
+  const embed = u.host === "embed.twitch.tv" && u.pathname.startsWith("/embed/");
+  if (!player && !embed) return target;
+  let engineHost = "";
+  let engineHostname = "";
+  try {
+    const eo = new URL(engineOrigin);
+    engineHost = eo.host;
+    engineHostname = eo.hostname;
+  } catch {
+    return target;
+  }
+  let home: string | null | undefined;
+  const fixed = u.search.replace(/([?&])parent=([^&]*)/g, (full, sep: string, raw: string) => {
+    let value: string;
+    try {
+      value = decodeURIComponent(raw);
+    } catch {
+      return full;
+    }
+    if (
+      value !== engineHostname &&
+      value !== engineHost &&
+      value !== engineOrigin &&
+      value !== engineOrigin + ":443" &&
+      value !== engineOrigin + ":80" &&
+      value !== engineHost + ":443" &&
+      value !== engineHost + ":80"
+    )
+      return full;
+    if (home === undefined) home = referrerOrigin(referrer, initiator);
+    if (!home) return full;
+    let vu: URL;
+    try {
+      vu = new URL(home);
+    } catch {
+      return full;
+    }
+    return sep + "parent=" + encodeURIComponent(vu.hostname);
+  });
+  return fixed === u.search ? target : u.href.replace(u.search, fixed);
 }
 
 /** #431: MSAL and sibling OAuth SPAs compute redirect_uri from

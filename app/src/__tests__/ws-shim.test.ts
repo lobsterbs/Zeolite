@@ -83,8 +83,8 @@ describe("page WebSocket shim abnormal close (#61)", () => {
   });
 });
 
-describe("page WebSocket shim bufferedAmount (#293)", () => {
-  it("counts pre-open sends and resets on open", async () => {
+describe("page WebSocket shim send and close states (#460/#461)", () => {
+  it("throws when connecting, sends when open, and discards sends after close", async () => {
     const Real = globalThis.WebSocket;
     if (!Real) return; /* no WebSocket global in this realm */
     vi.stubGlobal("CloseEvent", FakeCloseEvent);
@@ -100,15 +100,86 @@ describe("page WebSocket shim bufferedAmount (#293)", () => {
     const es = new WS("wss://relay.example/ws");
     expect(es.readyState).toBe(0);
     expect(es.bufferedAmount).toBe(0);
-    es.send("a");
-    es.send("b");
-    expect(es.bufferedAmount).toBe(2); /* the pre-handshake queue */
+    expect(() => es.send("a")).toThrowError(expect.objectContaining({ name: "InvalidStateError" }));
     const port = port2 as MessagePort | null;
     port?.postMessage({ ev: "open", protocol: "chat" });
     await new Promise((r) => setTimeout(r, 0)); /* port delivery */
     await new Promise((r) => setTimeout(r, 0)); /* queued events */
     expect(es.readyState).toBe(1);
-    expect(es.bufferedAmount).toBe(0); /* queue drained at open */
+    es.send("open");
+    es.close();
+    expect(es.readyState).toBe(2);
+    const beforeCloseSend = es.bufferedAmount;
+    expect(() => es.send("é")).not.toThrow();
+    expect(es.bufferedAmount).toBe(beforeCloseSend + 2);
+    port?.postMessage({ ev: "close", code: 1000, clean: true });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(es.readyState).toBe(3);
+    const beforeClosedSend = es.bufferedAmount;
+    expect(() => es.send("é")).not.toThrow();
+    expect(es.bufferedAmount).toBe(beforeClosedSend + 2);
+  });
+
+  it("counts bytes queued through the port and drains only after bridge acknowledgement (#462)", async () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return;
+    vi.stubGlobal("CloseEvent", FakeCloseEvent);
+    let port!: MessagePort;
+    ctlState.ctl = { postMessage(_m: unknown, transfer?: unknown[]) { port = transfer![0] as MessagePort; } };
+    const w: Record<string, unknown> = { WebSocket: Real };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    const ws = new WS("wss://relay.example/ws");
+    port.postMessage({ ev: "open", protocol: "chat" });
+    await new Promise((r) => setTimeout(r, 0));
+    ws.send("é");
+    expect(ws.bufferedAmount).toBe(2);
+    ws.send(new Uint8Array([1, 2, 3]));
+    expect(ws.bufferedAmount).toBe(5);
+    ws.send(new Blob(["ab"]));
+    expect(ws.bufferedAmount).toBe(7);
+    port.postMessage({ ev: "drain", bytes: 2 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ws.bufferedAmount).toBe(5);
+    port.postMessage({ ev: "drain", bytes: 5 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ws.bufferedAmount).toBe(0);
+    port.postMessage({ ev: "drain", bytes: 500 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ws.bufferedAmount).toBe(0); /* never underflows */
+  });
+
+  it("posts converted close arguments to the bridge", async () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return;
+    let port!: MessagePort;
+    ctlState.ctl = { postMessage(_m: unknown, transfers?: unknown[]) { port = transfers![0] as MessagePort; } };
+    const w: Record<string, unknown> = { WebSocket: Real };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    const ws = new WS("wss://relay.example/ws");
+    const received = new Promise<unknown>(resolve => { port.onmessage = e => resolve(e.data); });
+    ws.close("1000" as unknown as number, { toString: () => "bye" } as unknown as string);
+    expect(await received).toEqual({ op: "close", code: 1000, reason: "bye" });
+  });
+
+  it("rejects invalid close codes and overlong UTF-8 reasons before changing state", () => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return;
+    ctlState.ctl = { postMessage() {} };
+    const w: Record<string, unknown> = { WebSocket: Real };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    const es = new WS("wss://relay.example/ws");
+    for (const code of [1001, 2999, 5000]) {
+      expect(() => es.close(code)).toThrowError(expect.objectContaining({ name: "InvalidAccessError" }));
+      expect(es.readyState).toBe(0);
+    }
+    expect(() => es.close(1000, "é".repeat(62))).toThrowError(expect.objectContaining({ name: "SyntaxError" }));
+    expect(es.readyState).toBe(0);
+    expect(() => es.close(3000, "a".repeat(123))).not.toThrow();
+    expect(es.readyState).toBe(2);
+    expect(() => es.close(1001)).toThrowError(expect.objectContaining({ name: "InvalidAccessError" }));
   });
 });
 
@@ -222,8 +293,8 @@ describe("page WebSocket shim shared-backed views (#493)", () => {
     /* CONNECTING: the shared view throws and never counts */
     expect(() => es.send(new Uint8Array(new SharedArrayBuffer(4)))).toThrow(TypeError);
     expect((es as unknown as { bufferedAmount: number }).bufferedAmount).toBe(0);
-    es.send("queued"); /* queued like native */
-    expect((es as unknown as { bufferedAmount: number }).bufferedAmount).toBe(1);
+    expect(() => es.send("queued")).toThrow(DOMException);
+    expect(es.bufferedAmount).toBe(0);
     port?.postMessage({ ev: "open", protocol: "chat" });
     await new Promise((r) => setTimeout(r, 0));
     /* OPEN: shared views still throw, unshared payloads still post */
@@ -234,7 +305,7 @@ describe("page WebSocket shim shared-backed views (#493)", () => {
     es.send(new Uint8Array(new ArrayBuffer(4)));
     await new Promise((r) => setTimeout(r, 0));
     const sends = posted.filter((m) => (m as { op?: string })?.op === "send");
-    expect(sends).toHaveLength(4);
+    expect(sends).toHaveLength(3);
   });
 
   it("throws TypeError over InvalidStateError on a closing socket (native order)", async () => {

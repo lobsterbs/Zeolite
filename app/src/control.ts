@@ -6,7 +6,17 @@ import { buildNavHandleUrl, buildQueryHandleUrl, currentPrefix, decodeClientUrl,
 import type { JarConflictRule } from "./cookies";
 import { documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
-import { DIAG } from "./diag";
+import { guestRegisterHost, guestSpawn, guestTerminate, type GuestPortLike } from "./kernel/guests/executor";
+import { buildDoctor, doctorKdl, observeDoctorBoot, probeDoctorAssets } from "./doctor";
+import { experimentalSnapshot, selectExperimental } from "./experimental-flags";
+import { primaryWispUrl } from "./config";
+import { clearWispAuth, configureWispAuth, wispAuthStatus } from "./wisp-auth";
+import { transportState } from "./transport-lifecycle";
+import { policyDoctorState } from "./policy";
+import { rulesDoctorState } from "./rules";
+import { siteconfigDoctorState } from "./siteconfig";
+import { DIAG, traceClient } from "./diag";
+import { buildCompatibilityReport, compatibilityKdl } from "./compat-debugger";
 /* #90: the download registry instance lives in ./downloads; the
    control plane lists and cancels entries through the subsystem. */
 import { DL } from "./downloads";
@@ -21,11 +31,12 @@ import { beginRecording, finishRecording } from "./recording";
 import { pageCacheClear, virtualHcaptchaFrameFragment } from "./request";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
-import { VCTX, ZEOLITE_VERSION, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled } from "./swstate";
+import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled } from "./swstate";
+import { adaptiveEvidenceSnapshot } from "./adaptive-evidence";
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
-import { relayRegister } from "./relayfetch";
-import { altRegister, currentEngine, engineReady, setPrimaryWisp, wispTransport } from "./transport";
+import { relayAvailable, relayRegister } from "./relayfetch";
+import { altConfigured, altRegister, currentEngine, engineReady, setPrimaryWisp, wispTransport } from "./transport";
 import { loadInflight } from "./loadstate";
 import { activeStreams } from "./streams-alive";
 import { contextOf } from "./vctx";
@@ -48,6 +59,7 @@ const DECODE_ROUTES_MAX = 64;
 export interface ControlMessage {
   type:
     | "zl:config"
+    | "zl:wispAuth"
     | "zl:reloadBypass"
     | "zl:mint"
     | "zl:decodeRoutes"
@@ -67,6 +79,8 @@ export interface ControlMessage {
     | "zl:openExtPage"
     | "zl:listExt"
     | "zl:getDiag"
+    | "zl:exportDiagnostics"
+    | "zl:doctor"
     | "zl:installExt"
     | "zl:installExtFiles"
     | "zl:extEnable"
@@ -90,6 +104,9 @@ export interface ControlMessage {
     | "zl:importSession"
     | "zl:sameSite"
     | "zl:relayRegister"
+    | "zl:guestHost"
+    | "zl:guestSpawn"
+    | "zl:guestTerminate"
     | "zl:wispRegister"
     | "zl:wispPrimary"
     | "zl:fingerprint"
@@ -100,6 +117,15 @@ export interface ControlMessage {
     | "zl:clearJar"
     | "zl:transport"
   | "zl:loadState";
+  /** Experimental selections are preferences only, not security bypasses. */
+  experimental?: unknown;
+  /** Doctor: the host supplies version/scope expectations; no guessed values. */
+  expectedScope?: string;
+  expectedVersion?: string;
+  /** Opt-in, same-origin HEAD probes for static bundle assets only. */
+  probeAssets?: boolean;
+  /** Return parseable versioned KDL in addition to typed check data. */
+  format?: "kdl";
   extId?: string;
   msg?: unknown;
   prefix?: string;
@@ -111,6 +137,9 @@ export interface ControlMessage {
   httpsUpgrade?: boolean;
   /** zl:config: opt-in lazy images; absent keeps the live choice. */
   imageLazy?: boolean;
+  /** zl:config: opt-in learned-transit demotion (#487 phase 4);
+      absent keeps the live choice; false is the kill switch. */
+  adaptiveTransit?: boolean;
   /** zl:config: opt-in refusal of the plaintext ?url= initial
       navigation (#63). Absent keeps the persisted choice (legacy
       ?url= accepted, the migration window); the ack echoes the live
@@ -137,6 +166,12 @@ export interface ControlMessage {
   since?: number;
   /** Host-only diagnostic scope. */
   clientId?: string;
+  /** #494: only one verified request trace is exportable in V1. */
+  traceId?: string;
+  /** zl:wispAuth (#496): host-only password credentials for one wisp
+      endpoint. Memory-only (a worker restart drops them); the reply
+      echoes the redacted status, never the secret. */
+  wispAuth?: { op: "set" | "clear"; endpoint?: string; username?: string; password?: string };
   /** zl:wsOpen: page WebSocket bridge destination + protocols. */
   url?: string;
   protocols?: string[];
@@ -282,6 +317,12 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
     }
   }
   switch (msg?.type) {
+    /* Doctor is handled BEFORE boot gating and jar inheritance in
+       handleControlEvent. This case is a fail-closed registry guard. */
+    case "zl:doctor":
+    case "zl:exportDiagnostics":
+      reply({ ok: false, error: "host-only diagnostic preflight required" });
+      break;
     case "zl:relayRegister": {
       /* #137: the embedder registers its relay port. Host-only by the
          #41 gate (not in PAGE_MESSAGES); the port carries policy-
@@ -297,6 +338,49 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       }
       break;
     }
+    case "zl:guestHost": {
+      /* #477 wave 1: the guest host page (app/guest-host.html, same
+         pattern as zlsw-register) bridges its Worker-creator realm to
+         the kernel over this port. Host-only by the #41 gate (not in
+         PAGE_MESSAGES): the SW itself cannot create workers
+         (suite/e2e/sw-capability.mjs), so guest realms are created
+         by this engine-origin page. */
+      const gp = e.ports[0];
+      if (gp) {
+        guestRegisterHost(gp as unknown as GuestPortLike);
+        reply({ ok: true });
+      } else {
+        reply({ ok: false, error: "guest host registration needs a port" });
+      }
+      break;
+    }
+    case "zl:guestSpawn": {
+      /* #477 wave 1: spawn is a host-only control message. Proxied
+         pages still get virtual registrations only (swshim); the
+         page register capture is a later phase. */
+      const gm = msg as unknown as {
+        pageUrl?: unknown;
+        scriptURL?: unknown;
+        scope?: unknown;
+        script?: unknown;
+      };
+      guestSpawn(
+        {
+          pageUrl: typeof gm.pageUrl === 'string' ? gm.pageUrl : '',
+          scriptURL: typeof gm.scriptURL === 'string' ? gm.scriptURL : '',
+          scope: typeof gm.scope === 'string' ? gm.scope : undefined,
+          script: typeof gm.script === 'string' ? gm.script : '',
+        },
+        reply,
+      );
+      break;
+    }
+    case "zl:guestTerminate": {
+      const gt = msg as unknown as { origin?: unknown };
+      guestTerminate(typeof gt.origin === 'string' ? gt.origin : '', reply);
+      break;
+    }
+
     case "zl:wispPrimary": {
       /* LobsterBrowse Settings: the active WISP server carries all
          traffic. "" restores the build-time endpoint. Persisted with
@@ -327,6 +411,29 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       }
       break;
     }
+    case "zl:wispAuth": {
+      /* #496: host-only credential seam. The #41 gate keeps this type
+         out of PAGE_MESSAGES, so no proxied page can set credentials.
+         Memory-only: a worker restart drops the state and the host
+         re-pushes. The reply never echoes the secret. */
+      const w = msg.wispAuth;
+      if (!w || w.op === "clear") {
+        clearWispAuth();
+        reply({ ok: true, wispAuth: wispAuthStatus() });
+        break;
+      }
+      if (w.op !== "set") {
+        reply({ ok: false, error: "zl:wispAuth requires op set or clear" });
+        break;
+      }
+      const res = configureWispAuth(
+        w.endpoint ?? primaryWispUrl(),
+        w.username ?? "",
+        w.password ?? "",
+      );
+      reply({ ok: res.ok, error: res.error, wispAuth: wispAuthStatus() });
+      break;
+    }
     case "zl:ping":
       /* Issue #17: echo the live route shape so embedders can detect a
          revert to defaults (worker restart, storage wipe) and re-push
@@ -342,13 +449,15 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         httpsUpgrade: isHttpsUpgrade(),
         /* Lazy images: parity with the zl:config ack, so an embedder
            (the LB debug readout) reads the live choice from ping. */
-        imageLazy: isImageLazy(),
+        imageLazy: isImageLazy(), adaptiveTransit: adaptiveTransitEnabled(),
         /* #63: the live ?url= refusal choice, so an embedder detects a
            revert to defaults and re-pushes its config. */
         navHandles: navHandlesEnabled(),
         /* Injector phase 2: the live query-shape opt-in. */
         queryRoutes: queryRoutesEnabled(),
+        experimental: experimentalSnapshot(),
         profile: jarProfileState((e.source as { id?: string } | null)?.id),
+        wispAuth: wispAuthStatus(),
       });
       break;
     case "zl:config": {
@@ -361,10 +470,21 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         reply({ ok: false, error: "scheme removed: routes are b64u only (#32)" });
         break;
       }
+      /* Validate all experimental selections atomically before changing
+         existing settings. Selections never activate unfinished code. */
+      if (msg.experimental !== undefined) {
+        const accepted = selectExperimental(msg.experimental);
+        if (!accepted.ok) {
+          reply({ ok: false, error: accepted.error });
+          break;
+        }
+      }
       /* #53: absent leaves the persisted choice (old embedders). */
       if (typeof msg.httpsUpgrade === "boolean") setHttpsUpgrade(msg.httpsUpgrade);
       /* Lazy images: same rule - absent keeps the live choice. */
       if (typeof msg.imageLazy === "boolean") setImageLazy(msg.imageLazy);
+      /* #487 phase 4: learned demotion is opt-in; the ack echoes it. */
+      if (typeof msg.adaptiveTransit === "boolean") setAdaptiveTransit(msg.adaptiveTransit);
       /* #63: same migration-window rule for the ?url= refusal. */
       if (typeof msg.navHandles === "boolean") setNavHandles(msg.navHandles);
       /* Injector phase 2: same rule for the query-shape routes. */
@@ -372,7 +492,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       setScheme(msg.prefix ?? "/j/");
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
-      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled() });
+      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), adaptiveTransit: adaptiveTransitEnabled(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled(), experimental: experimentalSnapshot() });
       break;
     }
     case "zl:reloadBypass":
@@ -431,11 +551,8 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
           return null;
         }
       });
-      /* #489: the decode reply is one-shot - close the reply port
-         so the channel does not linger open in the worker after
-         the page-side settle already ran. */
-      reply({ ok: true, dests });
-      try { port?.close(); } catch { /* already closed */ }
+      try { reply({ ok: true, dests }); }
+      finally { port?.close(); }
       break;
     }
     case "zl:navHandle": {
@@ -569,7 +686,7 @@ case "zl:loadState": {
      streams number. Refused for proxied-page senders by the gate
      above: the counts must not enumerate other sites. */
   const host = typeof (msg as { host?: unknown }).host === "string" ? (msg as { host?: string }).host : undefined;
-  reply({ ok: true, inflight: loadInflight(host || undefined), streams: activeStreams() });
+  reply({ ok: true, inflight: loadInflight(host || undefined), streams: activeStreams(host || undefined) });
   break;
 }
 case "zl:tracing":
@@ -1046,7 +1163,7 @@ case "zl:tracing":
       const clientId = msg.clientId === undefined ? undefined : String(msg.clientId).slice(0, 256);
       const scoped = clientId === undefined ? null : netLogSince(0, clientId);
       reply({ entries: netLogSince(since, clientId), lastSeq: netLogCursor(), generation: netLogGeneration(), clientId: clientId ?? null,
-          version: ZEOLITE_VERSION, stats: scoped === null ? transitStats() : {
+          version: ZEOLITE_VERSION, stats: scoped === null ? { ...transitStats(), adaptive: adaptiveEvidenceSnapshot() } : {
             native: scoped.filter(x => x.transport === "NativeTransit").length,
             fallback: scoped.filter(x => x.transport === "RewriteFallback").length,
             fallbacks: scoped.filter(x => x.fallbackReason).map(x => ({ ts: x.ts, url: x.dest, reason: x.fallbackReason, traceId: x.traceId })),
@@ -1074,10 +1191,106 @@ export async function handleControlEvent(
      cold-start ping must not report the default shape mid-restore.
      Registry-dependent answers also wait for the restart-safe
      init, so a just-restarted worker serves real state. */
-  await deps.ready;
   const msg = e.data as ControlMessage;
   const port = e.ports[0];
   const reply = (payload: unknown) => port?.postMessage(payload);
+  /* #495: Doctor must answer even when boot is wedged. It is never
+     reachable from a proxied page, and it avoids dispatchCore's
+     legacy cookie-context bookkeeping and all outbound traffic by
+     default. The host owns any optional MCP exposure. */
+  if (msg?.type === "zl:doctor") {
+    if (senderIsProxiedPage(e)) {
+      reply({ ok: false, error: "host-only control message" });
+      return;
+    }
+    const boot = await observeDoctorBoot(deps.ready);
+    let clientControl: "pass" | "fail" | "unknown" | undefined;
+    if (msg.clientId !== undefined) {
+      if (typeof msg.clientId !== "string" || msg.clientId.length < 1 || msg.clientId.length > 256) {
+        clientControl = "fail";
+      } else {
+        try {
+          const selected = await self.clients.get(msg.clientId);
+          if (!selected?.url) clientControl = "fail";
+          else {
+            const u = new URL(selected.url);
+            clientControl = u.origin === self.location.origin &&
+              senderIsProxiedPath(u.pathname, u.search) ? "pass" : "fail";
+          }
+        } catch {
+          clientControl = "unknown";
+        }
+      }
+    }
+    const scriptUrl = self.location?.href;
+    const assets = msg.probeAssets === true ?
+      await probeDoctorAssets(scriptUrl ?? "", fetch, 1500, self.registration?.scope) : [];
+    const report = buildDoctor({
+      engineVersion: ZEOLITE_VERSION,
+      boot,
+      scriptUrl,
+      registrationScope: self.registration?.scope,
+      expectedScope: typeof msg.expectedScope === "string" && msg.expectedScope.length <= 1024 ? msg.expectedScope : undefined,
+      expectedVersion: typeof msg.expectedVersion === "string" && msg.expectedVersion.length <= 96 ? msg.expectedVersion : undefined,
+      degraded: getEngineDegraded() !== null,
+      transport: transportState(),
+      selectedEngine: currentEngine(),
+      relay: relayAvailable(),
+      alternateWisp: altConfigured(),
+      primaryWisp: primaryWispUrl(),
+      policy: policyDoctorState(),
+      rules: rulesDoctorState(),
+      siteconfig: siteconfigDoctorState(),
+      clientControl,
+    }, assets);
+    reply({ ...report, kdl: msg.format === "kdl" ? doctorKdl(report) : undefined });
+    return;
+  }
+  /* #494: live request identity is checked by the worker, never
+     inferred from a user-supplied tab label. Unlike legacy getDiag,
+     a missing client or trace fails closed; no global-ring fallback.
+     This is deliberately a request-scoped V1 exporter, not a claim
+     of document-lifetime isolation. */
+  if (msg?.type === "zl:exportDiagnostics") {
+    if (senderIsProxiedPage(e)) {
+      reply({ ok: false, error: "host-only control message" });
+      return;
+    }
+    const id = msg.clientId;
+    const trace = msg.traceId;
+    if (typeof id !== "string" || id.length < 1 || id.length > 256 ||
+        typeof trace !== "string" || trace.length > 64 ||
+        !/^zl-t[a-z0-9]+-[a-z0-9]+$/.test(trace) ||
+        traceClient(trace) !== id) {
+      reply({ ok: false, status: "identity-unavailable" });
+      return;
+    }
+    let client: Client | undefined;
+    try { client = await self.clients.get(id); }
+    catch { /* client enumeration unavailable or stale: fail closed */ }
+    let valid = false;
+    if (client?.url) {
+      try {
+        const u = new URL(client.url);
+        valid = u.origin === self.location.origin &&
+          senderIsProxiedPath(u.pathname, u.search);
+      } catch { /* client URL is not an attributable proxied page */ }
+    }
+    if (!valid) {
+      reply({ ok: false, status: "identity-unavailable" });
+      return;
+    }
+    const report = buildCompatibilityReport({
+      clientId: id, traceId: trace, engineVersion: ZEOLITE_VERSION,
+      generation: netLogGeneration(), now: Date.now(),
+      diagnostics: DIAG.eventsSince(0, id),
+      network: netLogSince(0, id),
+      tracing: tracingSnapshot(0).entries,
+    });
+    reply({ ok: true, ...report, kdl: compatibilityKdl(report) });
+    return;
+  }
+  await deps.ready;
 
   /* Bug-scout (#41): a proxied page must not drive the control plane
      (read the net log, flip the jar, tear the engine down). Page-facing
@@ -1112,7 +1325,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary",
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate",
 ]);
 
 
@@ -1141,7 +1354,8 @@ export function messageListener(deps: ControlDeps) {
       })
         /* #254: keep jar persistence alive for the whole message
            event; flushJarPersist never throws. */
-        .then(() => flushJarPersist()),
+        .then(() => (e.data as ControlMessage)?.type === "zl:doctor" ||
+          (e.data as ControlMessage)?.type === "zl:exportDiagnostics" ? undefined : flushJarPersist()),
     );
   };
 }

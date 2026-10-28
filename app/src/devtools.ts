@@ -16,6 +16,9 @@ interface NetDetail {
 interface NetEntry {
   seq: number;
   ts: number;
+  /** SW-owned request identity, only for verified request exports. */
+  traceId?: string;
+  clientId?: string;
   method: string;
   path: string;
   dest: string;
@@ -55,6 +58,8 @@ const rows = document.getElementById("rows")!;
 const paused = document.getElementById("paused")!;
 const statsEl = document.getElementById("stats")!;
 const detailEl = document.getElementById("detail")!;
+const requestKdlExport = document.getElementById("requestKdlExport") as HTMLButtonElement;
+const requestKdlStatus = document.getElementById("requestKdlStatus")!;
 const traceRows = document.getElementById("traceRows")!;
 const traceToggle = document.getElementById("traceToggle") as HTMLInputElement;
 const transportSelect = document.getElementById("transportSelect") as HTMLSelectElement;
@@ -81,8 +86,13 @@ function fmtBytes(n: number): string {
   return (n / 1024 / 1024).toFixed(1) + " MiB";
 }
 
+let selectedRequest: NetEntry | null = null;
 /** Per-request detail view (1.2 Halide): everything the SW recorded. */
 function showDetail(e: NetEntry): void {
+  selectedRequest = e;
+  requestKdlExport.disabled = !e.clientId || !e.traceId;
+  requestKdlStatus.textContent = requestKdlExport.disabled
+    ? "No verified request trace is available for this row." : "";
   const d = e.detail;
   const lines: string[] = [
     "target: " + e.dest,
@@ -107,6 +117,7 @@ function showDetail(e: NetEntry): void {
 }
 
 function render(): void {
+  /* Old selection loses identity when a worker generation changes. */
   const sorted = [...entries].sort((a, b) => {
     const av = a[sortKey];
     const bv = b[sortKey];
@@ -273,6 +284,9 @@ function tick(): void {
       lastGeneration = generation ?? 0;
       lastSeq = 0;
       entries = [];
+      selectedRequest = null;
+      requestKdlExport.disabled = true;
+      requestKdlStatus.textContent = "Worker restarted; select a request again.";
       diagLast = 0;
       diagEvents = [];
       traceLast = 0;
@@ -308,6 +322,157 @@ function tick(): void {
     if (d.engine && document.activeElement !== transportSelect) transportSelect.value = d.engine;
   });
 }
+
+/* #494 request-scoped debugger: manual export only. No persistent
+   logging or MCP server. The worker itself verifies the selected trace
+   belongs to a currently live proxied client and rejects stale rows. */
+requestKdlExport.addEventListener("click", () => {
+  const request = selectedRequest;
+  const ctl = navigator.serviceWorker?.controller;
+  if (!request?.traceId || !request.clientId || !ctl) {
+    requestKdlStatus.textContent = "Unavailable: select a live request with a verified trace.";
+    return;
+  }
+  requestKdlStatus.textContent = "Collecting request evidence...";
+  requestKdlExport.disabled = true;
+  const ch = new MessageChannel();
+  let settled = false;
+  const finish = () => {
+    if (settled) return false;
+    settled = true;
+    clearTimeout(deadline);
+    ch.port1.onmessage = null;
+    ch.port1.close();
+    ch.port2.close();
+    requestKdlExport.disabled = false;
+    return true;
+  };
+  const deadline = setTimeout(() => {
+    if (finish()) requestKdlStatus.textContent = "Export unavailable: worker did not answer.";
+  }, 5000);
+  ch.port1.onmessage = ev => {
+    if (!finish()) return;
+    const data = ev.data as {ok?: boolean; status?: string; kdl?: string};
+    if (!data?.ok || typeof data.kdl !== "string" || data.kdl.length > 40000) {
+      requestKdlStatus.textContent = "Export unavailable: trace identity expired or report unsupported.";
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([data.kdl], { type: "text/plain;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "zeolite-request.kdl";
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    requestKdlStatus.textContent = "KDL report exported for selected request.";
+  };
+  try {
+    ctl.postMessage({
+      type: "zl:exportDiagnostics", clientId: request.clientId, traceId: request.traceId,
+    }, [ch.port2]);
+  } catch {
+    finish();
+    requestKdlStatus.textContent = "Export unavailable: control request failed.";
+  }
+});
+
+/* #495: Zeolite Doctor belongs to the engine control plane, not an
+   MCP server. Use the verified host page + one-shot MessageChannel.
+   This panel shows only fixed redacted Doctor check facts. */
+interface DoctorReply {
+  ok: boolean;
+  healthy: boolean | null;
+  checks: Array<{ code: string; status: string; summary: string; remedy?: string }>;
+  kdl?: string;
+}
+const doctorStatus = document.getElementById("doctorStatus")!;
+const doctorRows = document.getElementById("doctorRows")!;
+const doctorInspect = document.getElementById("doctorInspect") as HTMLButtonElement;
+const doctorProbe = document.getElementById("doctorProbe") as HTMLButtonElement;
+const doctorExport = document.getElementById("doctorExport") as HTMLButtonElement;
+let lastDoctor: DoctorReply | null = null;
+
+function renderDoctor(report: DoctorReply): void {
+  doctorRows.replaceChildren();
+  doctorStatus.textContent = report.healthy === false
+    ? "Confirmed failing checks. Review the evidence below."
+    : report.healthy === true ? "All observed checks passed."
+      : "Partial inspection — unknown and skipped checks are not passes.";
+  for (const check of report.checks.slice(0, 32)) {
+    const row = document.createElement("tr");
+    const code = document.createElement("td");
+    const status = document.createElement("td");
+    const evidence = document.createElement("td");
+    code.textContent = check.code;
+    status.textContent = check.status;
+    status.className = "doctor-" + check.status;
+    evidence.textContent = check.summary + (check.remedy ? " — " + check.remedy : "");
+    row.append(code, status, evidence);
+    doctorRows.append(row);
+  }
+}
+
+function doctorRequest(probeAssets: boolean, onReady?: (report: DoctorReply) => void): void {
+  const ctl = navigator.serviceWorker?.controller;
+  if (!ctl) {
+    doctorStatus.textContent = "Unavailable: this DevTools page has no controlling service worker.";
+    return;
+  }
+  doctorStatus.textContent = probeAssets ? "Checking same-origin bundle assets..." : "Inspecting engine state...";
+  const channel = new MessageChannel();
+  let finished = false;
+  const settle = (): boolean => {
+    if (finished) return false;
+    finished = true;
+    clearTimeout(timeout);
+    channel.port1.onmessage = null;
+    channel.port1.close();
+    channel.port2.close();
+    return true;
+  };
+  const timeout = setTimeout(() => {
+    if (settle()) doctorStatus.textContent = "Unavailable: Doctor did not answer before the timeout.";
+  }, 5500);
+  channel.port1.onmessage = (event) => {
+    if (!settle()) return;
+    const report = event.data as DoctorReply | null;
+    if (!report?.ok || !Array.isArray(report.checks) || report.checks.length > 32) {
+      doctorStatus.textContent = "Unavailable: Doctor returned no valid report.";
+      return;
+    }
+    lastDoctor = report;
+    renderDoctor(report);
+    onReady?.(report);
+  };
+  try {
+    ctl.postMessage({ type: "zl:doctor", probeAssets, format: "kdl" }, [channel.port2]);
+  } catch {
+    settle();
+    doctorStatus.textContent = "Unavailable: Doctor request could not be sent.";
+  }
+}
+
+doctorInspect.addEventListener("click", () => doctorRequest(false));
+doctorProbe.addEventListener("click", () => doctorRequest(true));
+doctorExport.addEventListener("click", () => {
+  const exportReport = (report: DoctorReply) => {
+    if (typeof report.kdl !== "string") {
+      doctorStatus.textContent = "KDL export unavailable in the current worker build.";
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([report.kdl], { type: "text/plain;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "zeolite-doctor.kdl";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+  if (lastDoctor) exportReport(lastDoctor);
+  else doctorRequest(false, exportReport);
+});
 
 tick();
 setInterval(tick, 1000);

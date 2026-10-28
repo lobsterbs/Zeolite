@@ -11,8 +11,7 @@ before the page ever sees them.
 `registerOrigin(origin)` maps each target origin to its
 Zeolite-internal representation:
 
-- a stable internal id (FNV1a base36 of the origin, the same scheme
-  the bootstrap uses for storage scoping), and
+- a collision-free internal id (hex encoding of the canonical origin), and
 - the codec path base (the engine-local encoding of the origin).
 
 The jar stores cookie records under these ids.
@@ -300,3 +299,23 @@ isolation, ordering, persistence, SameSite knob, merge mode),
 persistence, document.cookie, import scoping) and
 `app/src/extensions/__tests__/cookies.test.ts` (bridge semantics).
 
+
+Legacy hash cookie ids migrate through the persisted origin map (#465).
+Cookie jar ids are independent of the short page-side storage token.
+
+## Profile recovery (#471)
+
+Profile snapshots are written serially. Restoration merges untouched roots
+before a new snapshot is saved, so a host window rebinding during startup
+cannot erase another window's session profile. Fresh trusted assignments win
+over older stored assignments.
+
+If profile storage cannot be read or its snapshot is malformed, unidentified
+clients receive no cookies and cannot write into the durable jar. A trusted
+host must rebind their root first. The uncertainty marker survives later
+saves and restarts; rebinding one host never authorizes unrelated clients.
+
+Cache refreshes and blocking revalidation use the normal transport policy.
+Redirect and final response cookies are admitted through the requesting
+client's profile, subject to Request.credentials. Background refreshes from
+different clients or credential contexts are not coalesced (#466/#467).

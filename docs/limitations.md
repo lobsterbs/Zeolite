@@ -16,6 +16,40 @@ its CSP protection; the engine's origin isolation and hostile-header
 stripping are the remaining guardrails. A CSP pass that rewrites
 directive sources is the only real fix and is deliberately not faked.
 
+### CSP opt-in prototype (#452)
+
+`app/src/csp-translation.ts` contains a **pure, not-yet-enforcing** parser
+and conservative candidate planner. It accepts only a small deny-only subset
+(`object-src 'none'`, `base-uri 'none'`, `form-action 'none'`,
+`worker-src 'none'`, `frame-src 'none'`, `child-src 'none'`).
+The 2026-10-28 audit conclusions: worker/frame/child `none` is
+representable (the engine page runtime creates no workers and injects
+no frames into proxied documents, and a site declaring them `none`
+had none upstream either); `frame-ancestors` stays rejected (the
+engine legitimately embeds proxied pages in its own UI frame, so a
+faithful `none` breaks the product while `self` broadens the
+embedding grant across the shared engine origin); `connect-src` stays
+rejected (the page runtime legitimately fetches minted engine routes
+from page context); nonce retention is rejected (engine-injected
+scripts are minted at the wasm rewriter seam and cannot carry the
+upstream nonce attribute) and hashes are rejected (the rewriter
+mutates inline script bodies, so upstream hashes fail);
+`strict-dynamic` depends on nonce propagation; `sandbox` is rejected
+(an opaque origin breaks the proxied page own storage semantics).
+Origin/path source lists, `'self'`, fallback directives, report-only
+policies, reports and malformed policies return a typed
+**unsupported** reason: nothing is emitted or silently widened. The current request pipeline still
+strips CSP and CSP meta as before; no new header or browser enforcement has
+been enabled. This is strictly a preparation stage, **not a CSP security
+restoration**.
+
+To enable it safely, #452 still needs origin-scoped engine route matching,
+an injection nonce/hash design, preservation of full policy semantics and
+real Chromium fixtures for allow/block, frames, workers, inline scripts,
+report-only and embedding isolation. A shared engine origin is not
+equivalent to a virtual site's `'self'`; mapping one to the other would
+weaken isolation.
+
 ## Redirect hops with an announced body over the replay cap
 
 The hop chain buffers a request stream body once (cap 32 MiB) and
@@ -27,11 +61,14 @@ that does not follow it sees the submission as hung (the DIAG event
 explains the behavior). An unannounced body that overflows the cap
 mid-buffer fails honestly instead.
 
-## Shared workers are keyed by URL only
+## SharedWorker identity is scoped, not a separate origin
 
-Classic and module shared workers loading from the same URL share one
-key, so their script environments are not isolated from each other.
-Documented in docs/matrix.md; a module/classic-aware key is the fix.
+The constructor wrapper folds the virtual-site token, classic/module script
+type and credentials mode into the native worker name. This prevents
+accidental classic/module and cross-site instance sharing while preserving
+the same scoped identity for repeated same-site, same-type constructions.
+Chromium sharing, teardown and hostile same-engine-page isolation still need
+end-to-end verification for #453. The virtual sites remain browser-same-origin.
 
 ## window.location is not virtualized
 

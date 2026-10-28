@@ -270,7 +270,7 @@ describe("directory-minted flat names (#143)", () => {
     recordAssetBase("https://p.example/", "https://cdn.example/assets/x.js");
     const rec = await recoverFlatAsset(
       "https://p.example/",
-      "https://p.example/a/b/c/d/e.chunk.3792087592bf207a.module.css",
+      "https://p.example/a/b/c/d/e/f/g/h/i.chunk.3792087592bf207a.module.css",
       "style",
       new Headers(),
       async () => new Response("body", { status: 200, headers: { "content-type": "text/css" } }),
@@ -282,7 +282,8 @@ describe("directory-minted flat names (#143)", () => {
     expect(isRecoverableAssetPath("/flat.css")).toBe(true);
     expect(isRecoverableAssetPath("/owner/repo/x.3792087592bf207a.module.css")).toBe(true);
     expect(isRecoverableAssetPath("/owner/repo/flat.css")).toBe(false);
-    expect(isRecoverableAssetPath("/a/b/c/d/e.module.css")).toBe(false);
+    expect(isRecoverableAssetPath("/a/b/c/d/e.module.css")).toBe(true);
+    expect(isRecoverableAssetPath("/a/b/c/d/e/f/g/h/i.chunk.3792087592bf207a.module.css")).toBe(false);
     expect(isRecoverableAssetPath("")).toBe(false);
   });
 
@@ -292,6 +293,41 @@ describe("directory-minted flat names (#143)", () => {
     expect(isRecoverableAssetPath("/assets/brave-logo-small.svg")).toBe(false);
     expect(isRecoverableAssetPath("/sp/search")).toBe(false);
     expect(isRecoverableAssetPath("/assets/brave-logo-small.Bdzj7Bzm.svg.min.js")).toBe(false);
+  });
+
+  it("#503: recovers a deep upload-session-shaped asset and carries the query", async () => {
+    recordAssetBase("https://p.example/", "https://cdn.example/assets/x.js");
+    const seen: string[] = [];
+    const rec = await recoverFlatAsset(
+      "https://p.example/",
+      "https://p.example/upload/crupload/session/e.chunk.3792087592bf207a.module.css?gsessionid=ABC123",
+      "style",
+      new Headers(),
+      async (u) => {
+        seen.push(u);
+        return new Response("body", { status: 200, headers: { "content-type": "text/css" } });
+      },
+    );
+    expect(rec?.url).toBe(
+      "https://cdn.example/assets/e.chunk.3792087592bf207a.module.css?gsessionid=ABC123",
+    );
+    expect(seen).toHaveLength(1);
+  });
+  it("#503: a deep path without a mint marker on the final segment stays out", async () => {
+    recordAssetBase("https://p.example/", "https://cdn.example/assets/x.js");
+    let calls = 0;
+    const rec = await recoverFlatAsset(
+      "https://p.example/",
+      "https://p.example/upload/crupload/session/file.css?gsessionid=ABC123",
+      "style",
+      new Headers(),
+      async () => {
+        calls++;
+        return new Response("body", { status: 200, headers: { "content-type": "text/css" } });
+      },
+    );
+    expect(rec).toBeNull();
+    expect(calls).toBe(0);
   });
 
   it("recovers a runtime-minted two-segment image against an observed base (#259)", async () => {

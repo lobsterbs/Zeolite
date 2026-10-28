@@ -154,8 +154,9 @@ describe("charset resolution (issue B)", () => {
     expect(charsetFromHeader("")).toBeNull();
   });
 
-  it("the header charset wins over a BOM and any meta", () => {
-    expect(resolveCharset("text/html; charset=utf-8", new Uint8Array([0xff, 0xfe, 0x3c]), true)).toBe("utf-8");
+  it("an HTML BOM wins over a conflicting header, while CSS retains header precedence", () => {
+    expect(resolveCharset("text/html; charset=utf-8", new Uint8Array([0xff, 0xfe, 0x3c]), true)).toBe("utf-16le");
+    expect(resolveCharset("text/css; charset=utf-8", new Uint8Array([0xff, 0xfe, 0x3c]), false)).toBe("utf-8");
   });
 
   it("a BOM resolves the charset without a header", () => {

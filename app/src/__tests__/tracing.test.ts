@@ -22,6 +22,29 @@ describe("rewrite tracing", () => {
     expect(s.entries[0].ts).toBeGreaterThan(0);
   });
 
+  it("records only fixed adaptive shadow facts while full tracing is disabled", () => {
+    const traceId = "zl-tabc123-1";
+    traceDecision({ subsystem: "transport", rule: "adaptive-shadow",
+      original: "NativeTransit", result: "required:response-content-type",
+      resource: "https://private.example/?token=SECRET_CANARY", traceId }, true);
+    traceDecision({ subsystem: "transport", rule: "adaptive-shadow",
+      original: "https://private.example/?token=SECRET_CANARY",
+      result: "native:default", traceId }, true);
+    traceDecision({ subsystem: "transport", rule: "adaptive-shadow",
+      original: "NativeTransit", result: "native:default?SECRET_CANARY", traceId }, true);
+    traceDecision({ subsystem: "rules", rule: "adaptive-shadow",
+      original: "NativeTransit", result: "native:default", traceId }, true);
+    const s = tracingSnapshot(0);
+    expect(s.enabled).toBe(false); // no full URL tracing
+    expect(s.entries).toHaveLength(1);
+    expect(s.entries[0]).toMatchObject({
+      subsystem: "transport", rule: "adaptive-shadow",
+      original: "NativeTransit", result: "required:response-content-type", traceId,
+    });
+    expect(s.entries[0].resource).toBeUndefined();
+    expect(JSON.stringify(s)).not.toContain("SECRET_CANARY");
+  });
+
   it("honors the delta cursor", () => {
     setTracing(true);
     traceDecision({ subsystem: "rules", original: "a", result: "b" });

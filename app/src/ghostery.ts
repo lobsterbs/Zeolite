@@ -19,6 +19,11 @@ import type { ResourceType } from "./rules";
 import { DIAG } from "./diag";
 
 const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+/* #500: sanity floor for a parsed ads+tracking engine. Any single
+   real list parses to tens of thousands of network filters; a junk
+   or truncated body parses to a handful. Below this the matcher
+   counts as empty or partial and is never installed. */
+const MIN_NETWORK_FILTERS = 1000;
 const RETRY_AFTER_MS = 60 * 1000;
 const LISTS_ORIGIN = "https://raw.githubusercontent.com";
 const LISTS_PATH = "/ghostery/adblocker/master/packages/adblocker/assets/";
@@ -78,7 +83,36 @@ async function loadEngine(force = false): Promise<void> {
   }
   loading = (async () => {
     try {
-      engine = await FiltersEngine.fromPrebuiltAdsAndTracking(fetchLists!);
+      const fresh = await FiltersEngine.fromPrebuiltAdsAndTracking(fetchLists!);
+      /* #500: a list host can answer 200 with a junk or truncated
+         body (captive portal, HTML error page) and the parser turns
+         that into an engine with zero or a handful of network
+         filters. No fetch failed, so the #381 load-failure row
+         never fires, and the matcher runs with a near-zero block
+         rate - the exact live symptom reported from relay-only
+         deployments. The ads+tracking set parses to tens of
+         thousands of network filters; anything under the sanity
+         floor is junk, not a partial real load. One DIAG names the
+         condition and junk never installs: the previously loaded
+         good matcher survives, otherwise the matcher stays null. */
+      const network = fresh.getFilters().networkFilters.length;
+      if (network < MIN_NETWORK_FILTERS) {
+        retryAt = Date.now() + RETRY_AFTER_MS;
+        refreshAt = retryAt;
+        DIAG.emit({
+          requestId: DIAG.trace(),
+          category: "TRANSPORT",
+          cause: "proxy",
+          severity: "warning",
+          stage: "UPSTREAM_RESPONSE",
+          message:
+            "ghostery filter lists parsed " + network + " network filters (empty or partial matcher); " +
+            (engine ? "keeping the previously loaded rules" : "local rules stay active") +
+            "; retrying after cooldown",
+        });
+        return;
+      }
+      engine = fresh;
       retryAt = 0;
       refreshAt = Date.now() + REFRESH_AFTER_MS;
     } catch (err) {

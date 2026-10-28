@@ -33,6 +33,62 @@ drive the whole design:
 - the page's controller cannot honestly change: the real
   controller of every engine page is the engine worker itself.
 
+## #477 P0 registration groundwork (PR #480)
+
+A pure, bounded, **non-executing** registration identity registry lives in
+`app/src/kernel/guests/registration.ts`. It uses full canonical virtual
+origin + scope as the key (never a short hash), rejects cross-origin scripts
+and scopes, path-ambiguous encoded separators, query/fragment scope input,
+and invalid persisted registrations. Longest-prefix matching requires an
+already-verified owner page origin, not a user-supplied identity. Its records
+hold only `origin`, `scope` and `scriptURL`; they cannot execute code,
+fetch a guessed script or access the engine's storage or control ports.
+
+The legacy single-registration shim can reuse the canonical validation
+helpers while retaining its existing non-execution behavior. This groundwork
+does **not** implement the multiple-scope persistent registry, worker lifecycle,
+isolated guest realm or synthetic fetch dispatch in a live browser. Browser
+behavior and threat-model review remain required before activating any guest
+execution. Never execute a guest inline in the engine Service Worker global;
+a mere `self` facade cannot isolate `globalThis`, constructors or an infinite
+loop. Untrusted worker code stays disabled.
+
+## #477 capability probe verdict (observed, real Chromium)
+
+Probe: suite/e2e/sw-capability.mjs (Playwright, dedicated fixture
+server, a bare registered service worker; committed with this change).
+Facts observed in the service worker global: Worker and SharedWorker
+are UNDEFINED. importScripts, eval, Function, OffscreenCanvas,
+WebAssembly, setTimeout, caches, indexedDB and WebSocket are available.
+
+Consequence for the stage-2 sandbox: the plain dedicated Worker on the
+engine origin in the model below cannot be created BY the engine
+service worker, because the service worker global exposes no Worker
+constructor at all. The only execution surfaces inside the service
+worker (eval, Function, importScripts) run in the kernel own global
+with no enforceable termination, which gate 2 forbids. Guest execution
+therefore stays unsupported on this platform. P4 (worker-per-guest) is
+likewise blocked from the worker side: the creator must be a page
+context on the engine origin, bridged to the service worker, which is
+a kernel architecture decision, not a shim change. Until that decision
+is made and reviewed, untrusted guest execution stays disabled.
+
+## #477 P1 facade fidelity, native shape (observed)
+
+Native ServiceWorkerRegistration, captured from the same live
+registration in real Chromium: scope, updateViaCache, installing,
+waiting, active, update(), onupdatefound, unregister, navigationPreload,
+showNotification, getNotifications, pushManager, sync, periodicSync,
+backgroundFetch, cookies, paymentManager. The probe also confirms
+controller === active and that controllerchange fires on claim. The
+phase-1 VirtualRegistration ships scope, installing, active and
+unregister. The S1 gaps are waiting, update(), onupdatefound and
+updateViaCache; each addition is paid from the strict bootstrap byte
+budget, so shipping them is a budget decision, not a mechanical fix.
+controller, controllerchange, onmessage and ready stay the real
+container own surface (the engine worker is the controller); the shim
+intentionally does not fake them.
+
 ## Registration identity and scope mapping
 
 Registration key: (site id, canonical scope). The site id is the
@@ -138,3 +194,70 @@ supported, kept honest.
 
 The emulation boundary is the contract: what is not listed as
 supported stays visibly absent rather than silently faked.
+
+## Wave 1 decision: guest execution via a page-created Worker
+
+Issue #477. Decision recorded 2026-10-27, implemented on branch
+fix/html-bom-478. The isolation gate settled it: the engine's
+service worker cannot create any realm of its own
+(ServiceWorkerGlobalScope exposes no Worker constructor, proven by
+suite/e2e/sw-capability.mjs), so the only proven-isolated,
+terminable realm available to the engine is a DedicatedWorker
+created by a page context on the engine origin.
+
+Mechanism, as shipped:
+
+- app/guest-host.html is an engine-served page the embedding
+  application keeps open, the same pattern as the zlsw-register
+  page. It never runs guest code itself.
+- The page sends the host-only control message zl:guestHost to the
+  engine worker with one end of a MessageChannel; the kernel
+  (app/src/kernel/guests/executor.ts) registers it as its guest
+  host port. The kind is deliberately absent from PAGE_MESSAGES,
+  so proxied pages cannot send it.
+- Spawn (zl:guestSpawn, host-only) validates the registration
+  identity through canonicalGuestRegistration, caps the script
+  body at 256 KiB, wraps it in a harness prelude, and asks the
+  host page to build a Worker from a blob. The host transfers one
+  MessagePort into the worker and reports zl:guestSpawned,
+  zl:guestSpawnFailed, zl:guestError and zl:guestTerminated back.
+- The kernel never touches the guest realm directly: install and
+  activate are dispatched on the guest port in that order, guest
+  messages route through an injectable listener, and a terminate
+  request is confirmed by the host before the record is dropped.
+- Dead handshakes are reaped lazily on the next kernel interaction
+  against a 10 s deadline; no timer runs inside the kernel.
+
+Honest deviations of wave 1, all deliberate:
+
+- Guests are network-blind: fetch, XMLHttpRequest, WebSocket and
+  importScripts are shadowed to undefined at spawn. Guest fetch
+  routing is stage 2 of the staged plan above, not started.
+- Guests receive no kernel storage handles: caches and indexedDB
+  are shadowed to undefined.
+- No fetch events are dispatched to guests; the engine owns
+  interception.
+- controllerchange and push remain unsupported, as listed above.
+- waitUntil is accepted and not awaited.
+- The spawn trigger is a host-only control message: the
+  proxied-page register capture (routing a page's
+  navigator.serviceWorker.register to a guest spawn) is a later
+  phase; the shim stays virtual-only.
+- The registration facade stays honest: update() rejects,
+  unregister routes to the kernel, getNotifications returns an
+  empty list.
+
+## Wave 2 status (#477): synthetic fetch dispatch, kernel seam
+
+- GuestKernel.dispatchFetch(origin, request) posts one synthetic fetch event into the running guest realm and resolves under a hard 250 ms fail-closed budget (GUEST_FETCH_BUDGET_MS). Every uncertain path (no guest, not running, no handler, malformed or oversize response, script error, timeout, termination) resolves handled:false: the engine request path serves the request exactly as with no guest present.
+- The harness fetch event carries a plain structured request (no live Request object, no stream, no privileged handle crosses the guest boundary) plus a respondWith that serializes the guest answer over the kernel port. A fetch event with no registered listener answers guestFetchNoHandler immediately instead of burning the budget.
+- Responses are validated before use: integer status 100-599, string header values, string or null body at most 2 MiB (GUEST_FETCH_BODY_MAX). Anything else fails closed.
+- Honest limit: the seam is kernel-level and unit-tested (app/src/__tests__/guest-fetch.test.ts) but is NOT wired into the live engine request path. Wiring it through Zeolite SSRF, cookies, diagnostics and policy is the next stage; until then guests still serve no real traffic and real fetch events stay engine-only.
+
+## Wave 3 status (#477 P3): fetch bridging wired into the live request path
+
+- After route decoding, origin-parameter virtualization, the disabled-site gate and client-context establishment, request.ts asks the running guest whose canonical scope matches the request URL first: guestDispatchFetchForUrl (GuestKernel.dispatchFetchForUrl) routes to the single origin-keyed running guest whose scope matches, under the wave-2 250 ms fail-closed budget and response validation.
+- A handled guest answer is served verbatim as the Response, minus Set-Cookie/Set-Cookie2 (a guest response must not stamp cookies onto the engine origin; virtual-site cookies belong to the jar at request time). An invalid status/body combination fails closed. Every uncertain outcome (no guest, scope miss, no handler, malformed or oversize answer, timeout, termination, aborted request, construction error) runs the ordinary engine path unchanged.
+- Recursion guard: synthetic dispatch is provably non-recursive. Guests are network-blind, so a guest answer never originates an engine fetch event, and the pending-id one-shot marker consumes exactly one response per dispatch. Cancellation: an already-aborted request never reaches the guest; the budget bounds everything else.
+- Honest limits: a served guest response bypasses engine response-side processing (rewrite passes, response cache, transport-level policy such as ad-block rules); the request never leaves the engine, so there is no egress or IP exposure. Guest-initiated network fetches remain impossible, so the normal Zeolite SSRF, cookie and policy surfaces apply to the page real requests, not to guest answers. The security review of the full dispatch model remains the merge requirement.
+- Tests: app/src/__tests__/guest-fetch-scope.test.ts pins the scope router (scope match with a handled answer, origin miss, sub-path scope, non-running guest).

@@ -174,10 +174,13 @@ addEventListener("message", windowRelay);
       that knows another site's token could still compute the scoped
       name and force sharing - all virtual sites are same-origin to
       the browser by design; the token is the practical boundary. */
+   const mode = typeof o === "object" && o ? o.type ?? "classic" : "classic";
+   const credentials = typeof o === "object" && o ? o.credentials ?? "same-origin" : "same-origin";
+   const suffix = "\u0000zl:" + site + ":" + mode + ":" + credentials;
    const scoped: SWArg =
     typeof o === "string"
-     ? o + "\u0000zl:" + site
-     : { ...(o ?? {}), name: ((o && o.name) || "") + "\u0000zl:" + site };
+     ? o + suffix
+     : { ...(o ?? {}), name: ((o && o.name) || "") + suffix };
    super(u, scoped);
    this.port.addEventListener("message", relay);
    tapChannel(this.port);

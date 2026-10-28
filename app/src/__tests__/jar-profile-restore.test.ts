@@ -57,7 +57,7 @@ describe("jar profile restore fail-closed (#471)", () => {
     vi.resetModules();
     const c = await import("../cookies");
     await c.jarProfilesReady();
-    expect(c.jarProfileState()).toBe("default");
+    expect(c.jarProfileState()).not.toBe("default");
     const h = new Headers();
     h.append("set-cookie", "a=1; Path=/");
     expect(c.applySetCookie("https://s.example/", h, "clientB")).toEqual([]);

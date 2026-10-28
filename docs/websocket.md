@@ -34,6 +34,16 @@ serve WebSocket only without TLS will fail; this is deliberate.
   framing, masking and fragmentation.
 - Reconnecting libraries see normal error/close sequences and can
   reconnect as usual.
+- `bufferedAmount` (#462) counts UTF-8 text and binary payload bytes
+  while page/worker messages await acceptance at the service-worker
+  bridge. The bridge sends a byte-count acknowledgment only after its
+  transport `send()` succeeds; failed writes receive no acknowledgment.
+  This is deliberately **bridge-queue accounting**, not an assertion
+  that data reached the peer or left the underlying TLS/Wisp buffer.
+  Sends discarded in CLOSING/CLOSED still add their payload bytes, matching
+  Chromium. Those discarded bytes receive no bridge acknowledgment.
+  Network-level bufferedAmount parity requires transport drain signals
+  that the current WsHandle does not expose.
 - Non-ws schemes fall through to the native constructor.
 
 ## URL handling (#279)
@@ -108,3 +118,8 @@ control (a page outside the engine scope fails with error + close
 1006, which matches native offline behavior); subprotocol and
 extension negotiation follow libcurl; targets without TLS fail by
 design (ws:// is upgraded).
+
+Synchronous transport send failures terminate the bridge connection (#485).
+The page receives an error followed by an abnormal 1006 close; the bridge
+detaches the connection before closing the transport, so a reentrant close
+callback cannot report it twice. Failed sends are not counted as transmitted.

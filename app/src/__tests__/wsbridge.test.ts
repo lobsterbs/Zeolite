@@ -83,6 +83,60 @@ function fakeFactory(): {
 }
 
 describe("WsBridge", () => {
+  it("acknowledges accepted UTF-8 and binary bytes after open, including queued bridge races (#462)", () => {
+    const { hooks } = fakeHooks();
+    const { factory, handlers, sent } = fakeFactory();
+    const b = new WsBridge(factory, hooks);
+    const p = fakePort();
+    b.open(p, "wss://example.com/", []);
+    p.onmessage?.({ data: { op: "send", data: "é" } });
+    expect(p.posted.filter(x => (x as { ev?: string }).ev === "drain")).toEqual([]);
+    handlers[0].h.onopen("");
+    expect(sent).toEqual(["é"]);
+    expect(p.posted).toContainEqual({ ev: "drain", bytes: 2 });
+    const binary = new Uint8Array([1, 2, 3]);
+    p.onmessage?.({ data: { op: "send", data: binary } });
+    expect(sent).toEqual(["é", binary]);
+    expect(p.posted).toContainEqual({ ev: "drain", bytes: 3 });
+    const blob = new Blob(["okay"]);
+    p.onmessage?.({ data: { op: "send", data: blob } });
+    expect(p.posted).toContainEqual({ ev: "drain", bytes: 4 });
+  });
+
+  it.each([false, true])("contains synchronous send failure (queued=%s) and closes transport", queued => {
+    const { hooks, rec } = fakeHooks();
+    let h!: FakeHandlers["h"];
+    let sends = 0;
+    const closes: number[] = [];
+    const factory: WsFactory = { open: (_url, _protocols, handlers) => {
+      h = handlers;
+      return {
+        send() { sends++; throw new Error("transport write failed"); },
+        close(code) { closes.push(code); h.onclose(code, ""); },
+      };
+    } };
+    const bridge = new WsBridge(factory, hooks);
+    const port = fakePort();
+    bridge.open(port, "wss://example.com/", []);
+    if (queued) {
+      port.onmessage?.({ data: { op: "send", data: "first" } });
+      port.onmessage?.({ data: { op: "send", data: "must not send" } });
+      expect(() => h.onopen("")).not.toThrow();
+    } else {
+      h.onopen("");
+      expect(() => port.onmessage?.({ data: { op: "send", data: "first" } })).not.toThrow();
+    }
+    expect(sends).toBe(1);
+    expect(closes).toEqual([1000]);
+    expect(bridge.size).toBe(0);
+    expect(port.closed).toBe(true);
+    expect(port.onmessage).toBeNull();
+    expect(rec.bytes).toEqual([]);
+    expect(rec.closes).toHaveLength(1);
+    expect(port.posted.map(x => (x as { ev: string }).ev)).toEqual(["open", "error", "close"]);
+    expect(port.posted.at(-1)).toMatchObject({ code: 1006, clean: false });
+  });
+
   it("upgrades ws:// to wss:// and records the decision", () => {
     const { hooks, rec } = fakeHooks();
     const { factory, handlers } = fakeFactory();

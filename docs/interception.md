@@ -115,7 +115,10 @@ SW: no DOM, no page globals.
   never for documents or stylesheets (the streaming rewriter owns
   those). Oversized or unknown-size responses pass through untouched.
 - Transformed responses are not written to the page cache.
-- Blocked requests are answered 403 and land in diagnostics (category
+- Blocked requests fail at the network level for every non-navigate
+  context (a network-error response, like a real blocker: fetch probes
+  reject, subresources never load, #500); navigations keep the honest
+  engine error page. Blocks land in diagnostics (category
   BLOCKED) and the network log (verdict blocked:rules or
   blocked:intercept).
 

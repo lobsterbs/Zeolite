@@ -27,7 +27,7 @@
 /// Rewrite every `url(...)` token and `@import "..."` string through
 /// `enc`.
 pub fn rewrite_stylesheet(css: &str, enc: &dyn Fn(&str) -> String) -> String {
-    scan(css, enc, true).0
+    scan(css, enc, true, None).0
 }
 
 /// Incremental url() rewriter for streamed stylesheets.
@@ -36,6 +36,11 @@ pub struct CssRewriter {
     /// (`url(`, `@import`, a comment, a string) to the end of the data
     /// seen so far.
     tail: String,
+    /// The byte immediately preceding `tail` in the original stream
+    /// (#507): an `image-set(` at the start of a chunk is
+    /// boundary-checked against this byte, not against a missing
+    /// buffer predecessor.
+    prev: Option<u8>,
     enc: Box<dyn Fn(&str) -> String>,
 }
 
@@ -44,6 +49,7 @@ impl CssRewriter {
     pub fn new(enc: Box<dyn Fn(&str) -> String>) -> Self {
         Self {
             tail: String::new(),
+            prev: None,
             enc,
         }
     }
@@ -51,10 +57,25 @@ impl CssRewriter {
     /// Feed one body chunk, get back everything that can be emitted now.
     pub fn process(&mut self, chunk: &str) -> String {
         let mut data = std::mem::take(&mut self.tail);
+        let prev = self.prev;
         data.push_str(chunk);
-        match scan(&data, &self.enc, false) {
-            (out, None) => out,
+        match scan(&data, &self.enc, false, prev) {
+            // All input consumed: the next chunk starts after this
+            // data last byte. Empty input consumes nothing, so the
+            // carried byte stays (#507).
+            (out, None) => {
+                if let Some(last) = data.as_bytes().last() {
+                    self.prev = Some(*last);
+                }
+                out
+            }
+            // The retained tail starts at `hold`, preceded by
+            // data[hold - 1] in the original stream; a zero hold
+            // consumes nothing and keeps the carried byte.
             (out, Some(hold)) => {
+                if hold > 0 {
+                    self.prev = Some(data.as_bytes()[hold - 1]);
+                }
                 self.tail = data[hold..].to_string();
                 out
             }
@@ -66,7 +87,8 @@ impl CssRewriter {
     /// pass over the same complete input.
     pub fn finish(&mut self) -> String {
         let data = std::mem::take(&mut self.tail);
-        scan(&data, &self.enc, true).0
+        let prev = self.prev;
+        scan(&data, &self.enc, true, prev).0
     }
 }
 
@@ -101,13 +123,60 @@ enum ImportTok<'a> {
 /// Shared scanner. Returns the rewritten output and, when `final_scan`
 /// is false, the byte index of a possibly-incomplete token to hold back
 /// for the next chunk. With `final_scan` true the input is treated as
-/// complete and the hold is always None.
-fn scan(data: &str, enc: &dyn Fn(&str) -> String, final_scan: bool) -> (String, Option<usize>) {
+/// complete and the hold is always None. `prev` is the byte preceding
+/// `data` in the original stream (None only for the one-shot pass,
+/// where index 0 is a true boundary): it keeps the identifier check of
+/// the image-set branch chunk-independent (#507).
+fn scan(
+    data: &str,
+    enc: &dyn Fn(&str) -> String,
+    final_scan: bool,
+    prev: Option<u8>,
+) -> (String, Option<usize>) {
     let bytes = data.as_bytes();
     let mut out = String::with_capacity(data.len() + 64);
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
+        // #507: at the start of a streamed buffer the previous byte
+        // is no longer in `bytes`, so boundary-check against the byte
+        // carried from the consumed prefix instead of assuming a
+        // token boundary at index 0.
+        let ident_boundary = if i > 0 {
+            !is_ident_byte(bytes[i - 1])
+        } else {
+            prev.is_none_or(|p| !is_ident_byte(p))
+        };
+        if (b == b'i' || b == b'I' || b == b'-') && ident_boundary {
+            let rest = &data[i..];
+            let mut consumed = None;
+            for prefix in ["image-set(", "-webkit-image-set("] {
+                if rest.len() < prefix.len()
+                    && !final_scan
+                    && rest
+                        .as_bytes()
+                        .eq_ignore_ascii_case(&prefix.as_bytes()[..rest.len()])
+                {
+                    return (out, Some(i));
+                }
+                if rest.len() >= prefix.len()
+                    && rest.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+                {
+                    if let Some(end) = image_set_end(rest, prefix.len()) {
+                        push_image_set(&mut out, &rest[..end], prefix.len(), enc);
+                        consumed = Some(end);
+                        break;
+                    }
+                    if !final_scan {
+                        return (out, Some(i));
+                    }
+                }
+            }
+            if let Some(end) = consumed {
+                i += end;
+                continue;
+            }
+        }
         if b == b'u' || b == b'U' {
             let rest = &data[i..];
             // Fewer than four bytes left, a case-insensitive prefix of
@@ -292,6 +361,108 @@ fn scan_import(s: &str) -> ImportTok<'_> {
         };
     }
     ImportTok::NotImport
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b >= 0x80
+}
+
+/// Find the matching close paren, ignoring strings and comments. An
+/// incomplete function is held across stream chunks like an open url().
+fn image_set_end(s: &str, open_end: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut depth = 1;
+    let mut j = open_end;
+    while j < b.len() {
+        if b[j] == b'\'' || b[j] == b'"' {
+            j = scan_string(b, j)?;
+        } else if j + 1 < b.len() && b[j] == b'/' && b[j + 1] == b'*' {
+            j += 2 + s[j + 2..].find("*/")? + 2;
+        } else {
+            if b[j] == b'(' {
+                depth += 1;
+            }
+            if b[j] == b')' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j + 1);
+                }
+            }
+            j += utf8_len(b[j]);
+        }
+    }
+    None
+}
+
+/// Bare strings only name URLs at the beginning of a direct image-set
+/// candidate. Preserve the quote and all other tokens, including type()
+/// strings. url() candidates use the normal URL scanner.
+fn push_image_set(out: &mut String, s: &str, open_end: usize, enc: &dyn Fn(&str) -> String) {
+    out.push_str(&s[..open_end]);
+    let b = s.as_bytes();
+    let mut i = open_end;
+    let mut depth = 1;
+    let mut candidate = true;
+    while i < b.len() {
+        if b[i] == b'\'' || b[i] == b'"' {
+            let end = scan_string(b, i).expect("complete image-set string");
+            let original = &s[i..end];
+            if candidate && depth == 1 {
+                let logical = css_unescape(&s[i + 1..end - 1]);
+                if !logical.trim().is_empty()
+                    && !logical.starts_with('#')
+                    && !is_opaque_scheme(&logical)
+                {
+                    let quote = b[i] as char;
+                    out.push(quote);
+                    out.push_str(
+                        &enc(&logical)
+                            .replace('\\', "\\\\")
+                            .replace(quote, &format!("\\{quote}")),
+                    );
+                    out.push(quote);
+                } else {
+                    out.push_str(original);
+                }
+            } else {
+                out.push_str(original);
+            }
+            candidate = false;
+            i = end;
+            continue;
+        }
+        if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'*' {
+            let end = i + 2 + s[i + 2..].find("*/").expect("complete image-set comment") + 2;
+            out.push_str(&s[i..end]);
+            i = end;
+            continue;
+        }
+        if (b[i] == b'u' || b[i] == b'U')
+            && i + 4 <= b.len()
+            && b[i..i + 4].eq_ignore_ascii_case(b"url(")
+        {
+            if let UrlTok::Complete { inner, end } = scan_url(&s[i..]) {
+                push_url(out, &s[i..i + end], inner, enc);
+                candidate = false;
+                i += end;
+                continue;
+            }
+        }
+        if b[i] == b'(' {
+            depth += 1;
+        }
+        if b[i] == b')' {
+            depth -= 1;
+        }
+        if b[i] == b',' && depth == 1 {
+            candidate = true;
+        } else if depth == 1 && !b[i].is_ascii_whitespace() && b[i] != b',' && candidate {
+            candidate = false;
+        }
+        let len = utf8_len(b[i]);
+        out.push_str(&s[i..i + len]);
+        i += len;
+    }
 }
 
 /// Index one past the closing quote of the string starting at
@@ -513,6 +684,26 @@ mod tests {
             .collect()
     }
 
+    /// #507: an `image-set(` that is the tail of a longer identifier
+    /// (`pngimage-set(` here) is not a rewrite candidate, and a chunk
+    /// boundary landing exactly before the token must not turn it
+    /// into one: the streaming pass boundary-checks against the
+    /// carried byte, not the missing buffer predecessor.
+    #[test]
+    fn image_set_identifier_tail_is_chunk_invariant() {
+        let css = r#"}}//h.example/px.pngimage-set("a.png" 1x, 'b' 2x)"#;
+        assert_eq!(rewrite_stylesheet(css, &enc), css);
+        chunked_eq(css, &all_splits(css));
+        // A real boundary still rewrites, including when the split
+        // lands directly before the token.
+        let real = r#";image-set("a.png" 1x)"#;
+        assert_eq!(
+            rewrite_stylesheet(real, &enc),
+            r#";image-set("[a.png]" 1x)"#
+        );
+        chunked_eq(real, &all_splits(real));
+    }
+
     #[test]
     fn urls() {
         let out = rewrite_stylesheet(
@@ -523,6 +714,27 @@ mod tests {
             out,
             "a{background:url('[img/x.png]')}b{background:url('[y.png]')}"
         );
+    }
+
+    #[test]
+    fn image_set_bare_string_candidates() {
+        let css = "a{background:image-set(\"a.png\" 1x, 'b.png' 2x, url(c.png) 3x)}";
+        let expected = "a{background:image-set(\"[a.png]\" 1x, '[b.png]' 2x, url('[c.png]') 3x)}";
+        assert_eq!(rewrite_stylesheet(css, &enc), expected);
+        chunked_eq(css, &all_splits(css));
+        let prefixed = "a{background:-webkit-image-set(\"a.png\" 1x)}";
+        assert_eq!(
+            rewrite_stylesheet(prefixed, &enc),
+            "a{background:-webkit-image-set(\"[a.png]\" 1x)}"
+        );
+        chunked_eq(prefixed, &all_splits(prefixed));
+    }
+
+    #[test]
+    fn image_set_keeps_non_candidate_strings_and_opaque_urls() {
+        let css = "a{content:\"image-set('x')\";background:image-set('data:image/png,x' 1x type('image/png'), url(#icon) 2x)}/* image-set('x') */";
+        assert_eq!(rewrite_stylesheet(css, &enc), css);
+        chunked_eq(css, &all_splits(css));
     }
 
     #[test]

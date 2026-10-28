@@ -7,6 +7,8 @@
    therefore report engine-origin URLs as written, never the target. */
 
 import { swc } from "./siteid";
+import { validateWsClose } from "../ws-close";
+import { wsPayload } from "../ws-payload";
 
 /* #419: normalize the second constructor argument the way the
    native constructor does: undefined/null -> [], a string -> one
@@ -26,10 +28,8 @@ function wsProtocolsList(protocols: unknown): string[] {
   const out: string[] = [];
   for (const tok of list) {
     const s = String(tok);
-    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(s))
-      throw new DOMException("The subprotocol '" + s + "' is invalid.", "SyntaxError");
-    if (seen.has(s))
-      throw new DOMException("The subprotocol '" + s + "' is invalid.", "SyntaxError");
+    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(s) || seen.has(s))
+      throw new DOMException("subprotocol", "SyntaxError");
     seen.add(s);
     out.push(s);
   }
@@ -102,9 +102,7 @@ export function applyWs(w: Record<string, unknown>): void {
       let wsState = 0;
       let binType: "blob" | "arraybuffer" = "blob";
       let proto = "";
-      /* #293: pre-handshake sends queue at the bridge; count them so
-         bufferedAmount is honest state, not a frozen 0. */
-      let pend = 0;
+      let bufferedBytes = 0;
       const ch = new MessageChannel();
       let q = Promise.resolve();
       /* The EventTarget has no native on* event-handler slots, so the
@@ -135,6 +133,7 @@ const disp = (e: Event) => {
           code?: number;
           clean?: boolean;
           protocol?: string;
+          bytes?: number;
         };
         /* Native parity: once CLOSING/CLOSED no further open or
            message events fire (a late engine open or a message
@@ -142,7 +141,6 @@ const disp = (e: Event) => {
         if (m.ev === "open") {
           if (wsState >= 2) return;
           wsState = 1;
-          pend = 0;
           proto = m.protocol ?? "";
           disp(new Event("open"));
         } else if (m.ev === "message") {
@@ -154,6 +152,9 @@ const disp = (e: Event) => {
             }
             fire(new MessageEvent("message", { data, origin: u.origin }));
           });
+        } else if (m.ev === "drain") {
+          if (typeof m.bytes === "number" && Number.isSafeInteger(m.bytes) && m.bytes >= 0)
+            bufferedBytes = Math.max(0, bufferedBytes - m.bytes);
         } else if (m.ev === "error") {
           disp(new Event("error"));
         } else if (m.ev === "close") {
@@ -193,34 +194,24 @@ const disp = (e: Event) => {
         },
         close: {
           value: (code?: number, reason?: string) => {
-            if (wsState === 3) return;
+            const normalized = validateWsClose(code, reason);
+            if (wsState >= 2) return;
             wsState = 2;
-            ch.port1.postMessage({ op: "close", code: code ?? 1000, reason });
+            ch.port1.postMessage({ op: "close", code: normalized.code ?? 1000, reason: normalized.reason });
           },
         },
         send: {
           value: (data: unknown) => {
-            /* #493: native BufferSource conversion rejects
-               SharedArrayBuffer-backed views before the state check:
-               a CLOSING socket still throws TypeError for them, never
-               InvalidStateError. Reject before counting or posting. */
-            if (
-              ArrayBuffer.isView(data) &&
-              (data as ArrayBufferView).buffer instanceof SharedArrayBuffer
-            )
-              throw new TypeError("SharedArrayBuffer-backed views are not valid WebSocket payload data.");
-            /* Spec: send() while CONNECTING buffers at the bridge; only
-               CLOSING/CLOSED throw. */
-            if (wsState >= 2) throw new DOMException("invalid state", "InvalidStateError");
-            if (wsState === 0) pend++;
-            ch.port1.postMessage({ op: "send", data });
+            const payload = wsPayload(data);
+            if (wsState === 0) throw new DOMException("State", "InvalidStateError");
+            if (wsState >= 2) { bufferedBytes += payload.bytes; return; }
+            ch.port1.postMessage({ op: "send", data: payload.data });
+            bufferedBytes += payload.bytes;
           },
         },
-        /* #293: own getter - without it the property resolved to the
-           native prototype's brand-checked accessor. Counts messages,
-           not bytes: the transport's queue depth is unreachable
-           without a bridge ack protocol. */
-        bufferedAmount: { get: () => pend },
+        /* Counts queued bytes until the SW bridge accepts each frame.
+           The transport's remote/network backlog is not observable. */
+        bufferedAmount: { get: () => bufferedBytes },
       });
       return es;
     } as unknown as new (u: string, p?: string | string[]) => WebSocket;

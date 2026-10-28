@@ -122,9 +122,8 @@ describe("page-cache refresh cookie admission (#466)", () => {
     expect(cookieHeaderFor("https://s.example/x", { clientId: "clientD" })).toContain("sid=s");
     /* the default jar never sees the session cookie */
     expect(cookieHeaderFor("https://s.example/x")).toBeNull();
-    /* the session namespace keeps the default jar empty, so the entry
-       stores - and the stored copy never keeps the set-cookie header */
-    expect(puts.length).toBe(1);
-    expect(puts[0].headers.get("set-cookie")).toBeNull();
+    /* This view carries session credentials and must not enter the shared
+       page cache, even though the default cookie jar remains empty. */
+    expect(puts.length).toBe(0);
   });
 });

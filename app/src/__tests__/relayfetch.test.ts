@@ -141,7 +141,6 @@ describe("relayFetch (#137)", () => {
     const respP = relayFetch("https://x.example/", { method: "GET", headers: new Headers() }, "t10");
     const rid = (p.posted[0] as { rid: number }).rid;
     p.deliver(head(rid));
-    p.deliver({ type: "zl:relayEnd", rid });
     const resp = await respP;
     await resp!.body!.cancel();
     expect(p.posted.some((m) => (m as { type: string }).type === "zl:relayCancel")).toBe(true);

@@ -26,6 +26,8 @@
 
 import { decodePath, encodeDest, setScheme } from "./codec";
 import { siteToken } from "./pageload";
+import { validateWsClose } from "./ws-close";
+import { wsPayload } from "./ws-payload";
 
 /** Route one worker-issued URL (an importScripts() argument or a
     fetch() input) through the engine codec, resolved against the
@@ -97,6 +99,9 @@ export function mintUrlViaRelay(
       if (done) return;
       done = true;
       clearTimeout(timer);
+      ch.port1.onmessage = null;
+      ch.port1.close();
+      ch.port2.close();
       resolve(route);
     };
     const timer = setTimeout(() => fin(null), timeout);
@@ -275,9 +280,7 @@ export function installWorkerPrelude(route: string): void {
       let wsState = 0;
       let binType: "blob" | "arraybuffer" = "blob";
       let proto = "";
-      /* #293: pre-handshake sends queue at the bridge; count them so
-         bufferedAmount is honest state, not a frozen 0. */
-      let pend = 0;
+      let bufferedBytes = 0;
       const ch = new MessageChannel();
       let q = Promise.resolve();
       /* Same contract as the page shim: raw on* handlers fire after
@@ -301,6 +304,7 @@ export function installWorkerPrelude(route: string): void {
           code?: number;
           clean?: boolean;
           protocol?: string;
+          bytes?: number;
         };
         /* Native parity: once CLOSING/CLOSED no further open or
            message events fire (a late engine open or a message
@@ -308,7 +312,6 @@ export function installWorkerPrelude(route: string): void {
         if (m?.ev === "open") {
           if (wsState >= 2) return;
           wsState = 1;
-          pend = 0;
           proto = m.protocol ?? "";
           disp(new Event("open"));
         } else if (m?.ev === "message") {
@@ -320,6 +323,9 @@ export function installWorkerPrelude(route: string): void {
             }
             fire(new MessageEvent("message", { data, origin: u.origin }));
           });
+        } else if (m?.ev === "drain") {
+          if (typeof m.bytes === "number" && Number.isFinite(m.bytes) && m.bytes >= 0)
+            bufferedBytes = Math.max(0, bufferedBytes - Math.floor(m.bytes));
         } else if (m?.ev === "error") {
           disp(new Event("error"));
           /* A terminal error carries the close code: the page relay's
@@ -364,24 +370,25 @@ export function installWorkerPrelude(route: string): void {
             if (v === "blob" || v === "arraybuffer") binType = v;
           },
         },
-        /* #293: honest pre-handshake queue state (messages, not
-           bytes; the transport depth is unreachable). */
-        bufferedAmount: { get: () => pend },
+        /* Counts bytes pending acceptance by the SW bridge; actual
+           Wisp/network flush completion is not observable. */
+        bufferedAmount: { get: () => bufferedBytes },
         extensions: { value: "" },
         close: {
           value: (code?: number, reason?: string) => {
-            if (wsState === 3) return;
+            const normalized = validateWsClose(code, reason);
+            if (wsState >= 2) return;
             wsState = 2;
-            ch.port1.postMessage({ op: "close", code: code ?? 1000, reason });
+            ch.port1.postMessage({ op: "close", code: normalized.code ?? 1000, reason: normalized.reason });
           },
         },
         send: {
           value: (data: unknown) => {
-            /* Spec: send() while CONNECTING buffers (the bridge queues
-               until the handshake completes); only CLOSING/CLOSED throw. */
-            if (wsState >= 2) throw new DOMException("invalid state", "InvalidStateError");
-            if (wsState === 0) pend++;
-            ch.port1.postMessage({ op: "send", data });
+            const payload = wsPayload(data);
+            if (wsState === 0) throw new DOMException("invalid state", "InvalidStateError");
+            if (wsState >= 2) { bufferedBytes += payload.bytes; return; }
+            ch.port1.postMessage({ op: "send", data: payload.data });
+            bufferedBytes += payload.bytes;
           },
         },
       });

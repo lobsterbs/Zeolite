@@ -236,12 +236,9 @@ jobs:
         # Raised 36352 -> 37888 for registered-embedder popup routing
         # and client/icon metadata (#416/#428). The strict byte gate
         # remains; measure the complete bundle after each change.
-        # Raised 39424 -> 41472 for the #488/#489/#490/#491 anchor
-        # read wave: per-element scan convergence (elMemo + the
-        # read-driven pendingReads refresh), decode-channel settle
-        # teardown, coherent component getters/stringifier, and the
-        # bounded embedder handshake retry; measured 40542, baseline
-        # 38471.
+        # #497 retains the 39424 gate after reconciling main's anchor
+        # and embedder recovery fixes. Share control-query cleanup rather
+        # than accepting the integration's transient 41566-byte bundle.
         # Raised 37888 -> 39424 for the scout-wave listener
         # registries: capture-aware wrapper identity (#472 in
         # vorigin/relay) and storage once/signal/capture parity
@@ -249,7 +246,7 @@ jobs:
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 41472 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 41472)"; exit 1; fi
+          if [ "$SIZE" -ge 39424 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 39424)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
@@ -437,9 +434,9 @@ jobs:
     # the rewriter's page seams or the #32/#34 privacy properties, so
     # browser-only failures survived CI. Fixtures-only (no third-party
     # sites) on purpose; the harness fails loudly with the engine
-    # server's output tail. Skipped on PRs to keep them fast; runs on
-    # every push to main, nightly and dispatch, like compat.
-    if: github.event_name != 'pull_request'
+    # server's output tail. Run on PRs as well: rewrite and security
+    # changes need Chromium acceptance before merge.
+
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: wasm
@@ -473,6 +470,10 @@ jobs:
           cd suite/e2e
           npm install
           npx playwright install --with-deps chromium
+      - name: WebSocket closing buffered bytes vs Chromium (#462)
+        run: node suite/e2e/ws-buffered.mjs
+      - name: Location policy Chromium + WASM fixture (#456)
+        run: node suite/e2e/location-policy.mjs
       - name: Browser E2E suite (issue #35)
         run: |
           node suite/e2e/e2e.mjs 2>&1 | tee browser.out

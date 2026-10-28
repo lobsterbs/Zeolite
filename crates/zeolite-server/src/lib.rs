@@ -1035,11 +1035,25 @@ pub fn build_app(shared: Arc<Shared>) -> Router {
             // request).
             let frame_ancestors = frame_ancestors.clone();
             async move {
+                let path = req.uri().path().to_owned();
                 let mut resp = next.run(req).await;
                 resp.headers_mut().insert(
                     "x-content-type-options",
                     axum::http::HeaderValue::from_static("nosniff"),
                 );
+                if path == "/sw.js" {
+                    /* docs/integration-guide.md: the engine worker must
+                    be eligible for root scope and revalidated rather
+                    than pinned stale by intermediary/browser caches. */
+                    resp.headers_mut().insert(
+                        "service-worker-allowed",
+                        axum::http::HeaderValue::from_static("/"),
+                    );
+                    resp.headers_mut().insert(
+                        "cache-control",
+                        axum::http::HeaderValue::from_static("no-cache"),
+                    );
+                }
                 if let Some(fa) = &frame_ancestors {
                     if let Ok(v) =
                         axum::http::HeaderValue::from_str(&format!("frame-ancestors {fa}"))
@@ -3631,6 +3645,36 @@ mod tests {
         assert!(
             head.contains("content-security-policy: frame-ancestors https://host.example"),
             "frame-ancestors missing: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_static_response_has_scope_and_revalidation_headers() {
+        let addr = serve_app(Config::default()).await;
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!("HEAD /sw.js HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = match s.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let head = String::from_utf8_lossy(&buf).into_owned().to_lowercase();
+        assert!(
+            head.contains("service-worker-allowed: /"),
+            "worker root-scope header missing: {head}"
+        );
+        assert!(
+            head.contains("cache-control: no-cache"),
+            "worker revalidation policy missing: {head}"
+        );
+        assert!(
+            head.contains("x-content-type-options: nosniff"),
+            "worker nosniff missing: {head}"
         );
     }
 

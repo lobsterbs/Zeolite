@@ -34,6 +34,9 @@ pub struct RewriteConfig {
     /// virtual location global (#236). Parse failures fall back
     /// unchanged, never broken JS.
     pub rewrite_globals: bool,
+    /// Hybrid policy limits only the location AST pass, not other rewrites.
+    pub location_max_bytes: usize,
+    pub location_event_attributes: bool,
 }
 
 impl Default for RewriteConfig {
@@ -51,6 +54,8 @@ impl Default for RewriteConfig {
             block_hosts: Vec::new(),
             lazy_images: false,
             rewrite_globals: true,
+            location_max_bytes: crate::js::globals::MAX_BYTES,
+            location_event_attributes: true,
         }
     }
 }

@@ -1,6 +1,6 @@
 /* #251/#255 acceptance: the automatic reset+retry only rides
-   idempotent requests with replayable bodies ("websocket did not
-   open" is pre-send and safe for any method), and the first-byte
+   idempotent requests with replayable bodies after dispatch. Error
+   messages cannot establish non-delivery. The first-byte
    deadline aborts the abandoned upstream fetch through the signal
    the vendored request accepts. The vendored module is mocked; the
    cancel/backpressure surface of the vendored stream lives in
@@ -11,11 +11,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const h = vi.hoisted(() => ({
   calls: [] as Array<{ dest: string; method?: string; body?: unknown; signal?: AbortSignal | null }>,
   failFirst: null as string | null,
+  initFailure: null as Error | null,
   stall: false,
 }));
 
 vi.mock("../libcurl-transport-vendored", () => ({
-  init: async () => {},
+  init: async () => { if (h.initFailure) throw h.initFailure; },
   fetch: (dest: string, init?: RequestInit) => {
     h.calls.push({ dest, method: init?.method, body: init?.body, signal: init?.signal });
     if (h.failFirst !== null) {
@@ -45,15 +46,27 @@ vi.mock("../libcurl-transport-vendored", () => ({
 }));
 
 import { transportResetForTests, wispTransport } from "../transport";
+import { TransportDeliveryError, deliveryStateOf } from "../delivery";
 
 beforeEach(() => {
   h.calls.length = 0;
   h.failFirst = null;
+  h.initFailure = null;
   h.stall = false;
   transportResetForTests(15);
 });
 
 describe("transport retry safety (#251)", () => {
+  it("marks a primary initialization failure before target dispatch", async () => {
+    const { deliveryState } = await import("../delivery");
+    const error = new Error("initialization failed");
+    h.initFailure = error;
+    const failure = await wispTransport.fetch("https://a.example/", { method: "POST", body: "x" }).catch(e => e);
+    expect(failure.cause).toBe(error);
+    expect(h.calls).toHaveLength(0);
+    expect(deliveryState(failure)).toBe("definitely-not-delivered");
+  });
+
   it("GET is retried once on a connect-class failure", async () => {
     h.failFirst = "failed sending data";
     const r = await wispTransport.fetch("https://a.example/");
@@ -69,11 +82,20 @@ describe("transport retry safety (#251)", () => {
     expect(h.calls.length).toBe(1);
   });
 
-  it("POST is retried when the request was never sent (websocket did not open)", async () => {
+  it("a failed dispatched POST has an explicit delivery-unknown state and transport", async () => {
     h.failFirst = "websocket did not open";
-    const r = await wispTransport.fetch("https://a.example/", { method: "POST", body: "x=1" });
-    expect(r.status).toBe(200);
-    expect(h.calls.length).toBe(2);
+    const err = await wispTransport.fetch("https://a.example/", { method: "POST", body: "x=1" })
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(TransportDeliveryError);
+    expect(deliveryStateOf(err)).toBe("delivery-unknown");
+    expect((err as TransportDeliveryError).transport).toBe("wisp");
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("POST error text cannot prove non-delivery", async () => {
+    h.failFirst = "websocket did not open";
+    await expect(wispTransport.fetch("https://a.example/", { method: "POST", body: "x=1" })).rejects.toThrow("websocket did not open");
+    expect(h.calls.length).toBe(1);
   });
 
   it("a stream body is never retried, even on a GET", async () => {

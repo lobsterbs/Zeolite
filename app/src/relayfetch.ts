@@ -24,6 +24,7 @@
      fall back (#382); unknown POST/PATCH delivery fails without
      replay (#442). Large/multipart uploads have a finite 10min bound. */
 
+import { deliverySuccess, deliveryFailure, TransportDeliveryError, type DeliveryResult } from "./delivery";
 import { DIAG } from "./diag";
 import { isHostClient, type WinClient } from "./lifecycle";
 
@@ -152,7 +153,7 @@ let hostCredits = false;
 export function relayRegister(port: MessagePort, credits?: unknown): void {
   hostPort = port;
   /* #470: only an embedder that understands byte credits receives
-     them; a legacy registration keeps the unbounded stream. */
+     them; legacy registrations use the bounded non-cooperative queue. */
   hostCredits = credits === 1;
   /* #354: a pending channel-less relay fetch may be waiting for
      exactly this registration; wake it (bounded wait resolves true). */
@@ -188,16 +189,19 @@ export function relayHeaderDeadlineMs(init: { headers: Headers; body?: BodyInit 
 }
 /** Dispatch happened, so a POST/PATCH may already have succeeded.
     This terminal error prevents a second transport from duplicating it. */
-export class RelayDeliveryUnknownError extends Error {
-  name = "RelayDeliveryUnknownError";
+export class RelayDeliveryUnknownError extends TransportDeliveryError {
+  override name = "RelayDeliveryUnknownError";
+  constructor(reason: string) { super("delivery-unknown", "relay", reason); }
 }
 
-export async function relayFetch(
+async function relayFetchRaw(
   dest: string,
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
   traceId: string,
+  dispatched: () => void,
 ): Promise<Response | null> {
   const port = hostPort;
+  const crediting = hostCredits;
   if (!port) return null;
   const body = init.body;
   if (body !== undefined && body !== null && typeof body !== "string" && !(body instanceof ArrayBuffer)) {
@@ -222,11 +226,30 @@ export async function relayFetch(
   if (signal?.aborted) throw abortErr();
   const rid = ++ridSeq;
   const queue: RelayMsg[] = [];
+  let queuedBytes = 0;
+  let terminal = false;
   let wake: (() => void) | null = null;
   let aborted = false;
-  const cancelUpstream = () => port.postMessage({ type: "zl:relayCancel", rid });
+  const cancelUpstream = () => {
+    try { port.postMessage({ type: "zl:relayCancel", rid }); } catch { /* dead port: local teardown must still run */ }
+  };
   waiters.set(rid, (m) => {
-    queue.push(m);
+    if (terminal) return;
+    const invalidChunk = m.type === "zl:relayChunk" && !(m.bytes instanceof Uint8Array);
+    const bytes = m.type === "zl:relayChunk" && !invalidChunk ? m.bytes.byteLength : 0;
+    // Bound both payload memory and zero-byte/control frame floods, including
+    // legacy peers that cannot participate in the credit protocol.
+    if (invalidChunk || queuedBytes + bytes > RELAY_CREDIT_BYTES * 2 || queue.length >= 4096) {
+      terminal = true;
+      waiters.delete(rid);
+      queue.length = 0;
+      queuedBytes = 0;
+      queue.push({ type: "zl:relayError", rid, error: invalidChunk ? "invalid relay chunk" : "relay response queue limit exceeded" });
+      try { cancelUpstream(); } catch { /* local failure still wakes the reader */ }
+    } else {
+      queuedBytes += bytes;
+      queue.push(m);
+    }
     const w = wake;
     wake = null;
     w?.();
@@ -234,6 +257,8 @@ export async function relayFetch(
   const onAbort = () => {
     if (aborted) return;
     aborted = true;
+    queue.length = 0;
+    queuedBytes = 0;
     cancelUpstream();
     waiters.delete(rid);
     const w = wake;
@@ -242,8 +267,15 @@ export async function relayFetch(
   };
   signal?.addEventListener("abort", onAbort, { once: true });
   const cleanup = () => {
+    queue.length = 0;
+    queuedBytes = 0;
     waiters.delete(rid);
     signal?.removeEventListener("abort", onAbort);
+  };
+  const shift = (): RelayMsg => {
+    const m = queue.shift()!;
+    if (m?.type === "zl:relayChunk") queuedBytes -= m.bytes.byteLength;
+    return m;
   };
   const take = (): Promise<RelayMsg> =>
     new Promise((resolve, reject) => {
@@ -251,21 +283,29 @@ export async function relayFetch(
         reject(abortErr());
         return;
       }
-      const m = queue.shift();
+      const m = shift();
       if (m) resolve(m);
-      else wake = () => (aborted ? reject(abortErr()) : resolve(queue.shift() as RelayMsg));
+      else wake = () => (aborted ? reject(abortErr()) : resolve(shift()));
     });
-  port.postMessage({
-    type: "zl:fetchRelay",
-    rid,
-    dest,
-    method: init.method,
-    headers: Array.from(init.headers.entries()),
-    body,
-  });
-  /* #470: the up-front credit grant; a non-crediting host never
-     receives these frames. */
-  if (hostCredits) port.postMessage({ type: "zl:relayCredit", rid, bytes: RELAY_CREDIT_BYTES });
+  try {
+    dispatched();
+    port.postMessage({
+      type: "zl:fetchRelay",
+      rid,
+      dest,
+      method: init.method,
+      headers: Array.from(init.headers.entries()),
+      body,
+    });
+    /* #470: the up-front credit grant; a non-crediting host never
+       receives these frames. */
+    if (crediting) port.postMessage({ type: "zl:relayCredit", rid, bytes: RELAY_CREDIT_BYTES });
+  } catch (error) {
+    cleanup();
+    queue.length = 0;
+    cancelUpstream();
+    throw error;
+  }
   /* Header deadline for every relayed fetch, subresources included.
      Without it a silent embedder (or a port it dropped without a
      close event) parks the request until the page gives up. #382:
@@ -339,48 +379,100 @@ export async function relayFetch(
     cancelUpstream();
     return failedAfterDispatch("invalid relay response");
   }
-  const h = new Headers();
-  for (const [k, v] of first.headers) h.append(k, v);
-  for (const c of first.setCookies ?? []) h.append("set-cookie", c);
-  const nullBody = first.status === 204 || first.status === 205 || first.status === 304;
-  const stream = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      let m: RelayMsg;
-      try {
-        m = await take();
-      } catch (err) {
-        cleanup();
-        controller.error(err);
-        return;
-      }
-      if (m.type === "zl:relayChunk") {
-        controller.enqueue(m.bytes);
-        /* #470: grant the drained bytes back so a crediting embedder
-           can pace its reads. */
-        if (hostCredits) port.postMessage({ type: "zl:relayCredit", rid, bytes: m.bytes.byteLength });
-        return;
-      }
+  try {
+    const h = new Headers();
+    for (const [k, v] of first.headers) h.append(k, v);
+    for (const c of first.setCookies ?? []) h.append("set-cookie", c);
+    const nullBody = init.method.toUpperCase() === "HEAD" || first.status === 204 || first.status === 205 || first.status === 304;
+    if (nullBody) {
       cleanup();
-      if (m.type === "zl:relayEnd") controller.close();
-      else controller.error(new Error(m.type === "zl:relayError" ? m.error : "relay protocol fault"));
-    },
-    cancel() {
-      cleanup();
+      queue.length = 0;
+      queuedBytes = 0;
       cancelUpstream();
-    },
-  });
-  const out = new Response(nullBody ? null : stream, {
-    status: first.status,
-    statusText: first.statusText,
-    headers: h,
-  });
-  /* #10: Response construction drops set-cookie (forbidden
-     response-header name), so the jar rawHeaders view carries the
-     relayed cookies explicitly; the embedder edge already strips
-     them from what the page can read. */
-  (out as Response & { rawHeaders?: Array<[string, string]> }).rawHeaders = [
-    ...first.headers,
-    ...(first.setCookies ?? []).map((c): [string, string] => ["set-cookie", c]),
-  ];
-  return out;
+    }
+    const stream = nullBody ? null : new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        let m: RelayMsg;
+        try {
+          m = await take();
+        } catch (err) {
+          cleanup();
+          controller.error(err);
+          return;
+        }
+        if (m.type === "zl:relayChunk") {
+          controller.enqueue(m.bytes);
+          /* #470: grant the drained bytes back so a crediting embedder
+             can pace its reads. */
+          if (crediting) {
+            try { port.postMessage({ type: "zl:relayCredit", rid, bytes: m.bytes.byteLength }); }
+            catch (error) { cleanup(); cancelUpstream(); controller.error(error); }
+          }
+          return;
+        }
+        cleanup();
+        if (m.type === "zl:relayEnd") controller.close();
+        else controller.error(new Error(m.type === "zl:relayError" ? m.error : "relay protocol fault"));
+      },
+      cancel() {
+        onAbort();
+        cleanup();
+      },
+    });
+    const out = new Response(nullBody ? null : stream, {
+      status: first.status,
+      statusText: first.statusText,
+      headers: h,
+    });
+    /* #10: Response construction drops set-cookie (forbidden
+       response-header name), so the jar rawHeaders view carries the
+       relayed cookies explicitly; the embedder edge already strips
+       them from what the page can read. */
+    (out as Response & { rawHeaders?: Array<[string, string]> }).rawHeaders = [
+      ...first.headers,
+      ...(first.setCookies ?? []).map((c): [string, string] => ["set-cookie", c]),
+    ];
+    return out;
+  } catch (error) {
+    cleanup();
+    queue.length = 0;
+    cancelUpstream();
+    throw error;
+  }
 }
+/** Internal typed result, including null/fallback paths. No relay write is
+    declared undelivered after dispatch merely because the channel failed. */
+export async function relayFetchResult(
+  dest: string,
+  init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
+  traceId: string,
+): Promise<DeliveryResult> {
+  let dispatched = false;
+  try {
+    const response = await relayFetchRaw(dest, init, traceId, () => { dispatched = true; });
+    if (response) return deliverySuccess("relay", response, traceId);
+    return deliveryFailure("relay", new Error(dispatched ? "relay response unavailable after dispatch" : "relay cannot carry request"),
+      dispatched ? "delivery-unknown" : "definitely-not-delivered", traceId);
+  } catch (cause) {
+    return deliveryFailure("relay", cause, dispatched ? "delivery-unknown" : "definitely-not-delivered", traceId);
+  }
+}
+
+/** Compatibility facade: preserve the Response/null contract and terminal
+    non-idempotent/abort errors while using explicit evidence internally. */
+export async function relayFetch(
+  dest: string,
+  init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
+  traceId: string,
+): Promise<Response | null> {
+  if (init.signal?.aborted) throw init.signal.reason ?? new DOMException("aborted", "AbortError");
+  const result = await relayFetchResult(dest, init, traceId);
+  if (result.state === "delivered-response") return result.response;
+  if (init.signal?.aborted || (result.cause instanceof Error && result.cause.name === "AbortError")) throw result.cause;
+  if (result.state === "definitely-not-delivered" || /^(GET|HEAD|OPTIONS|PUT|DELETE|TRACE)$/i.test(init.method)) return null;
+  if (result.cause instanceof RelayDeliveryUnknownError) throw result.cause;
+  throw new RelayDeliveryUnknownError("relay delivery outcome unknown; request not retried");
+}
+
+/** Test seam for terminal cleanup, including synchronous port failures. */
+export function relayPendingCount(): number { return waiters.size; }

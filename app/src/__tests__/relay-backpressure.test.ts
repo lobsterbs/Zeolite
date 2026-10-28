@@ -60,4 +60,35 @@ describe("relay response backpressure (#470)", () => {
     await deliver(port, [4]);
     expect(creditsOf(port)).toEqual([]);
   });
+  it("keeps each stream's negotiated credits across re-registration", async () => {
+    const p = reg(1);
+    const pending = relayFetch("https://api.example/read", { method: "GET", headers: new Headers() }, "t");
+    const rid = p.sent[0].rid;
+    reg();
+    p.reply({ type: "zl:relayHead", rid, status: 200, statusText: "", headers: [] });
+    p.reply({ type: "zl:relayChunk", rid, bytes: new Uint8Array(8) });
+    p.reply({ type: "zl:relayEnd", rid });
+    expect(await (await pending)!.text()).toHaveLength(8);
+    expect(creditsOf(p).map(m => m.bytes)).toEqual([RELAY_CREDIT_BYTES, 8]);
+  });
+
+  it("cancels an overflowing legacy response instead of retaining unlimited bytes", async () => {
+    const p = reg();
+    const pending = relayFetch("https://api.example/read", { method: "POST", headers: new Headers() }, "t");
+    const rid = p.sent[0].rid;
+    p.reply({ type: "zl:relayChunk", rid, bytes: new Uint8Array(RELAY_CREDIT_BYTES * 2 + 1) });
+    await expect(pending).rejects.toThrow("queue limit exceeded");
+    expect(p.sent.filter(m => m.type === "zl:relayCancel")).toHaveLength(1);
+  });
+
+  it.each([204, 205, 304])("releases bodyless %s responses without waiting for a body reader", async status => {
+    const p = reg();
+    const pending = relayFetch("https://api.example/read", { method: "GET", headers: new Headers() }, "t");
+    const rid = p.sent[0].rid;
+    p.reply({ type: "zl:relayHead", rid, status, statusText: "", headers: [] });
+    const response = await pending;
+    expect(response!.body).toBeNull();
+    expect(p.sent.filter(m => m.type === "zl:relayCancel")).toHaveLength(1);
+  });
+
 });

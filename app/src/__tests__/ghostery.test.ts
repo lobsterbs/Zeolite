@@ -14,8 +14,8 @@ vi.mock("@ghostery/adblocker", () => ({
     fromPrebuiltAdsAndTracking: async (f: typeof fetch) => {
       cap.listFetch = f;
       return {
-        match: () => ({
-          match: true,
+        getFilters: () => ({ networkFilters: new Array(1200), cosmeticFilters: [] }),
+        match: () => ({          match: true,
           filter: { getHostname: () => "ads.example" },
           redirect: { body: "/* blocked */", contentType: "application/javascript" },
         }),

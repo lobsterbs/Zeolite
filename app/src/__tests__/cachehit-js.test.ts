@@ -27,6 +27,7 @@ vi.mock("../transport", () => ({
 }));
 
 import { handleFetch } from "../request";
+import { cookiesResetForTests } from "../cookies";
 import { currentPrefix, decodePath, encodeDestLegacy } from "../codec";
 
 const ORIGIN = "https://zl.test";
@@ -74,8 +75,8 @@ describe("cache-hit JS transform parity (#134)", () => {
 
   const stubCache = (body: string) =>
     vi.stubGlobal("caches", {
-      open: async () => ({
-        match: async () =>
+      open: async (name: string) => ({
+        match: async () => name === "zeolite-jar-profile-v1" ? undefined :
           new Response(body, {
             headers: {
               "content-type": "application/javascript",
@@ -90,6 +91,7 @@ describe("cache-hit JS transform parity (#134)", () => {
     });
 
   beforeEach(() => {
+    cookiesResetForTests();
     transportMock.calls = 0;
     puts.length = 0;
   });

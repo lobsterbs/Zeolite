@@ -25,11 +25,21 @@
       .diag-error { color: #c33; }
       .diag-warning { color: #c80; }
       .diag-critical { color: #c33; font-weight: bold; }
+      #doctorPanel { margin: 12px; }
+      #doctorPanel h2 { margin: 0 0 6px; }
+      #doctorPanel button { margin-right: 6px; margin-bottom: 6px; padding: 5px 10px; cursor: pointer; }
+      #doctorStatus { color: #888; margin: 0 0 8px; }
+      #doctorRows td:last-child { white-space: normal; min-width: 180px; }
+      .doctor-fail { color: #c33; }
+      .doctor-warn { color: #c80; }
+      .doctor-unknown, .doctor-skipped { color: #888; }
     </style>
   </head>
   <body>
     <h1>Zeolite network inspector <span id="stats"></span><span id="paused">loading...</span></h1>
     <pre id="detail">click a request row for details</pre>
+    <button id="requestKdlExport" type="button" disabled>Export selected request KDL</button>
+    <span id="requestKdlStatus" role="status"></span>
     <table>
       <thead>
         <tr>
@@ -45,6 +55,17 @@
       </thead>
       <tbody id="rows"></tbody>
     </table>
+    <section id="doctorPanel" aria-label="Zeolite Doctor">
+      <h2>Zeolite Doctor</h2>
+      <p id="doctorStatus" role="status">Not checked. Unknown means unverified, not healthy.</p>
+      <button id="doctorInspect" type="button">Inspect</button>
+      <button id="doctorProbe" type="button">Check bundle assets</button>
+      <button id="doctorExport" type="button">Export KDL</button>
+      <table>
+        <thead><tr><th>check</th><th>status</th><th>observation / next step</th></tr></thead>
+        <tbody id="doctorRows"></tbody>
+      </table>
+    </section>
     <h2>transport engine <select id="transportSelect"><option value="libcurl">libcurl (mbedTLS)</option><option value="epoxy">epoxy (rustls)</option></select></h2>
     <h2>rewrite tracing <label><input type="checkbox" id="traceToggle" /> enabled</label></h2>
     <table>
