@@ -40,6 +40,14 @@ export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
      holds, and garbage or foreign tokens decode to null. Bounded
      worker-side; no new capability. */
   "zl:decodeRoutes",
+  /* #477 wave 3: the swshim register/unregister forward. The
+     page registration reaches the guest kernel with pageUrl
+     recovered worker-side from the sender route (never
+     page-supplied), so a proxied page can only spawn a guest for
+     its OWN origin and script/scope pair; unregister names no
+     target at all - the worker terminates the sender origin. */
+  "zl:guestRegister",
+  "zl:guestUnregister",
 ]);
 
 /** Pathname half of the sender classification: true when a client at
@@ -85,6 +93,10 @@ const HOST_PATHS = new Set([
      every registration. Grants no new capability: "/" is already a
      host path, so a page can already drive its own SW as host. */
   "/zlsw-register",
+  /* #477 wave 3: the guest-host page spawns guest realms on the
+     engine origin (LB embeds it hidden). Its own traffic is
+     host-only (zl:guestHost port); the page runs no guest code. */
+  "/guest-host.html",
 ]);
 
 /** True only when the sender is one of the engine's own host pages:

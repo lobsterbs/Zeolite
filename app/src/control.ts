@@ -6,7 +6,10 @@ import { buildNavHandleUrl, buildQueryHandleUrl, currentPrefix, decodeClientUrl,
 import type { JarConflictRule } from "./cookies";
 import { documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
-import { guestRegisterHost, guestSpawn, guestTerminate, type GuestPortLike } from "./kernel/guests/executor";
+import { GUEST_SCRIPT_MAX, guestRegisterHost, guestSpawn, guestTerminate, type GuestPortLike } from "./kernel/guests/executor";
+/* #477: canonical registration identity; inputs from untrusted pages
+   pass the verified-client gates first (dispatch, below). */
+import { canonicalGuestRegistration } from "./kernel/guests/registration";
 import { buildDoctor, doctorKdl, observeDoctorBoot, probeDoctorAssets } from "./doctor";
 import { experimentalSnapshot, selectExperimental } from "./experimental-flags";
 import { primaryWispUrl } from "./config";
@@ -28,7 +31,7 @@ import { netLogCursor, netLogGeneration, netLogSince } from "./netlog";
 import { senderVirtualOrigin } from "./origin";
 import type { RecordingState } from "./recording";
 import { beginRecording, finishRecording } from "./recording";
-import { pageCacheClear, virtualHcaptchaFrameFragment } from "./request";
+import { ghosteryListFetch, pageCacheClear, virtualHcaptchaFrameFragment } from "./request";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
 import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled } from "./swstate";
@@ -107,6 +110,8 @@ export interface ControlMessage {
     | "zl:guestHost"
     | "zl:guestSpawn"
     | "zl:guestTerminate"
+    | "zl:guestRegister"
+    | "zl:guestUnregister"
     | "zl:wispRegister"
     | "zl:wispPrimary"
     | "zl:fingerprint"
@@ -378,6 +383,81 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
     case "zl:guestTerminate": {
       const gt = msg as unknown as { origin?: unknown };
       guestTerminate(typeof gt.origin === 'string' ? gt.origin : '', reply);
+      break;
+    }
+    case "zl:guestRegister": {
+      /* #477 wave 3: a proxied page's virtual register() forwards here
+         (swshim). pageUrl is recovered worker-side from the sender's own
+         route, never page-supplied, and canonicalGuestRegistration pins
+         script and scope to that origin before anything is fetched. The
+         script travels the normal policy/transport path and is bounded
+         like a host spawn; the realm itself stays network-blind. */
+      const gr = msg as unknown as { scriptURL?: unknown; scope?: unknown };
+      let pageUrl: string | null = null;
+      const src = e.source as Client | null;
+      if (src && src.url) {
+        try {
+          pageUrl = decodeClientUrl(new URL(src.url, self.location.origin));
+        } catch {
+          pageUrl = null;
+        }
+      }
+      if (!pageUrl || typeof gr.scriptURL !== "string" || !gr.scriptURL) {
+        reply({ ok: false, error: "guest register needs a verified page and a script URL" });
+        break;
+      }
+      let identity: ReturnType<typeof canonicalGuestRegistration>;
+      try {
+        identity = canonicalGuestRegistration(
+          pageUrl,
+          gr.scriptURL,
+          typeof gr.scope === "string" ? gr.scope : undefined,
+        );
+      } catch (err) {
+        reply({ ok: false, error: err instanceof TypeError ? err.message : "invalid guest registration" });
+        break;
+      }
+      let script = "";
+      try {
+        const resp = await ghosteryListFetch(identity.scriptURL);
+        if (resp.ok) script = await resp.text();
+      } catch {
+        script = "";
+      }
+      if (script.length === 0 || script.length > GUEST_SCRIPT_MAX) {
+        reply({ ok: false, error: "guest script fetch failed, empty, or above the size cap" });
+        break;
+      }
+      guestSpawn(
+        { pageUrl: identity.origin + "/", scriptURL: identity.scriptURL, scope: identity.scope, script },
+        reply,
+      );
+      break;
+    }
+    case "zl:guestUnregister": {
+      /* #477 wave 3: the page names no target; the sender's own decoded
+         page origin is the only candidate, so a page can only ever
+         terminate its own guest. */
+      const gu = e.source as Client | null;
+      let guPage: string | null = null;
+      if (gu && gu.url) {
+        try {
+          guPage = decodeClientUrl(new URL(gu.url, self.location.origin));
+        } catch {
+          guPage = null;
+        }
+      }
+      if (!guPage) {
+        reply({ ok: false, error: "guest unregister needs a verified page" });
+        break;
+      }
+      let guOrigin = "";
+      try {
+        guOrigin = new URL(guPage).origin;
+      } catch {
+        guOrigin = "";
+      }
+      guestTerminate(guOrigin, reply);
       break;
     }
 
@@ -1325,7 +1405,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate",
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
 ]);
 
 

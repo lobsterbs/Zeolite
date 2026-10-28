@@ -531,3 +531,17 @@ describe("challengeReanchorUrl (#492-class handoff re-anchor)", () => {
   });
 });
 
+
+describe("guest registration gate (#477 wave 3)", () => {
+  it("the swshim forward types are page-facing; spawn and host stay host-only", () => {
+    expect(PAGE_MESSAGES.has("zl:guestRegister")).toBe(true);
+    expect(PAGE_MESSAGES.has("zl:guestUnregister")).toBe(true);
+    expect(PAGE_MESSAGES.has("zl:guestSpawn")).toBe(false);
+    expect(PAGE_MESSAGES.has("zl:guestHost")).toBe(false);
+  });
+
+  it("the guest-host page is a host page", () => {
+    const O = "http://engine.example";
+    expect(senderIsHostPage(O + "/guest-host.html", O)).toBe(true);
+  });
+});

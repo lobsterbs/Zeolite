@@ -284,3 +284,63 @@ describe("worker storage scoping (#171)", () => {
     expect(ch.name).toBe("ch1");
   });
 });
+
+describe("swshim guest forwarding (#477 wave 3)", () => {
+  const mkStore2 = (): { get(): string | null; set(v: string): void; clear(): void } => {
+    let v: string | null = null;
+    return { get: () => v, set: (x) => { v = x; }, clear: () => { v = null; } };
+  };
+
+  it("register forwards the canonical script/scope to the engine controller", async () => {
+    const posted: unknown[] = [];
+    const s = mkStore2();
+    const c: Record<string, unknown> = {
+      controller: { postMessage: (m: unknown) => posted.push(m) },
+    };
+    swShimApply(c, s, "https://a.example/");
+    await (c.register as (u: string, o?: { scope?: string }) => Promise<unknown>)("/sw.js", { scope: "/" });
+    expect(posted).toEqual([
+      { type: "zl:guestRegister", scriptURL: "https://a.example/sw.js", scope: "https://a.example/" },
+    ]);
+  });
+
+  it("a cross-origin register still rejects and never forwards (#474)", async () => {
+    const posted: unknown[] = [];
+    const s = mkStore2();
+    const c: Record<string, unknown> = {
+      controller: { postMessage: (m: unknown) => posted.push(m) },
+    };
+    swShimApply(c, s, "https://a.example/");
+    await expect(
+      (c.register as (u: string) => Promise<unknown>)("https://evil.example/sw.js"),
+    ).rejects.toThrow(TypeError);
+    expect(posted).toEqual([]);
+  });
+
+  it("unregister forwards after the register forward", async () => {
+    const posted: unknown[] = [];
+    const s = mkStore2();
+    const c: Record<string, unknown> = {
+      controller: { postMessage: (m: unknown) => posted.push(m) },
+    };
+    swShimApply(c, s, "https://a.example/");
+    const reg = await (
+      c.register as (u: string) => Promise<{ unregister(): Promise<boolean> }>
+    )("/sw.js");
+    expect(await reg.unregister()).toBe(true);
+    expect(posted).toEqual([
+      { type: "zl:guestRegister", scriptURL: "https://a.example/sw.js", scope: "https://a.example/" },
+      { type: "zl:guestUnregister" },
+    ]);
+  });
+
+  it("no controller leaves the virtual semantics unchanged", async () => {
+    const s = mkStore2();
+    const c: Record<string, unknown> = {};
+    swShimApply(c, s, "https://a.example/");
+    const reg = await (
+      c.register as (u: string) => Promise<{ active: unknown; installing: unknown }>
+    )("/sw.js");
+    expect(reg.active ?? reg.installing).toBeTruthy();
+  });
+});

@@ -243,10 +243,13 @@ jobs:
         # registries: capture-aware wrapper identity (#472 in
         # vorigin/relay) and storage once/signal/capture parity
         # (#475); measured 38471, baseline 37311.
+        # Raised 39424 -> 39680 for #477 wave 3: the swshim
+        # register/unregister forward to the engine controller
+        # (guest spawn/unspawn); measured 39501.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 39424 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 39424)"; exit 1; fi
+          if [ "$SIZE" -ge 39680 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 39680)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

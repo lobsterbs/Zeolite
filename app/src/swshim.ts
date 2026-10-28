@@ -24,6 +24,23 @@ export interface VirtualRegistration {
   unregister(): Promise<boolean>;
 }
 
+/* #477 wave 3: the virtual registration is now also forwarded, best
+   effort, to the engine's real controller, which spawns the page's
+   guest realm on the guest-host page. The forward never changes the
+   virtual promise shape, and a missing or silent controller leaves
+   the virtual semantics unchanged. The worker re-derives the page
+   origin from the sender route, so the payload grants the page no
+   power beyond its own registration. */
+let guestCtl: { postMessage(m: unknown): void } | null = null;
+
+function guestForward(m: Record<string, unknown>): void {
+  try {
+    if (guestCtl) guestCtl.postMessage(m);
+  } catch {
+    /* best-effort: the virtual registration stands either way */
+  }
+}
+
 export interface SwShimStore {
   get(): string | null;
   set(v: string): void;
@@ -64,6 +81,7 @@ function registration(scriptURL: string, scope: string, store: SwShimStore, sett
     active: settled ? worker : null,
     unregister: () => {
       store.clear();
+      guestForward({ type: "zl:guestUnregister" });
       return Promise.resolve(true);
     },
   };
@@ -146,10 +164,21 @@ export function swShimGet(
     they belong to the engine's real worker. */
 export function swShimApply(container: object, store: SwShimStore, pageUrl: string): void {
   const c = container as Record<string, unknown>;
+  try {
+    const ctl = c.controller;
+    guestCtl = ctl && typeof (ctl as { postMessage?: unknown }).postMessage === "function"
+      ? (ctl as { postMessage(m: unknown): void })
+      : null;
+  } catch {
+    guestCtl = null;
+  }
   c.register = ((u: string | URL, o?: { scope?: string }) => {
     /* #474: a native-style rejected promise, not a sync throw. */
     try {
-      return Promise.resolve(swShimRegister(store, pageUrl, u, o));
+      const reg = swShimRegister(store, pageUrl, u, o);
+      const w = reg.active ?? reg.installing;
+      if (w) guestForward({ type: "zl:guestRegister", scriptURL: w.scriptURL, scope: reg.scope });
+      return Promise.resolve(reg);
     } catch (e) {
       return Promise.reject(e);
     }
