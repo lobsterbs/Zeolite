@@ -75,7 +75,12 @@ export function isRecoverableAssetPath(pathname: string): boolean {
   const last = segs.length ? segs[segs.length - 1] : "";
   if (!last) return false;
   if (segs.length === 1) return true;
-  if (segs.length > 4) return false;
+  /* #503: upload-session and deep CDN asset paths carry 5-8 segments;
+     the same mint-marker discipline (a content hash or a .module. marker
+     or the dotted-hash shape) still decides the final segment, so page
+     routes stay out. Past 8 segments the retry is refused: deeper tails
+     are API shapes, not minted assets. */
+  if (segs.length > 8) return false;
   if (/[0-9a-f]{6,}/i.test(last) || last.includes(".module.")) return true;
   /* #259: SvelteKit mints hashed asset names with a base64ish
      middle segment (brave-logo-small.Bdzj7Bzm.svg) at runtime
@@ -160,7 +165,10 @@ export async function recoverFlatAsset(
   for (const base of bases.slice(0, maxTries)) {
     let cand: URL;
     try {
-      cand = new URL(flat, base);
+      /* #503: session-shaped assets carry query material (a gsessionid);
+         the retry must be the same request against the observed base,
+         so the original search rides along. */
+      cand = new URL(flat + u.search, base);
     } catch {
       continue;
     }
