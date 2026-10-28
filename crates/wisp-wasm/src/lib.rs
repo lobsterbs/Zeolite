@@ -8,6 +8,7 @@
 
 use bytes::BytesMut;
 use wasm_bindgen::prelude::*;
+use wisp_core::extension::{password_auth_client, ExtensionId};
 use wisp_core::{encode_packet, CloseReason, Frame, Packet, PacketType, StreamKind};
 
 pub const WISP_VERSION_MAJOR: u8 = 2;
@@ -78,6 +79,25 @@ pub fn handshake_info() -> Vec<u8> {
         extensions: Vec::new(),
     };
     encode_into_bytes(&pkt)
+}
+
+/// A Wisp v2 password-auth client INFO frame, using the canonical
+/// wisp-core encoder. The browser's vendored libcurl/epoxy transport
+/// does NOT invoke this helper today: do not claim authenticated
+/// browsing until the vendor connection owns this negotiated frame.
+/// Invalid credentials fail closed (None), never become URL parameters.
+#[wasm_bindgen(js_name = "handshakeInfoPassword")]
+pub fn handshake_info_password(username: String, password: String) -> Option<Vec<u8>> {
+    if username.is_empty() || username.len() > 255 || password.is_empty() || password.len() > 4096 {
+        return None;
+    }
+    let payload = password_auth_client(&username, &password).ok()?;
+    Some(encode_into_bytes(&Packet::Info {
+        stream_id: 0,
+        major: WISP_VERSION_MAJOR,
+        minor: WISP_VERSION_MINOR,
+        extensions: vec![(ExtensionId::PasswordAuth as u8, payload)],
+    }))
 }
 
 /// CONNECT for a new TCP stream to host:port.
@@ -174,6 +194,37 @@ mod tests {
         assert_eq!(wire[0], 0x05);
         assert_eq!(wire[5], 2); // major
         assert_eq!(wire[6], 1); // minor
+    }
+
+    #[test]
+    fn password_info_roundtrips_through_canonical_wisp_core() {
+        let wire = handshake_info_password("ada".into(), "hunter2".into()).unwrap();
+        let mut bytes = BytesMut::from(wire.as_slice());
+        let frame = Frame::decode(&mut bytes).unwrap().unwrap();
+        match frame.parse_packet().unwrap() {
+            Packet::Info {
+                stream_id,
+                major,
+                minor,
+                extensions,
+            } => {
+                assert_eq!((stream_id, major, minor), (0, 2, 1));
+                assert_eq!(extensions.len(), 1);
+                assert_eq!(extensions[0].0, ExtensionId::PasswordAuth as u8);
+                let (user, password) =
+                    wisp_core::extension::password_auth_client_decode(&extensions[0].1).unwrap();
+                assert_eq!((user.as_str(), password.as_str()), ("ada", "hunter2"));
+            }
+            _ => panic!("expected Wisp INFO"),
+        }
+    }
+
+    #[test]
+    fn password_info_rejects_invalid_or_oversized_secrets() {
+        assert!(handshake_info_password("".into(), "secret".into()).is_none());
+        assert!(handshake_info_password("user".into(), "".into()).is_none());
+        assert!(handshake_info_password("a".repeat(256), "secret".into()).is_none());
+        assert!(handshake_info_password("user".into(), "x".repeat(4097)).is_none());
     }
 
     #[test]

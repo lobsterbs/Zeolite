@@ -29,6 +29,7 @@ export default defineConfig({
       input: {
         main: "index.html",
         devtools: "devtools.html",
+        guestHost: "guest-host.html",
         sw: "src/sw.ts",
       },
       output: {

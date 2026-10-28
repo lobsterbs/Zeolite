@@ -40,7 +40,7 @@ describe("site id hashing (#270)", () => {
     const a = registerOrigin("https://c221470sg.test");
     const b = registerOrigin("https://eto8f6qoq.test");
     expect(a.id).not.toBe(b.id);
-    expect(a.id).toBe(fnv1a("https://c221470sg.test"));
+    expect(a.id).toBe(registerOrigin("https://c221470sg.test/path").id);
   });
 
   it("migrates old-hash jar keys via the persisted origins record", async () => {
@@ -66,6 +66,6 @@ describe("site id hashing (#270)", () => {
     /* and the re-persisted record carries the new id */
     await jarPersist();
     const rec = (await idbGet(db, STORE_COOKIES, "jar")) as Array<[string, unknown[]]>;
-    expect(rec[0][0]).toBe(fnv1a(origin));
+    expect(rec[0][0]).toBe(registerOrigin(origin).id);
   });
 });

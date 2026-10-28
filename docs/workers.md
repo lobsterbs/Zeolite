@@ -71,3 +71,15 @@ therefore virtualized by `app/src/swshim.ts` + bootstrap wiring:
 
 These are browser security limits, documented rather than hacked
 around.
+
+SharedWorker names also include worker type and credential mode (#453), so
+classic and module instances cannot accidentally share the same virtual identity.
+
+WebSocket close arguments use Web IDL unsigned-short and USVString conversion
+before validation in both page and worker shims. Converted values are passed
+to the bridge, including replacement of lone surrogate code units.
+
+Rewrite-stream heartbeat channels close both ports after the final active
+stream settles (#486). Concurrent streams share a channel; a later activity
+cycle creates a new one. This resource lifecycle does not change the browser's
+service-worker idle policy.

@@ -10,11 +10,18 @@
    pin the worker forever and block updates, so the ping stops when
    the last stream settles. */
 let active = 0;
+const byHost = new Map<string, number>();
+function streamHost(url?: string): string {
+  if (!url) return "";
+  try { return new URL(url).host; } catch { return ""; }
+}
 let heartbeat: ReturnType<typeof setInterval> | null = null;
+let heartbeatChannel: MessageChannel | null = null;
 
 function startHeartbeat(): void {
   if (heartbeat !== null) return;
   const ch = new MessageChannel();
+  heartbeatChannel = ch;
   /* The dispatched message event is what resets the idle timer; the
      no-op listener keeps the port served. */
   ch.port1.onmessage = () => undefined;
@@ -30,8 +37,10 @@ function startHeartbeat(): void {
 }
 
 /** A rewrite stream started pumping: arm the heartbeat. */
-export function streamAlive(): void {
+export function streamAlive(url?: string): void {
   active++;
+  const host = streamHost(url);
+  if (host) byHost.set(host, (byHost.get(host) ?? 0) + 1);
   startHeartbeat();
 }
 
@@ -39,17 +48,26 @@ export function streamAlive(): void {
     once the last one is gone. Paired with streamAlive in a finally,
     so every exit path lands here; the counter floors at zero instead
     of going negative on an unbalanced call. */
-export function streamDone(): void {
+export function streamDone(url?: string): void {
   active = Math.max(0, active - 1);
+  const host = streamHost(url);
+  if (host) {
+    const count = byHost.get(host) ?? 0;
+    if (count <= 1) byHost.delete(host);
+    else byHost.set(host, count - 1);
+  }
   if (active === 0 && heartbeat !== null) {
     clearInterval(heartbeat);
     heartbeat = null;
+    heartbeatChannel?.port1.close();
+    heartbeatChannel?.port2.close();
+    heartbeatChannel = null;
   }
 }
 
 /** Streams currently pumping (test seam). */
-export function activeStreams(): number {
-  return active;
+export function activeStreams(host?: string): number {
+  return host ? byHost.get(host) ?? 0 : active;
 }
 
 /** True while the heartbeat interval is armed (test seam). */

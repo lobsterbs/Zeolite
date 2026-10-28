@@ -16,7 +16,7 @@ import {
   setScheme,
 } from "../codec";
 import { NAV } from "../bootstrap/navguard";
-import { derefSelfRoute, navhTailDest, navpResolve } from "../request";
+import { challengeReanchorUrl, derefSelfRoute, navhTailDest, navpResolve } from "../request";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "../cpgate";
 
 /* Issue #63 (#54 design D): the opaque initial-navigation handle.
@@ -480,3 +480,54 @@ describe("prel tail on the handle route (google.com/ai reload class)", () => {
     ).toBeNull();
   });
 });
+
+describe("navpResolve (#508/#492-class parked prels and route candidates)", () => {
+  it("resolves a prel against the handle-derived base when the parent is an engine path", () => {
+    const path =
+      "/.within.website/x/cmd/anubis/api/pass-challenge/__zl_prel__/" + encodeURIComponent("/sp/favicon?fqdn=x");
+    expect(navpResolve(path, undefined, "https://example.com/sp/search?query=lawn")).toBe(
+      "https://example.com/sp/favicon?fqdn=x",
+    );
+  });
+  it("still fails closed without a fallback base on an undecodable parent", () => {
+    const path = "/not-a-route/__zl_prel__/" + encodeURIComponent("/img/x.png");
+    expect(navpResolve(path, undefined, null)).toBeNull();
+    expect(navpResolve(path)).toBeNull();
+  });
+  it("decodes a route-shaped candidate directly instead of resolving it against the parent", () => {
+    setRouteKey(KEY_A);
+    const route = encodeDest("https://example.com/a/b.png");
+    const path = "/x/__zl_prel__/" + encodeURIComponent(route);
+    expect(navpResolve(path, undefined, "https://parent.example/")).toBe("https://example.com/a/b.png");
+  });
+  it("recovers a concatenated-token candidate (<token><plaintext>)", () => {
+    setRouteKey(KEY_A);
+    const glued = encodeDest("http://") + "www.startpage.com/sp/afs/ads/i/iframe.html";
+    const path = "/x/__zl_prel__/" + encodeURIComponent(glued);
+    expect(navpResolve(path, undefined, "https://example.com/")).toBe(
+      "http://www.startpage.com/sp/afs/ads/i/iframe.html",
+    );
+  });
+});
+describe("challengeReanchorUrl (#492-class handoff re-anchor)", () => {
+  it("mints a visible handle form for the repaired redir destination", () => {
+    setRouteKey(KEY_A);
+    const fixed =
+      "https://anubis.test/x/cmd/anubis/api/pass-challenge?id=1&redir=" +
+      encodeURIComponent("https://example.com/sp/search?query=lawn");
+    const out = challengeReanchorUrl(fixed);
+    expect(out).toBeTruthy();
+    expect(out).toContain("/sp/search?query=lawn");
+  });
+  it("falls back to the plain opaque route without a route key", () => {
+    setRouteKey(null);
+    const fixed =
+      "https://anubis.test/x/cmd/anubis/api/pass-challenge?redir=" + encodeURIComponent("https://example.com/sp/search");
+    expect(challengeReanchorUrl(fixed)).toBe(encodeDest("https://example.com/sp/search"));
+  });
+  it("returns null for unrepairable shapes", () => {
+    expect(challengeReanchorUrl("https://anubis.test/pass-challenge")).toBeNull();
+    expect(challengeReanchorUrl("not a url")).toBeNull();
+  });
+});
+

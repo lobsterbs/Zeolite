@@ -196,7 +196,7 @@ describe("pageCacheMatch stale-while-revalidate dedup", () => {
     expect(hit?.status).toBe(200);
     /* the refresh rides waitUntil, it must not block the response */
     expect(kept.length).toBe(1);
-    expect(transportMock.calls).toBe(1);
+    await vi.waitFor(() => expect(transportMock.calls).toBe(1));
   });
 
   it("coalesces concurrent stale hits into one upstream fetch", async () => {
@@ -210,7 +210,7 @@ describe("pageCacheMatch stale-while-revalidate dedup", () => {
       pageCacheMatch(new Request(PAGES[1])),
     ]);
     expect(hits.every((h) => h?.status === 200)).toBe(true);
-    expect(transportMock.calls).toBe(1);
+    await vi.waitFor(() => expect(transportMock.calls).toBe(1));
     release();
   });
 
@@ -223,14 +223,14 @@ describe("pageCacheMatch stale-while-revalidate dedup", () => {
     await pageCacheMatch(new Request(PAGES[2]), (p) => {
       kept.push(p);
     });
-    expect(transportMock.calls).toBe(1);
+    await vi.waitFor(() => expect(transportMock.calls).toBe(1));
     release();
     await Promise.all(kept);
     transportMock.gate = undefined;
     await pageCacheMatch(new Request(PAGES[2]), (p) => {
       kept.push(p);
     });
-    expect(transportMock.calls).toBe(2);
+    await vi.waitFor(() => expect(transportMock.calls).toBe(2));
   });
 
   it("runs refresh redirect hops through the live-path upgrade gate (#376)", async () => {

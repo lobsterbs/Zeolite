@@ -40,7 +40,7 @@ function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string
   if (scope === undefined) {
     const s = new URL("./", scriptHref);
     if (s.origin !== pageOrigin) {
-      throw new TypeError("The Service Worker scope is outside the page origin");
+      throw new TypeError("Origin");
     }
     return s.href;
   }
@@ -51,7 +51,7 @@ function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string
     /* malformed below */
   }
   if (!s || s.origin !== pageOrigin) {
-    throw new TypeError("The Service Worker scope is outside the page origin");
+    throw new TypeError("Origin");
   }
   return s.href;
 }
@@ -96,7 +96,7 @@ export function swShimRegister(
     /* malformed below */
   }
   if (!script || script.origin !== new URL(pageUrl).origin) {
-    throw new TypeError("The Service Worker script is outside the page origin");
+    throw new TypeError("Origin");
   }
   const rec = { scriptURL: script.href, scope: scopeFor(pageUrl, options?.scope, script.href) };
   store.set(JSON.stringify(rec));

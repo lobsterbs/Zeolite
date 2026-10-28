@@ -28,10 +28,9 @@
    tracked per element (elMemo), not per route string, so the
    memo's LRU window can no longer restart collection from the
    document prefix; a route evicted from the string memo refreshes
-   through the read that missed it (pendingReads), never through a
-   document rescan. */
+   through the read that missed it, never through a document rescan. */
 
-import { swc } from "./siteid";
+import { controlQuery } from "./controlquery";
 
 type AnyRecord = Record<string, any>;
 
@@ -52,13 +51,6 @@ const MEMO_MAX = 512;
    (attr differs) recollects honestly. dest "" is a memoized
    negative for that attr value. */
 const elMemo = new WeakMap<AnyRecord, { attr: string; dest: string }>();
-/* #488: routes whose property read missed the string memo re-ask
-   through the read itself, bounded by real read activity. The
-   scan drains this set after the document window (routes the
-   window already collected leave the queue); the document
-   prefix is never rescanned for them. */
-const pendingReads = new Set<string>();
-const PENDING_READS_MAX = 64;
 /* routes of the in-flight batch; cleared when the reply (or the
    timeout) settles, so a lost reply stays retryable. */
 const inflight = new Set<string>();
@@ -73,45 +65,21 @@ const SCAN_DEBOUNCE = 200;
    value is kept either way. Covers the relative and absolute
    forms. */
 function routeShaped(v: string): boolean {
-  if (v.startsWith("/__zl_")) return true;
-  let p = v;
-  let q = "";
-  if (/^https?:/i.test(v)) {
-    try {
-      const u = new URL(v);
-      p = u.pathname;
-      q = u.search;
-    } catch {
-      return false;
-    }
-  } else {
-    /* #418: relative forms can still carry the query part */
-    try {
-      q = new URL(v, "http://zeolite.invalid").search;
-    } catch {
-      /* unparseable: no query to inspect */
-    }
-  }
-  if (p.startsWith("/__zl_")) return true;
-  /* #418: query-shape routes carry the handle in zlNavh with the
-     real pathname untouched; the worker decode stays the judge (a
-     real-site path that false-positives decodes to null and
-     memoizes negative). */
-  if (/[?&]zlNavh=([A-Za-z0-9_-]{12,})/.test(q)) return true;
-  return /^[A-Za-z0-9_-]{12,}$/.test(p.split("/")[2] ?? "");
+  try {
+    const u = new URL(v, "http://z/");
+    return u.pathname.startsWith("/__zl_") || /[?&]zlNavh=[A-Za-z0-9_-]{12,}/.test(u.search) ||
+      /^[A-Za-z0-9_-]{12,}$/.test(u.pathname.split("/")[2] ?? "");
+  } catch { return false; }
 }
 
 function memoSet(k: string, v: string): void {
   memo.delete(k);
   memo.set(k, v);
-  if (memo.size > MEMO_MAX) {
-    const first = memo.keys().next();
-    if (!first.done) memo.delete(first.value);
-  }
+  if (memo.size > MEMO_MAX) memo.delete(memo.keys().next().value!);
 }
 
 /* The guarded realm (document + location for the scan). */
-const realmRef: { w: AnyRecord | null } = { w: null };
+let realm: AnyRecord | null = null;
 /* The pre-wrap getAttribute: the scan must read the RAW attr; the
    wrapped one virtualizes exactly what the scan collects. */
 let nativeGetAttr: ((this: AnyRecord, n: string) => string | null) | null = null;
@@ -119,7 +87,7 @@ let scanTimer: ReturnType<typeof setTimeout> | null = null;
 let scanning = false;
 
 function scheduleScan(): void {
-  if (scanTimer !== null || scanning || !realmRef.w) return;
+  if (scanTimer !== null || scanning || !realm) return;
   scanTimer = setTimeout(() => {
     scanTimer = null;
     scan();
@@ -142,83 +110,31 @@ function scheduleScan(): void {
 function scan(): void {
   scanning = true;
   try {
-    const w = realmRef.w;
-    if (!w) return;
-    const doc = w.document as AnyRecord | undefined;
+    const w = realm;
+    const doc = w && w.document;
     if (!doc || typeof doc.querySelectorAll !== "function") return;
-    const batch: string[] = [];
-    const nodes = doc.querySelectorAll("a[href],area[href]") as ArrayLike<AnyRecord>;
-    /* per-scan route -> collected elements (elMemo seeding), and
-       element -> its raw attr string at collection time. */
-    const els = new Map<string, AnyRecord[]>();
-    const attrOf = new Map<AnyRecord, string>();
+    const batch = new Set<string>();
+    const rows: Array<[AnyRecord, string, string]> = [];
     let more = false;
-    for (let i = 0; i < nodes.length; i++) {
-      const n = nodes[i];
-      const g: unknown = nativeGetAttr ?? n.getAttribute;
-      if (typeof g !== "function") continue;
-      let a: unknown;
-      try {
-        a = (g as (this: AnyRecord, n: string) => unknown).call(n, "href");
-      } catch {
-        continue;
-      }
-      if (typeof a !== "string" || !a) continue;
-      const prev = elMemo.get(n);
-      if (prev && prev.attr === a) continue;
-      if (batch.length >= 2 * BATCH_MAX) {
-        more = true;
-        break;
-      }
-      if (!memo.has(a) && !inflight.has(a) && routeShaped(a)) {
-        batch.push(a);
-        attrOf.set(n, a);
-        const list = els.get(a);
-        if (list) list.push(n);
-        else els.set(a, [n]);
-      }
-      try {
-        const abs = new URL(a, (w.location as AnyRecord).href).href;
-        if (abs !== a && !memo.has(abs) && !inflight.has(abs) && routeShaped(abs)) {
-          batch.push(abs);
-          if (!attrOf.has(n)) attrOf.set(n, a);
-          const list2 = els.get(abs);
-          if (list2) list2.push(n);
-          else els.set(abs, [n]);
-        }
-      } catch {
-        /* an unparseable base anchors nothing */
+    for (const n of doc.querySelectorAll("a[href],area[href]") as Iterable<AnyRecord>) {
+      const g = nativeGetAttr ?? n.getAttribute;
+      let a: string;
+      try { a = g.call(n, "href"); } catch { continue; }
+      if (!a || elMemo.get(n)?.attr === a) continue;
+      if (batch.size >= BATCH_MAX) { more = true; break; }
+      let abs = a;
+      try { abs = new URL(a, w!.location.href).href; } catch { /* keep raw */ }
+      for (const r of new Set([a, abs])) {
+        if (!routeShaped(r)) continue;
+        const hit = memo.get(r);
+        if (hit !== undefined) elMemo.set(n, { attr: a, dest: hit });
+        else if (!inflight.has(r)) { batch.add(r); rows.push([n, a, r]); }
       }
     }
-    /* #488: read-refresh routes join after the document window:
-       they were evicted from the string memo by an active read, and
-       the read itself is their only honest re-ask (the scan never
-       recollects processed elements). Routes this window already
-       collected, or that the memo or in-flight set now answers,
-       leave the queue; a full window keeps the rest queued. */
-    if (pendingReads.size) {
-      for (const r of pendingReads) {
-        if (memo.has(r) || inflight.has(r) || batch.includes(r)) {
-          pendingReads.delete(r);
-          continue;
-        }
-        if (batch.length >= 2 * BATCH_MAX) break;
-        pendingReads.delete(r);
-        batch.push(r);
-      }
-    }
-    const fill =
-      els.size > 0
-        ? (route: string, dest: string | null): void => {
-            for (const el of els.get(route) ?? []) {
-              elMemo.set(el, { attr: attrOf.get(el) ?? "", dest: dest ?? "" });
-            }
-          }
-        : undefined;
-    if (batch.length) decodeBatch(batch, more, fill);
-  } finally {
-    scanning = false;
-  }
+    if (batch.size) decodeBatch([...batch], more, (r, d) => {
+      for (const [n, a, route] of rows) if (route === r) elMemo.set(n, { attr: a, dest: d ?? "" });
+    });
+  } finally { scanning = false; }
 }
 
 /* Ask the worker to decode a batch: the reply's dests array
@@ -237,41 +153,18 @@ function decodeBatch(
   fill?: (route: string, dest: string | null) => void,
 ): void {
   const uniq: string[] = [];
-  let capped = false;
   for (const r of routes) {
     if (memo.has(r) || inflight.has(r)) continue;
     inflight.add(r);
     uniq.push(r);
-    if (uniq.length >= BATCH_MAX) {
-      capped = true;
+    if (uniq.length >= BATCH_MAX + 1) {
       break;
     }
   }
   if (!uniq.length) return;
-  const ctl = swc();
-  if (!ctl) {
+  controlQuery({ type: "zl:decodeRoutes", routes: uniq }, data => {
     for (const r of uniq) inflight.delete(r);
-    return;
-  }
-  const ch = new MessageChannel();
-  let settled = false;
-  let to: ReturnType<typeof setTimeout> | undefined;
-  const settle = (): void => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(to);
-    ch.port1.onmessage = null;
-    for (const r of uniq) inflight.delete(r);
-    try {
-      ch.port1.close();
-    } catch {
-      /* an already-closed port stays closed */
-    }
-  };
-  to = setTimeout(settle, 5000);
-  ch.port1.onmessage = (ev: MessageEvent) => {
-    settle();
-    const d = (ev.data ?? {}) as { ok?: boolean; dests?: unknown[] };
+    const d = (data ?? {}) as { ok?: boolean; dests?: unknown[] };
     if (!d.ok || !Array.isArray(d.dests)) return;
     for (let i = 0; i < uniq.length && i < d.dests.length; i++) {
       const dst = d.dests[i];
@@ -281,32 +174,23 @@ function decodeBatch(
     /* #387: a bounded window left undecoded routes behind; drive
        the next one so a large document virtualizes fully without
        waiting for a mutation or a read miss. */
-    if (capped || more) scheduleScan();
-  };
-  try {
-    ctl.postMessage({ type: "zl:decodeRoutes", routes: uniq }, [ch.port2]);
-  } catch {
-    settle();
-    try {
-      ch.port2.close();
-    } catch {
-      /* already transferred: nothing to close */
-    }
-  }
+    if (more) scheduleScan();
+  });
+
 }
 
 /** The nav guard's swap-row getter seam: the virtual destination
     when it is already decoded; undefined while pending or when the
     value is not a route (the caller keeps its native read). #488:
-    a miss of an evicted entry registers a read-driven refresh
-    (pendingReads) - the scan never recollects processed elements,
+    a miss of an evicted entry requests a read-driven refresh;
+    the scan never recollects processed elements,
     so the read itself is the only honest re-ask. */
 export function anchorVirtual(v: string): string | undefined {
   const hit = memo.get(v);
   if (hit !== undefined) return hit === "" ? undefined : hit;
   if (!routeShaped(v)) return undefined;
-  if (pendingReads.size < PENDING_READS_MAX) pendingReads.add(v);
-  scheduleScan();
+  if (!scanTimer && !scanning) decodeBatch([v], false);
+  else scheduleScan();
   return undefined;
 }
 
@@ -317,12 +201,12 @@ export function anchorVirtual(v: string): string | undefined {
     wrap. One-way dependency: navguard imports this module, never
     the reverse. */
 export function applyAnchorShim(w: Record<string, unknown>): void {
-  realmRef.w = w as AnyRecord;
+  realm = w as AnyRecord;
   const doc = (w as AnyRecord).document as AnyRecord | undefined;
   if (doc) {
     if (doc.readyState === "loading" && typeof (w as AnyRecord).addEventListener === "function") {
       try {
-        (w as AnyRecord).addEventListener("DOMContentLoaded", () => scheduleScan(), { once: true });
+        (w as AnyRecord).addEventListener("DOMContentLoaded", scheduleScan, { once: true });
       } catch {
         /* a realm that refuses listeners keeps the scan seams */
       }
@@ -335,9 +219,9 @@ export function applyAnchorShim(w: Record<string, unknown>): void {
     | undefined;
   if (MO && doc && doc.documentElement) {
     try {
-      new MO(() => scheduleScan()).observe(doc.documentElement, {
+      new MO(scheduleScan).observe(doc.documentElement, {
         childList: true,
-        subtree: true,
+        subtree: true, attributes: true, attributeFilter: ["href"],
       });
     } catch {
       /* no observer: the install scan and the getter seam remain */
@@ -350,29 +234,12 @@ export function applyAnchorShim(w: Record<string, unknown>): void {
   if (typeof O !== "function") return;
   nativeGetAttr = O;
   proto.getAttribute = function (this: AnyRecord, n: string) {
-    if (String(n).toLowerCase() === "href") {
-      const tag = String(this.tagName ?? "").toUpperCase();
-      if (tag === "A" || tag === "AREA") {
-        let v: string | null = null;
-        try {
-          v = O.call(this, n);
-        } catch {
-          return O.call(this, n);
-        }
-        if (typeof v === "string") {
-          /* #488: the element-associated result answers first: an
-             LRU eviction from the string memo must not strand this
-             element's read back on the opaque route. */
-          const e = elMemo.get(this);
-          if (e && e.attr === v) {
-            return e.dest === "" ? O.call(this, n) : e.dest;
-          }
-          const hit = memo.get(v);
-          if (hit !== undefined && hit !== "") return hit;
-        }
-      }
+    const v = O.call(this, n);
+    if (String(n).toLowerCase() === "href" && /^(a|area)$/i.test(this.tagName) && v !== null) {
+      const e = elMemo.get(this);
+      return (e && e.attr === v ? e.dest : memo.get(v)) || v;
     }
-    return O.call(this, n);
+    return v;
   };
   /* #490: coherent component reads. The swap-row href getter
      virtualizes once the decode reply lands, but the native
@@ -386,64 +253,18 @@ export function applyAnchorShim(w: Record<string, unknown>): void {
      the native read), native descriptor fallback when unparseable.
      Setters stay native - a component write keeps the browser's
      own href mutation semantics untouched. */
-  const comps: Array<"protocol" | "host" | "hostname" | "port" | "pathname" | "search" | "hash"> = [
-    "protocol",
-    "host",
-    "hostname",
-    "port",
-    "pathname",
-    "search",
-    "hash",
-  ];
-  for (const C of [(w as AnyRecord).HTMLAnchorElement, (w as AnyRecord).HTMLAreaElement] as Array<
-    AnyRecord | undefined
-  >) {
-    if (!C || !C.prototype) continue;
-    const hp = C.prototype as AnyRecord;
-    for (const prop of comps) {
+  for (const C of [(w as AnyRecord).HTMLAnchorElement, (w as AnyRecord).HTMLAreaElement]) {
+    const hp = C && C.prototype;
+    if (!hp) continue;
+    for (const prop of "protocol host hostname port pathname search hash origin".split(" ")) {
       const d = Object.getOwnPropertyDescriptor(hp, prop);
-      if (!d || typeof d.get !== "function") continue;
-      const nativeGet = d.get as (this: AnyRecord) => string;
-      const desc: PropertyDescriptor = {
-        configurable: true,
-        enumerable: true,
-        get(this: AnyRecord) {
-          try {
-            return new URL(String(this.href))[prop];
-          } catch {
-            return nativeGet.call(this);
-          }
-        },
-      };
-      if (typeof d.set === "function") {
-        const nativeSet = d.set as (this: AnyRecord, v: string) => void;
-        desc.set = function (this: AnyRecord, v: string) {
-          nativeSet.call(this, v);
-        };
-      }
-      Object.defineProperty(hp, prop, desc);
+      if (!d || !d.get) continue;
+      Object.defineProperty(hp, prop, { ...d, get(this: AnyRecord) {
+        try { return (new URL(this.href) as unknown as AnyRecord)[prop]; }
+        catch { return d.get!.call(this); }
+      } });
     }
-    const od = Object.getOwnPropertyDescriptor(hp, "origin");
-    if (od && typeof od.get === "function") {
-      const nativeOrigin = od.get as (this: AnyRecord) => string;
-      Object.defineProperty(hp, "origin", {
-        configurable: true,
-        enumerable: true,
-        get(this: AnyRecord) {
-          try {
-            return new URL(String(this.href)).origin;
-          } catch {
-            return nativeOrigin.call(this);
-          }
-        },
-      });
-    }
-    const td = Object.getOwnPropertyDescriptor(hp, "toString");
-    if (td && typeof td.value === "function") {
-      hp.toString = function (this: AnyRecord): string {
-        return String(this.href);
-      };
-    }
+    if (Object.getOwnPropertyDescriptor(hp, "toString")?.value) hp.toString = function(this: AnyRecord) { return String(this.href); };
   }
   /* #388: SVG anchors read their href through SVGAnimatedString
      (baseVal/animVal), a seam neither the nav guard table nor

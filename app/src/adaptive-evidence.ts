@@ -1,0 +1,149 @@
+/* #487 phases 3 + 4: bounded, privacy-preserving per-origin
+   transit evidence. Phase 3 records observe-only JS serve outcomes
+   (no behavior ever changes on them); phase 4 turns CORROBORATED
+   rewrite-specific body-pass failures into an opt-in next-navigation
+   literal-pass skip. The learned demotion is off by default and gated
+   by the swstate adaptiveTransit flag (the host kill switch); a
+   manual KDL native rule wins earlier in the request path; documents,
+   CSS and worker preludes are never learned-demoted. Storage is
+   hostname + counters only: no URLs, queries, headers or body bytes.
+   Module state: a worker restart clears it (which is also the engine
+   version invalidation), and a 7-day TTL bounds a long-lived worker. */
+
+import { ZEOLITE_VERSION } from "./swstate";
+
+export interface AdaptiveOriginEvidence {
+  origin: string;
+  observed: number;
+  provenUnchanged: number;
+  literalChanged: number;
+  specifierChanged: number;
+  bodyPassFailures: number;
+  failureTraces: string[];
+  demotionsServed: number;
+  firstSeen: number;
+  lastSeen: number;
+}
+
+/* ponytail: bounded store - 512 origins, drop-oldest; 8 failure
+   trace ids per origin. Corroboration: >= 3 failures on >= 2
+   distinct traces. One failure (one flaky wasm load) never changes
+   behavior. */
+const MAX_ORIGINS = 512;
+const MAX_TRACES = 8;
+const CORROBORATE_FAILURES = 3;
+const CORROBORATE_TRACES = 2;
+export const ADAPTIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+const evidence = new Map<string, AdaptiveOriginEvidence>();
+let dropped = 0;
+
+function hostOf(target: string): string | null {
+  try {
+    return new URL(target).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function entry(origin: string): AdaptiveOriginEvidence {
+  let e = evidence.get(origin);
+  const now = Date.now();
+  if (!e) {
+    if (evidence.size >= MAX_ORIGINS) {
+      const oldest = evidence.keys().next().value;
+      if (oldest !== undefined) {
+        evidence.delete(oldest);
+        dropped++;
+      }
+    }
+    e = {
+      origin,
+      observed: 0,
+      provenUnchanged: 0,
+      literalChanged: 0,
+      specifierChanged: 0,
+      bodyPassFailures: 0,
+      failureTraces: [],
+      demotionsServed: 0,
+      firstSeen: now,
+      lastSeen: now,
+    };
+    evidence.set(origin, e);
+  }
+  e.lastSeen = now;
+  return e;
+}
+
+/** #487 phase 3: observe-only record of one served JS body's actual
+    transformation class (from transit.planJsServeOutcome). */
+export function recordJsServeOutcome(
+  target: string,
+  o: { specifierChanged: boolean; literalChanged: boolean; literalSkipped: boolean },
+): void {
+  const h = hostOf(target);
+  if (!h) return;
+  const e = entry(h);
+  e.observed++;
+  if (o.specifierChanged) e.specifierChanged++;
+  if (o.literalChanged) e.literalChanged++;
+  if (!o.specifierChanged && !o.literalChanged && !o.literalSkipped) e.provenUnchanged++;
+}
+
+/** #487 phase 4: one rewrite-specific body-pass failure (the literal
+    pass threw; the specifier output still served). traceId rides for
+    corroboration across DISTINCT loads only - never logged. */
+export function recordBodyPassFailure(target: string, traceId: string): void {
+  const h = hostOf(target);
+  if (!h) return;
+  const e = entry(h);
+  e.bodyPassFailures++;
+  if (!e.failureTraces.includes(traceId)) {
+    if (e.failureTraces.length >= MAX_TRACES) e.failureTraces.shift();
+    e.failureTraces.push(traceId);
+  }
+}
+
+/** #487 phase 4: is the literal pass for this origin corroborated as
+    failing? TTL-stale evidence never demotes. The caller gates on the
+    swstate adaptiveTransit flag; this answers evidence only. */
+export function literalPassDemotion(target: string): boolean {
+  const h = hostOf(target);
+  if (!h) return false;
+  const e = evidence.get(h);
+  if (!e) return false;
+  if (Date.now() - e.lastSeen > ADAPTIVE_TTL_MS) {
+    evidence.delete(h);
+    return false;
+  }
+  return e.bodyPassFailures >= CORROBORATE_FAILURES && e.failureTraces.length >= CORROBORATE_TRACES;
+}
+
+/** #487 phase 4: deployment-level metric - one serve that skipped the
+    literal pass on learned evidence. */
+export function noteDemotionServed(target: string): void {
+  const h = hostOf(target);
+  if (!h) return;
+  entry(h).demotionsServed++;
+}
+
+/** Host diagnostics view: hostname + counters only, TTL-pruned, with
+    the engine version that produced it (the versioned rollout stamp). */
+export function adaptiveEvidenceSnapshot(): {
+  version: string;
+  origins: number;
+  dropped: number;
+  entries: AdaptiveOriginEvidence[];
+} {
+  const now = Date.now();
+  for (const [k, v] of evidence) {
+    if (now - v.lastSeen > ADAPTIVE_TTL_MS) evidence.delete(k);
+  }
+  return { version: ZEOLITE_VERSION, origins: evidence.size, dropped, entries: Array.from(evidence.values()) };
+}
+
+/** Tests and the kill switch reset. */
+export function adaptiveEvidenceReset(): void {
+  evidence.clear();
+  dropped = 0;
+}

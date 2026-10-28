@@ -200,6 +200,21 @@ export function setImageLazy(on: boolean): void {
   imageLazy = on;
 }
 
+/* #487 phase 4: the LEARNED literal-pass demotion is opt-in (default
+   off). Evidence recording (#487 phase 3) is observe-only and always
+   on; this flag only gates whether corroborated evidence may change
+   behavior. Ephemeral like imageLazy: resets on restart, the host
+   zl:config is the runtime switch (and the kill switch). */
+let adaptiveTransit = false;
+
+export function adaptiveTransitEnabled(): boolean {
+  return adaptiveTransit;
+}
+
+export function setAdaptiveTransit(on: boolean): void {
+  adaptiveTransit = on;
+}
+
 /* ---- Per-site route table ------------------------------------------ */
 
 /** Sites the user disabled for this engine. Keyed by registrable-ish

@@ -237,6 +237,85 @@ export function refineWithContent(
   return dec;
 }
 
+/** #487 phase 1: one response behavior planner for both cache and live
+    paths. This is deliberately conservative: MIME and request destination
+    decide required passes; only an explicit KDL native rule can demote
+    the page-script literal pass, and byte-sensitive CDN-CGI resources
+    preserve their pre-existing unconditional pass-through exception.
+
+    "light" is reserved for the independently verified AST/specifier
+    selection phase; no heuristic currently selects it. The strategy
+    describes the rewrite requirement, not the relay/Wisp wire route. */
+export type RewriteStrategy = "native" | "light" | "full" | "required" | "blocked";
+export type AdaptiveEvidence =
+  | "default"
+  | "request-destination"
+  | "response-content-type"
+  | "manual-policy"
+  | "challenge-namespace";
+
+export interface AdaptiveTransitPlan {
+  decision: TransitDecision;
+  strategy: RewriteStrategy;
+  evidence: AdaptiveEvidence;
+}
+
+/** Structural subset of the behavior-only KDL rule, with transport
+    routes excluded at the call site via behaviorMatch(). */
+export interface BehaviorOverride {
+  id: string;
+  route: string;
+}
+
+/** One response planner, called after MIME is known; the resulting
+    decision is the sole authority for network log, body-transform gates
+    and the fallback ring in both fresh and cached response paths. */
+export function planResponseTransit(
+  initial: TransitDecision,
+  contentType: string,
+  dest: string,
+  target: string,
+  override: BehaviorOverride | null = null,
+): AdaptiveTransitPlan {
+  let decision = refineWithContent(initial, contentType, dest);
+  let evidence: AdaptiveEvidence = initial.mode === "RewriteFallback" && initial.reason === "POLICY_REWRITE"
+    ? "manual-policy"
+    : DOC_DESTS.has(dest.toLowerCase()) ? "request-destination"
+    : decision.mode === "RewriteFallback" ? "response-content-type"
+    : "default";
+
+  /* Do not use the generic policy demotion for documents, styles,
+     workers, or other required transforms. Keep the existing exact
+     script-destination eligibility contract. */
+  if (
+    decision.mode === "RewriteFallback" &&
+    decision.reason === "JS_LITERAL_REWRITE_REQUIRED" &&
+    override?.route === "native" &&
+    (dest === "script" || dest === "")
+  ) {
+    decision = { mode: "NativeTransit", reason: "POLICY_NATIVE", ruleId: override.id };
+    evidence = "manual-policy";
+  }
+
+  /* The exception must win over rewrite policy and even document
+     classification, as before: tampering with Cloudflare's signed
+     challenge bodies breaks those pages. Never turn a Blocked request
+     into a transportable one. */
+  if (decision.mode === "RewriteFallback" && isCdnCgiUrl(target)) {
+    decision = { mode: "NativeTransit", reason: "CDN_CGI_NATIVE" };
+    evidence = "challenge-namespace";
+  }
+
+  const strategy: RewriteStrategy =
+    decision.mode === "Blocked" ? "blocked"
+    : decision.mode === "NativeTransit" ? "native"
+    : decision.reason === "JS_LITERAL_REWRITE_REQUIRED" || decision.reason === "POLICY_REWRITE"
+      ? "full"
+      : "required";
+
+  return { decision, strategy, evidence };
+}
+
 export interface FallbackEvent {
   ts: number;
   url: string;
@@ -318,4 +397,37 @@ export function transitResetForTests(): void {
   relayCount = 0;
   wispCount = 0;
   fallbacks.length = 0;
+}
+
+/** #487 phase 2: the ACTUAL serve-time transformation class for a JS
+    body, proven by comparing each pass output against its input (the
+    rewriter is its own oracle). A proven-unchanged body still serves
+    through the same pipeline (bytes identical) and is NEVER
+    reclassified native: a textual no-diff is not site-level proof
+    until the other seams (eval, new Function, generated URLs, workers)
+    are accounted for. literalSkipped means the pass could not run
+    (origin-pinning skip #449 or a wasm load failure), so no proof is
+    claimed. The outcome feeds the netLog annotation, the phase-3
+    evidence and the phase-4 corroboration. */
+export interface JsServeOutcome {
+  specifierChanged: boolean;
+  literalChanged: boolean;
+  literalSkipped: boolean;
+  provenUnchanged: boolean;
+}
+
+export function planJsServeOutcome(
+  raw: string,
+  afterSpecifiers: string,
+  afterLiterals: string | null,
+): JsServeOutcome {
+  const specifierChanged = afterSpecifiers !== raw;
+  const literalSkipped = afterLiterals === null;
+  const literalChanged = !literalSkipped && afterLiterals !== afterSpecifiers;
+  return {
+    specifierChanged,
+    literalChanged,
+    literalSkipped,
+    provenUnchanged: !specifierChanged && !literalChanged && !literalSkipped,
+  };
 }

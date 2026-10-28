@@ -87,6 +87,7 @@ describe("embedder handshake retry (#491)", () => {
     applyEmbedSync(w);
     /* the throw re-armed the handshake instead of permanently
        disabling identity sync (the #491 regression) */
+    await tick();
     expect(calls.length).toBe(2);
     expect(calls[0][0]).toEqual({ type: "zl:getEmbedder" });
     expect(calls[1][0]).toEqual({ type: "zl:getEmbedder" });
@@ -100,7 +101,7 @@ describe("embedder handshake retry (#491)", () => {
     );
   });
 
-  it("an unreachable worker exhausts the bounded budget and fails closed", () => {
+  it("an unreachable worker exhausts the bounded budget and fails closed", async () => {
     const { w } = makeWin(ENGINE + ENTRY);
     const parent = { postMessage: vi.fn() };
     w.parent = parent;
@@ -118,6 +119,7 @@ describe("embedder handshake retry (#491)", () => {
     applyEmbedSync(w);
     /* MAX_ATTEMPTS bounds the whole recovery: no infinite retry
        loop, and no permanent zombie state either */
+    await tick();
     expect(n).toBe(4);
     /* fail-closed terminal: popups are not routed anywhere and no
        native fallback window opens */
@@ -153,4 +155,18 @@ describe("embedder handshake retry (#491)", () => {
     await tick();
     expect(parent.postMessage).toHaveBeenCalledTimes(1);
   });
+  it.each([null, {}, { ok: false }, { ok: true }, { ok: false, origin: null }])("does not authorize standalone popups from malformed reply %j", async reply => {
+    const { w } = makeWin(ENGINE + ENTRY);
+    w.parent = { postMessage: vi.fn() };
+    let peer: MessagePort;
+    vi.stubGlobal("navigator", { serviceWorker: { controller: { postMessage(_m: unknown, ports: MessagePort[]) { peer = ports[0]; } } } });
+    applyEmbedSync(w);
+    const fallback = vi.fn();
+    embedPopup(w, "https://x.example", fallback);
+    peer!.postMessage(reply);
+    await tick();
+    expect(fallback).not.toHaveBeenCalled();
+    expect(embedPopup(w, "https://x.example", fallback)).toBe(true);
+  });
+
 });

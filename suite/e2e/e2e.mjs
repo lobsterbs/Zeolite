@@ -38,7 +38,7 @@
    `npx playwright install chromium`). */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright";
@@ -95,7 +95,7 @@ async function waitFor(label, timeoutMs, fn) {
 function attachRecorder(pg) {
   const rec = { requests: [] };
   (async () => {
-    const cdp = await context.newCDPSession(pg);
+    const cdp = await pg.context().newCDPSession(pg);
     await cdp.send("Network.enable");
     cdp.on("Network.requestWillBeSent", (p) => {
       rec.requests.push({ id: p.requestId, url: p.request.url, fromSW: undefined, failed: false, status: 0 });
@@ -126,8 +126,8 @@ async function frameWith(pg, sel) {
   return null;
 }
 
-async function openProxied(target, marker = "#zl-marker") {
-  const pg = await context.newPage();
+async function openProxied(target, marker = "#zl-marker", ctx = context) {
+  const pg = await ctx.newPage();
   const rec = attachRecorder(pg);
   await pg.goto(ENGINE + "/?url=" + encodeURIComponent(target));
   let frame = null;
@@ -183,6 +183,28 @@ async function evalIn(frame, label, js, timeoutMs = 15000) {
   ]);
 }
 
+async function hostControl(pg, message, timeoutMs = 6000) {
+  return await pg.evaluate(({ message, timeoutMs }) => new Promise((resolve) => {
+    const ctl = navigator.serviceWorker.controller;
+    if (!ctl) return resolve({ ok: false, status: "unavailable", error: "no controller" });
+    const ch = new MessageChannel();
+    let done = false;
+    let timer;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      ch.port1.onmessage = null;
+      ch.port1.close();
+      ch.port2.close();
+      resolve(value);
+    };
+    timer = setTimeout(() => finish({ ok: false, status: "unavailable", error: "timeout" }), timeoutMs);
+    ch.port1.onmessage = (e) => finish(e.data);
+    try { ctl.postMessage(message, [ch.port2]); }
+    catch { finish({ ok: false, status: "unavailable", error: "postMessage failed" }); }
+  }), { message, timeoutMs });
+}
 async function startEngine() {
   const bin = resolve("target/release/zeolite-server");
   if (!existsSync(bin)) {
@@ -263,7 +285,137 @@ async function main() {
     process.exitCode = 1;
     return;
   }
+  /* ---- #495: host-only Zeolite Doctor ----------------------------- */
 
+  await check("doctor: passive report proves only observed host facts and emits KDL (#495)", async () => {
+    const { page } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const ping = await hostControl(page, { type: "zl:ping" });
+    const transportBefore = await hostControl(page, { type: "zl:transport" });
+    assert(ping?.ok === true && typeof ping.version === "string", "ping unavailable: " + JSON.stringify(ping));
+    assert(transportBefore?.ok === true, "transport poll unavailable before Doctor");
+    const report = await hostControl(page, {
+      type: "zl:doctor", expectedScope: ENGINE + "/", expectedVersion: ping.version, format: "kdl",
+    });
+    assert(report?.ok === true, "doctor refused: " + JSON.stringify(report));
+    eq(report.schemaVersion, 1, "doctor schema");
+    const byCode = Object.fromEntries(report.checks.map((c) => [c.code, c]));
+    eq(byCode["worker.running"]?.status, "pass", "worker.running");
+    eq(byCode["worker.boot"]?.status, "pass", "worker.boot");
+    eq(byCode["worker.scope"]?.status, "pass", "worker.scope");
+    eq(byCode["bundle.version"]?.status, "pass", "bundle.version");
+    eq(byCode["worker.client-control"]?.status, "unknown", "no selected client must remain unknown");
+    eq(byCode["assets.bootstrap"]?.status, "skipped", "passive Doctor must not probe assets");
+    assert(typeof report.kdl === "string" && report.kdl.startsWith("zeolite-doctor version=1"), "missing Doctor KDL");
+    assert(!report.kdl.includes(ORIGIN_A), "Doctor KDL leaked target origin");
+    const pingAfter = await hostControl(page, { type: "zl:ping" });
+    const transportAfter = await hostControl(page, { type: "zl:transport" });
+    for (const key of ["version", "prefix", "scheme", "httpsUpgrade", "imageLazy", "navHandles", "queryRoutes"])
+      eq(pingAfter[key], ping[key], "passive Doctor changed ping field " + key);
+    eq(JSON.stringify(pingAfter.experimental), JSON.stringify(ping.experimental), "passive Doctor changed experimental flags");
+    eq(transportAfter.engine, transportBefore.engine, "passive Doctor changed transport engine");
+    const mismatch = await hostControl(page, {
+      type: "zl:doctor", expectedScope: ENGINE + "/wrong/", expectedVersion: "definitely-not-" + ping.version,
+    });
+    const mismatchByCode = Object.fromEntries(mismatch.checks.map((c) => [c.code, c]));
+    eq(mismatchByCode["worker.scope"]?.status, "fail", "wrong expected scope");
+    eq(mismatchByCode["bundle.version"]?.status, "fail", "wrong expected version");
+    assert(mismatch.healthy === false, "confirmed scope/version mismatch must make health false");
+    return "passive facts + KDL + scope/version mismatch";
+  });
+
+  await check("doctor: verifies live proxied client and rejects fake identity (#495)", async () => {
+    const { page } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const logs = await hostControl(page, { type: "zl:getNetLog", since: 0 });
+    assert(Array.isArray(logs?.entries), "netlog unavailable");
+    const row = logs.entries.find((e) => typeof e.clientId === "string" && e.clientId.length > 0);
+    assert(row, "no worker-attributed proxied client in netlog");
+    const live = await hostControl(page, { type: "zl:doctor", clientId: row.clientId });
+    eq(live?.checks?.find((c) => c.code === "worker.client-control")?.status, "pass", "live selected client");
+    const fake = await hostControl(page, { type: "zl:doctor", clientId: "not-a-real-client" });
+    eq(fake?.checks?.find((c) => c.code === "worker.client-control")?.status, "fail", "fake selected client");
+    assert(fake.healthy === false, "confirmed client failure must make health false");
+    return "live=pass fake=fail";
+  });
+
+  await check("doctor: proxied page cannot inspect host integration state (#495)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const report = await evalIn(frame, "Doctor from proxied page", '() => new Promise((res) => { const ch = new MessageChannel(); const ctl = navigator.serviceWorker.controller; if (!ctl) return res({ ok: false, error: "no controller" }); ctl.postMessage({ type: "zl:doctor", format: "kdl" }, [ch.port2]); ch.port1.onmessage = (e) => res(e.data); setTimeout(() => res({ ok: false, error: "timeout" }), 5000); })');
+    eq(report?.ok, false, "proxied doctor call must fail");
+    eq(report?.error, "host-only control message", "Doctor gate reason");
+    assert(report.kdl === undefined, "refused proxied page received Doctor KDL");
+    return "host-only refusal";
+  });
+
+  await check("doctor: standalone DevTools reports unavailable without a controlling worker (#495)", async () => {
+    const isolated = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const pg = await isolated.newPage();
+      await pg.goto(ENGINE + "/devtools.html");
+      eq(await pg.evaluate(() => navigator.serviceWorker.controller === null), true, "blocked context unexpectedly controlled");
+      await pg.locator("#doctorInspect").click();
+      const status = await pg.locator("#doctorStatus").textContent();
+      assert(String(status).startsWith("Unavailable:"), "Doctor UI did not expose unavailable state: " + status);
+      return status;
+    } finally {
+      await isolated.close();
+    }
+  });
+  await check("doctor: explicit bundle probe checks fixed same-origin assets only (#495)", async () => {
+    const { page, rec } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const before = rec.requests.length;
+    const report = await hostControl(page, { type: "zl:doctor", probeAssets: true });
+    assert(report?.ok === true, "Doctor asset probe refused");
+    const assets = report.checks.filter((c) => c.code.startsWith("assets."));
+    eq(assets.length, 8, "asset check count");
+    for (const a of assets) eq(a.status, "pass", a.code + " should be a verified local asset: " + JSON.stringify(a));
+    eq(report.checks.find((c) => c.code === "worker.service-worker-allowed")?.status, "pass",
+      "Service-Worker-Allowed deployment contract");
+    eq(report.checks.find((c) => c.code === "worker.cache-policy")?.status, "pass",
+      "worker cache revalidation deployment contract");
+    const requested = rec.requests.slice(before).map((r) => r.url);
+    assert(requested.every((u) => u.startsWith(ENGINE)), "Doctor asset probe contacted non-engine origin: " + JSON.stringify(requested));
+    return assets.map((a) => a.code + "=" + a.status).join(" ");
+  });
+
+
+  await check("doctor: missing rewriter WASM is a named deployment failure (#495)", async () => {
+    const { page } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const wasm = resolve("app/dist/rewriter_wasm_bg.wasm");
+    const held = wasm + ".doctor-missing";
+    assert(existsSync(wasm), "built rewriter WASM fixture is missing before test");
+    renameSync(wasm, held);
+    try {
+      const report = await hostControl(page, { type: "zl:doctor", probeAssets: true });
+      const check = report?.checks?.find((c) => c.code === "assets.rewriter-wasm");
+      eq(check?.status, "fail", "missing rewriter WASM status");
+      assert(String(check?.summary).includes("missing") || String(check?.summary).includes("redirect"),
+        "missing WASM did not produce actionable evidence: " + JSON.stringify(check));
+      assert(report.healthy === false, "known missing runtime asset must make Doctor health false");
+      return "assets.rewriter-wasm=fail";
+    } finally {
+      renameSync(held, wasm);
+    }
+  });
+  await check("doctor: malformed policy.kdl is a real Chromium config failure (#495)", async () => {
+    const policy = resolve("app/dist/policy.kdl");
+    const hadPolicy = existsSync(policy);
+    const original = hadPolicy ? readFileSync(policy) : null;
+    const isolated = await browser.newContext();
+    writeFileSync(policy, 'rule "broken" {\n', "utf8");
+    try {
+      const { page } = await openProxied(ORIGIN_A + "/dir/page.html", "#zl-marker", isolated);
+      const report = await hostControl(page, { type: "zl:doctor" });
+      const cfg = report?.checks?.find((c) => c.code === "config.policy");
+      eq(cfg?.status, "fail", "malformed policy.kdl");
+      assert(report.healthy === false, "malformed policy must make Doctor health false");
+      assert(!JSON.stringify(report).includes('rule "broken"'), "Doctor leaked malformed KDL contents");
+      return "config.policy=fail";
+    } finally {
+      await isolated.close();
+      if (hadPolicy) writeFileSync(policy, original);
+      else if (existsSync(policy)) unlinkSync(policy);
+    }
+  });
   await check("routing: an absolute cross-origin link navigates through the engine", async () => {
     const { page } = await openProxied(ORIGIN_A + "/dir/page.html");
     await (await waitFor("frame", 10000, () => frameWith(page, "#zl-marker"))).locator("#abs").click();
@@ -618,6 +770,47 @@ async function main() {
     })`, 20000);
     eq(out, "shared:shared-ok", "shared worker message");
     return out;
+  });
+
+  await check("api: SharedWorker classic/module identities stay isolated (#453)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const values = JSON.parse(await evalIn(frame, "shared identity", `async () => {
+      const held = [];
+      async function identity(type, credentials) {
+        return await new Promise((resolve, reject) => {
+          const options = { name: "zl-identity-453", type };
+          if (credentials) options.credentials = credentials;
+          const w = new SharedWorker("/dir/shared-identity.js", options);
+          held.push(w);
+          const timer = setTimeout(() => reject(new Error("shared worker identity timeout")), 12000);
+          w.port.onmessage = (e) => { if (e.data?.id) { clearTimeout(timer); resolve(e.data.id); } };
+          w.port.onmessageerror = () => { clearTimeout(timer); reject(new Error("shared worker message error")); };
+          w.port.start();
+          w.port.postMessage("id");
+        });
+      }
+      const classic1 = await identity("classic");
+      const classic2 = await identity("classic");
+      const module1 = await identity("module");
+      const module2 = await identity("module");
+      const differentCredentials = await identity("module", "omit");
+      return JSON.stringify({ classicShared: classic1 === classic2, moduleShared: module1 === module2,
+        typeIsolated: classic1 !== module1, credentialsIsolated: module1 !== differentCredentials, first: classic1 });
+    }`, 70000));
+    assert(values.classicShared, "two same-name classic constructions must share an instance");
+    assert(values.moduleShared, "two same-name module constructions must share an instance");
+    assert(values.typeIsolated, "classic and module workers shared an instance");
+    assert(values.credentialsIsolated, "module workers with distinct credentials shared an instance");
+    const { frame: frameB } = await openProxied(ORIGIN_B + "/dir/page.html");
+    const other = await evalIn(frameB, "cross-site shared identity", `() => new Promise((resolve, reject) => {
+      const w = new SharedWorker("/dir/shared-identity.js", { name: "zl-identity-453", type: "classic" });
+      const timer = setTimeout(() => reject(new Error("second site worker timeout")), 12000);
+      w.port.onmessage = e => { if (e.data?.id) { clearTimeout(timer); resolve(e.data.id); } };
+      w.port.start();
+      w.port.postMessage("id");
+    })`, 20000);
+    assert(values.first !== other, "distinct virtual origins shared a worker global");
+    return "same-type reuse, classic/module separation, credential and origin isolation";
   });
 
   await check("api: localStorage/sessionStorage round-trip inside the virtual origin", async () => {
@@ -1387,6 +1580,33 @@ async function main() {
     }
     assert(bad.length === 0, "decodable destinations on engine routes: " + bad.slice(0, 4).join(" | "));
     return urls.size + " urls swept: " + routes + " opaque routes, " + handles + " keyed handles, " + markers + " nav markers (documented #54 degrade)";
+  });
+
+  /* ---- #499: credential-bearing URL configuration ------------------- */
+
+  await check("rewriter: credential-bearing DSN/config stays parseable while fetch routes (#499)", async () => {
+    const direct = await context.newPage();
+    let expected;
+    try {
+      await direct.goto(ORIGIN_A + "/dir/credential-config.html");
+      expected = await waitFor("direct URL parser", 10000, () =>
+        direct.evaluate(() => self.__zlConfig ? { dsn: self.__zlConfig.dsn, other: self.__zlConfig.other } : null),
+      );
+    } finally {
+      await direct.close();
+    }
+    const { frame, rec } = await openProxied(ORIGIN_A + "/dir/credential-config.html", "#zl-config");
+    const actual = await waitFor("proxied URL parser and fetch", 12000, async () => {
+      const result = await frame.evaluate(() => self.__zlConfig ? { ...self.__zlConfig } : null);
+      return result?.fetched === "pending" ? null : result;
+    });
+    assert(expected.dsn && expected.other, "direct browser failed to parse original configuration URLs");
+    eq(actual.dsn, expected.dsn, "proxied DSN userinfo was rewritten");
+    eq(actual.other, expected.other, "non-Sentry configuration userinfo was rewritten");
+    eq(actual.fetched, "api", "browser-owned fetch failed to route through the engine");
+    const escaped = rec.requests.filter((r) => r.url.startsWith(ORIGIN_A) || r.url.startsWith(ORIGIN_B));
+    assert(escaped.length === 0, "browser-direct request escaped engine: " + JSON.stringify(escaped.slice(0, 3)));
+    return "two URL parsers agree with direct control; fetch engine-served";
   });
 
   /* ---- #449: origin-pinning script literal skip --------------------- */

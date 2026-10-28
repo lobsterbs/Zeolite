@@ -15,6 +15,7 @@ vi.mock("../transport", () => ({
   currentEngine: () => "libcurl",
   wispTransport: { ready: async () => {} },
   altRegister: () => {},
+  altConfigured: () => false,
 }));
 
 /* #279: capture wsBridge.open destinations for the retarget tests. */
@@ -50,6 +51,10 @@ import {
 } from "../control";
 import { EXT_CONTROL_TYPES, dispatchExtControl } from "../extensions/control";
 import { documentCookieRead, documentCookieWrite } from "../cookies";
+import { DIAG } from "../diag";
+import { netLogPush } from "../netlog";
+import { parseKdl } from "../kdl";
+import { experimentalSnapshot, resetExperimentalForTests } from "../experimental-flags";
 
 /* Derives the case labels from the dispatcher's own source, the way the
    wiring sees it after vitest's transform (unminified). */
@@ -102,6 +107,195 @@ describe("sender gate preserved by the extraction (#41/#48)", () => {
   it("refuses a host-only message from a proxied page", async () => {
     const { ev, posted } = mkEvent("https://w.example.org/j/abc", { type: "zl:config", prefix: "/k/" });
     await handleControlEvent(ev, deps);
+    expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
+  });
+
+  it("accepts only host-selected experimental preferences, and reports inactive capabilities", async () => {
+    resetExperimentalForTests();
+    const selected = {
+      adaptiveTransit: true, hybridLocation: true,
+      cspTranslation: true, virtualSW: true,
+    };
+    const { ev, posted } = mkEvent("https://w.example.org/", {
+      type: "zl:config", prefix: "/j/", experimental: selected,
+    });
+    await handleControlEvent(ev, deps);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
+      ok: true, experimental: { requested: selected,
+        effective: { adaptiveTransit: false, hybridLocation: false,
+          cspTranslation: true, virtualSW: false } },
+    });
+    const ping = mkEvent("https://w.example.org/j/token", { type: "zl:ping" });
+    await handleControlEvent(ping.ev, deps);
+    expect(ping.posted[0]).toMatchObject({
+      ok: true, experimental: { requested: selected,
+        effective: { cspTranslation: true, virtualSW: false } },
+    });
+    const bad = mkEvent("https://w.example.org/", {
+      type: "zl:config", prefix: "/j/", experimental: { virtualSW: "true" },
+    });
+    await handleControlEvent(bad.ev, deps);
+    expect(bad.posted[0]).toMatchObject({ ok: false, error: "unknown or non-boolean experimental flag" });
+    expect(experimentalSnapshot().requested).toEqual(selected);
+    resetExperimentalForTests();
+  });
+
+  it("refuses proxied attempts to enable an experimental feature", async () => {
+    resetExperimentalForTests();
+    const { ev, posted } = mkEvent("https://w.example.org/j/abc", {
+      type: "zl:config", experimental: { virtualSW: true },
+    });
+    await handleControlEvent(ev, deps);
+    expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
+    expect(experimentalSnapshot().requested.virtualSW).toBe(false);
+  });
+
+  it("rejects zl:doctor from proxied pages before examining boot state", async () => {
+    const stalled = new Promise(() => {});
+    const { ev, posted } = mkEvent("https://w.example.org/j/abc", { type: "zl:doctor" });
+    await handleControlEvent(ev, { ready: stalled, persistRoute: () => { throw new Error("must not write"); } });
+    expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
+  });
+
+  it("doctor proves selected proxied client control and fails closed for stale/host clients", async () => {
+    const get = vi.fn(async (id: string) => {
+      if (id === "live") return { id, url: "https://w.example.org/j/abc" };
+      if (id === "host") return { id, url: "https://w.example.org/" };
+      return undefined;
+    });
+    vi.stubGlobal("self", {
+      location: { origin: "https://w.example.org", href: "https://w.example.org/sw.js" },
+      registration: { scope: "https://w.example.org/" },
+      clients: { get },
+    });
+    for (const [clientId, expected] of [
+      ["live", "pass"],
+      ["gone", "fail"],
+      ["host", "fail"],
+    ] as const) {
+      const { ev, posted } = mkEvent("https://w.example.org/", {
+        type: "zl:doctor", clientId,
+      });
+      await handleControlEvent(ev, deps);
+      const report = posted[0] as { checks: Array<{code: string; status: string}> };
+      expect(report.checks.find(c => c.code === "worker.client-control")?.status).toBe(expected);
+    }
+    expect(get).toHaveBeenCalledTimes(3);
+  });
+
+  it("doctor reports client verification unknown when browser client enumeration fails", async () => {
+    vi.stubGlobal("self", {
+      location: { origin: "https://w.example.org", href: "https://w.example.org/sw.js" },
+      registration: { scope: "https://w.example.org/" },
+      clients: { get: async () => { throw new Error("browser API unavailable"); } },
+    });
+    const { ev, posted } = mkEvent("https://w.example.org/", {
+      type: "zl:doctor", clientId: "live",
+    });
+    await handleControlEvent(ev, deps);
+    const report = posted[0] as { checks: Array<{code: string; status: string}> };
+    expect(report.checks.find(c => c.code === "worker.client-control")?.status).toBe("unknown");
+  });
+
+  it("permits zl:doctor to return a bounded passive, redacted report without extra fetching", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    const { ev, posted } = mkEvent("https://w.example.org/", {
+      type: "zl:doctor", expectedVersion: "wrong version", format: "kdl",
+    });
+    await handleControlEvent(ev, { ready: Promise.resolve(), persistRoute: () => { throw new Error("must not write"); } });
+    expect(posted).toHaveLength(1);
+    const report = posted[0] as { ok: boolean; healthy: boolean | null; checks: Array<{code: string; status: string}>; kdl: string };
+    expect(report.ok).toBe(true);
+    expect(report.healthy).toBe(false); // version mismatch is proven
+    expect(report.checks.find(c => c.code === "bundle.version")?.status).toBe("fail");
+    expect(report.checks.find(c => c.code === "assets.bootstrap")?.status).toBe("skipped");
+    expect(report.checks.find(c => c.code === "worker.client-control")?.status).toBe("unknown");
+    expect(report.kdl).toContain('zeolite-doctor version=1');
+    expect(fetcher).not.toHaveBeenCalled();
+    fetcher.mockRestore();
+  });
+
+  it("doctor reports failed boot rather than hanging behind the normal control-plane gate", async () => {
+    const { ev, posted } = mkEvent("https://w.example.org/", { type: "zl:doctor" });
+    await handleControlEvent(ev, {
+      ready: Promise.reject(new Error("private credential password=do-not-export")),
+      persistRoute: () => { throw new Error("must not write"); },
+    });
+    expect(posted).toHaveLength(1);
+    const report = posted[0] as { ok: boolean; healthy: boolean | null; checks: Array<{code: string; status: string}> };
+    expect(report.ok).toBe(true);
+    expect(report.healthy).toBe(false);
+    expect(report.checks.find(c => c.code === "worker.boot")?.status).toBe("fail");
+    expect(JSON.stringify(report)).not.toContain("do-not-export");
+  });
+
+  it("exports only a worker-verified proxied client request, never worker-global diagnostics", async () => {
+    const traceId = DIAG.trace("page-one");
+    DIAG.stage(traceId, "REQUEST_INTERCEPTED");
+    netLogPush({
+      traceId, method: "GET", path: "/j/secret", dest: "https://private.example/?token=SHOULD-NOT-LEAK",
+      rtype: "DOCUMENT", status: 200, ms: 12, bytes: 48, transport: "RewriteFallback",
+    });
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org" },
+      clients: { get: vi.fn(async (id: string) =>
+        id === "page-one" ? { id, url: "https://w.example.org/j/abc" } : null) },
+    });
+    const { ev, posted } = mkEvent("https://w.example.org/", {
+      type: "zl:exportDiagnostics", clientId: "page-one", traceId,
+    });
+    await handleControlEvent(ev, { ready: new Promise(() => {}), persistRoute: () => { throw Error("no mutations"); } });
+    expect(posted).toHaveLength(1);
+    const report = posted[0] as { ok: boolean; scope: string; steps: unknown[]; kdl: string };
+    expect(report.ok).toBe(true);
+    expect(report.scope).toBe("request");
+    expect(report.steps).toHaveLength(2);
+    expect(parseKdl(report.kdl)[0].children).toHaveLength(2);
+    expect(JSON.stringify(report)).not.toContain("SHOULD-NOT-LEAK");
+    expect(JSON.stringify(report)).not.toContain("private.example");
+    expect(JSON.stringify(report)).not.toContain("page-one");
+  });
+
+  it("refuses exported traces with missing, unrelated, or navigated-away client IDs", async () => {
+    const traceId = DIAG.trace("page-one");
+    const probe = vi.fn(async (id: string) => ({
+      id, url: "https://w.example.org/index.html",
+    }));
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org" }, clients: { get: probe } });
+    const messages: ControlMessage[] = [
+      { type: "zl:exportDiagnostics", clientId: "another-client", traceId },
+      { type: "zl:exportDiagnostics", clientId: "page-one" },
+      { type: "zl:exportDiagnostics", clientId: "page-one", traceId },
+    ];
+    for (const msg of messages) {
+      const { ev, posted } = mkEvent("https://w.example.org/", msg);
+      await handleControlEvent(ev, { ready: new Promise(() => {}), persistRoute: () => { throw Error("no mutations"); } });
+      expect(posted).toEqual([{ ok: false, status: "identity-unavailable" }]);
+    }
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it("failed client enumeration refuses export without disclosing worker-global events", async () => {
+    const traceId = DIAG.trace("page-one");
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org" },
+      clients: { get: async () => { throw Error("client gone"); } },
+    });
+    const { ev, posted } = mkEvent("https://w.example.org/", {
+      type: "zl:exportDiagnostics", clientId: "page-one", traceId,
+    });
+    await handleControlEvent(ev, { ready: new Promise(() => {}), persistRoute: () => {} });
+    expect(posted).toEqual([{ ok: false, status: "identity-unavailable" }]);
+  });
+
+  it("blocks proxied pages from exporting another site's ring even if trace ID is known", async () => {
+    const traceId = DIAG.trace("page-one");
+    vi.stubGlobal("self", { location: { origin: "https://w.example.org" }, clients: {
+      get: () => { throw Error("must reject before client lookup"); },
+    } });
+    const { ev, posted } = mkEvent("https://w.example.org/j/abc", {
+      type: "zl:exportDiagnostics", clientId: "page-one", traceId,
+    });
+    await handleControlEvent(ev, { ready: new Promise(() => {}), persistRoute: () => { throw Error("no mutations"); } });
     expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
   });
 

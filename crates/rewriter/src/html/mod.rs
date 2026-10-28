@@ -49,6 +49,7 @@ const BLOCKABLE: &[&str] = &[
 ];
 
 pub struct Rewriter {
+    location_events: std::cell::RefCell<Vec<&'static str>>,
     cfg: RewriteConfig,
     /// Real destination URL of the page being rewritten (page base).
     base: String,
@@ -74,6 +75,7 @@ pub struct Rewriter {
 impl Rewriter {
     pub fn new(cfg: RewriteConfig) -> Self {
         Self {
+            location_events: std::cell::RefCell::new(Vec::new()),
             cfg,
             base: String::new(),
             st: St::Text,
@@ -85,6 +87,37 @@ impl Rewriter {
             base_seen: false,
             depth: 0,
         }
+    }
+
+    /// Set before processing. Unknown modes preserve the deployed legacy policy.
+    pub fn set_location_policy(&mut self, mode: &str, max_bytes: usize) {
+        if !matches!(mode, "legacy" | "hybrid" | "off") {
+            return;
+        }
+        self.cfg.rewrite_globals = mode != "off";
+        self.cfg.location_event_attributes = mode == "legacy";
+        self.cfg.location_max_bytes = max_bytes.clamp(1, crate::js::globals::MAX_BYTES);
+    }
+
+    pub fn take_location_events(&self) -> String {
+        self.location_events
+            .borrow_mut()
+            .drain(..)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn location_body(&self, js: &str) -> String {
+        let (out, reason) = if self.cfg.rewrite_globals {
+            crate::js::globals::rewrite_with_reason(js, self.cfg.location_max_bytes)
+        } else {
+            (js.to_owned(), "disabled")
+        };
+        let mut events = self.location_events.borrow_mut();
+        if events.len() < 32 {
+            events.push(reason);
+        }
+        out
     }
 
     /// Set the page's real destination URL (call before the first chunk).
@@ -168,6 +201,17 @@ impl Rewriter {
         self.enc_route(url, false, true)
     }
 
+    /// #499: true when the absolute URL carries userinfo before the
+    /// first path, query or fragment byte (scheme://user[:pass]@host).
+    /// A @ elsewhere (path, query, fragment) is not userinfo.
+    fn userinfo_in_authority(abs: &str) -> bool {
+        let Some((_, rest)) = abs.split_once("://") else {
+            return false;
+        };
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        rest[..end].contains("@")
+    }
+
     fn enc_route(&self, url: &str, literal: bool, script: bool) -> String {
         // Already engine-local (nested rewriting): keep as-is. An empty
         // origin matches every URL, so it must not take this branch.
@@ -212,6 +256,20 @@ impl Rewriter {
         // destination at all (issue #12: every same-page anchor link
         // navigated to 404 "zeolite: bad route").
         if abs.is_empty() || abs.starts_with('#') {
+            return abs;
+        }
+        // #499: a userinfo-carrying absolute URL (scheme://key@host)
+        // is configuration-shaped data, not a navigation sink:
+        // Sentry DSNs and credential-bearing config strings are
+        // parsed by application JS as written, and an engine route
+        // fails those parsers (Invalid Sentry Dsn). JS literals
+        // are data until a runtime sink consumes them, and the
+        // runtime seams still route the eventual request, so the
+        // literal keeps its verbatim value. Only the authority is
+        // inspected: an @ in a path or query is not userinfo.
+        // HTML attributes and script srcs are browser-owned sinks
+        // and keep routing (the literal gate below).
+        if literal && Self::userinfo_in_authority(&abs) {
             return abs;
         }
         // Opaque absolute URLs (data:, blob:, about:, javascript:,
@@ -331,11 +389,7 @@ impl Rewriter {
         // #235: location reads rename to the virtual location global
         // (#236) after the literal and frame-buster passes, so the
         // parse gate sees the final body.
-        if self.cfg.rewrite_globals {
-            crate::js::globals::rewrite_globals(&neutral)
-        } else {
-            neutral
-        }
+        self.location_body(&neutral)
     }
 
     /// Rewrite an iframe srcdoc document (issue #36). The attribute
@@ -555,11 +609,7 @@ impl Rewriter {
                             let neutral = crate::js::antiframe(&rewritten);
                             // #235: the same globals pass the external
                             // body path runs, on the final body.
-                            let with_globals = if self.cfg.rewrite_globals {
-                                crate::js::globals::rewrite_globals(&neutral)
-                            } else {
-                                neutral
-                            };
+                            let with_globals = self.location_body(&neutral);
                             out.push_str(&with_globals);
                         } else {
                             out.push_str(&raw);
@@ -801,11 +851,13 @@ impl Rewriter {
                         }));
                         // #241: handlers read the same virtual
                         // location as script bodies.
-                        Some(if self.cfg.rewrite_globals {
-                            crate::js::globals::rewrite_globals(&neutral)
-                        } else {
-                            neutral
-                        })
+                        Some(
+                            if self.cfg.rewrite_globals && self.cfg.location_event_attributes {
+                                crate::js::globals::rewrite_globals(&neutral)
+                            } else {
+                                neutral
+                            },
+                        )
                     } else {
                         None
                     };
@@ -1539,6 +1591,34 @@ mod tests {
     }
 
     #[test]
+    fn location_policy_modes_caps_and_events() {
+        let mut r = Rewriter::new(cfg());
+        r.set_location_policy("off", 512 * 1024);
+        assert_eq!(r.rewrite_js_body("location.pathname"), "location.pathname");
+        assert_eq!(r.take_location_events(), "disabled");
+        r.set_location_policy("hybrid", 8);
+        assert_eq!(r.rewrite_js_body("location.pathname"), "location.pathname");
+        assert_eq!(r.take_location_events(), "size-cap");
+        r.set_location_policy("hybrid", 512 * 1024);
+        assert_eq!(r.rewrite_js_body("location.pathname"), "__zl.pathname");
+        assert_eq!(r.take_location_events(), "rewritten");
+        assert_eq!(
+            r.rewrite_js_body("const location = 1; location;"),
+            "const location = 1; location;"
+        );
+        assert_eq!(r.take_location_events(), "no-reads");
+        assert_eq!(r.rewrite_js_body("location.["), "location.[");
+        assert_eq!(r.take_location_events(), "parse-failure");
+        let out = r.process("<div onclick=\"location.href\"></div><script>location.href</script>");
+        assert!(out.contains("onclick=\"location.href\""), "{out}");
+        assert!(out.contains("<script>__zl.href</script>"), "{out}");
+        for _ in 0..100 {
+            r.rewrite_js_body("location.href");
+        }
+        assert!(r.take_location_events().split(',').count() <= 32);
+    }
+
+    #[test]
     fn script_type_ignores_other_attribute_values() {
         for (tag, executable) in [
             (
@@ -1864,6 +1944,16 @@ document.write('<script src=x></script>');
         r.set_base("https://example.com/");
         let out = r.process("<style>a{background:url(x.png)}</style>");
         assert!(out.contains("/j/"), "got: {}", out);
+    }
+
+    #[test]
+    fn image_set_strings_in_style_blocks_and_attributes() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = r.process("<style>a{background:image-set('a.png' 1x)}</style><div style=\"background:image-set('b.png' 1x)\"></div>");
+        assert!(!out.contains("'a.png'"), "got: {out}");
+        assert!(!out.contains("'b.png'"), "got: {out}");
+        assert!(out.matches("/j/").count() >= 2, "got: {out}");
     }
 
     #[test]
@@ -3342,5 +3432,59 @@ document.write('<script src=x></script>');
         out.push_str(&r.finish());
         assert!(out.contains("var x = 1;"), "script body survives");
         assert!(out.contains("done"));
+    }
+    #[test]
+    fn userinfo_url_literals_stay_verbatim() {
+        // #499: a Sentry DSN is URL-shaped configuration parsed by
+        // application JS as written; an engine route fails the DSN
+        // parse. The literal must keep its verbatim value while a
+        // browser-owned fetch URL in the same bundle still routes.
+        let r = Rewriter::new(cfg());
+        let dsn = "https://abc123@o456.ingest.sentry.io/42";
+        let js = format!(
+            "Sentry.init({{ dsn: '{}' }}); fetch('https://example.com/api');",
+            dsn
+        );
+        let out = r.rewrite_js_body(&js);
+        assert!(out.contains(dsn), "DSN literal must stay verbatim: {out}");
+        let route = format!(
+            "/j/{}",
+            crate::encode::b64u_encode(b"https://example.com/api")
+        );
+        assert!(
+            out.contains(&route),
+            "browser-owned fetch URL must still route: {out}"
+        );
+    }
+    #[test]
+    fn userinfo_gate_is_authority_only() {
+        let r = Rewriter::new(cfg());
+        // An @ in the query is not userinfo: the literal still routes.
+        let out = r.rewrite_js_body("fetch('https://example.com/mail?to=a@b.com')");
+        let route = format!(
+            "/j/{}",
+            crate::encode::b64u_encode(b"https://example.com/mail?to=a@b.com")
+        );
+        assert!(out.contains(&route), "query @ must not gate: {out}");
+        // The inline handler path uses the same literal gate.
+        let mut r2 = Rewriter::new(cfg());
+        let html = r#"<a onclick="send('https://key@host.example/42')">u</a>"#;
+        let out2 = r2.process(html);
+        assert!(
+            out2.contains("https://key@host.example/42"),
+            "inline handler literal keeps verbatim value: {out2}"
+        );
+    }
+    #[test]
+    fn userinfo_html_attributes_still_route() {
+        // Browser-owned sinks (href) are not gated: only JS string
+        // literals (enc_literal) take the #499 verbatim branch.
+        let mut r = Rewriter::new(cfg());
+        let out = r.process(r#"<a href="https://user:pw@example.com/x">u</a>"#);
+        let route = format!(
+            "/j/{}",
+            crate::encode::b64u_encode(b"https://user:pw@example.com/x")
+        );
+        assert!(out.contains(&route), "href routing must not change: {out}");
     }
 }

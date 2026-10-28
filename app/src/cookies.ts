@@ -1,8 +1,8 @@
 /* Per-origin cookie jars + virtual-origin registry (Phase 4, 1.4).
 
    One cookie store partitioned by the virtual-origin registry:
-   each target origin gets a stable internal id (the FNV1a hash
-   the bootstrap uses for storage scoping). Cookies attach to a
+   each target origin gets a collision-free internal id from
+   its canonical origin. Cookies attach to a
    request only when their own Domain/Path/Secure attributes say
    so (RFC 6265 matching): never admitted or attached outside
    their domain scope, so unrelated origins are isolated by
@@ -26,7 +26,7 @@ import { decodeNavHandleRoot, encodeDest } from "./codec";
 import { DIAG } from "./diag";
 import { traceDecision } from "./tracing";
 import { openDb, idbGet, idbPut, STORE_COOKIES } from "./extensions/idb";
-import { fnv1a } from "./bootstrap/siteid";
+
 import { getDomain, getPublicSuffix } from "tldts";
 
 export type SameSite = "strict" | "lax" | "none";
@@ -85,7 +85,7 @@ export interface Cookie {
 
 export interface VirtualOrigin {
   origin: string;
-  /** Stable internal id (FNV1a base36, same as bootstrap storage). */
+  /** Collision-free canonical-origin id, independent of page storage tokens. */
   id: string;
   /** Zeolite-internal representation: engine path base of the origin. */
   pathBase: string;
@@ -113,10 +113,15 @@ const originById = new Map<string, string>();
    for distinct origins (same bug the page-side token had). */
 
 /** Register (memoized) a target origin and its internal representation. */
+function originJarId(origin: string): string {
+  return "o" + Array.from(new TextEncoder().encode(new URL(origin).origin), b => b.toString(16).padStart(2, "0")).join("");
+}
+
 export function registerOrigin(origin: string): VirtualOrigin {
+  origin = new URL(origin).origin;
   let e = registry.get(origin);
   if (!e) {
-    e = { origin, id: fnv1a(origin), pathBase: encodeDest(origin) };
+    e = { origin, id: originJarId(origin), pathBase: encodeDest(origin) };
     registry.set(origin, e);
     originById.set(e.id, origin);
   }
@@ -151,9 +156,6 @@ let profile = PROFILE_DEFAULT;
 const clientRoots = new Map<string, string>();
 const rootProfiles = new Map<string, string>();
 const unboundClients = new Set<string>();
-/* #471: set when a profile-cache restore fails or the record is
-   corrupt; session clients must fail closed, not ride the global jar. */
-let profilesRestoreFailed = false;
 
 function rootOf(clientId?: string): string | null {
   if (!clientId) return null;
@@ -168,13 +170,10 @@ function activeProfile(clientId?: string): string {
        zl:jarProfile), so it rides the default jar there. The
        PROFILE_UNBOUND fallback stays for a session deployment, where
        a root that lost its profile (worker restart) fails closed. */
-    return rootProfiles.get(root) ?? (anySessionProfileActive() ? PROFILE_UNBOUND : PROFILE_DEFAULT);
+    return rootProfiles.get(root) ?? (profileRestoreFailed || anySessionProfileActive() ? PROFILE_UNBOUND : PROFILE_DEFAULT);
   }
-  /* #471: a failed restore fails closed for any client without a
-     root binding (session deployments) instead of silently riding
-     the global jar. */
-  if (clientId && profilesRestoreFailed && !clientRoots.has(clientId)) return PROFILE_UNBOUND;
   if (clientId && unboundClients.has(clientId)) return PROFILE_UNBOUND;
+  if (profileRestoreFailed && !globalProfileAssigned) return PROFILE_UNBOUND;
   return profile;
 }
 
@@ -214,84 +213,56 @@ export function anySessionProfileActive(): boolean {
    documented restart semantics. */
 const PROFILE_CACHE = "zeolite-jar-profile-v1";
 let jarProfilesPromise: Promise<void> | null = null;
+let profilePersistChain: Promise<void> = Promise.resolve();
+let profileRestoreFailed = false;
+let globalProfileAssigned = false;
+const assignedRoots = new Set<string>();
+
+function validProfileName(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 64 && !value.includes(SEP);
+}
 
 export function jarProfilesReady(): Promise<void> {
   if (!jarProfilesPromise) {
     jarProfilesPromise = (async () => {
-      if (typeof caches === "undefined") return;
+      if (typeof caches === "undefined") throw new Error("profile storage unavailable");
       const c = await caches.open(PROFILE_CACHE);
       const r = await c.match("profiles");
       if (!r) return;
-      const text = await r.text();
-      /* #471: only text that was plausibly a profile record can poison
-         the restore - a foreign entry for the key keeps the documented
-         memory-only defaults. */
-      if (!text.startsWith("{")) return;
-      let j: { v?: unknown; profile?: unknown; roots?: Record<string, unknown> };
-      try {
-        j = JSON.parse(text) as { v?: unknown; profile?: unknown; roots?: Record<string, unknown> };
-      } catch {
-        /* corrupt record: fail closed for unbound clients */
-        profilesRestoreFailed = true;
-        return;
+      const j = (await r.json()) as { v?: unknown; profile?: unknown; roots?: unknown; uncertain?: unknown };
+      if (!j || (j.v !== undefined && j.v !== 1) || (j.uncertain !== undefined && typeof j.uncertain !== "boolean") || !validProfileName(j.profile) || !j.roots || typeof j.roots !== "object" || Array.isArray(j.roots)) {
+        throw new Error("invalid profile snapshot");
       }
-      /* #471: a future-version record is a corrupt restore too. */
-      if (!j || typeof j !== "object" || (j.v !== undefined && j.v !== 1)) {
-        profilesRestoreFailed = true;
-        return;
-      }
-      if (
-        typeof j.profile === "string" &&
-        j.profile.length > 0 &&
-        j.profile.length <= 64 &&
-        !j.profile.includes(SEP)
-      ) {
-        profile = j.profile;
-      }
-      if (j.roots && typeof j.roots === "object") {
-        for (const [root, pid] of Object.entries(j.roots)) {
-          if (
-            typeof pid === "string" &&
-            pid.length > 0 &&
-            pid.length <= 64 &&
-            !pid.includes(SEP)
-          ) {
-            rootProfiles.set(root, pid);
-          }
-        }
+      const roots = Object.entries(j.roots);
+      if (roots.some(([root, pid]) => !root || !validProfileName(pid))) throw new Error("invalid root profile");
+      if (j.uncertain === true) profileRestoreFailed = true;
+      // A fresh trusted assignment wins over a slower disk restore.
+      if (!globalProfileAssigned) profile = j.profile;
+      for (const [root, pid] of roots) {
+        if (!assignedRoots.has(root)) rootProfiles.set(root, pid as string);
       }
     })().catch(() => {
-      /* #471: an infrastructure failure keeps the documented
-         memory-only defaults; only a corrupt RECORD fails closed. */
+      // The unreadable snapshot may describe an incognito session.
+      // Only explicitly assigned roots (or a legacy global assignment)
+      // may use cookies until the host rebinds the remaining clients.
+      profileRestoreFailed = true;
     });
   }
   return jarProfilesPromise;
 }
 
-/* #471: profile persistence is a serialized chain. Two quick
-   profile switches used to race their cache puts, so an older
-   snapshot could land last and a restart restored a stale profile
-   (incognito cross-talk). The seq skips snapshots superseded before
-   their turn; the chain keeps the puts in FIFO order. */
-let jarPersistSeq = 0;
-let jarPersistChain: Promise<void> = Promise.resolve();
 function persistJarProfiles(): void {
-  const seq = ++jarPersistSeq;
-  const snapshot = { v: 1, profile, roots: Object.fromEntries(rootProfiles) };
-  jarPersistChain = jarPersistChain
-    .then(async () => {
-      if (seq !== jarPersistSeq) return; /* superseded by a newer snapshot */
-      if (typeof caches === "undefined") return;
-      const c = await caches.open(PROFILE_CACHE);
-      await c.put("profiles", new Response(JSON.stringify(snapshot)));
-    })
-    .catch(() => {
-      /* storage unavailable: memory-only semantics for this lifetime */
-    });
-}
-/** Tests only: resolve when every queued profile snapshot has settled. */
-export function jarProfilePersistDrain(): Promise<void> {
-  return jarPersistChain;
+  profilePersistChain = profilePersistChain.then(async () => {
+    // Restore untouched roots before writing, otherwise a host pushing
+    // one root at boot could erase another window's session profile.
+    await jarProfilesReady();
+    if (typeof caches === "undefined") return;
+    const snapshot = { v: 1, profile, roots: Object.fromEntries(rootProfiles), uncertain: profileRestoreFailed };
+    const c = await caches.open(PROFILE_CACHE);
+    await c.put("profiles", new Response(JSON.stringify(snapshot)));
+  }).catch(() => {
+    // Preserve memory state and allow a later trusted push to retry.
+  });
 }
 
 function profileNameForNamespace(namespace: string): string {
@@ -398,6 +369,7 @@ export function pruneJarClients(activeClientIds: ReadonlySet<string>): void {
   for (const [id, root] of clientRoots) if (activeClientIds.has(id)) liveRoots.add(root);
   for (const [root, pid] of rootProfiles) {
     if (!activeClientIds.has(root) && !liveRoots.has(root)) {
+      assignedRoots.add(root);
       rootProfiles.delete(root);
       prunedProfiles = true;
       if (pid !== PROFILE_DEFAULT) clearNamespace(namespaceForProfile(pid, root));
@@ -437,6 +409,7 @@ export function setJarProfile(p: unknown, clientId?: string): { ok: boolean; pro
   if (clientId) {
     const root = rootOf(clientId) ?? clientId;
     const prev = rootProfiles.get(root) ?? PROFILE_DEFAULT;
+    assignedRoots.add(root);
     rootProfiles.set(root, next);
     clientRoots.set(clientId, root);
     if (prev !== PROFILE_DEFAULT && prev !== next) {
@@ -445,6 +418,7 @@ export function setJarProfile(p: unknown, clientId?: string): { ok: boolean; pro
     persistJarProfiles();
     return { ok: true, profile: next };
   }
+  globalProfileAssigned = true;
   const prev = profile;
   if (prev !== PROFILE_DEFAULT && prev !== next) {
     clearNamespace(namespaceForProfile(prev, null));
@@ -1205,15 +1179,11 @@ export async function jarLoad(): Promise<void> {
         }
       }
     }
-    /* #270 migration: records persisted before the Math.imul fnv1a fix
-       are keyed by the old double-precision hash. The origins record
-       maps those old ids back to real origins, so rekey every jar
-       under the corrected id; an originless (id-only) record keeps its
-       key as-is. The same remap applies to the in-memory originById
-       view so enumeration names origins under the new ids. */
+    /* #465: legacy hash keys migrate through the persisted origin map.
+       Unattributed legacy records retain their unreachable old keys. */
     const oldOrigins = new Map(originById);
     const migrated = new Map<string, string>();
-    for (const [id, o] of oldOrigins) migrated.set(fnv1a(o), o);
+    for (const [id, o] of oldOrigins) migrated.set(originJarId(o), new URL(o).origin);
     originById.clear();
     for (const [k, v] of migrated) originById.set(k, v);
     if (Array.isArray(rec)) {
@@ -1228,7 +1198,7 @@ export async function jarLoad(): Promise<void> {
           const pid = sep < 0 ? "" : entry[0].slice(0, sep);
           const id = sep < 0 ? entry[0] : entry[0].slice(sep + SEP.length);
           const origin = oldOrigins.get(id);
-          const newId = origin ? fnv1a(origin) : id;
+          const newId = origin ? originJarId(origin) : id;
           if (pid === "") {
             /* default-profile records are bare origin ids, predating
                profiles; they keep that shape. */
@@ -1354,10 +1324,12 @@ export function cookiesResetForTests(): void {
   rootProfiles.clear();
   navHandleRoots.clear();
   unboundClients.clear();
-  profilesRestoreFailed = false;
-  jarPersistSeq = 0;
-  jarPersistChain = Promise.resolve();
   persistChain = Promise.resolve();
+  profilePersistChain = Promise.resolve();
+  jarProfilesPromise = null;
+  profileRestoreFailed = false;
+  globalProfileAssigned = false;
+  assignedRoots.clear();
 }
 
 /* #52 detect-only: recognize an Anubis pass-challenge endpoint so the
@@ -1372,3 +1344,6 @@ export function isPassChallenge(dest: string): boolean {
   }
 }
 
+
+/** Wait for queued profile snapshot writes. */
+export function jarProfilePersistDrain(): Promise<void> { return profilePersistChain; }

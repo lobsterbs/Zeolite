@@ -226,12 +226,18 @@ describe("SharedWorker identity scoping (#260)", () => {
     const b = setup("siteB");
     b.mk("/shared.js", "myname");
     expect(a.seen.map((x) => x.o)).toEqual([
-      "myname\u0000zl:siteA",
-      { name: "myname\u0000zl:siteA", type: "classic" },
-      { name: "\u0000zl:siteA" },
+      "myname\u0000zl:siteA:classic:same-origin",
+      { name: "myname\u0000zl:siteA:classic:same-origin", type: "classic" },
+      { name: "\u0000zl:siteA:classic:same-origin" },
     ]);
-    expect(b.seen[0].o).toBe("myname\u0000zl:siteB");
+    expect(b.seen[0].o).toBe("myname\u0000zl:siteB:classic:same-origin");
     expect(b.seen[0].u).toBe("/shared.js"); /* the script URL is never touched */
+  });
+
+  it("separates worker type and credential mode (#453)", () => {
+    const a = setup("siteA");
+    for (const options of [{ name: "n" }, { name: "n", type: "module" }, { name: "n", type: "module", credentials: "omit" }]) a.mk("/s.js", options);
+    expect(new Set(a.seen.map(x => (x.o as { name: string }).name)).size).toBe(3);
   });
 
   it("same site, same URL and name share one scoped identity", () => {

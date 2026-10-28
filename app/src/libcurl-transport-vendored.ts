@@ -1,3 +1,5 @@
+import { installWispAuthSocket } from "./wisp-auth";
+
 /* libcurl-transport adapter (vendored seam).
 
    The package is AGPL-3.0-only and its dist is 2.1 MB, so it is
@@ -960,6 +962,119 @@ async function ensureAlt(): Promise<LibcurlClientLike> {
   return altClient;
 }
 
+/* ---- #454: fresh-session dispatch for non-idempotent requests -------
+   libcurl.js 0.7.4 pools upstream connections per session (each
+   HTTPSession is a separate wasm curl multi handle with its own
+   connection cache). When a REUSED pooled connection dies before any
+   response byte, the wasm's libcurl re-sends the request once on a
+   fresh connection REGARDLESS of method (its connection-died-retry
+   behavior), so a server that accepts a non-idempotent request and
+   then drops the socket commits it twice, and the SW cannot see or
+   gate the second dispatch: one adapter call, one error 52. The
+   instrumented runs behind suite/e2e/delivery-fault.mjs pinned this.
+   The wasm exports no curl_easy_setopt surface, so a per-handle
+   CURLOPT_FRESH_CONNECT is unreachable without rebuilding the AGPL
+   artifact. The reachable deterministic seam: every non-idempotent
+   request gets its own HTTPSession. Its connection cache is empty,
+   so the request rides a brand-new connection, and libcurl never
+   re-sends a request whose fresh connection died - it surfaces
+   error 52 honestly through the same adapter rejection the SW
+   already maps to a terminal delivery-unknown. Sessions share the
+   bundle's global wisp socket (streams multiplex), so the cost is
+   one multi handle per request, closed when the body settles
+   (stream flush or cancel) or immediately on a null body. Residual:
+   a consumer that neither drains nor cancels the body leaves the
+   handle alive; every SW pump consumes or cancels (the #201 cancel
+   propagation and the #200 body-stall bound). Idempotent methods
+   keep the pooled session and its keep-alive. Parity set:
+   transport.ts IDEMPOTENT_METHODS (GET HEAD OPTIONS PUT DELETE
+   TRACE). Epoxy pooling is a different wasm and stays unverified;
+   the harness covers the libcurl engine only. */
+const POOLED_IDEMPOTENT = /^(GET|HEAD|OPTIONS|PUT|DELETE|TRACE)$/;
+
+interface FreshSession {
+  fetch(url: string, params: Record<string, unknown>): Promise<Response & { raw_headers?: RawHeaders }>;
+  close_now(): void;
+}
+type FreshSessionCtor = new (options: Record<string, unknown>) => FreshSession;
+
+/** #454: dispatch one request through a libcurl client, giving
+    non-idempotent methods a per-request session (fresh connection,
+    no pooled reuse, no libcurl re-send after a connection death).
+    Exported for __tests__/fresh-session.test.ts; the SW reaches it
+    through fetch() and altFetch(). */
+export async function libcurlRequest(
+  c: LibcurlClientLike,
+  remote: URL,
+  method: string,
+  body: BodyInit | null,
+  headers: RawHeaders,
+  signal: AbortSignal | undefined,
+): Promise<TransferrableResponse> {
+  const pooled = (c as LibcurlClientLike & { session?: unknown }).session as
+    | { close_now?: unknown; options?: Record<string, unknown>; constructor?: unknown }
+    | undefined;
+  /* Bundle-layout drift (no session, no close_now, no constructor):
+     the pooled client request stays correct delivery-wise, so fall
+     back rather than fail; the transport-gate workflow catches
+     drift before any deploy. */
+  if (
+    POOLED_IDEMPOTENT.test(method) ||
+    !pooled ||
+    typeof pooled.close_now !== "function" ||
+    typeof pooled.constructor !== "function"
+  ) {
+    return c.request(remote, method, body, headers, signal);
+  }
+  const Ctor = pooled.constructor as FreshSessionCtor;
+  const session = new Ctor({ proxy: pooled.options?.proxy });
+  let payload: Response & { raw_headers?: RawHeaders };
+  try {
+    const headersObj: Record<string, string> = {};
+    for (const [key, value] of headers) headersObj[key] = value;
+    payload = await session.fetch(remote.href, {
+      method,
+      headers: headersObj,
+      body,
+      redirect: "manual",
+      signal,
+    });
+  } catch (err) {
+    session.close_now();
+    throw err;
+  }
+  let outBody: unknown = payload.body;
+  if (!payload.body) {
+    session.close_now();
+  } else {
+    let closed = false;
+    const close = (): void => {
+      if (!closed) {
+        closed = true;
+        session.close_now();
+      }
+    };
+    type CloseableTransformer = Transformer<Uint8Array, Uint8Array> & { cancel?: () => void };
+    const transformer: CloseableTransformer = {
+      flush() {
+        close();
+      },
+      cancel() {
+        close();
+      },
+    };
+    outBody = (payload.body as ReadableStream).pipeThrough(
+      new TransformStream(transformer),
+    );
+  }
+  return {
+    body: outBody as TransferrableResponse["body"],
+    headers: payload.raw_headers ?? [],
+    status: payload.status,
+    statusText: payload.statusText,
+  };
+}
+
 /** #168: one fetch through the secondary client, same response shape
     as the primary libcurl path (rawHeaders survive for the cookie
     jar, null-body statuses normalized). No retry here: the caller
@@ -974,7 +1089,7 @@ export async function altFetch(url: string, init?: RequestInit): Promise<Respons
       headers.push([key, value]);
     });
   }
-  const res = await c.request(new URL(url), method, init?.body ?? null, headers, init?.signal ?? undefined);
+  const res = await libcurlRequest(c, new URL(url), method, init?.body ?? null, headers, init?.signal ?? undefined);
   const h2 = new Headers();
   for (const [k, v] of res.headers) h2.append(k, v);
   const nullBody = res.status === 204 || res.status === 304;
@@ -1066,6 +1181,10 @@ export function installWispWatcher(g: WatcherGlobal = globalThis as WatcherGloba
 
 installWispWatcher();
 
+/* #496: credentialed wisp sockets carry the PasswordAuth extension
+   in their client INFO; without credentials this is a pass-through. */
+installWispAuthSocket();
+
 export async function init(cfg: { websocket: string }): Promise<void> {
   lastCfg = cfg;
   setTransportState("connecting", "init " + engine);
@@ -1113,7 +1232,7 @@ export async function fetch(url: string, init?: RequestInit): Promise<Response> 
     });
   }
   const signal = init?.signal ?? undefined;
-  const res = await c.request(new URL(url), method, init?.body ?? null, headers, signal);
+  const res = await libcurlRequest(c, new URL(url), method, init?.body ?? null, headers, signal);
   const h2 = new Headers();
   for (const [k, v] of res.headers) h2.append(k, v);
   /* Null-body statuses (#92/#96): a 204/304 Response may not carry

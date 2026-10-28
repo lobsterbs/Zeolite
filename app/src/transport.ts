@@ -7,6 +7,7 @@
    the seam, it does not invite a second backend (#84 non-goals).
    WebSocket opening and the live engine name are re-exported through
    the same seam; WS bridging stays in sw.ts (#88). */
+import { attemptDelivery, deliveryResponse, deliveryState, prepareDelivery, deliveryFailure, type DeliveryTransport, TransportDeliveryError } from "./delivery";
 import { DIAG } from "./diag";
 import { loadEnter, loadLeave } from "./loadstate";
 import { transportState, waitForTransportState } from "./transport-lifecycle";
@@ -263,9 +264,8 @@ class WispStallError extends Error {}
    reset. A non-idempotent method or a one-shot (stream) body fails
    honestly on the first error instead of the retry duplicating a
    side effect or dying on an already-consumed stream.
-   "websocket did not open" fails before the request is ever sent,
-   so it is retryable for any method (pre-send is the one safe
-   class). request.ts buffers stream bodies once at its
+   Transport error text cannot prove that a request was never sent.
+   Non-idempotent requests therefore remain terminal after dispatch. request.ts buffers stream bodies once at its
    upstreamFetch choke point (#155), so real traffic arrives here
    replayable; a bare stream means a caller that bypassed that
    seam. */
@@ -278,9 +278,16 @@ function bodyReplayable(init?: RequestInit): boolean {
   return false; /* ReadableStream and anything else one-shot */
 }
 
+/** Wrapped evidence must not hide stall/connect classes from recovery health
+    accounting. This unwrap is never used as proof of non-delivery. */
+function deliveryCause(error: unknown): unknown {
+  for (let i = 0; i < 8 && error instanceof TransportDeliveryError; i++) error = error.cause;
+  return error;
+}
+
 function retryable(init: RequestInit | undefined, err: unknown): boolean {
-  if (!bodyReplayable(init)) return false;
-  if (/websocket did not open/i.test(String(err))) return true;
+  if (init?.signal?.aborted || (err instanceof Error && err.name === "AbortError") || !bodyReplayable(init)) return false;
+  if (deliveryState(err) === "definitely-not-delivered") return true;
   return IDEMPOTENT_METHODS.has((init?.method ?? "GET").toUpperCase());
 }
 
@@ -295,7 +302,7 @@ export { retryable as canReplayAfterFailure };
    abort stays an honest AbortError, only the deadline surfaces as
    a stall. Replaces the old promise-race withDeadline, which left
    the abandoned fetch running. */
-async function fetchWithDeadline(
+async function fetchWithDeadlineRaw(
   fetcher: (dest: string, init?: RequestInit) => Promise<Response>,
   dest: string,
   init: RequestInit | undefined,
@@ -327,6 +334,18 @@ async function fetchWithDeadline(
     if (timer !== undefined) clearTimeout(timer);
     init?.signal?.removeEventListener("abort", forward);
   }
+}
+
+async function fetchWithDeadline(
+  fetcher: (dest: string, init?: RequestInit) => Promise<Response>,
+  dest: string, init: RequestInit | undefined,
+  transport: DeliveryTransport = "wisp", traceId?: string,
+): Promise<Response> {
+  if (init?.signal?.aborted) {
+    return deliveryResponse(deliveryFailure(transport,
+      init.signal.reason ?? new DOMException("aborted", "AbortError"), "definitely-not-delivered", traceId));
+  }
+  return deliveryResponse(await attemptDelivery(transport, () => fetchWithDeadlineRaw(fetcher, dest, init), traceId));
 }
 
 async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Promise<Response> {
@@ -396,23 +415,23 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
     if (transportState() === "dead") {
       await waitForTransportState("connected", WAIT_FOR_RECONNECT_MS);
     }
-    await ensureCurl();
+    await prepareDelivery("wisp", ensureCurl, traceId);
     /* #415: remember which client generation serves this request */
     const curlGen = curlGeneration;
     try {
-      const resp = await fetchWithDeadline(zlCurlFetch, dest, init);
+      const resp = await fetchWithDeadline(zlCurlFetch, dest, init, "wisp", traceId);
       /* A first-byte success is evidence the socket is healthy:
          clear the storm window and any cooldown. */
       stallClear();
       return resp;
     } catch (err) {
-      if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw err;
+      if (!isConnectClassError(deliveryCause(err)) && !(deliveryCause(err) instanceof WispStallError)) throw err;
       /* #251: a non-idempotent method or a one-shot body must not
          ride the reset+retry: the side effect may already have
          happened upstream. Record the stall for the storm detector
          and fail honestly. */
       if (!retryable(init, err)) {
-        if (err instanceof WispStallError) recordStall();
+        if (deliveryCause(err) instanceof WispStallError) recordStall();
         DIAG.emit({
           category: "TRANSPORT",
           severity: "warning",
@@ -422,12 +441,12 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
         });
         throw err;
       }
-      if (err instanceof WispStallError) recordStall();
+      if (deliveryCause(err) instanceof WispStallError) recordStall();
       DIAG.emit({
         category: "TRANSPORT",
         severity: "error",
         message:
-          err instanceof WispStallError
+          deliveryCause(err) instanceof WispStallError
             ? "transport stall: no first byte within " + WISP_TTFB_DEADLINE_MS + "ms; reset, retrying once"
             : "transport failure; reset, retrying once on a fresh connection",
         technicalReason: String(err),
@@ -436,12 +455,12 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
       /* #415: one shared reset per generation, not one per failure */
       await sharedCurlReset(curlGen);
       try {
-        return await fetchWithDeadline(zlCurlFetch, dest, init);
+        return await fetchWithDeadline(zlCurlFetch, dest, init, "wisp", traceId);
       } catch (err2) {
         /* #226: a stall on the fresh connection is the strongest
            evidence the socket is wedged; count it before rethrowing
            so the storm detector does not undercount. */
-        if (err2 instanceof WispStallError) recordStall();
+        if (deliveryCause(err2) instanceof WispStallError) recordStall();
         throw err2;
       }
     }
@@ -477,15 +496,15 @@ async function sharedAltReset(gen: number): Promise<void> {
   zlAltReset();
 }
 
-export async function altWispFetch(dest: string, init?: RequestInit): Promise<Response> {
+export async function altWispFetch(dest: string, init?: RequestInit, traceId?: string): Promise<Response> {
   loadEnter(dest);
   /* #415: remember which alt client generation serves this request */
   const altGen = altGeneration;
   try {
     try {
-      return await fetchWithDeadline(zlAltFetch, dest, init);
+      return await fetchWithDeadline(zlAltFetch, dest, init, "wisp-route", traceId);
     } catch (err) {
-      if (!isConnectClassError(err) && !(err instanceof WispStallError)) throw err;
+      if (!isConnectClassError(deliveryCause(err)) && !(deliveryCause(err) instanceof WispStallError)) throw err;
       /* #251: same retry-safety gate as the primary path */
       if (!retryable(init, err)) {
         DIAG.emit({
@@ -501,14 +520,14 @@ export async function altWispFetch(dest: string, init?: RequestInit): Promise<Re
         category: "TRANSPORT",
         severity: "error",
         message:
-          err instanceof WispStallError
+          deliveryCause(err) instanceof WispStallError
             ? "wisp-route transport stall: no first byte within " + WISP_TTFB_DEADLINE_MS + "ms; reset, retrying once"
             : "wisp-route transport failure; reset, retrying once on a fresh connection",
         technicalReason: String(err),
         url: dest,
       });
       await sharedAltReset(altGen);
-      return fetchWithDeadline(zlAltFetch, dest, init);
+      return fetchWithDeadline(zlAltFetch, dest, init, "wisp-route", traceId);
     }
   } finally {
     loadLeave(dest);

@@ -18,7 +18,7 @@ import {
   STORE_META,
 } from "./idb";
 import { locateManifest, readZip, DEFAULT_ZIP_LIMITS } from "./package";
-import { parseManifest } from "./manifest";
+import { parseManifest, resolveManifestI18n } from "./manifest";
 import { normalizeExtensionPath } from "./origin";
 import { globToRegExp } from "./content-scripts";
 import { hostPatternsMatch } from "./permissions";
@@ -133,6 +133,18 @@ export class ExtensionManager {
     if (!ok || parsed === null) {
       throw new Error("zeolite: manifest invalid: " + diags.errors.join("; "));
     }
+    /* #504: resolve __MSG_*__ placeholders in name/description from
+       the package's own _locales/<default_locale>/messages.json,
+       which lives next to the manifest in the raw zip paths. */
+    const readPkg = (p: string): Uint8Array | undefined => {
+      const cands = loc.root !== "" ? [p, "/" + p, loc.root + p, loc.root + "/" + p] : [p, "/" + p];
+      for (const c of cands) {
+        const b = files.get(c);
+        if (b) return b;
+      }
+      return undefined;
+    };
+    resolveManifestI18n(raw as Record<string, unknown>, parsed, readPkg, diags);
     const relOf = (p: string) =>
       loc.root !== "" && p.startsWith(loc.root) ? p.slice(loc.root.length) : p;
     const id = await this.deriveId(files, relOf);
@@ -213,13 +225,17 @@ export class ExtensionManager {
     const files = await this.storedFiles(id);
     const mbytes = files.get("manifest.json");
     if (!mbytes) throw new Error("zeolite: stored package lost its manifest");
-    const { ok, parsed, diags } = parseManifest(JSON.parse(new TextDecoder().decode(mbytes)));
+    const mraw: Record<string, unknown> = JSON.parse(new TextDecoder().decode(mbytes));
+    const { ok, parsed, diags } = parseManifest(mraw);
     if (!ok || parsed === null) {
       rec.state = "error";
       rec.lastError = "reload failed: " + diags.errors.join("; ");
       this.changed(id);
       throw new Error("zeolite: reload failed: manifest no longer valid");
     }
+    /* #504: stored file keys are root-relative, so both the bare and
+       leading-slash forms resolve. */
+    resolveManifestI18n(mraw, parsed, (p) => files.get(p) ?? files.get(p.slice(1)), diags);
     Object.assign(rec, parsed);
     rec.state = "installed";
     rec.lastError = null;

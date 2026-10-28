@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zeolite Guest Host</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font: 13px/1.45 system-ui, sans-serif; margin: 0; }
+      main { padding: 12px; max-width: 34rem; }
+      h1 { font-size: 14px; margin: 8px 0 4px; }
+      p { margin: 4px 0; }
+      #status { font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Zeolite Guest Host</h1>
+      <p id="status">connecting to the engine service worker</p>
+      <p>
+        This engine-origin page hosts guest service-worker realms for the
+        Zeolite kernel. The service worker itself cannot create workers, so
+        guests are created here and bridged to the kernel over the control
+        port. Keep this page open while guests are active; closing it
+        terminates them. This page runs no guest code itself.
+      </p>
+    </main>
+    <script>
+      (function () {
+        "use strict";
+        var statusEl = document.getElementById("status");
+        var workers = new Map();
+        var control = null;
+
+        function setStatus(text) {
+          if (statusEl) statusEl.textContent = text;
+        }
+
+        function post(message, transfer) {
+          if (control) control.postMessage(message, transfer || []);
+        }
+
+        /* The zl:guestHost control kind is host-only (the engine's
+           PAGE_MESSAGES gate excludes it), so only engine-origin pages
+           can open this bridge. Proxied pages cannot spawn guests. */
+        function connect() {
+          var sw = navigator.serviceWorker;
+          if (!sw || !sw.controller) {
+            setStatus("no engine service worker controlling this page");
+            return;
+          }
+          var channel = new MessageChannel();
+          control = channel.port1;
+          control.onmessage = function (ev) {
+            var d = ev.data || {};
+            if (d.op === "spawn") spawn(d);
+            else if (d.op === "terminate") terminate(String(d.origin));
+          };
+          sw.controller.postMessage({ type: "zl:guestHost" }, [channel.port2]);
+          setStatus("guest host ready");
+        }
+
+        function spawn(d) {
+          var origin = String(d.origin || "");
+          try {
+            var worker = new Worker(
+              URL.createObjectURL(new Blob([d.script], { type: "text/javascript" }))
+            );
+            var channel = new MessageChannel();
+            worker.onerror = function (e) {
+              post({
+                kind: "zl:guestError",
+                origin: origin,
+                error: e && e.message ? e.message : "guest worker error"
+              });
+            };
+            worker.postMessage({ zl: "harnessPort" }, [channel.port1]);
+            workers.set(origin, worker);
+            post(
+              { kind: "zl:guestSpawned", origin: origin, port: channel.port2 },
+              [channel.port2]
+            );
+          } catch (err) {
+            post({ kind: "zl:guestSpawnFailed", origin: origin, error: String(err) });
+          }
+        }
+
+        function terminate(origin) {
+          var worker = workers.get(origin);
+          if (worker) {
+            worker.terminate();
+            workers.delete(origin);
+          }
+          post({ kind: "zl:guestTerminated", origin: origin });
+        }
+
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", connect);
+        } else {
+          connect();
+        }
+      })();
+    </script>
+  </body>
+</html>

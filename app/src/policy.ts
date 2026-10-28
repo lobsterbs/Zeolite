@@ -188,6 +188,16 @@ export function policyMatch(p: CompiledPolicy, url: string, rtype: ResourceType)
   return best;
 }
 
+/* #487: behavior rules must not compete with network transport rules.
+   Previously policyMatch() could choose a high-priority relay/wisp
+   rule ahead of a lower-priority native/rewrite rule, accidentally
+   disabling the intended content behavior. Transport selection still
+   uses transportMatch() independently below. */
+export function behaviorMatch(p: CompiledPolicy, url: string, rtype: ResourceType): PolicyRule | null {
+  const behaviors = p.rules.filter((r) => r.route === "native" || r.route === "rewrite");
+  return behaviors.length === 0 ? null : policyMatch({ rules: behaviors }, url, rtype);
+}
+
 /* #154: transport-side view of the same rules. route "native" and
    route "rewrite" choose a response's rewrite behavior (literal pass
    demotion, rewrite upgrade); route "relay" and route "wisp" choose
@@ -206,18 +216,26 @@ export function transportMatch(p: CompiledPolicy, url: string, rtype: ResourceTy
    missing file means "no policy" (the default); a malformed file
    is rejected loudly and the defaults stay active. */
 let cached: Promise<CompiledPolicy> | null = null;
+let doctorState: "not-loaded" | "loaded" | "missing" | "invalid" | "unavailable" = "not-loaded";
+export function policyDoctorState(): typeof doctorState { return doctorState; }
 
 export function loadPolicy(): Promise<CompiledPolicy> {
   if (!cached) {
     cached = (async () => {
+      let parsing = false;
       try {
         const resp = await fetch("/policy.kdl", { cache: "no-cache" });
         /* A 5xx is a transient failure, not a missing file: forget the
            memo so the next request retries. A 404 stays memoized. */
         if (resp.status >= 500) cached = null;
-        if (!resp.ok) return { rules: [] };
-        return compilePolicy(await resp.text());
+        if (!resp.ok) { doctorState = resp.status === 404 ? "missing" : "unavailable"; return { rules: [] }; }
+        const body = await resp.text();
+        parsing = true;
+        const result = compilePolicy(body);
+        doctorState = "loaded";
+        return result;
       } catch (e) {
+        doctorState = parsing ? "invalid" : "unavailable";
         cached = null;
         DIAG.emit({
           category: "TRANSPORT",
@@ -236,4 +254,5 @@ export function loadPolicy(): Promise<CompiledPolicy> {
 /** Tests only: drop the memoized policy. */
 export function policyResetForTests(): void {
   cached = null;
+  doctorState = "not-loaded";
 }

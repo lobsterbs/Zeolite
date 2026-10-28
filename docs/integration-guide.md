@@ -9,7 +9,8 @@ is either implemented there or documents a known gap there (marked as such).
 
 Related documents: `engine-adapter.md` (the embed contract and engine adapter
 API), `policy.md` (the rules engine), `interception.md`, `limitations.md`,
-`transport-lifecycle.md`, `session.md`, `versioning.md`.
+`transport-lifecycle.md`, `doctor.md` (read-only host diagnostics),
+`session.md`, `versioning.md`.
 
 ## Prerequisites
 
@@ -104,11 +105,14 @@ Mount the wisp handler (the reference host mounts it at `/wisp/`).
 Authentication follows the server key config (`ZL_WISP_ED25519_HEX`),
 regardless of which auth extension parsed.
 
-Honest limitation: the shipped wasm wisp client carries no password or
-key credentials. If your wisp endpoint requires authentication, every wasm
-wisp connection is refused. Either place an unauthenticated endpoint where
-network position protects it, or route traffic over the relay. This is why
-the reference host runs relay-only.
+Honest limitation, now conditional: the shipped wasm wisp client itself
+carries no password or key credentials, but the worker ships a wisp
+auth socket wrapper (#496) that upgrades the vendored v1 client to an
+authenticated wisp v2.1 PasswordAuth session when the host arms it with
+zl:wispAuth (see docs/wisp-auth-client.md). Without armed credentials an
+authenticated endpoint still refuses every wasm wisp connection: place an
+unauthenticated endpoint where network position protects it, arm
+zl:wispAuth, or route traffic over the relay.
 
 ### Relay endpoint
 
@@ -343,7 +347,7 @@ Run this after integrating and after every pin bump:
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | register() resolves but the engine never controls the origin | classic registration, missing `type: "module"` | pass `type: "module"`; a classic evaluation error surfaces nowhere |
-| 502 tls handshake eof on every upstream fetch | the wisp endpoint requires auth the wasm client cannot present | route `default-relay` first in `policy.kdl`, or expose an unauthenticated wisp endpoint |
+| 502 tls handshake eof on every upstream fetch | the wisp endpoint requires auth and no credentials are armed | arm `zl:wispAuth` (docs/wisp-auth-client.md), route `default-relay` first in `policy.kdl`, or expose an unauthenticated wisp endpoint |
 | Routes render as `/j/...` on your origin | `zl:config` never reached the worker (register-before-config race, or wrong origin worker) | wait for registration, re-push, verify with `zl:ping` |
 | Version endpoint reports a stale worker hash after deploy | container layer cache re-served the old tarball | deploy with cache clearing; the served hash is the oracle |
 | A host page throws on a strict URL sanity check before fetching (loader classes that validate generated URLs) | the rewriter tokenized a string literal the loader validates | add a `native` behavior rule for that host; the transport rule still routes the fetch |

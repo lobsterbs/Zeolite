@@ -69,7 +69,14 @@ export type DiagStage =
   | "TRANSPORT_FALLBACK"
   | "REDIRECT_HOP"
   | "REDIRECTED"
-  | "PINNED_SCRIPT";
+  | "PINNED_SCRIPT"
+  | "ADAPTIVE_RECOVERY";
+
+export type DiagDeliveryState =
+  | "definitely-not-delivered"
+  | "delivered-response"
+  | "delivery-unknown";
+export type DiagDeliveryTransport = "wisp" | "wisp-route" | "relay";
 
 export interface DiagEvent {
   /** Browser-owned source client, assigned at interception. */
@@ -85,6 +92,10 @@ export interface DiagEvent {
   url?: string;
   traceId?: string;
   requestId?: string;
+  /** #454: fixed-vocabulary transport evidence. Never infer these
+      from technicalReason/message text. */
+  deliveryState?: DiagDeliveryState;
+  deliveryTransport?: DiagDeliveryTransport;
   stack?: string;
 }
 
@@ -124,9 +135,12 @@ export function redactSecrets(s: string): string {
   return s
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, "$1[redacted]@")
     .replace(/([?&#](?:code|state|nonce|code_verifier|id_token|access_token|refresh_token|session_token|credential|g-recaptcha-response|h-captcha-response|cf-turnstile-response)=)[^&#\s]*/gi, "$1[redacted]")
+    // Match the whole authorization value: redacting only the word
+    // "Bearer" would leave its actual credential in diagnostic text.
+    .replace(/(authorization["'\s:=]+)(?:bearer|basic)\s+\S+/gi, "$1[redacted]")
     .replace(/(authorization["'\s:=]+)(\S+)/gi, "$1[redacted]")
     .replace(/(cookie["'\s:=]+)([^;\s]+)/gi, "$1[redacted]")
-    .replace(/(bearer\s+)[A-Za-z0-9._\-]+/gi, "$1[redacted]")
+    .replace(/((?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[redacted]")
     .replace(/((?:token|password|secret|api[_-]?key)["'\s:=]+)([^&\s;]+)/gi, "$1[redacted]");
 }
 
@@ -152,6 +166,7 @@ class Diag {
       message: redactSecrets(e.message),
       technicalReason: e.technicalReason ? redactSecrets(e.technicalReason) : undefined,
       url: e.url ? redactSecrets(e.url) : undefined,
+      stack: e.stack ? redactSecrets(e.stack) : undefined,
     };
     events.push(ev);
     if (events.length > EVENT_LIMIT) events.shift();
