@@ -69,14 +69,54 @@ function eq(a, b, msg) {
 
 /* Every check carries its cause class; a failure prints and records
    it (the report groups failures per category). */
+/* #477 ship note: ONE bounded wedge-restart retest. The vendored
+   wisp transport can wedge transiently under rapid stream churn
+   (observed CI runs 1180/1181 and local runs: a probe's fetches
+   surface "zeolite: upstream fetch failed ... Could not connect to
+   server" while the engine log shows the follow-up connects never
+   arriving, and in CI every later probe then times out inside the
+   same wedge). The engine's own #119 lifecycle cannot observe this
+   wedge. Policy, printed loudly so CI output never hides it: on the
+   wedge signature, ONCE per battery, restart the engine process AND
+   the browser context (fresh SW, fresh transport) and retest the
+   SAME probe. A real regression fails identically after the restart
+   and the suite stays red; a transient wedge passes and is visible
+   as "| after one wedge restart". No result is faked or skipped. */
+let wedgeRestartUsed = false;
+
+async function wedgeRestart() {
+  wedgeRestartUsed = true;
+  console.log("[RETRY][wedge] wedge signature seen: restarting engine + browser context, retesting the probe once");
+  try { engineProc?.kill("SIGKILL"); } catch {}
+  engineProc = null;
+  await sleep(700);
+  try { await context.close(); } catch {}
+  context = await browser.newContext();
+  await startEngine();
+}
+
 async function check(category, name, fn) {
   try {
     const detail = await fn();
     results.push({ category, name, ok: true });
     console.log("[PASS][" + category + "] " + name + (detail ? " | " + detail : ""));
   } catch (err) {
-    results.push({ category, name, ok: false, error: String(err?.message ?? err) });
-    console.log("[FAIL][" + category + "] " + name + " | " + String(err?.message ?? err));
+    let failure = err;
+    const msg = String(err?.message ?? err);
+    if (!wedgeRestartUsed && /zeolite: upstream fetch failed|Could not connect to server|zeolite: u|Timeout \d+ms exceeded/.test(msg)) {
+      try {
+        await wedgeRestart();
+        const detail = await fn();
+        results.push({ category, name, ok: true });
+        console.log("[PASS][" + category + "] " + name + (detail ? " | " + detail : "") + " | after one wedge restart");
+        return;
+      } catch (retryErr) {
+        failure = retryErr;
+        console.log("[RETRY][wedge] the probe failed again after the wedge restart: recording the post-restart failure");
+      }
+    }
+    results.push({ category, name, ok: false, error: String(failure?.message ?? failure) });
+    console.log("[FAIL][" + category + "] " + name + " | " + String(failure?.message ?? failure));
   }
 }
 
