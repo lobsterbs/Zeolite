@@ -1,6 +1,8 @@
 /* Page identity helpers shared by the bootstrap modules: the site
+
    storage hash, the virtual page origin and the controller lookup,
    stated once so the minified bundle pays for them once. */
+import { NativeURL } from "./anchorshim";
 
 export function fnv1a(s: string): string {
   let h = 0x811c9dc5;
@@ -19,7 +21,7 @@ export function fnv1a(s: string): string {
    from it and the cookie / serviceWorker shims share it. */
 export function pageOrigin(dest: string): string {
   try {
-    return new URL(dest).origin;
+    return new NativeURL(dest).origin;
   } catch {
     return "";
   }

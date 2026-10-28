@@ -1,5 +1,6 @@
 /* Same-site frame messaging repair (#128, #130, #131, #132).
 
+
    Every engine-routed document is served from one real origin, so
    cross-frame calls name their target by VIRTUAL origin: the
    reCAPTCHA anchor calls parent.postMessage(msg, pageVO), the page
@@ -39,6 +40,7 @@
    Residuals: window.top and window.frames[i] are LegacyUnforgeable
    and keep receiver-side behavior (a top-path cross-realm call
    still delivers with the top realm's source). */
+import { NativeURL } from "./anchorshim";
 type AnyRecord = Record<string, any>;
 
 /* #132: the child-proxy cache. One map per realm (each realm loads
@@ -134,7 +136,7 @@ function senderPm(
     if (typeof origin === "string" && origin !== "*" && origin !== "/" && origin !== real) {
       let want = "";
       try {
-        want = new URL(origin).origin;
+        want = new NativeURL(origin).origin;
       } catch {
         want = ""; /* malformed: the native keeps its SyntaxError */
       }
@@ -292,7 +294,7 @@ export function applyPostMessage(w: AnyRecord): void {
     if (typeof origin === "string" && origin !== "*" && origin !== "/" && origin !== real) {
       let want = "";
       try {
-        want = new URL(origin).origin;
+        want = new NativeURL(origin).origin;
       } catch {
         want = ""; // malformed: keep the native SyntaxError below
       }

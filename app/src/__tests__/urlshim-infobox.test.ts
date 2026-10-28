@@ -12,6 +12,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyAnchorShim, applyUrlShim, urlVirtual } from "../bootstrap/anchorshim";
+import { swShimRegister } from "../swshim";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -117,5 +118,45 @@ describe("URL parse seam (#510 Brave infobox website row)", () => {
     expect((w.URL as { __zlUrlWrap?: boolean }).__zlUrlWrap).toBe(true);
     applyUrlShim(w);
     expect((w.URL as { __zlUrlWrap?: boolean }).__zlUrlWrap).toBe(true);
+  });
+
+  it("keeps the swshim register native: a memoized script route still registers against the page route (#510 follow-up)", async () => {
+    const sent: Array<{ type: string; routes: string[] }> = [];
+    const ports: Array<{ postMessage: (p: unknown) => void }> = [];
+    stubController(sent, ports);
+    /* the page route never joins the memo (no anchor or island
+       carries it), the script route does - the CI shape that threw
+       TypeError Origin when the shim parsed through the seam */
+    const pageRoute = "https://engine.host/zl/PageRouteToken1XyZq";
+    const swRoute = "https://engine.host/zl/SwScriptRoute01XyZq";
+    const script = { textContent: "x=" + JSON.stringify(swRoute) };
+    const w: Record<string, any> = {
+      document: {
+        readyState: "complete",
+        querySelectorAll: (sel: string) => (sel === "script:not([src])" ? [script] : []),
+      },
+      location: { href: pageRoute },
+      URL,
+    };
+    applyAnchorShim(w);
+    applyUrlShim(w);
+    expect(await settle(() => sent.length === 1)).toBe(true);
+    ports[0].postMessage({ ok: true, dests: ["https://site.example/sw.js"] });
+    expect(await settle(() => urlVirtual(swRoute) !== undefined)).toBe(true);
+    const rec: { v: string | null } = { v: null };
+    const store = {
+      get: () => rec.v,
+      set: (v: string) => {
+        rec.v = v;
+      },
+      clear: () => {
+        rec.v = null;
+      },
+    };
+    const reg = swShimRegister(store, pageRoute, swRoute);
+    expect(reg.installing).not.toBeNull();
+    const stored = JSON.parse(String(rec.v)) as { scriptURL: string; scope: string };
+    expect(stored.scriptURL).toBe(swRoute);
+    expect(stored.scope.startsWith("https://engine.host/")).toBe(true);
   });
 });
