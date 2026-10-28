@@ -48,6 +48,7 @@ import { adoptResponse } from "./downloads";
 import { flatRed, netLogAnnotateRewrite, netLogPush, type NetDetail } from "./netlog";
 import { traceDecision } from "./tracing";
 import { siteToken } from "./pageload";
+import { guestDispatchFetchForUrl } from "./kernel/guests/executor";
 
 import { altConfigured, altEndpoint, altRegister, altWispFetch, canReplayAfterFailure, wispTransport } from "./transport";
 import { normalizeWispUrl, primaryWispOverrideValue, setPrimaryWispOverride } from "./config";
@@ -2593,6 +2594,59 @@ export function handleFetch(e: FetchEvent): void {
       if (e.request.mode === "navigate" || isWorkerDestination(e.request.destination)) {
         const newClient = e.resultingClientId || e.clientId;
         if (newClient && establishContext(VCTX, newClient, target)) capContexts(VCTX, VCTX_CAP);
+      }
+
+      /* #477 P3: fetch bridging into the guest realm. The request has
+         decoded to its real virtual-site URL and passed the
+         disabled-site gate; if a running guest service worker owns
+         that URL scope, the engine asks it first under the hard
+         250 ms fail-closed budget. A handled guest answer becomes the
+         served Response verbatim minus privileged cookie headers (an
+         invalid status/body combination fails closed); every other
+         outcome falls through to the ordinary engine path unchanged.
+         Recursion is provably impossible: guests are network-blind, so
+         a guest answer never originates an engine fetch event, and the
+         pending-id one-shot marker consumes exactly one response per
+         dispatch. An already-aborted request never reaches the guest. */
+      if (!(e.request.signal && e.request.signal.aborted)) {
+        try {
+          const gHeaders: Record<string, string> = {};
+          for (const [hk, hv] of e.request.headers) gHeaders[hk] = hv;
+          const gOutcome = await guestDispatchFetchForUrl(target, {
+            url: target,
+            method: e.request.method,
+            headers: gHeaders,
+            destination: e.request.destination || undefined,
+            mode: e.request.mode,
+            clientId: e.resultingClientId || e.clientId || undefined,
+          });
+          if (gOutcome.handled) {
+            const gH = new Headers(gOutcome.headers);
+            /* A guest response must not stamp cookies onto the engine
+               origin; virtual-site cookies belong to the jar at request
+               time. */
+            gH.delete("set-cookie");
+            gH.delete("set-cookie2");
+            try {
+              const gResp = new Response(gOutcome.body, { status: gOutcome.status, headers: gH });
+              const gt = DIAG.trace(e.resultingClientId || e.clientId);
+              DIAG.emit({
+                traceId: gt,
+                requestId: gt,
+                category: "SERVICE_WORKER",
+                severity: "info",
+                stage: "REQUEST_INTERCEPTED",
+                message: "guest fetch handler served the request (#477 P3)",
+                url: target,
+              });
+              return gResp;
+            } catch {
+              /* Invalid status/body combination fails closed below. */
+            }
+          }
+        } catch {
+          /* Guest bridging never breaks the ordinary engine path. */
+        }
       }
 
       return (async () => {

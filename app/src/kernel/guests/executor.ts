@@ -22,7 +22,7 @@
    timer inside the kernel). Proxied-page register capture stays
    virtual-only in this wave. */
 
-import { canonicalGuestRegistration } from "./registration";
+import { canonicalGuestRegistration, guestScopeMatches } from "./registration";
 import { DIAG } from "../../diag";
 
 /** Hard cap on the guest script body the kernel will ever wrap. */
@@ -417,6 +417,21 @@ export class GuestKernel {
     });
   }
 
+  /** #477 P3: route one request to the running guest whose canonical
+      scope matches the request URL (the real SW fetch contract).
+      Guests are keyed by origin and guestScopeMatches requires origin
+      equality, so at most one record can ever match; the first match
+      is exact. No match resolves handled:false and the engine request
+      path serves the request exactly as with no guest. */
+  dispatchFetchForUrl(url: string, request: GuestFetchRequest): Promise<GuestFetchOutcome> {
+    this.tick();
+    for (const g of this.guests.values()) {
+      if (g.state !== "running" || !g.guest) continue;
+      if (guestScopeMatches(g.scope, url)) return this.dispatchFetch(g.origin, request);
+    }
+    return Promise.resolve({ handled: false });
+  }
+
   /** Test and diagnostic view of live guest state. */
   active(): { origin: string; state: string }[] {
     return [...this.guests.values()].map((g) => ({ origin: g.origin, state: g.state }));
@@ -438,4 +453,11 @@ export function guestSpawn(msg: GuestSpawnMessage, reply: GuestReplyFn): void {
 
 export function guestTerminate(origin: string, reply?: GuestReplyFn): void {
   kernel.terminate(origin, reply);
+}
+
+  /** #477 P3: the live request path's fetch bridge entry. Every
+      uncertain outcome resolves handled:false and the ordinary engine
+      request path serves the request. */
+export function guestDispatchFetchForUrl(url: string, request: GuestFetchRequest): Promise<GuestFetchOutcome> {
+  return kernel.dispatchFetchForUrl(url, request);
 }
