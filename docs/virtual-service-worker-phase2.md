@@ -261,3 +261,11 @@ Honest deviations of wave 1, all deliberate:
 - Recursion guard: synthetic dispatch is provably non-recursive. Guests are network-blind, so a guest answer never originates an engine fetch event, and the pending-id one-shot marker consumes exactly one response per dispatch. Cancellation: an already-aborted request never reaches the guest; the budget bounds everything else.
 - Honest limits: a served guest response bypasses engine response-side processing (rewrite passes, response cache, transport-level policy such as ad-block rules); the request never leaves the engine, so there is no egress or IP exposure. Guest-initiated network fetches remain impossible, so the normal Zeolite SSRF, cookie and policy surfaces apply to the page real requests, not to guest answers. The security review of the full dispatch model remains the merge requirement.
 - Tests: app/src/__tests__/guest-fetch-scope.test.ts pins the scope router (scope match with a handled answer, origin miss, sub-path scope, non-running guest).
+
+
+## Wave 3 completion (#477): page-facing register/unregister
+
+- Proxied pages calling navigator.serviceWorker.register(scriptURL, {scope}) now forward to the engine controller as zl:guestRegister (canonicalGuestRegistration, GUEST_SCRIPT_MAX script bound, pageUrl recovered worker-side from the message source, ghosteryListFetch for the default list) and spawn the guest realm on the guest-host page; register() with no controller leaves the virtual semantics unchanged. unregister() forwards zl:guestUnregister and terminates only the guest whose sender origin matches.
+- The guest-host page (guest-host.html) is served by the engine and hosts isolated guest realms; the live request path consults running guests first under the wave-2 fail-closed budget (see the wave 3 status section above).
+- Tests: app/src/__tests__/worker.test.ts pins the register/unregister forwarding seam; the navhandle gate tests pin the /guest-host.html host path.
+- CI note: run 40684200188 on 968462b failed only the browser torture job after a runner-side upstream failure (the first failing probe parsed the honest "zeolite: upstream fetch failed" error body, then every subsequent probe timed out on page.goto; the e2e.mjs suite and the rust, wasm, app and compat jobs all passed on the same commit). This documentation commit retriggers CI to confirm.
