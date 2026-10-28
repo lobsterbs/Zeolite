@@ -246,3 +246,10 @@ Honest deviations of wave 1, all deliberate:
 - The registration facade stays honest: update() rejects,
   unregister routes to the kernel, getNotifications returns an
   empty list.
+
+## Wave 2 status (#477): synthetic fetch dispatch, kernel seam
+
+- GuestKernel.dispatchFetch(origin, request) posts one synthetic fetch event into the running guest realm and resolves under a hard 250 ms fail-closed budget (GUEST_FETCH_BUDGET_MS). Every uncertain path (no guest, not running, no handler, malformed or oversize response, script error, timeout, termination) resolves handled:false: the engine request path serves the request exactly as with no guest present.
+- The harness fetch event carries a plain structured request (no live Request object, no stream, no privileged handle crosses the guest boundary) plus a respondWith that serializes the guest answer over the kernel port. A fetch event with no registered listener answers guestFetchNoHandler immediately instead of burning the budget.
+- Responses are validated before use: integer status 100-599, string header values, string or null body at most 2 MiB (GUEST_FETCH_BODY_MAX). Anything else fails closed.
+- Honest limit: the seam is kernel-level and unit-tested (app/src/__tests__/guest-fetch.test.ts) but is NOT wired into the live engine request path. Wiring it through Zeolite SSRF, cookies, diagnostics and policy is the next stage; until then guests still serve no real traffic and real fetch events stay engine-only.

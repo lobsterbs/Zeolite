@@ -15,7 +15,7 @@
    Wave 1 honest limits, by design (docs/virtual-service-worker-phase2.md):
    guests are network-blind (fetch, XMLHttpRequest, WebSocket,
    importScripts shadowed at spawn), receive no kernel storage handles
-   (caches, indexedDB shadowed), get no fetch events, controllerchange
+   (caches, indexedDB shadowed), get no fetch events (the wave-2 seam dispatchFetch adds a kernel-side synthetic fetch dispatch with a 250 ms fail-closed budget, not yet wired into the live engine request path), controllerchange
    and push are never dispatched, waitUntil is accepted and not
    awaited, the spawn trigger is a host-only control message, and a
    dead handshake is only reaped on the next kernel interaction (no
@@ -30,6 +30,52 @@ export const GUEST_SCRIPT_MAX = 256 * 1024;
 
 /** Deadline for the host handshake of one spawn or terminate, ms. */
 export const GUEST_HANDSHAKE_MS = 10000;
+
+/** #477 wave 2: hard fail-closed budget for one synthetic guest fetch.
+    A guest realm may loop or never answer; the engine never waits past
+    this. */
+export const GUEST_FETCH_BUDGET_MS = 250;
+
+/** #477 wave 2: upper bound on a synthetic guest response body.
+    Above it the outcome fails closed to the engine path. */
+export const GUEST_FETCH_BODY_MAX = 2 * 1024 * 1024;
+
+/** #477 wave 2: plain structured request handed to the guest realm.
+    No live Request object, no stream, no privileged handle crosses the
+    guest boundary. */
+export interface GuestFetchRequest {
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+  destination?: string;
+  mode?: string;
+  clientId?: string;
+}
+
+/** #477 wave 2: synthetic fetch outcome. handled:false means the
+    engine request path serves the request exactly as with no guest. */
+export type GuestFetchOutcome =
+  | { handled: false }
+  | { handled: true; status: number; headers: Record<string, string>; body: string | null };
+
+/** #477 wave 2: a synthetic guest response is used only when every
+    field is bounded and well-typed; anything else fails closed. */
+function validGuestFetchResponse(
+  r: unknown,
+): r is { status: number; headers?: Record<string, string>; body?: string | null } {
+  if (!r || typeof r !== 'object') return false;
+  const v = r as Record<string, unknown>;
+  if (typeof v.status !== "number" || !Number.isInteger(v.status) || v.status < 100 || v.status > 599) return false;
+  if (v.headers !== undefined && v.headers !== null) {
+    if (typeof v.headers !== 'object' || Array.isArray(v.headers)) return false;
+    for (const [k, val] of Object.entries(v.headers)) {
+      if (typeof k !== 'string' || typeof val !== 'string') return false;
+    }
+  }
+  if (v.body !== undefined && v.body !== null && typeof v.body !== 'string') return false;
+  if (typeof v.body === 'string' && v.body.length > GUEST_FETCH_BODY_MAX) return false;
+  return true;
+}
 
 /** Minimal structural port the kernel needs. Mirrors wsbridge's
     PortLike so a real MessagePort plugs in without a cast. */
@@ -80,7 +126,11 @@ export function guestHarness(scope: string, scriptURL: string): string {
     'if(e.data&&e.data.zl==="harnessPort"&&e.ports&&e.ports[0]){' +
     "port=e.ports[0];port.onmessage=function(ev){" +
     'var d=ev.data;if(!d||d.zl!=="guestEvent")return;' +
-    "var f=L[d.type]||[];var g={type:d.type,data:d.data,source:null,waitUntil:function(){}};" +
+    "var f=L[d.type]||[];" +
+    "if(d.type===\"fetch\"&&(!d.data||!f.length)){port.postMessage({zl:\"guestFetchNoHandler\",id:d.data&&d.data.id});return;}" +
+    "var g={type:d.type,data:d.data,source:null,waitUntil:function(){}};" +
+    "if(d.type===\"fetch\"&&d.data){g.request=d.data.request;" +
+    "g.respondWith=function(p){Promise.resolve(p).then(function(r){port.postMessage({zl:\"guestFetchResponse\",id:d.data.id,response:r});}).catch(function(err){port.postMessage({zl:\"guestFetchResponse\",id:d.data.id,error:String(err)});});};}" +
     'for(var i=0;i<f.length;i++){try{f[i](g);}catch(err){if(port)port.postMessage({zl:"guestError",error:String(err)});}}' +
     '};port.postMessage({zl:"guestReady"});}});' +
     "self.addEventListener=function(t,f){(L[t]=L[t]||[]).push(f);};" +
@@ -103,6 +153,11 @@ export class GuestKernel {
   private guests = new Map<string, GuestRecord>();
   private now: () => number;
   private onMessage: GuestListener | null = null;
+  private fetchSeq = 0;
+  private fetchPending = new Map<
+    number,
+    { origin: string; timer: ReturnType<typeof setTimeout>; done: (o: GuestFetchOutcome) => void }
+  >();
 
   constructor(now: () => number) {
     this.now = now;
@@ -202,6 +257,15 @@ export class GuestKernel {
     g.state = "terminating";
     g.deadlineAt = this.now() + GUEST_HANDSHAKE_MS;
     g.host.postMessage({ op: "terminate", origin });
+    /* #477 wave 2: a terminating realm never answers pending fetches;
+       fail them closed to the engine path immediately. */
+    for (const [id, p] of this.fetchPending) {
+      if (p.origin === origin) {
+        this.fetchPending.delete(id);
+        clearTimeout(p.timer);
+        p.done({ handled: false });
+      }
+    }
     DIAG.emit({
       category: "SERVICE_WORKER",
       severity: "info",
@@ -294,9 +358,63 @@ export class GuestKernel {
         message: "guest script error contained",
         technicalReason: typeof d.error === "string" ? d.error.slice(0, 200) : "",
       });
+    } else if (d.zl === "guestFetchResponse") {
+      const fr = d as { id?: unknown; response?: unknown; error?: unknown };
+      const p = typeof fr.id === "number" ? this.fetchPending.get(fr.id) : undefined;
+      if (!p) return;
+      const resp = fr.response;
+      if (typeof fr.error === "string" || !validGuestFetchResponse(resp)) {
+        /* Malformed, oversize or errored guest answers fail closed. */
+        p.done({ handled: false });
+        return;
+      }
+      p.done({ handled: true, status: resp.status, headers: { ...(resp.headers ?? {}) }, body: resp.body ?? null });
+    } else if (d.zl === "guestFetchNoHandler") {
+      const fh = d as { id?: unknown };
+      const p = typeof fh.id === "number" ? this.fetchPending.get(fh.id) : undefined;
+      if (p) p.done({ handled: false });
     } else if (d.zl === "guestControl" && d.op === "unregister") {
       this.terminate(origin);
     }
+  }
+
+  /** #477 wave 2: dispatch one synthetic fetch event to the running
+      guest realm under the hard fail-closed budget. Every uncertain
+      path (no guest, not running, no handler, malformed or oversize
+      response, script error, timeout, termination) resolves
+      handled:false and the engine request path serves the request
+      exactly as with no guest. This seam is kernel-level and
+      unit-tested; wiring it into the live request path (Zeolite SSRF,
+      cookies, policy) is the next wave. */
+  dispatchFetch(origin: string, request: GuestFetchRequest): Promise<GuestFetchOutcome> {
+    this.tick();
+    const g = this.guests.get(origin);
+    if (!g || g.state !== "running" || !g.guest) return Promise.resolve({ handled: false });
+    const guest = g.guest;
+    const id = ++this.fetchSeq;
+    return new Promise<GuestFetchOutcome>((resolve) => {
+      const p: { origin: string; timer: ReturnType<typeof setTimeout>; done: (o: GuestFetchOutcome) => void } = {
+        origin,
+        timer: null as unknown as ReturnType<typeof setTimeout>,
+        done: (o: GuestFetchOutcome): void => {
+          this.fetchPending.delete(id);
+          clearTimeout(p.timer);
+          resolve(o);
+        },
+      };
+      p.timer = setTimeout(() => {
+        DIAG.emit({
+          category: "SERVICE_WORKER",
+          severity: "warning",
+          cause: "failure",
+          message: "guest fetch budget exceeded; engine path serves the request",
+          technicalReason: origin,
+        });
+        p.done({ handled: false });
+      }, GUEST_FETCH_BUDGET_MS);
+      this.fetchPending.set(id, p);
+      guest.postMessage({ zl: "guestEvent", type: "fetch", data: { id, request } });
+    });
   }
 
   /** Test and diagnostic view of live guest state. */
