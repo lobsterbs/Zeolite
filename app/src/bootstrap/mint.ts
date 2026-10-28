@@ -22,6 +22,7 @@
    the worker settles can succeed. */
 
 import { makeRel, tokenShaped } from "./navguard";
+import { NativeURL } from "./anchorshim";
 import { controlQuery } from "./controlquery";
 
 type AnyRecord = Record<string, any>;
@@ -72,7 +73,7 @@ export function mintRoute(dest: string, timeout = 5000): Promise<string | null> 
 export function routeAnchor(loc: string): string | undefined {
   let p: string;
   try {
-    p = new URL(loc).pathname;
+    p = new NativeURL(loc).pathname;
   } catch {
     return undefined;
   }
@@ -87,7 +88,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
   const crossDest = (v: string): string | null => {
     let u: URL;
     try {
-      u = new URL(v, loc.href);
+      u = new NativeURL(v, loc.href);
     } catch {
       return null;
     }

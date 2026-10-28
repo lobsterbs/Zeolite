@@ -12,8 +12,11 @@
    carries, memoizes route -> virtual destination, and serves the
    read seams: the nav guard's swap-row property getter (A and
    AREA href), Element.getAttribute, the component getters and
-   stringifier (#490), and the SVG anchor's animated href object
-   (#388).
+   stringifier (#490), the SVG anchor's animated href object
+   (#388), and the URL parse seam: a page that PARSES a
+   route-shaped string (Brave's infobox website row renders
+   new URL(website_url).hostname, #510) reads the decoded virtual
+   destination once the memo holds it.
 
    Honest limits: the first read before the decode reply lands
    returns the native route value (a race, not a hang); detached
@@ -33,6 +36,14 @@
 import { controlQuery } from "./controlquery";
 
 type AnyRecord = Record<string, any>;
+
+/* The pre-patch URL constructor, captured at module init: the URL
+   parse seam (#510) wraps the realm's URL below, and every
+   INTERNAL parse of an engine route (shape tests, absolute-form
+   derivation, the #490 component parse, and the navguard/mint
+   import below) must keep native semantics: a decoded route must
+   not change what the engine itself computes from it. */
+export const NativeURL = URL;
 
 /* route -> virtual destination; "" marks a route the worker could
    not decode (a memoized negative so it never re-asks). LRU-capped
@@ -56,6 +67,17 @@ const elMemo = new WeakMap<AnyRecord, { attr: string; dest: string }>();
 const inflight = new Set<string>();
 const BATCH_MAX = 64;
 const SCAN_DEBOUNCE = 200;
+/* #510: route-shaped candidates inside inline script text:
+   scheme-absolute URLs or /zl/ paths, terminated by a quote or a
+   markup delimiter. The worker decode stays the judge: a
+   real-site URL that matches the shape decodes to null and
+   memoizes negative. */
+const HARVEST_RE = /(?:https?:\/\/|\/zl\/)[^\s"'`<>{}\\]+/g;
+/* #510: inline scripts whose text already joined a COMPLETED
+   harvest window. A bounded-out script stays unmarked so the next
+   window resumes it; memo/inflight skips make the rescan converge
+   instead of replaying the prefix (the #387 lesson). */
+const harvested = new WeakSet<AnyRecord>();
 
 /* Route-shape test: a navguard marker, or a second path segment
    that is a long opaque token run (the #157 cross-prefix route
@@ -66,7 +88,7 @@ const SCAN_DEBOUNCE = 200;
    forms. */
 function routeShaped(v: string): boolean {
   try {
-    const u = new URL(v, "http://z/");
+    const u = new NativeURL(v, "http://z/");
     return u.pathname.startsWith("/__zl_") || /[?&]zlNavh=[A-Za-z0-9_-]{12,}/.test(u.search) ||
       /^[A-Za-z0-9_-]{12,}$/.test(u.pathname.split("/")[2] ?? "");
   } catch { return false; }
@@ -123,13 +145,33 @@ function scan(): void {
       if (!a || elMemo.get(n)?.attr === a) continue;
       if (batch.size >= BATCH_MAX) { more = true; break; }
       let abs = a;
-      try { abs = new URL(a, w!.location.href).href; } catch { /* keep raw */ }
+      try { abs = new NativeURL(a, w!.location.href).href; } catch { /* keep raw */ }
       for (const r of new Set([a, abs])) {
         if (!routeShaped(r)) continue;
         const hit = memo.get(r);
         if (hit !== undefined) elMemo.set(n, { attr: a, dest: hit });
         else if (!inflight.has(r)) { batch.add(r); rows.push([n, a, r]); }
       }
+    }
+    /* #510: harvest route-shaped URL literals from INLINE script
+       bodies (SvelteKit/Nuxt-style hydration data islands carry
+       engine-minted routes the page PARSES to build visible
+       surfaces) so the memo is warm before hydration reads it.
+       Bounded by the same window; a script that fits is marked
+       harvested for good (its text is immutable), a bounded-out one
+       resumes at the next scan. */
+    for (const n of doc.querySelectorAll("script:not([src])") as Iterable<AnyRecord>) {
+      if (harvested.has(n)) continue;
+      const t = typeof n.textContent === "string" ? n.textContent : "";
+      if (!t) { harvested.add(n); continue; }
+      let cut = false;
+      for (const m of t.match(HARVEST_RE) ?? []) {
+        if (!routeShaped(m) || memo.has(m) || inflight.has(m)) continue;
+        if (batch.size >= BATCH_MAX) { more = true; cut = true; break; }
+        batch.add(m);
+      }
+      if (cut) break;
+      harvested.add(n);
     }
     if (batch.size) decodeBatch([...batch], more, (r, d) => {
       for (const [n, a, route] of rows) if (route === r) elMemo.set(n, { attr: a, dest: d ?? "" });
@@ -260,7 +302,7 @@ export function applyAnchorShim(w: Record<string, unknown>): void {
       const d = Object.getOwnPropertyDescriptor(hp, prop);
       if (!d || !d.get) continue;
       Object.defineProperty(hp, prop, { ...d, get(this: AnyRecord) {
-        try { return (new URL(this.href) as unknown as AnyRecord)[prop]; }
+        try { return (new NativeURL(this.href) as unknown as AnyRecord)[prop]; }
         catch { return d.get!.call(this); }
       } });
     }
@@ -306,4 +348,70 @@ export function applyAnchorShim(w: Record<string, unknown>): void {
       });
     }
   }
+}
+
+/** #510: the URL parse seam. anchorVirtual serves attribute reads;
+    a hydration-era page builds visible surfaces by PARSING
+    data-island route strings (Brave's infobox website row renders
+    new URL(website_url).hostname), so the parse itself must serve
+    the decoded destination: a route-shaped input with a memo hit
+    answers the virtual URL, a miss keeps the native parse and asks
+    the worker (the anchorshim race: the first parse of a route
+    before the decode reply lands stays native). The miss ask is
+direct rather than scheduleScan: a parsed literal has no DOM node a
+rescan could recollect, and decodeBatch memo/inflight dedupe keeps
+repeated misses idempotent. */
+export function urlVirtual(v: string): string | undefined {
+  const hit = memo.get(v);
+  if (hit !== undefined) return hit === "" ? undefined : hit;
+  if (!routeShaped(v)) return undefined;
+  decodeBatch([v], false);
+  return undefined;
+}
+
+/** #510: install the URL constructor wrap. The wrapper is a plain
+    function that RETURNS a native URL instance - built from the
+    decoded virtual destination on a hit, otherwise
+    Reflect.construct of the original arguments - so instances stay
+    genuine URL objects (instanceof and prototype identity survive)
+    and the engine's own internals keep NativeURL. Statics are
+    copied because a plain wrapper has none of its own; parse()
+    routes through the same seam so both parse surfaces agree.
+    Honest limits: a realm without URL keeps its native
+    constructor; a twice-guarded realm (the __zlUrlWrap mark) is
+    left as-is; a memoized negative decodes to nothing and the
+    native parse stands. */
+export function applyUrlShim(w: Record<string, unknown>): void {
+  const NU = (w as AnyRecord).URL as
+    | (new (input: string | URL, base?: string | URL) => URL)
+    | undefined;
+  if (!NU || typeof NU !== "function") return;
+  if ((NU as unknown as AnyRecord).__zlUrlWrap) return;
+  const Wrapped = function (input: string | URL, base?: string | URL): URL {
+    if (!new.target) throw new TypeError("Failed to construct 'URL': Please use the 'new' operator");
+    const s = typeof input === "string" ? input : String(input ?? "");
+    const d = urlVirtual(s);
+    if (d !== undefined) return new NativeURL(d);
+    return Reflect.construct(NU, [input, base]);
+  } as AnyRecord;
+  Wrapped.__zlUrlWrap = true;
+  const rec = NU as unknown as AnyRecord;
+  for (const k of ["createObjectURL", "revokeObjectURL"]) {
+    const fn = rec[k];
+    if (typeof fn === "function") Wrapped[k] = fn;
+  }
+  if (typeof rec.parse === "function") {
+    Wrapped.parse = function (input: string | URL, base?: string | URL): URL | null {
+      try {
+        const s = typeof input === "string" ? input : String(input ?? "");
+        const d = urlVirtual(s);
+        if (d !== undefined) return new NativeURL(d);
+        return Reflect.construct(NU, [input, base]);
+      } catch {
+        return null;
+      }
+    };
+  }
+  try { Wrapped.prototype = rec.prototype; } catch { /* a locked prototype keeps the wrapper's own */ }
+  (w as AnyRecord).URL = Wrapped;
 }
