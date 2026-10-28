@@ -44,7 +44,8 @@ describe("CSP deny-only translation safety subset (#452)", () => {
       "upgrade-insecure-requests",
       "connect-src 'none'",
       "frame-ancestors 'none'",
-      "worker-src 'none'",
+      /* worker-src/frame-src/child-src 'none' moved to the audited
+         representable set on 2026-10-28; see the audit tests below. */
       "report-uri https://report.example/csp",
       "report-to security",
     ]) {
@@ -130,4 +131,30 @@ describe("CSP deny-only translation safety subset (#452)", () => {
     expect(out.has("content-security-policy-report-only")).toBe(false);
     expect(out.get("content-type")).toBe("text/html");
   });
+  it("translates the audited worker/frame/child deny directives (#452 audit)", () => {
+    const all = "object-src 'none'; worker-src 'none'; frame-src 'none'; child-src 'none'";
+    expect(planCspTranslation(all)).toEqual({
+      kind: "candidate",
+      policy: all,
+      directives: ["object-src", "worker-src", "frame-src", "child-src"],
+    });
+    for (const d of ["worker-src", "frame-src", "child-src"]) {
+      expect(planCspTranslation(d + " 'none'").kind).toBe("candidate");
+      expect(planCspTranslation(d + " 'self'").kind).toBe("unsupported");
+      expect(planCspTranslation(d + " https://cdn.example").kind).toBe("unsupported");
+    }
+  });
+
+  it("keeps the audited-unsupported directives rejected with typed reasons (#452 audit)", () => {
+    /* frame-ancestors: the engine embeds proxied pages in its own UI frame;
+       connect-src: the page runtime fetches minted engine routes;
+       nonce/hash: injected scripts cannot carry the upstream nonce and
+       the rewriter mutates inline bodies. */
+    for (const d of ["frame-ancestors", "connect-src", "script-src", "img-src", "sandbox", "report-uri"]) {
+      expect(planCspTranslation(d + " 'none'")).toEqual({ kind: "unsupported", reason: "unsupported-directive" });
+    }
+    expect(planCspTranslation("script-src 'nonce-abcd1234'").kind).toBe("unsupported");
+    expect(planCspTranslation("script-src 'sha256-4iYvwKpOKvxQNR0lGBTyEK8TqwJcpK46DpKYoLzkX5M'").kind).toBe("unsupported");
+  });
 });
+

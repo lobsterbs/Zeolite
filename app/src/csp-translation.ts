@@ -9,7 +9,7 @@
    of source-list directives. It deliberately rejects directives with
    origins, paths, wildcards, nonce/hash, strict-dynamic, reports,
    sandbox, fallback semantics or embedding meaning rather than
-   silently dropping or broadening them. A rejection emits no policy. */
+   silently dropping or broadening them. The 2026-10-28 audit added worker-src, frame-src and child-src 'none' as representable (the engine page runtime creates no workers and injects no frames into proxied documents); frame-ancestors and connect-src stay rejected (the engine embeds proxied pages in its own UI frame and the page runtime legitimately fetches minted engine routes), and nonce/hash stay rejected (injected scripts cannot carry the upstream nonce and the rewriter mutates inline bodies, so upstream hashes fail). A rejection emits no policy. */
 
 export type CspUnsupportedReason =
   | "oversize" | "invalid-syntax" | "duplicate-directive"
@@ -23,7 +23,8 @@ export type CspTranslationPlan =
 /* These directives have no fallback to another source list and 'none'
    prohibits their class of actions. Other directives need a URL-aware
    engine-origin and bootstrap safety proof before we can translate. */
-const DENY_ONLY = new Set(["object-src", "base-uri", "form-action"]);
+/* worker-src/frame-src/child-src 'none' joined after the 2026-10-28 audit: the engine page runtime creates no workers and injects no frames into proxied documents, and a site declaring them 'none' had none upstream either. */
+const DENY_ONLY = new Set(["object-src", "base-uri", "form-action", "worker-src", "frame-src", "child-src"]);
 const MAX_POLICY_BYTES = 8192;
 const MAX_DIRECTIVES = 64;
 
