@@ -42,6 +42,7 @@
    engine-origin root document) nothing installs. */
 
 import { NAVP } from "./navguard";
+import { NativeURL } from "./anchorshim";
 
 /* Local copy of the handle marker: the bootstrap bundle stays
    independent of codec.ts (size gate), same as navguard's NAV. */
@@ -112,7 +113,7 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
   const hist = w.history as Hist | undefined;
   let natUrl: URL;
   try {
-    natUrl = new URL(nat.href);
+    natUrl = new NativeURL(nat.href);
   } catch {
     return;
   }
@@ -224,7 +225,7 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
     if (s.charAt(0) === "#") return cur.split("#")[0] + s;
     let u: URL;
     try {
-      u = new URL(s, "http://v" + cur);
+      u = new NativeURL(s, "http://v" + cur);
     } catch {
       return null;
     }
@@ -251,7 +252,7 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
        Decode it back to the virtual state it carries instead. */
     if (u.pathname.startsWith(NAVH + "/") || u.pathname.indexOf(NAVP + "/") > 0) {
       try {
-        const dec = fromNative(new URL("http://v" + u.pathname + u.search + u.hash));
+        const dec = fromNative(new NativeURL("http://v" + u.pathname + u.search + u.hash));
         if (dec !== null) return dec;
       } catch {
         /* fall through to the plain-path read */
@@ -326,7 +327,7 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
   const sync = (): void => {
     let u: URL;
     try {
-      u = new URL(nat.href);
+      u = new NativeURL(nat.href);
     } catch {
       return;
     }
@@ -357,32 +358,32 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
       go(v, false);
     },
     get pathname(): string {
-      return new URL("http://v" + cur).pathname;
+      return new NativeURL("http://v" + cur).pathname;
     },
     /* #182: a pathname write navigates (the native semantic),
        keeping the current search and hash. */
     set pathname(v: string) {
       let u: URL;
       try {
-        u = new URL(String(v), "http://v" + cur);
+        u = new NativeURL(String(v), "http://v" + cur);
       } catch {
         return;
       }
-      const c = new URL("http://v" + cur);
+      const c = new NativeURL("http://v" + cur);
       go(u.pathname + c.search + c.hash, false);
     },
     get search(): string {
-      return new URL("http://v" + cur).search;
+      return new NativeURL("http://v" + cur).search;
     },
     /* #182: a search write replaces the query, keeps the path
        and hash, and navigates. */
     set search(v: string) {
-      const c = new URL("http://v" + cur);
+      const c = new NativeURL("http://v" + cur);
       const q = v === "" ? "" : v.startsWith("?") ? v : "?" + v;
       go(c.pathname + q + c.hash, false);
     },
     get hash(): string {
-      return new URL("http://v" + cur).hash;
+      return new NativeURL("http://v" + cur).hash;
     },
     /* #182: a hash write mirrors natively so the history entry
        and hashchange stay real, and the view moves up front so

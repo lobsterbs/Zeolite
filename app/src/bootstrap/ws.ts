@@ -9,6 +9,7 @@
 import { swc } from "./siteid";
 import { validateWsClose } from "../ws-close";
 import { wsPayload } from "../ws-payload";
+import { NativeURL } from "./anchorshim";
 
 /* #419: normalize the second constructor argument the way the
    native constructor does: undefined/null -> [], a string -> one
@@ -66,7 +67,7 @@ export function applyWs(w: Record<string, unknown>): void {
         (w.document as { baseURI?: string } | undefined)?.baseURI ||
         (w.location as { href?: string } | undefined)?.href;
       try {
-        u = new URL(url, base);
+        u = new NativeURL(url, base);
       } catch {
         throw new DOMException(url, "SyntaxError");
       }

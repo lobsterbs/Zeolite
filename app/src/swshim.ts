@@ -1,5 +1,6 @@
 /* navigator.serviceWorker shim (Phase 6, 1.6 Hydride).
 
+
  A browser allows exactly one real service worker registration per
  scope, and the engine owns this scope. A proxied page's
  navigator.serviceWorker API is therefore virtualized: registrations
@@ -11,6 +12,7 @@
  or executed, no fetch/message events reach a virtual registration,
  `controller` stays the engine's real worker, and the fake states skip
  the real waiting periods. */
+import { NativeURL } from "./bootstrap/anchorshim";
 
 export interface VirtualWorker {
   scriptURL: string;
@@ -53,9 +55,9 @@ export interface SwShimStore {
    an explicit scope resolves against the page. Cross-origin or
    malformed inputs throw TypeError like the native register. */
 function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string): string {
-  const pageOrigin = new URL(pageUrl).origin;
+  const pageOrigin = new NativeURL(pageUrl).origin;
   if (scope === undefined) {
-    const s = new URL("./", scriptHref);
+    const s = new NativeURL("./", scriptHref);
     if (s.origin !== pageOrigin) {
       throw new TypeError("Origin");
     }
@@ -63,7 +65,7 @@ function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string
   }
   let s: URL | null = null;
   try {
-    s = new URL(scope, pageUrl);
+    s = new NativeURL(scope, pageUrl);
   } catch {
     /* malformed below */
   }
@@ -109,11 +111,11 @@ export function swShimRegister(
      TypeError, never a foreign registration. */
   let script: URL | null = null;
   try {
-    script = new URL(scriptURL + "", pageUrl);
+    script = new NativeURL(scriptURL + "", pageUrl);
   } catch {
     /* malformed below */
   }
-  if (!script || script.origin !== new URL(pageUrl).origin) {
+  if (!script || script.origin !== new NativeURL(pageUrl).origin) {
     throw new TypeError("Origin");
   }
   const rec = { scriptURL: script.href, scope: scopeFor(pageUrl, options?.scope, script.href) };
@@ -142,11 +144,11 @@ export function swShimGet(
      #474: exact-origin compare - a prefix test admitted lookalikes. */
   let scopeUrl: URL | null = null;
   try {
-    scopeUrl = new URL(rec.scope);
+    scopeUrl = new NativeURL(rec.scope);
   } catch {
     return undefined;
   }
-  if (scopeUrl.origin !== new URL(pageUrl).origin) return undefined;
+  if (scopeUrl.origin !== new NativeURL(pageUrl).origin) return undefined;
   if (scope != null) {
     try {
       if (rec.scope !== scopeFor(pageUrl, scope, rec.scriptURL)) return undefined;

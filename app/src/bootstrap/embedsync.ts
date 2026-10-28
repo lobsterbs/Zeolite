@@ -13,6 +13,7 @@
    embedder fails closed, queued popups are not routed). */
 import { controlQuery } from "./controlquery";
 import { onVlocChange } from "./vloc";
+import { NativeURL } from "./anchorshim";
 
 type Popup = { href: string; fallback: () => void };
 const popups = new WeakMap<object, (p: Popup) => void>();
@@ -75,7 +76,7 @@ export function applyEmbedSync(w: Record<string, unknown>): void {
       if (d.origin === null) { finish(true); return; }
       if (typeof d.origin !== "string" || !/^https:\/\/[^/]+$/.test(d.origin) ||
           typeof d.url !== "string" || !/^https?:\/\//.test(d.url)) { finish(false); return; }
-      try { base = new URL(d.url).origin; } catch { finish(false); return; }
+      try { base = new NativeURL(d.url).origin; } catch { finish(false); return; }
       settled = true;
       cancel();
       origin = d.origin;
@@ -87,7 +88,7 @@ export function applyEmbedSync(w: Record<string, unknown>): void {
           return;
         }
         let u: URL;
-        try { u = new URL(p.href, cur); } catch { return; }
+        try { u = new NativeURL(p.href, cur); } catch { return; }
         if (!/^https?:$/.test(u.protocol)) return;
         const send = (href: string) => post({ lb: "navigate", data: { href, newTab: true, clientId } });
         const loc = w.location as { origin?: string } | undefined;
@@ -95,7 +96,7 @@ export function applyEmbedSync(w: Record<string, unknown>): void {
         // Worker decoding keeps keyed routes and query routes out of the URL bar.
         if (!u.pathname.startsWith("/__zl_") && !/^[\w-]{12,}$/.test(u.pathname.split("/")[2] ?? "") &&
             !u.searchParams.has("zlNavh")) {
-          send(new URL(u.pathname + u.search + u.hash, cur).href);
+          send(new NativeURL(u.pathname + u.search + u.hash, cur).href);
           return;
         }
         controlQuery({ type: "zl:decodeRoutes", routes: [u.href] }, e => {
