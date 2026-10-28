@@ -34,7 +34,7 @@ import { applyCookie } from "./cookie";
 import { applyIsolation } from "./isolation";
 import { applyStorage } from "./storage";
 import { applySenderShim } from "./postmsg";
-import { anchorVirtual } from "./anchorshim";
+import { anchorVirtual, NativeURL } from "./anchorshim";
 import { embedPopup } from "./embedsync";
 
 export const NAV = "/__zl_nav__";
@@ -61,7 +61,7 @@ export const NAVP = "/__zl_prel__";
 function ownOriginPath(v: string, origin: string): string | null {
   let u: URL;
   try {
-    u = new URL(v);
+    u = new NativeURL(v);
   } catch {
     return null;
   }
@@ -156,7 +156,7 @@ export function applyNavGuard(
   const destAbs = (v: string): string | null => {
     let u: URL;
     try {
-      u = new URL(String(v), loc);
+      u = new NativeURL(String(v), loc);
     } catch {
       return null;
     }
@@ -182,7 +182,7 @@ export function applyNavGuard(
      (an about:blank child) nothing changes. */
   let ownRoutePath: string | undefined;
   try {
-    ownRoutePath = new URL(loc).pathname;
+    ownRoutePath = new NativeURL(loc).pathname;
   } catch {
     /* a realm whose loc is not a URL anchors nothing */
   }
@@ -650,7 +650,7 @@ export function applyNavGuard(
         /* the pathname carries no validation of its own: relRoute's
            engine-prefix check rejects non-route pages (an
            about:blank parent), an empty path anchors nothing. */
-        routePath = new URL(loc).pathname;
+        routePath = new NativeURL(loc).pathname;
       } catch {
         /* not a URL: no parent route to anchor to */
       }
