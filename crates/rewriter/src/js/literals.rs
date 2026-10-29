@@ -371,6 +371,22 @@ fn looks_like_url(s: &str) -> bool {
     if lower.starts_with("http://www.w3.org/") || lower.starts_with("https://www.w3.org/") {
         return false;
     }
+    // #492: RFC 2606 reserves example.com/.net/.org as documentation
+    // hosts, and bundlers ship them as inert placeholder bases
+    // (Startpage URL-resolver idiom: a `http://example.com` default
+    // base, then URL.pathname+search so the page fetches the derived
+    // path against its own origin). Minting a route for the
+    // placeholder turned that derived path into a live route to the
+    // documentation host and the SW fetched example.com upstream
+    // (SERP favicons 404). Exact registrable hosts only: subdomains
+    // (api.example.com) are real deployment shapes and keep routing.
+    if let Some(a) = authority {
+        let host = a.split(['/', '?', '#']).next().unwrap_or("");
+        let host = host.split(':').next().unwrap_or("").to_ascii_lowercase();
+        if matches!(host.as_str(), "example.com" | "example.net" | "example.org") {
+            return false;
+        }
+    }
     // A bare scheme fragment ("http://", "https://", "ws://",
     // "wss://") is a concatenation prefix, not a URL: minting a
     // route for it leaves a token where the scheme was and the
@@ -594,13 +610,38 @@ mod tests {
     #[test]
     fn rewrites_url_literals_only() {
         let js =
-            r#"var a = "https://example.com/x"; var b = 'hello'; fetch("//cdn.example.net/y");"#;
+            r#"var a = "https://www.example.com/x"; var b = 'hello'; fetch("//cdn.example.net/y");"#;
         let out = rewrite_script(js, &|u| format!("[{}]", u));
-        assert!(out.contains(r#""[https://example.com/x]""#), "{}", out);
+        assert!(out.contains(r#""[https://www.example.com/x]""#), "{}", out);
         assert!(out.contains("'hello'"));
         // Protocol-relative literals are rewritten as-is: absolutizing
         // them is the enc callback's job (it knows the page scheme).
         assert!(out.contains(r#""[//cdn.example.net/y]""#), "{}", out);
+    }
+
+    #[test]
+    fn rfc2606_documentation_hosts_stay_verbatim() {
+        // #492: Startpage bundles a literal `http://example.com`
+        // placeholder base (DsFwN3q-.js) and the SERP favicon component
+        // resolves /sp/favicon against it, then returns
+        // URL.pathname+search so the fetch resolves against the page
+        // origin. Rewriting the placeholder made the derived path a
+        // live route to example.com and every favicon 404ed upstream.
+        // Reserved documentation hosts stay verbatim; subdomains keep
+        // routing.
+        let js = "let t = `http://example.com`; fetch('https://example.com/sp/favicon?fqdn=x'); fetch(\"https://api.example.com/x\"); fetch('//example.net/y');";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert!(out.contains("`http://example.com`"), "{}", out);
+        assert!(
+            out.contains("'https://example.com/sp/favicon?fqdn=x'"),
+            "{}",
+            out
+        );
+        assert!(out.contains(r#""[https://api.example.com/x]""#), "{}", out);
+        assert!(out.contains("'//example.net/y'"), "{}", out);
+        assert!(!out.contains("[http://example.com]"), "{}", out);
+        assert!(!out.contains("[https://example.com"), "{}", out);
+        assert!(!out.contains("[//example.net"), "{}", out);
     }
 
     #[test]

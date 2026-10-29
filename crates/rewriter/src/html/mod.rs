@@ -3442,14 +3442,14 @@ document.write('<script src=x></script>');
         let r = Rewriter::new(cfg());
         let dsn = "https://abc123@o456.ingest.sentry.io/42";
         let js = format!(
-            "Sentry.init({{ dsn: '{}' }}); fetch('https://example.com/api');",
+            "Sentry.init({{ dsn: '{}' }}); fetch('https://www.example.com/api');",
             dsn
         );
         let out = r.rewrite_js_body(&js);
         assert!(out.contains(dsn), "DSN literal must stay verbatim: {out}");
         let route = format!(
             "/j/{}",
-            crate::encode::b64u_encode(b"https://example.com/api")
+            crate::encode::b64u_encode(b"https://www.example.com/api")
         );
         assert!(
             out.contains(&route),
@@ -3460,10 +3460,10 @@ document.write('<script src=x></script>');
     fn userinfo_gate_is_authority_only() {
         let r = Rewriter::new(cfg());
         // An @ in the query is not userinfo: the literal still routes.
-        let out = r.rewrite_js_body("fetch('https://example.com/mail?to=a@b.com')");
+        let out = r.rewrite_js_body("fetch('https://www.example.com/mail?to=a@b.com')");
         let route = format!(
             "/j/{}",
-            crate::encode::b64u_encode(b"https://example.com/mail?to=a@b.com")
+            crate::encode::b64u_encode(b"https://www.example.com/mail?to=a@b.com")
         );
         assert!(out.contains(&route), "query @ must not gate: {out}");
         // The inline handler path uses the same literal gate.
