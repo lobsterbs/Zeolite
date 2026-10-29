@@ -66,3 +66,32 @@ canary rides the engine, and no browser-direct request escapes.
 
 The gapi-native `policy.kdl` rule stays as the backstop for hosts
 that must never be rewritten at the transport layer.
+
+## RFC 2606 reserved hosts stay verbatim (#492)
+
+Some sites build URLs through a placeholder base instead of a real
+one. Startpage's SERP bundle (chunk DsFwN3q-.js) carries the
+URL-resolver idiom
+
+    iu = e => { let t = `http://example.com`; ... }
+
+and resolves site paths against it with the URL constructor, using
+only the resulting pathname+search so the page then fetches the
+derived relative path against its own origin. When the literal pass
+minted that placeholder into a live route token, the derived
+/sp/favicon?fqdn=... request rode a decoded example.com route and
+the SW fetched the documentation host upstream (404), which is why
+result favicons went missing through the engine (issue #492).
+
+`looks_like_url` in `crates/rewriter/src/js/literals.rs` therefore
+demotes the RFC 2606 reserved documentation hosts (example.com,
+example.net, example.org) to non-URLs. The demotion is exact
+registrable host only: subdomains (api.example.com) are real
+deployment shapes and keep routing. The literal stays verbatim in
+the body, the page resolves its relative path against the content
+origin, and the request engine serves the derived path natively.
+
+Regression-tested in `crates/rewriter/src/js/literals.rs`
+(`rfc2606_documentation_hosts_stay_verbatim`: template, quoted and
+protocol-relative reserved hosts stay verbatim while api.example.com
+still routes).
