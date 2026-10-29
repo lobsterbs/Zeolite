@@ -176,7 +176,7 @@ index ffc7d7a..b1a64f2 100644
  
  describe("reqDest (#82 seam)", () => {
    it("falls back to sec-fetch-dest when destination is empty (Firefox, #40)", () => {
-@@ -941,7 +941,13 @@ describe("split-origin legacy routes decode ahead of the context recovery", () =>
+@@ -941,7 +941,13 @@ describe("split-origin legacy routes decode ahead of the context recovery", () =
      const { ev, armed } = mkEvent(ORIGIN + "/dir/img.png", "esc-46b");
      handleFetch(ev);
      const served = await armed[0]!;
@@ -190,7 +190,7 @@ index ffc7d7a..b1a64f2 100644
 +    const loc = served.headers.get("location")!;
 +    expect(loc.startsWith("/dir/img.png?zlNavh=")).toBe(true);
 +    expect(decodeClientUrl(new URL(loc, ORIGIN))).toBe("https://prev.example/dir/img.png");
-  });
+   });
  });
 diff --git a/app/src/request.ts b/app/src/request.ts
 index 8b1c151..d156ac4 100644
