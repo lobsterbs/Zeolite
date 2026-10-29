@@ -609,8 +609,7 @@ mod tests {
 
     #[test]
     fn rewrites_url_literals_only() {
-        let js =
-            r#"var a = "https://www.example.com/x"; var b = 'hello'; fetch("//cdn.example.net/y");"#;
+        let js = r#"var a = "https://www.example.com/x"; var b = 'hello'; fetch("//cdn.example.net/y");"#;
         let out = rewrite_script(js, &|u| format!("[{}]", u));
         assert!(out.contains(r#""[https://www.example.com/x]""#), "{}", out);
         assert!(out.contains("'hello'"));
