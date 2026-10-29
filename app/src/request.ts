@@ -2204,6 +2204,51 @@ export function handleFetch(e: FetchEvent): void {
           dest0 = unwrapDest(legacyFirst);
           routeCarriesQuery = true;
         } else if (ctxDest) {
+          /* #511 (the cyber.blooket join class): a same-virtual-origin
+             navigation the page performed through a NATIVE location
+             write (window.location.href in bundled JS, an un-renamed
+             realm; the #235 rename cannot reach these) lands on the
+             bare same-origin path, and the #33 context recovery above
+             resolves it. Serving the document at the bare path leaves
+             no handle in the URL, so every page-side history write
+             re-anchors through the vloc entry+NAVP mint (its
+             navq-less arm) and parks the document on the opaque prel
+             pathname; a pathname-routed SPA reading the native
+             location then misses every route and renders its
+             catch-all (Blooket's literal "Game not found."). Answer
+             the navigation the way the initial navigation was
+             answered: one same-origin 302 to the visible query-shape
+             handle form (real path + fresh zlNavh token), so the
+             document owns a URL whose pathname it can read and whose
+             history writes commit the real path natively. Fail-closed:
+             no mint (no route key, or the path collides with an
+             engine surface), an existing handle param (the qHandle
+             branch owns those), or a non-GET navigation keeps the
+             direct serve (a redirect would strip a POST body). */
+          if (
+            e.request.method === "GET" &&
+            e.request.mode === "navigate" &&
+            !queryHandleToken(url.search)
+          ) {
+            const ctxClean = queryRoutesEnabled() ? buildQueryHandleUrl(ctxDest) : null;
+            if (ctxClean) {
+              const traceId = DIAG.trace(e.resultingClientId || e.clientId);
+              netLogPush({
+                method: e.request.method,
+                traceId,
+                path: url.pathname + url.search,
+                dest: ctxDest,
+                status: 302,
+                rtype: classifyRtype(reqDest(e.request), ""),
+                ms: 0,
+                bytes: 0,
+                verdict: "engine: context navigation redirected to the visible handle form",
+                transport: "engine",
+                detail: { internalUrl: ctxClean, ttfb: 0 },
+              });
+              return new Response(null, { status: 302, headers: { location: ctxClean } });
+            }
+          }
           dest0 = ctxDest;
         } else {
           const refDest = e.request.referrer
