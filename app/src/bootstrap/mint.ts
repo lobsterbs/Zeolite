@@ -37,16 +37,20 @@ const memo = new Map<string, Promise<string | null>>();
 /** Mint an engine route for an absolute http(s) destination. Resolves
     the route, or null when no controller exists, the reply is
     malformed, or the engine refuses. */
-export function mintRoute(dest: string, timeout = 5000): Promise<string | null> {
-  const hit = memo.get(dest);
+export function mintRoute(dest: string, nav = false, timeout = 5000): Promise<string | null> {
+  /* #511: the two callers need different shapes for the same dest -
+     a navigation write wants the query handle, a re-emission input
+     must stay opaque - so the memo key carries the shape. */
+  const key = nav ? "nav:" + dest : dest;
+  const hit = memo.get(key);
   if (hit) {
     // LRU by recency: re-insert so eviction order tracks usage.
-    memo.delete(dest);
-    memo.set(dest, hit);
+    memo.delete(key);
+    memo.set(key, hit);
     return hit;
   }
   const p = new Promise<string | null>((resolve) => {
-    controlQuery({ type: "zl:mint", dest }, (m) => {
+    controlQuery(nav ? { type: "zl:mint", dest, nav: true } : { type: "zl:mint", dest }, (m) => {
       resolve(typeof m?.route === "string" ? m.route : null);
     }, timeout);
   });
@@ -54,11 +58,11 @@ export function mintRoute(dest: string, timeout = 5000): Promise<string | null> 
     const oldest = memo.keys().next();
     if (!oldest.done) memo.delete(oldest.value);
   }
-  memo.set(dest, p);
+  memo.set(key, p);
   p.then((route) => {
     /* #459: delete only OUR entry - an evicted promise settling
        after a newer mint for the same dest must not drop it. */
-    if (!route && memo.get(dest) === p) memo.delete(dest);
+    if (!route && memo.get(key) === p) memo.delete(key);
   });
   return p;
 }

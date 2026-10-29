@@ -301,6 +301,85 @@ describe("config-gated mint (zl:config / zl:navHandle)", () => {
     );
     expect((nav.replies[0] as { url: string }).url.startsWith("/__zl_navh__/")).toBe(true);
   });
+
+  /* #511 absolute-write seam: the same opt-in gates zl:mint, the verb
+     the bootstrap nav guard uses for absolute location/href writes. A
+     pathname-routed SPA (Blooket /:gameId/play/:playerId) commits the
+     minted route as its location; the query shape keeps
+     location.pathname the real path, the path form left it opaque
+     (/zl/<keyed>) and the SPA fell into its catch-all. */
+  it("mints the query shape only behind the queryRoutes opt-in (zl:mint)", async () => {
+    const before = mkReplies();
+    await dispatchCore(
+      { type: "zl:mint", nav: true, dest: "https://b.example/6ae3/play/42" } as unknown as ControlMessage,
+      ctx(mkMsgEvent(ORIGIN + "/", { type: "zl:mint" } as unknown as ControlMessage), before.reply),
+    );
+    /* default OFF: the path-form scheme route */
+    expect((before.replies[0] as { route: string }).route.startsWith("/j/")).toBe(true);
+
+    const cfg = mkReplies();
+    await dispatchCore(
+      { type: "zl:config", prefix: "/j/", queryRoutes: true } as unknown as ControlMessage,
+      ctx(mkMsgEvent(ORIGIN + "/", { type: "zl:config" } as unknown as ControlMessage), cfg.reply),
+    );
+
+    const after = mkReplies();
+    await dispatchCore(
+      { type: "zl:mint", nav: true, dest: "https://b.example/6ae3/play/42" } as unknown as ControlMessage,
+      ctx(mkMsgEvent(ORIGIN + "/", { type: "zl:mint" } as unknown as ControlMessage), after.reply),
+    );
+    const route = (after.replies[0] as { route: string }).route;
+    expect(route.startsWith("/6ae3/play/42?zlNavh=")).toBe(true);
+    expect(decodeClientUrl(new URL(route, ORIGIN))).toBe("https://b.example/6ae3/play/42");
+  });
+
+  it("keeps the re-emission mint path-formed behind the queryRoutes opt-in (zl:mint)", async () => {
+    const cfg = mkReplies();
+    await dispatchCore(
+      { type: "zl:config", prefix: "/j/", queryRoutes: true } as unknown as ControlMessage,
+      ctx(mkMsgEvent(ORIGIN + "/", { type: "zl:config" } as unknown as ControlMessage), cfg.reply),
+    );
+    const re = mkReplies();
+    await dispatchCore(
+      { type: "zl:mint", dest: "https://b.example/6ae3/play/42" } as unknown as ControlMessage,
+      ctx(mkMsgEvent(ORIGIN + "/", { type: "zl:mint" } as unknown as ControlMessage), re.reply),
+    );
+    /* a nav-less mint feeds fetch/beacon/XHR re-emission: the opaque
+       path form keeps the real path and query out of the browser-
+       visible request records, so queryRoutes must not reshape it */
+    expect((re.replies[0] as { route: string }).route.startsWith("/j/")).toBe(true);
+  });
+
+  it("keeps the fragment off the handle token and off the decoded target (zl:mint)", async () => {
+    const cfg = mkReplies();
+    await dispatchCore(
+      { type: "zl:config", prefix: "/j/", queryRoutes: true } as unknown as ControlMessage,
+      ctx(mkMsgEvent(ORIGIN + "/", { type: "zl:config" } as unknown as ControlMessage), cfg.reply),
+    );
+    const frag = mkReplies();
+    await dispatchCore(
+      { type: "zl:mint", nav: true, dest: "https://b.example/p?a=1#f2" } as unknown as ControlMessage,
+      ctx(mkMsgEvent(ORIGIN + "/", { type: "zl:mint" } as unknown as ControlMessage), frag.reply),
+    );
+    const route = (frag.replies[0] as { route: string }).route;
+    expect(route.startsWith("/p?a=1&zlNavh=")).toBe(true);
+    expect(route.endsWith("#f2")).toBe(true);
+    expect(decodeClientUrl(new URL(route, ORIGIN))).toBe("https://b.example/p?a=1");
+  });
+
+  it("falls back to the path-form route when the query mint refuses an engine path (zl:mint)", async () => {
+    const cfg = mkReplies();
+    await dispatchCore(
+      { type: "zl:config", prefix: "/j/", queryRoutes: true } as unknown as ControlMessage,
+      ctx(mkMsgEvent(ORIGIN + "/", { type: "zl:config" } as unknown as ControlMessage), cfg.reply),
+    );
+    const nav = mkReplies();
+    await dispatchCore(
+      { type: "zl:mint", nav: true, dest: "https://s.example/sw.js" } as unknown as ControlMessage,
+      ctx(mkMsgEvent(ORIGIN + "/", { type: "zl:mint" } as unknown as ControlMessage), nav.reply),
+    );
+    expect((nav.replies[0] as { route: string }).route.startsWith("/j/")).toBe(true);
+  });
 });
 
 describe("query-route navigation (handleFetch arms)", () => {

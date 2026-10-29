@@ -208,7 +208,7 @@ export function applyNavGuard(
     dest: string,
     write: (v: string) => void,
   ): void => {
-    mintRoute(dest).then((route) => {
+    mintRoute(dest, true).then((route) => {
       if (raw.get(el)?.[key] !== wrote) return;
       try {
         write(route ?? navEncode(dest));
@@ -573,7 +573,7 @@ export function applyNavGuard(
         setTimeout(() => driven.delete(n));
         return;
       }
-      mintRoute(d).then((route) => {
+      mintRoute(d, true).then((route) => {
         const r = route ?? navEncode(d);
         try {
           driven.delete(n);
@@ -712,7 +712,7 @@ export function applyNavGuard(
         /* #54: re-drive through the minted route (marker fallback);
            the cancel already happened, so the mint delay is paid
            before the first byte of the navigation. */
-        mintRoute(dest).then((route) => {
+        mintRoute(dest, true).then((route) => {
           const target = route ?? navEncode(dest);
           if (!ev.formData) {
             (w.location as { href: string }).href = target;
@@ -810,7 +810,7 @@ export function applyNavGuard(
           const d = destAbs(s0);
           if (d !== null) {
             el.setAttribute("src", "");
-            mintRoute(d).then((route) => {
+            mintRoute(d, true).then((route) => {
               try {
                 if (el.getAttribute("src") === "") el.setAttribute("src", route ?? navEncode(d));
               } catch {
