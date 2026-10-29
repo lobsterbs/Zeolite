@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { relayFetch, relayRegister, RELAY_HEADER_DEADLINE_MS, RELAY_UPLOAD_HEADER_DEADLINE_MS, RelayDeliveryUnknownError } from "../relayfetch";
+import { relayFetch, relayFetchResult, relayRegister, RELAY_HEADER_DEADLINE_MS, RELAY_UPLOAD_HEADER_DEADLINE_MS, RelayDeliveryUnknownError } from "../relayfetch";
 import { deliveryStateOf } from "../delivery";
 class Port {
   sent: Array<{ type: string; rid: number }> = [];
@@ -159,4 +159,32 @@ describe("relay evidence and failure cleanup (#454)", () => {
     }, "pre-aborted-stream")).rejects.toMatchObject({ name: "AbortError" });
   });
 
+});
+
+/* #501: the relay endpoint can now prove a rejection happened before
+   any upstream dispatch (x-zl-delivery evidence rides zl:relayError);
+   such a failure is definitely-not-delivered, so even a POST may be
+   replayed on the fallback transport instead of failing terminally. */
+describe("pre-dispatch relay evidence (#501)", () => {
+  it("lets a POST fall back when the relay proves pre-dispatch", async () => {
+    const port = reg();
+    const pending = relayFetch("https://api.example/fingerprint", { method: "POST", headers: new Headers(), body: "{}" }, "relay-502");
+    port.reply({ type: "zl:relayError", rid: port.sent[0].rid, error: "relay endpoint unavailable (502)", delivery: "definitely-not-delivered" });
+    expect(await pending).toBeNull();
+  });
+  it("reports definitely-not-delivered for pre-dispatch relay evidence", async () => {
+    const port = reg();
+    const pending = relayFetchResult("https://api.example/fingerprint", { method: "POST", headers: new Headers(), body: "{}" }, "relay-502-result");
+    port.reply({ type: "zl:relayError", rid: port.sent[0].rid, error: "relay endpoint unavailable (502)", delivery: "definitely-not-delivered" });
+    const r = await pending;
+    expect(r.state).toBe("definitely-not-delivered");
+  });
+  it("keeps the terminal unknown outcome when the embedder reports no delivery evidence", async () => {
+    const port = reg();
+    const pending = relayFetch("https://api.example/fingerprint", { method: "POST", headers: new Headers(), body: "{}" }, "relay-502-legacy");
+    port.reply({ type: "zl:relayError", rid: port.sent[0].rid, error: "relay endpoint unavailable (502)" });
+    const err = (await outcome(pending)).error as RelayDeliveryUnknownError;
+    expect(err).toBeInstanceOf(RelayDeliveryUnknownError);
+    expect(deliveryStateOf(err)).toBe("delivery-unknown");
+  });
 });
