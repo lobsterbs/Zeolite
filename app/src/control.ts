@@ -156,6 +156,12 @@ export interface ControlMessage {
       token rides ?zlNavh=). Ephemeral like navHandles: a worker
       restart reverts it, the host re-pushes on boot. */
   queryRoutes?: boolean;
+  /** zl:mint: navigation-bound mint (the navguard absolute
+      location/href writes). Only this caller gets the query-shape
+      handle behind the queryRoutes opt-in; the re-emission mints
+      stay path-formed - a query handle would expose the real path
+      and query in browser-visible records, defeating that seam. */
+  nav?: boolean;
   /** zl:transport: engine selection (#64). Absent = a poll; the reply carries the live engine; "libcurl"|"epoxy" switches it on the next init(). */
   engine?: "libcurl" | "epoxy";
   /** zl:rules: default outgoing user-agent for hosts without an
@@ -605,7 +611,27 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          target. Otherwise the worker strips the decoded fragment
          before fetch and the document can never observe it. */
       const hash = dest.indexOf("#");
-      const route = hash < 0 ? encodeDest(dest) : encodeDest(dest.slice(0, hash)) + dest.slice(hash);
+      const body = hash < 0 ? dest : dest.slice(0, hash);
+      const tail = hash < 0 ? "" : dest.slice(hash);
+      /* Injector phase 2 (#511 absolute-write seam): a nav-bound
+         mint (the navguard location/href writes) with queryRoutes
+         on takes the query-shape handle (<real path>?<real query>&
+         zlNavh=<token>) so an absolute location write commits the
+         real pathname natively - pathname-routed SPAs (Blooket's
+         /:gameId/play/:playerId) read location.pathname without any
+         shim and would otherwise see the opaque /zl/<keyed> scheme
+         route and fall into their catch-all ("Game not found.").
+         Re-emission mints (fetch/beacon/XHR inputs) stay path-
+         formed: a query handle would print the real path and query
+         into the very records that seam exists to keep clean. A
+         mint-refused collision (an engine-internal path) or a
+         missing route key falls back to the path-form route; an
+         expired handle re-mints at the serve seam (request.ts), so
+         long-lived anchors stay usable. */
+      const qh = msg.nav === true && queryRoutesEnabled()
+        ? buildQueryHandleUrl(body)
+        : null;
+      const route = qh !== null ? qh + tail : encodeDest(body) + tail;
       reply({ ok: true, route });
       break;
     }
