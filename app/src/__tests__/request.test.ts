@@ -40,7 +40,7 @@ import { classifyRtype, forwardedHeaders, handleFetch, mergeRouteSearch, pageCac
 import { setFingerprint, setSiteEnabled } from "../swstate";
 import { establishContext, resolveRelative } from "../vctx";
 import { VCTX } from "../swstate";
-import { b64uEncode, encodeDestLegacy, setScheme } from "../codec";
+import { b64uEncode, decodeClientUrl, encodeDestLegacy, setScheme } from "../codec";
 
 describe("reqDest (#82 seam)", () => {
   it("falls back to sec-fetch-dest when destination is empty (Firefox, #40)", () => {
@@ -941,7 +941,13 @@ describe("split-origin legacy routes decode ahead of the context recovery", () =
     const { ev, armed } = mkEvent(ORIGIN + "/dir/img.png", "esc-46b");
     handleFetch(ev);
     const served = await armed[0]!;
-    expect(served.status).toBe(200);
-    expect(transportMock.urls[0]).toBe("https://prev.example/dir/img.png");
+    /* #511: a bare-path GET navigation with a settled context answers
+       the visible query-shape handle form now, so the document owns a
+       readable URL; the redirect target decodes back to the exact
+       context destination the direct serve used. */
+    expect(served.status).toBe(302);
+    const loc = served.headers.get("location")!;
+    expect(loc.startsWith("/dir/img.png?zlNavh=")).toBe(true);
+    expect(decodeClientUrl(new URL(loc, ORIGIN))).toBe("https://prev.example/dir/img.png");
   });
 });
