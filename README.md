@@ -10,89 +10,97 @@
 
 **A standalone web interception and proxy engine for browser-based hosts.**
 
-[Quick start](#quick-start) · [Features](#features) · [Compatibility](#compatibility) · [Documentation](#documentation)
-
-> **Experimental software.** Zeolite is not production-ready. Compatibility and public APIs can change, and some browser capabilities cannot be reproduced inside a service worker.
+> **Experimental software.** Zeolite is not production-ready. Compatibility and public APIs can change.
 
 ## What is Zeolite?
 
-Zeolite gives browser-based hosts a reusable engine for routing web traffic through Wisp, isolating site state, and rewriting content when native browser behavior is not enough.
+Zeolite gives browser-based hosts (web apps, proxy frontends, kiosk shells) a reusable engine for routing web traffic through a Wisp relay, isolating site state, and rewriting content where native browser behavior is not enough.
 
 Its guiding principle is simple: **preserve the website's native behavior wherever possible; rewrite only when necessary.**
 
 Zeolite is a standalone project. It does not depend on LobsterBrowse.
 
-## Features
+## What is real today
 
-- **Request interception** — route and control site traffic through a service-worker runtime.
-- **Wisp transport** — carry proxied traffic through Zeolite's Wisp transport path.
-- **Selective rewriting** — stream HTML and CSS rewriting, plus supported JavaScript URL and module transformations.
-- **Site isolation** — virtual origins, per-site cookie jars, and separated storage namespaces.
-- **Compatibility APIs** — a growing subset of WebExtension APIs, downloads, WebSockets, and session import/export.
-- **Diagnostics and testing** — bounded logs, opt-in rewrite tracing, recording/replay, compatibility probes, and browser end-to-end tests.
+Every claim below is gated by the repository's own tests; run them yourself with the commands in this README.
 
-## Compatibility
+- **Wisp v2.1 transport** - handshake, TCP CONNECT, byte-exact relay of requests and responses in both directions, upstream status preservation (301, 302, 307, 404, 500), Set-Cookie relay, and intact media and download bytes. Gated deterministically by `suite/capabilities.mjs` (14 rows).
+- **Rewriting (Rust compiled to WASM, driven by the service worker)** - streaming HTML and CSS rewriting, JavaScript URL and module transformations, anchor and URL-literal seams for script data islands, and a hybrid pre-execution location rewrite that is per-origin gated, size capped, and fail-open.
+- **Explicit delivery certainty** - every transport failure carries one of three states (`definitely-not-delivered`, `delivered-response`, `delivery-unknown`) plus the transport identity. Non-idempotent requests (POST, PATCH) with unknown delivery are never retried automatically. See [docs/transport-lifecycle.md](docs/transport-lifecycle.md).
+- **Site isolation** - virtual origins, per-site cookie jars, separated storage namespaces, and virtual service-worker contexts (register dispatch, capture and forward semantics, postMessage bridging) without executing the site's real service-worker script.
+- **Transport engines** - libcurl (WASM) and epoxy (rustls + hyper) with different TLS fingerprints, plus a relay fetch path and Wisp routes. SSRF and authentication are enforced server-side: loopback CONNECT is refused by default and keyless clients are rejected.
+- **Compatibility APIs** - a growing subset of WebExtension APIs, downloads, WebSockets, session import and export.
+- **Diagnostics** - bounded scoped logs with secret redaction, a compatibility debugger, recording and replay, and two scoreboards (deterministic capabilities; report-only live probes).
 
-Zeolite has been exercised against real websites, not just synthetic fixtures. Verified working examples include Google Search, Brave Search, ChatGPT, Wikipedia, YouTube, and ordinary content sites. Results can vary with upstream protections, login requirements, and browser behavior.
+## What is partial or not real
 
-**CAPTCHA support is working, and remaining compatibility fixes are being addressed.** Supported challenge flows have been tested, including Anubis proof-of-work and Google reCAPTCHA rendering and interaction. Zeolite is not a universal CAPTCHA solver and does not bypass Cloudflare interstitials.
+Read this before deploying. The engine reports honestly instead of pretending.
 
-### Important limitations
+- **CAPTCHA** - rendering and interaction are verified for Google reCAPTCHA and Anubis proof-of-work. Zeolite is not a universal CAPTCHA solver, does not promise challenge completion, and does not bypass Cloudflare interstitials. Per-stage challenge tracing is open work.
+- **Service workers** - a proxied site's real service worker is never executed; it is represented virtually. Sites that depend on their own worker logic may degrade.
+- **location** - `window.location` is LegacyUnforgeable: page-level reads of `location.pathname`, `search` and `origin` cannot be intercepted by a shim. The hybrid rewrite fixes script-source reads on gated origins only; everything else keeps route-shaped workarounds with known seams.
+- **Egress reality** - sites that bot-wall datacenter IP ranges fail from datacenter deployments regardless of the engine. The probe scoreboard classifies such rows as `egress-gate`; that is an environment fact, not an engine defect.
+- **Rewriting limits** - some page scripts and navigation patterns cannot be rewritten or virtualized reliably. When the literal rewriter cannot rewrite a script safely, it falls back conservatively and logs the fallback.
+- **WebExtension APIs** - a subset. Isolated extension worlds are partial or unsupported.
 
-- Zeolite is not a browser engine; it runs within browser service-worker constraints.
-- Some WebExtension APIs and isolated extension worlds are partial or unsupported.
-- Proxied-site service workers are represented virtually; the site's real service-worker script is not executed.
-- Some page scripts and navigation patterns cannot be rewritten or virtualized reliably.
+See the [support matrix](docs/matrix.md) and [limitations](docs/limitations.md) for feature-by-feature status.
 
-See the [support matrix](docs/matrix.md) for feature-by-feature status and known gaps.
+## Architecture
+
+- **Rust workspace**: `zeolite-rewriter` (HTML, CSS and JS rewriters), `zeolite-wisp` (WASM bindings for the service-worker runtime), `wisp-core` and `wisp-extensions` (the Wisp v2.1 protocol), `zeolite-server` (relay and static server).
+- **app/**: the TypeScript service-worker runtime. It loads the WASM rewriters and drives interception, isolation and diagnostics. The bootstrap stays JavaScript because it runs before WASM is available.
+- **CI** runs five jobs (rust, wasm, app, compat, browser). The browser job includes torture, differential, reload-count and WebSocket e2e suites. Distribution artifacts are published to the `dist` branch; consumers pin a dist commit.
 
 ## Quick start
 
-### Requirements
-
-- Rust and the `wasm32-unknown-unknown` target
-- Node.js and npm
-- A browser with service-worker support for runtime testing
-
-### Build the WebAssembly crates
+Requirements: Rust with the `wasm32-unknown-unknown` target, Node.js with npm, and a Chromium-based browser for the e2e suites.
 
 ```bash
-cargo build -p zeolite-rewriter -p zeolite-wisp --target wasm32-unknown-unknown --release
-```
+# type-check the WASM crates
+cargo check -p zeolite-rewriter -p zeolite-wisp --target wasm32-unknown-unknown
 
-### Build and test the app
-
-```bash
+# app: types, unit suite, build
 cd app
 npm install
 npm run check
 npm test
 npm run build
-```
 
-### Run the standalone server
-
-From the repository root:
-
-```bash
+# run the standalone server on loopback
+cd ..
 cargo run -p zeolite-server -- --port 6002 --static app/dist
 ```
 
-The server binds to loopback by default. **Do not expose it to a network unless you have deliberately configured authentication and allowed origins.** See the server configuration and security documentation before deploying it.
+The server binds to loopback by default and parses `--port`, `--static`, `--bind` and `--config`. **Do not expose it to a network unless you have deliberately configured authentication and allowed origins.** See the [security review](docs/security.md) first.
+
+## Testing and scoreboards
+
+```bash
+# deterministic transport gate: 14 rows, fails the run on any miss
+node suite/capabilities.mjs --base http://localhost:6002
+
+# live-site probe: report-only, classifies egress-gated failures honestly
+node suite/probe.mjs --base http://localhost:6002
+```
+
+The capabilities scoreboard requires the base server to run with `ZL_TEST_ALLOW_PRIVATE_DESTS=1` and `ZL_TEST_EGRESS=1` so it may reach its loopback fixture. The harness spawns additional servers to verify the production-default SSRF and auth refusals.
 
 ## Documentation
 
-- [Support matrix and limitations](docs/matrix.md)
+- [Support matrix](docs/matrix.md) and [limitations](docs/limitations.md)
+- [Transport lifecycle and delivery policy](docs/transport-lifecycle.md)
+- [Hybrid location rewrite](docs/hybrid-location-rewrite.md)
+- [Virtual service worker](docs/virtual-service-worker-phase2.md)
 - [Security review](docs/security.md)
-- [Engine adapter](docs/engine-adapter.md)
-- [Plugin API](docs/plugins.md)
-- [Roadmap](docs/roadmap.md)
-- [Versioning](docs/versioning.md)
-- [Performance notes](docs/performance.md)
+- [Engine adapter](docs/engine-adapter.md) and [integration guide](docs/integration-guide.md)
+- [Plugin API](docs/plugins.md) and [policy](docs/policy.md)
+- [Performance notes](docs/performance.md), [roadmap](docs/roadmap.md), [versioning](docs/versioning.md)
+
+The `docs/` directory holds more: cookies, session, storage, websocket, workers, recording, tracing, fingerprint, downloads, error pages, network inspector, and more.
 
 ## Contributing
 
-Bug reports, compatibility findings, and pull requests are welcome. Include the affected site or feature, browser/runtime, reproduction steps, and relevant diagnostics when possible. Remove cookies, tokens, and other secrets before sharing logs.
+Bug reports, compatibility findings, and pull requests are welcome. Include the affected site or feature, browser and runtime, reproduction steps, and relevant diagnostics. Remove cookies, tokens, and other secrets before sharing logs.
 
 ## License
 
