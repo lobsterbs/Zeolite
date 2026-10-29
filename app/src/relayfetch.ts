@@ -39,7 +39,10 @@ type RelayMsg =
     }
   | { type: "zl:relayChunk"; rid: number; bytes: Uint8Array }
   | { type: "zl:relayEnd"; rid: number }
-  | { type: "zl:relayError"; rid: number; error: string };
+  /* #501: delivery is pre-dispatch evidence from the embedder relay;
+     absent on legacy peers and post-dispatch faults, which stay
+     delivery-unknown. */
+  | { type: "zl:relayError"; rid: number; error: string; delivery?: "definitely-not-delivered" };
 
 let hostPort: MessagePort | null = null;
 let ridSeq = 0;
@@ -188,7 +191,9 @@ export function relayHeaderDeadlineMs(init: { headers: Headers; body?: BodyInit 
     ? RELAY_UPLOAD_HEADER_DEADLINE_MS : RELAY_HEADER_DEADLINE_MS;
 }
 /** Dispatch happened, so a POST/PATCH may already have succeeded.
-    This terminal error prevents a second transport from duplicating it. */
+    This terminal error prevents a second transport from duplicating it.
+    #501: a relay error carrying pre-dispatch evidence bypasses this class
+    and returns a replayable null fallback instead. */
 export class RelayDeliveryUnknownError extends TransportDeliveryError {
   override name = "RelayDeliveryUnknownError";
   constructor(reason: string) { super("delivery-unknown", "relay", reason); }
@@ -198,7 +203,7 @@ async function relayFetchRaw(
   dest: string,
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
   traceId: string,
-  dispatched: () => void,
+  dispatched: { value: boolean },
 ): Promise<Response | null> {
   const port = hostPort;
   const crediting = hostCredits;
@@ -288,7 +293,7 @@ async function relayFetchRaw(
       else wake = () => (aborted ? reject(abortErr()) : resolve(shift()));
     });
   try {
-    dispatched();
+    dispatched.value = true;
     port.postMessage({
       type: "zl:fetchRelay",
       rid,
@@ -362,6 +367,13 @@ async function relayFetchRaw(
       message: "embedder relay failed: " + first.error,
       url: dest,
     });
+    if (first.delivery === "definitely-not-delivered") {
+      /* #501: the relay endpoint proved the upstream never received
+         the request (rejected before dispatch), so the caller may
+         replay it on the fallback transport even for a POST. */
+      dispatched.value = false;
+      return null;
+    }
     return failedAfterDispatch(first.error);
   }
   if (first.type !== "zl:relayHead") {
@@ -447,14 +459,14 @@ export async function relayFetchResult(
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
   traceId: string,
 ): Promise<DeliveryResult> {
-  let dispatched = false;
+  const dispatched = { value: false };
   try {
-    const response = await relayFetchRaw(dest, init, traceId, () => { dispatched = true; });
+    const response = await relayFetchRaw(dest, init, traceId, dispatched);
     if (response) return deliverySuccess("relay", response, traceId);
-    return deliveryFailure("relay", new Error(dispatched ? "relay response unavailable after dispatch" : "relay cannot carry request"),
-      dispatched ? "delivery-unknown" : "definitely-not-delivered", traceId);
+    return deliveryFailure("relay", new Error(dispatched.value ? "relay response unavailable after dispatch" : "relay cannot carry request"),
+      dispatched.value ? "delivery-unknown" : "definitely-not-delivered", traceId);
   } catch (cause) {
-    return deliveryFailure("relay", cause, dispatched ? "delivery-unknown" : "definitely-not-delivered", traceId);
+    return deliveryFailure("relay", cause, dispatched.value ? "delivery-unknown" : "definitely-not-delivered", traceId);
   }
 }
 
