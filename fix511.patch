@@ -1,0 +1,250 @@
+diff --git a/app/src/__tests__/ctx-nav-clean.test.ts b/app/src/__tests__/ctx-nav-clean.test.ts
+new file mode 100644
+index 0000000..ee2a978
+--- /dev/null
++++ b/app/src/__tests__/ctx-nav-clean.test.ts
+@@ -0,0 +1,159 @@
++import "fake-indexeddb/auto";
++import { beforeEach, describe, expect, it, vi } from "vitest";
++
++/* #511 (the cyber.blooket join class): a same-virtual-origin
++   navigation the page performed through a NATIVE location write
++   (window.location.href in bundled JS; the #235 rename cannot reach
++   it) lands on the bare same-origin path. The #33 context recovery
++   resolves it, but serving the document at the bare tokenless path
++   leaves no handle in its URL, so the page's own history writes
++   re-anchor through the vloc navq-less prel mint and park the
++   document on the opaque pathname, and a pathname-routed SPA
++   reading the native location misses every route (Blooket's
++   literal "Game not found." catch-all). The SW answers the GET
++   navigation with one same-origin 302 to the visible query-shape
++   handle form (real path + fresh zlNavh token), the same shape the
++   initial navigation minted; fetches, POST navigations, and
++   unmintable cases keep the direct serve. */
++
++const transportMock = vi.hoisted(() => ({
++  calls: 0,
++  urls: [] as string[],
++  queue: [] as Response[],
++  inits: [] as Array<{ method?: string; headers?: Headers; body?: unknown } | undefined>,
++}));
++
++vi.mock("../transport", () => ({
++  currentEngine: () => "libcurl",
++  wispTransport: {
++    ready: async () => {},
++    fetch: async (url: string, init?: { method?: string; headers?: Headers; body?: unknown }) => {
++      transportMock.calls++;
++      transportMock.urls.push(url);
++      transportMock.inits.push(init ? { method: init.method, headers: init.headers, body: init.body } : undefined);
++      const queued = transportMock.queue.shift();
++      if (queued) return queued;
++      return new Response("mock", { headers: { "content-type": "text/plain" } });
++    },
++  },
++}));
++
++import { handleFetch, routeReady } from "../request";
++import { b64uEncode, decodeClientUrl, setRouteKey, setScheme } from "../codec";
++import { setQueryRoutes, VCTX } from "../swstate";
++import { establishContext } from "../vctx";
++
++const ORIGIN = "https://engine.example";
++const KEY = b64uEncode(new Uint8Array(16).map((_, i) => i));
++const HOME = "https://site.example";
++const PATH = "/join/6ae3/game/6ae3-player";
++
++const mkEvent = (routeUrl: string, mode: string, destination: string, method = "GET") => {
++  const armed: Promise<Response>[] = [];
++  const ev = {
++    request: {
++      url: routeUrl,
++      method,
++      mode,
++      destination,
++      credentials: "same-origin",
++      referrer: "",
++      body: null,
++      headers: new Headers(),
++    },
++    clientId: "doc-1",
++    resultingClientId: "doc-1-new",
++    respondWith: (p: Promise<Response>) => void armed.push(p),
++    waitUntil: () => {},
++  } as unknown as FetchEvent;
++  return { ev, armed };
++};
++
++beforeEach(async () => {
++  /* the module-eval routeRestore can replace the key set after this
++     file first awaits (a fresh idb mints a new key), so let it settle
++     BEFORE the key is set: the minted token must decode on every test. */
++  await routeReady;
++  setScheme("/j/");
++  setRouteKey(KEY);
++  setQueryRoutes(true);
++  transportMock.calls = 0;
++  transportMock.urls = [];
++  transportMock.inits = [];
++  transportMock.queue = [];
++  establishContext(VCTX, "doc-1", HOME + "/");
++  vi.stubGlobal("self", {
++    location: { origin: ORIGIN },
++    registration: { scope: ORIGIN + "/" },
++    clients: { get: async () => null },
++  });
++  vi.stubGlobal("caches", {
++    open: async () => {
++      throw new Error("no cache storage");
++    },
++  });
++});
++
++describe("bare-path context navigation redirects to the visible query-shape form (#511)", () => {
++  it("redirects a GET navigation on a bare same-origin path with a client context", async () => {
++    const { ev, armed } = mkEvent(ORIGIN + PATH, "navigate", "document");
++    handleFetch(ev);
++    const served = await armed[0]!;
++    expect(served.status).toBe(302);
++    const loc = served.headers.get("location")!;
++    expect(loc.startsWith(PATH + "?zlNavh=")).toBe(true);
++    /* the clean form decodes back to the context destination */
++    expect(decodeClientUrl(new URL(loc, ORIGIN))).toBe(HOME + PATH);
++    /* nothing went upstream on the bare-path request itself */
++    expect(transportMock.calls).toBe(0);
++  });
++
++  it("keeps the direct serve for subresource fetches (no redirect)", async () => {
++    const { ev, armed } = mkEvent(ORIGIN + PATH, "cors", "script");
++    handleFetch(ev);
++    const served = await armed[0]!;
++    expect(served.status).toBe(200);
++    expect(transportMock.urls).toEqual([HOME + PATH]);
++  });
++
++  it("keeps the direct serve for POST navigations (a redirect would strip the body)", async () => {
++    const { ev, armed } = mkEvent(ORIGIN + PATH, "navigate", "document", "POST");
++    handleFetch(ev);
++    const served = await armed[0]!;
++    expect(served.status).toBe(200);
++    expect(transportMock.urls).toEqual([HOME + PATH]);
++  });
++
++  it("fails closed without a route key (the bare-path serve stands)", async () => {
++    setRouteKey(null);
++    const { ev, armed } = mkEvent(ORIGIN + PATH, "navigate", "document");
++    handleFetch(ev);
++    const served = await armed[0]!;
++    expect(served.status).toBe(200);
++    expect(transportMock.urls).toEqual([HOME + PATH]);
++  });
++
++  it("fails closed when query routes are disabled", async () => {
++    setQueryRoutes(false);
++    const { ev, armed } = mkEvent(ORIGIN + PATH, "navigate", "document");
++    handleFetch(ev);
++    const served = await armed[0]!;
++    expect(served.status).toBe(200);
++    expect(transportMock.urls).toEqual([HOME + PATH]);
++  });
++
++  it("serves the committed query form through the handle branch on the next hop", async () => {
++    /* the redirect target itself decodes and serves: the qHandle
++       branch owns the tokened URL, so the 302 loop closes in one hop */
++    const { ev, armed } = mkEvent(ORIGIN + PATH, "navigate", "document");
++    handleFetch(ev);
++    const served = await armed[0]!;
++    const loc = served.headers.get("location")!;
++    const second = mkEvent(new URL(loc, ORIGIN).href, "navigate", "document");
++    handleFetch(second.ev);
++    const doc = await second.armed[0]!;
++    expect(doc.status).toBe(200);
++    expect(transportMock.urls).toEqual([HOME + PATH]);
++  });
++});
++
+diff --git a/app/src/__tests__/request.test.ts b/app/src/__tests__/request.test.ts
+index ffc7d7a..b1a64f2 100644
+--- a/app/src/__tests__/request.test.ts
++++ b/app/src/__tests__/request.test.ts
+@@ -40,7 +40,7 @@ import { classifyRtype, forwardedHeaders, handleFetch, mergeRouteSearch, pageCac
+ import { setFingerprint, setSiteEnabled } from "../swstate";
+ import { establishContext, resolveRelative } from "../vctx";
+ import { VCTX } from "../swstate";
+-import { b64uEncode, encodeDestLegacy, setScheme } from "../codec";
++import { b64uEncode, decodeClientUrl, encodeDestLegacy, setScheme } from "../codec";
+ 
+ describe("reqDest (#82 seam)", () => {
+   it("falls back to sec-fetch-dest when destination is empty (Firefox, #40)", () => {
+@@ -941,7 +941,13 @@ describe("split-origin legacy routes decode ahead of the context recovery", () =>
+     const { ev, armed } = mkEvent(ORIGIN + "/dir/img.png", "esc-46b");
+     handleFetch(ev);
+     const served = await armed[0]!;
+-    expect(served.status).toBe(200);
+-    expect(transportMock.urls[0]).toBe("https://prev.example/dir/img.png");
++    /* #511: a bare-path GET navigation with a settled context answers
++       the visible query-shape handle form now, so the document owns a
++       readable URL; the redirect target decodes back to the exact
++       context destination the direct serve used. */
++    expect(served.status).toBe(302);
++    const loc = served.headers.get("location")!;
++    expect(loc.startsWith("/dir/img.png?zlNavh=")).toBe(true);
++    expect(decodeClientUrl(new URL(loc, ORIGIN))).toBe("https://prev.example/dir/img.png");
+  });
+ });
+diff --git a/app/src/request.ts b/app/src/request.ts
+index 8b1c151..d156ac4 100644
+--- a/app/src/request.ts
++++ b/app/src/request.ts
+@@ -2204,6 +2204,51 @@ export function handleFetch(e: FetchEvent): void {
+           dest0 = unwrapDest(legacyFirst);
+           routeCarriesQuery = true;
+         } else if (ctxDest) {
++          /* #511 (the cyber.blooket join class): a same-virtual-origin
++             navigation the page performed through a NATIVE location
++             write (window.location.href in bundled JS, an un-renamed
++             realm; the #235 rename cannot reach these) lands on the
++             bare same-origin path, and the #33 context recovery above
++             resolves it. Serving the document at the bare path leaves
++             no handle in the URL, so every page-side history write
++             re-anchors through the vloc entry+NAVP mint (its
++             navq-less arm) and parks the document on the opaque prel
++             pathname; a pathname-routed SPA reading the native
++             location then misses every route and renders its
++             catch-all (Blooket's literal "Game not found."). Answer
++             the navigation the way the initial navigation was
++             answered: one same-origin 302 to the visible query-shape
++             handle form (real path + fresh zlNavh token), so the
++             document owns a URL whose pathname it can read and whose
++             history writes commit the real path natively. Fail-closed:
++             no mint (no route key, or the path collides with an
++             engine surface), an existing handle param (the qHandle
++             branch owns those), or a non-GET navigation keeps the
++             direct serve (a redirect would strip a POST body). */
++          if (
++            e.request.method === "GET" &&
++            e.request.mode === "navigate" &&
++            !queryHandleToken(url.search)
++          ) {
++            const ctxClean = queryRoutesEnabled() ? buildQueryHandleUrl(ctxDest) : null;
++            if (ctxClean) {
++              const traceId = DIAG.trace(e.resultingClientId || e.clientId);
++              netLogPush({
++                method: e.request.method,
++                traceId,
++                path: url.pathname + url.search,
++                dest: ctxDest,
++                status: 302,
++                rtype: classifyRtype(reqDest(e.request), ""),
++                ms: 0,
++                bytes: 0,
++                verdict: "engine: context navigation redirected to the visible handle form",
++                transport: "engine",
++                detail: { internalUrl: ctxClean, ttfb: 0 },
++              });
++              return new Response(null, { status: 302, headers: { location: ctxClean } });
++            }
++          }
+           dest0 = ctxDest;
+         } else {
+           const refDest = e.request.referrer
