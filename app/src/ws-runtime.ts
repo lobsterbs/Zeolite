@@ -1,38 +1,29 @@
 /* WebSocket bridge runtime (issue #88: modularize sw.ts - extract the
-   WebSocket handling): the one bridge instance and its wiring to the
-   libcurl transport (TLS terminates there) live here instead of sw.ts.
-   The bridge class itself is ./wsbridge (unit-gated); this module is
-   the production wiring: openWebSocket as the factory, netlog rows for
-   the open (status 101) and the final close (code + byte totals),
-   DIAG events for abnormal closes, and the tracing hook.
+   WebSocket handling): the bridge instances and their wiring to the
+   transports live here instead of sw.ts. The bridge class itself is
+   ./wsbridge (unit-gated); this module is the production wiring:
+   openWebSocket as the wisp factory (TLS terminates there), netlog
+   rows for the open (status 101) and the final close (code + byte
+   totals), DIAG events for abnormal closes, and the tracing hook.
 
    Pages route ws(s):// through the zl:wsOpen control message; ws:// is
-   upgraded to wss:// before the transport sees it. The zl:wsOpen
-   handler (sender verification, virtual-origin identity) stays with
-   the control plane; it calls wsBridge.open(). */
+   upgraded to wss:// before a transport sees it. #511 adds the second
+   factory: when the embedder registered a relay channel, the control
+   plane opens page WebSockets on the relay bridge (embedder-side
+   egress) instead of the wisp transport; both share this accounting
+   shape, only the transport label and the internal route note differ.
+   The zl:wsOpen handler (sender verification, virtual-origin
+   identity) stays with the control plane; it calls one of the two. */
 
 import { DIAG } from "./diag";
 import { netLog, netLogPush, type NetEntry } from "./netlog";
 import { openWebSocket } from "./transport";
+import { relayWsFactory } from "./ws-relay";
 import { traceDecision } from "./tracing";
-import { WsBridge } from "./wsbridge";
+import { WsBridge, type WsHooks } from "./wsbridge";
 
-export const wsBridge = new WsBridge(
-  {
-    open: (url, protocols, h, headers) =>
-      openWebSocket(
-        url,
-        protocols,
-        {
-          onopen: (p) => h.onopen(p),
-          onmessage: (d) => h.onmessage(d),
-          onclose: (c, r) => h.onclose(c, r),
-          onerror: (e) => h.onerror(e),
-        },
-        headers,
-      ),
-  },
-  {
+function bridgeHooks(transport: "NativeTransit" | "Relay", internalUrl: string): WsHooks {
+  return {
     attempt: (url, upgraded) => ({
       url,
       upgraded,
@@ -52,8 +43,8 @@ export const wsBridge = new WsBridge(
         bytes: 0,
         verdict: "ws" + (protocol ? " proto " + protocol : ""),
         rtype: "WEBSOCKET",
-        transport: "NativeTransit",
-        detail: { internalUrl: "(wisp stream)", ttfb: ms },
+        transport,
+        detail: { internalUrl, ttfb: ms },
       });
       t.entry = netLog[netLog.length - 1];
     },
@@ -87,10 +78,32 @@ export const wsBridge = new WsBridge(
         verdict: clean ? "ws:closed" : "ws:aborted",
         err: clean ? undefined : "abnormal close " + code,
         rtype: "WEBSOCKET",
-        transport: "NativeTransit",
-        detail: { internalUrl: "(wisp stream)", ttfb: ms },
+        transport,
+        detail: { internalUrl, ttfb: ms },
       });
     },
     trace: (d) => void traceDecision(d),
+  };
+}
+
+export const wsBridge = new WsBridge(
+  {
+    open: (url, protocols, h, headers) =>
+      openWebSocket(
+        url,
+        protocols,
+        {
+          onopen: (p) => h.onopen(p),
+          onmessage: (d) => h.onmessage(d),
+          onclose: (c, r) => h.onclose(c, r),
+          onerror: (e) => h.onerror(e),
+        },
+        headers,
+      ),
   },
+  bridgeHooks("NativeTransit", "(wisp stream)"),
 );
+
+/* #511: the relay bridge shares the class and the accounting; only the
+   factory and the transport label differ. */
+export const wsRelayBridge = new WsBridge(relayWsFactory, bridgeHooks("Relay", "(relay ws)"));

@@ -43,7 +43,7 @@ import { altConfigured, altRegister, currentEngine, engineReady, setPrimaryWisp,
 import { loadInflight } from "./loadstate";
 import { activeStreams } from "./streams-alive";
 import { contextOf } from "./vctx";
-import { wsBridge } from "./ws-runtime";
+import { wsBridge, wsRelayBridge } from "./ws-runtime";
 import type { PortLike } from "./wsbridge";
 import { wsIdentityHeaders } from "./wsidentity";
 
@@ -826,18 +826,28 @@ case "zl:tracing":
         port?.close();
         break;
       }
-      /* Issue #4: an all-cached page can open a WebSocket before any
-         proxied fetch initialized the transport; openWebSocket would
-         throw on the uninitialized client and every bridge ws closed
-         1006. Wait for the transport here (sends queue at the bridge
-         until the handshake completes). */
-      try {
-        await wispTransport.ready();
-      } catch {
-        port.postMessage({ ev: "error", error: "transport unavailable" });
-        port.postMessage({ ev: "close", code: 1006, clean: false });
-        port.close();
-        break;
+      /* #511: a registered relay channel carries page WebSockets on
+         the embedder's guarded egress (the same path as relayed
+         fetches); the wisp arm below stays for embedders without a
+         relay, so its transport wait only runs then. No
+         cross-fallback: a relay ws failure is an honest page error,
+         never a silently wedged second transport (ponytail: a
+         fallback would double-open the socket). */
+      const viaRelay = relayAvailable();
+      if (!viaRelay) {
+        /* Issue #4: an all-cached page can open a WebSocket before any
+           proxied fetch initialized the transport; openWebSocket would
+           throw on the uninitialized client and every bridge ws closed
+           1006. Wait for the transport here (sends queue at the bridge
+           until the handshake completes). */
+        try {
+          await wispTransport.ready();
+        } catch {
+          port.postMessage({ ev: "error", error: "transport unavailable" });
+          port.postMessage({ ev: "close", code: 1006, clean: false });
+          port.close();
+          break;
+        }
       }
       /* Deep-integration item 4: per-origin virtual WS identities. The
          handshake carries the initiator's virtual origin, the jar's
@@ -901,7 +911,7 @@ case "zl:tracing":
         profile: getFpProfile(),
         clientId: sourceClientId,
       });
-      wsBridge.open(port as unknown as PortLike, wsUrl, Array.isArray(msg.protocols) ? msg.protocols : [], wsHeaders);
+      (viaRelay ? wsRelayBridge : wsBridge).open(port as unknown as PortLike, wsUrl, Array.isArray(msg.protocols) ? msg.protocols : [], wsHeaders);
       break;
     }
     case "zl:docCookie": {

@@ -47,6 +47,26 @@ type RelayMsg =
 let hostPort: MessagePort | null = null;
 let ridSeq = 0;
 const waiters = new Map<number, (m: RelayMsg) => void>();
+/* #511: WebSocket-over-relay subscribers. The zl:ws* frames are
+   typed and disjoint from fetch replies (the dispatch keys on the
+   frame type first), so one port carries both traffics. */
+const wsSubscribers: Array<(m: unknown) => void> = [];
+
+export function relaySubscribe(fn: (m: unknown) => void): void {
+  wsSubscribers.push(fn);
+}
+
+/** #511: post a ws frame on the CURRENT relay port; false when the
+    channel is gone or dead, so the caller fails honestly. */
+export function relaySendWs(msg: unknown): boolean {
+  if (!hostPort) return false;
+  try {
+    hostPort.postMessage(msg);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /* #354: a plain idle restart of the service worker drops the stored
    port, and controllerchange does not fire for it, so the embedder
@@ -166,6 +186,12 @@ export function relayRegister(port: MessagePort, credits?: unknown): void {
   port.onmessage = (ev: MessageEvent) => {
     const m = ev.data as RelayMsg;
     if (!m || typeof m.rid !== "number") return;
+    /* #511: ws frames dispatch by type before the fetch waiter
+       space; the frame sets are disjoint. */
+    if (typeof (m as { type?: string }).type === "string" && (m as { type: string }).type.startsWith("zl:ws")) {
+      for (const d of [...wsSubscribers]) d(m);
+      return;
+    }
     waiters.get(m.rid)?.(m);
   };
 }
