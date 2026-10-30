@@ -1,8 +1,9 @@
 # Hybrid location rewriting (#456)
 
-Status: **Partial**. Per-site policy, bounded AST work and per-instance reason
-telemetry are implemented. Legacy behavior remains the deployment default;
-this is not a default-off migration or complete location virtualization.
+Status: **Partial**. Per-site policy, bounded AST work, per-instance reason
+telemetry and gate 4 (corroborated automatic targeting) are implemented.
+Legacy behavior remains the deployment default; this is not a default-off
+migration or complete location virtualization.
 
 ## Configuration
 
@@ -21,14 +22,39 @@ with a 2 MiB AST limit). `hybrid` defaults to 512 KiB and excludes event
 attributes. `off` disables only location rewriting; URL literal rewriting and
 frame-buster handling continue. An explicit positive integer cap up to 2 MiB
 is supported; invalid modes/caps leave the legacy configuration unchanged.
-No hosts are automatically opted in. A generic application 404 does not prove
-a location-read failure and cannot safely trigger rewriting.
+An explicit rule always wins over the learned mark below, including `off`.
+
+## Automatic targeting (gate 4)
+
+A pathname-reading SPA that answers a correct URL with its own not-found
+view (the play2048.co class, the LegacyUnforgeable limit) is marked for the
+hybrid pass on its next load. The mark requires corroborated evidence, never
+a generic 404 (a legitimate application response):
+
+- a bounded page-side watcher, injected with the document init script, fires
+  only on a strong marker (the document title or the first h1/h2 reads
+  "404" / "not found") and reports through the `zl:spa404` control message
+  carrying no data;
+- the worker recovers the origin from the sender's own route (never a
+  page claim) and requires reports from at least 2 distinct loads;
+- the origin's documents must have shown actual location-read rewrites
+  (the wasm pass reason `rewritten`) - reads without reports and reports
+  without reads both stay legacy.
+
+The store is hostname + counters only, bounded (512 origins), 7-day TTL,
+cleared on worker restart. The feature is on by default per the issue's
+hybrid design: a false positive opts an origin into the bounded, fail-open
+pass (strictly closer to native behavior), a mark emits a REWRITE diag
+event, and `zl:config locationTargeting false` is the host kill switch.
+The learned snapshot rides the `zl:getNetLog` stats view
+(`stats.locationTarget`).
 
 Inline executable script bodies and external scripts use the same policy.
 External scripts resolve URL literals against their own resource URL, but
 choose location policy using the verified initiating page, including on cache
-hits. Unknown initiators retain legacy behavior rather than guessing a CDN's
-policy. Workers and eval are outside this rollout.
+hits and for the learned mark. Unknown initiators retain legacy behavior
+rather than guessing a CDN's policy. Workers and eval are outside this
+rollout.
 
 ## Processing and diagnostics
 
@@ -54,8 +80,9 @@ apply these controls.
 
 - Decide the default-off migration without regressing existing deployments.
 - Bound total candidate buffering across the other rewrite passes.
-- Add direct/proxied Chromium fixtures and scoreboard evidence before enabling
-  policies for reported failing sites.
+- Scoreboard (nightly compat run) evidence for the auto-marked origins and
+  the shipped play2048.co rule; the heuristic has not been measured against
+  a live corpus yet.
 - Keep dynamic eval, worker source, computed properties, shorthand bindings,
   and browser-owned location surfaces explicitly unsupported where applicable.
 

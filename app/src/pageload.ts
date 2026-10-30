@@ -49,15 +49,33 @@ function vPath(dest: string): string {
   }
 }
 
+/** #456 gate 4: the post-load own-404 watcher. Pathname-reading SPAs
+    answer a correct URL with their own not-found view (the
+    LegacyUnforgeable limit); the SW cannot see the DOM, so this
+    bounded page-side check reports the shape to the worker. It
+    fires only on a strong marker (the document title or the first
+    h1/h2 reads "404" / "not found"), carries no data, and the
+    worker-side handler recovers the origin from the sender's own
+    route, never from this message. Corroboration across distinct
+    loads lives in location-targeting.ts. */
+export const SPA404_WATCHER =
+  "(function(){function q(){try{var m=/\\b404\\b|\\bnot found\\b/i;" +
+  'var t=document.title||"";var h=document.querySelector("h1,h2");' +
+  'if(m.test(t)||(h&&m.test(h.textContent||"")))' +
+  'navigator.serviceWorker.controller.postMessage({type:"zl:spa404"})}catch(e){}}' +
+  "function s(){setTimeout(q,800);setTimeout(q,2500)}" +
+  'if(document.readyState==="complete")s();else addEventListener("load",s)})();';
+
 /** The inline init script spliced into the rewritten stream head
     AFTER the doctype (quirks fix; it used to ride the very first
     chunk, before the doctype, which forced quirks mode on every
     proxied document). An active fingerprint profile rides the same
     splice (1.8). #236 adds the hostless vpath the virtual location
-    seeds from. */
+    seeds from. #456 gate 4 adds the own-404 watcher. */
 export function initScript(dest: string, fpScript: string | null): string {
   return (
     `<script>window.__ZL=${JSON.stringify({ site: siteToken(dest), vpath: vPath(dest) })};</script>` +
+    `<script>${SPA404_WATCHER}</script>` +
     (fpScript ? `<script>${fpScript}</script>` : "")
   );
 }

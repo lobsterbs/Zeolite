@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { initScript, siteToken, initSplicePoint } from "../pageload";
+import { initScript, siteToken, initSplicePoint, SPA404_WATCHER } from "../pageload";
 import { b64uEncode, setRouteKey } from "../codec";
 
 const DEST = "https://real.site/deep/page?q=1";
@@ -27,8 +27,13 @@ describe("siteToken (issue #32)", () => {
 describe("initScript (issue #32)", () => {
   it("injects the opaque site identity, never the destination", () => {
     const s = initScript(DEST, null);
-    expect(s).toMatch(
-      /^<script>window\.__ZL=\{"site":"[a-z0-9]+","vpath":"[^"]*"\};<\/script>$/,
+    /* #456 gate 4: the own-404 watcher now rides the same splice. */
+    expect(s).toBe(
+      '<script>window.__ZL={"site":"' +
+        siteToken(DEST) +
+        '","vpath":"/deep/page?q=1"};</script><script>' +
+        SPA404_WATCHER +
+        "</script>",
     );
     /* #236: the hostless vpath rides the identity, the host never */
     expect(s).toContain('"vpath":"/deep/page?q=1"');
@@ -41,7 +46,9 @@ describe("initScript (issue #32)", () => {
     expect(s).toBe(
       '<script>window.__ZL={"site":"' +
         siteToken(DEST) +
-        '","vpath":"/deep/page?q=1"};</script><script>/*fp*/</script>',
+        '","vpath":"/deep/page?q=1"};</script><script>' +
+        SPA404_WATCHER +
+        '</script><script>/*fp*/</script>',
     );
   });
 });
@@ -84,7 +91,9 @@ describe("siteToken (keyed mode)", () => {
     expect(s).toBe(
       '<script>window.__ZL={"site":"' +
         siteToken(DEST) +
-        '","vpath":"/deep/page?q=1"};</script>',
+        '","vpath":"/deep/page?q=1"};</script><script>' +
+        SPA404_WATCHER +
+        "</script>",
     );
     expect(s).not.toContain("real.site");
     expect(s).not.toContain(DEST);

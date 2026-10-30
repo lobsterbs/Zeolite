@@ -7,7 +7,8 @@
    site profile script, degraded flag) through initTransform; the
    getters are lazy and resolved at request time, never at module
    eval, so the call may precede the declarations it closes over. */
-import { siteRules, ruleFor, locationPolicy, type SiteRule, type LocationPolicy } from "./siteconfig";
+import { siteRules, ruleFor, type SiteRule, type LocationPolicy } from "./siteconfig";
+import { recordDocumentLocationReads, resolveLocationPolicy } from "./location-targeting";
 import { DIAG } from "./diag";
 import { streamAlive, streamDone } from "./streams-alive";
 import { charsetFromHeader, makeDecoder, resolveCharset } from "./headers";
@@ -242,7 +243,7 @@ export function rewriteStream(
         // HTML response with no diag event and no console error.
         const mod = await modP;
         const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
-        configureLocation(rw, locationPolicy(rule));
+        configureLocation(rw, resolveLocationPolicy(base, rule));
         for (const path of rule.inject ?? []) rw.add_injection(path);
         if (rule.block?.length) rw.set_blocked_hosts(rule.block);
         if (deps!.lazyImages()) rw.set_lazy_images();
@@ -288,7 +289,7 @@ export function rewriteStream(
             }
             if (rest) emit(rw.process(rest));
             const tail = rw.finish();
-            reportLocation(rw);
+            reportLocation(rw, base);
             if (tail) controller.enqueue(encoder.encode(tail));
             controller.close();
             onDone?.();
@@ -296,7 +297,7 @@ export function rewriteStream(
           }
           if (injected) {
             emit(rw.process(decoder!.decode(value, { stream: true })));
-            reportLocation(rw);
+            reportLocation(rw, base);
             continue;
           }
           if (decoder !== null) {
@@ -489,7 +490,7 @@ function configureLocation(rw: JsRewriter, policy: LocationPolicy): boolean {
   return true;
 }
 
-function reportLocation(rw: JsRewriter): void {
+function reportLocation(rw: JsRewriter, owner?: string): void {
   const events = rw.take_location_events?.();
   if (!events) return;
   // Fixed vocabulary only: no source, destinations or tokens in diagnostics.
@@ -499,17 +500,21 @@ function reportLocation(rw: JsRewriter): void {
       counts.set(reason, (counts.get(reason) ?? 0) + 1);
   }
   if (counts.size) DIAG.emit({ category: "REWRITE", severity: "info", message: "location pass: " + [...counts].map(([k, n]) => k + "=" + n).join(", ") });
+  /* #456 gate 4: the pathname-reading half of the auto-targeting
+     evidence (observe-only; the mark lives in location-targeting). */
+  if (owner && (counts.get("rewritten") ?? 0) > 0) recordDocumentLocationReads(owner);
 }
 
 export async function rewriteJsBody(js: string, base: string, pageBase?: string): Promise<string> {
   const mod = await rewriter();
   // The owner page chooses policy; a third-party CDN's hostname must not.
-  const policy = locationPolicy(pageBase ? ruleFor(await siteRules(), pageBase) : {});
+  // #456 gate 4: the learned mark rides the same owner-page rule.
+  const policy = resolveLocationPolicy(pageBase, pageBase ? ruleFor(await siteRules(), pageBase) : {});
   const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined);
   try {
     if (configureLocation(rw, policy) && rw.rewrite_script) {
       const out = rw.rewrite_script(js);
-      reportLocation(rw);
+      reportLocation(rw, pageBase);
       return out;
     }
     // Older WASM cannot honor off/hybrid. Preserve source instead of applying
