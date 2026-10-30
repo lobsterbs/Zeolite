@@ -45,7 +45,7 @@ export interface NetEntry {
       (issue #30: escape telemetry, not proxied traffic), or "engine"
       for an engine-answered request that never touched the transport
       (the #34 CORS preflight). */
-  transport?: "NativeTransit" | "RewriteFallback" | "Blocked" | "browser" | "engine";
+  transport?: "NativeTransit" | "RewriteFallback" | "Blocked" | "browser" | "engine" | "Relay";
   /** Machine-readable reason when the decision was RewriteFallback. */
   fallbackReason?: string;
   /** Final destination after redirects, when the transport exposed it. */
