@@ -122,15 +122,27 @@ function siteKeys(store: Storage): string[] {
  if (IDB) {
  const OPEN = IDB.open.bind(IDB);
  const DEL = IDB.deleteDatabase.bind(IDB);
- /* databases() is deliberately absent (honest unimplemented API):
-    wrapping it would risk leaking engine-own database names. cmp()
-    (2.2 Arsenide) compares two prefixed names, so ordering stays
-    consistent inside the site scope; it is absent when the host
-    factory does not provide it, rather than faked. */
+ /* #555: databases() is exposed only where the host factory provides
+    it, filtered to this site's prefix with the prefix stripped from
+    the returned names - engine-own and other-site databases never
+    appear, and the API stays honestly absent where the host lacks it
+    (never faked). cmp() (2.2 Arsenide) compares two prefixed names,
+    so ordering stays consistent inside the site scope; it is absent
+    when the host factory does not provide it, rather than faked. */
  const shim: Record<string, unknown> = {
  open: (n: string, v?: number) => OPEN(pre(n), v),
  deleteDatabase: (n: string) => DEL(pre(n)),
  };
+ const DBS = (IDB as unknown as {
+   databases?: () => Promise<Array<{ name?: string; version?: number }>>;
+ }).databases;
+ if (typeof DBS === "function") {
+   const call = DBS.bind(IDB);
+   shim.databases = async () =>
+     (await call())
+       .filter((d) => typeof d.name === "string" && d.name.startsWith(P))
+       .map((d) => ({ name: (d.name as string).slice(P.length), version: d.version }));
+ }
  if (typeof IDB.cmp === "function") {
  const CMP = IDB.cmp.bind(IDB);
  /* #263: cmp() compares IndexedDB KEYS, not database names - prefixing

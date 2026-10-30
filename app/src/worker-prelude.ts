@@ -428,9 +428,10 @@ export function fireHandler(t: object, e: Event): void {
    page bootstrap's bootstrap/storage.ts + isolation.ts shims: DB and
    cache names carry the site prefix (two proxied sites never share a
    database or a cache, and neither touches an engine-own one), and
-   BroadcastChannel names are prefixed the same way. databases() stays
-   deliberately absent (honest unimplemented API: wrapping it would
-   leak engine-own database names). Exported so worker.test.ts pins it. */
+   BroadcastChannel names are prefixed the same way. databases() is
+   exposed prefix-filtered with stripped names only where the host
+   factory provides it (#555); elsewhere it stays honestly absent.
+   Exported so worker.test.ts pins it. */
 export function applyWorkerStorage(t: Record<string, unknown>, P: string): void {
   const pre = (n: string) => P + n;
   {
@@ -442,6 +443,16 @@ export function applyWorkerStorage(t: Record<string, unknown>, P: string): void 
         open: (n: string, v?: number) => OPEN(pre(n), v),
         deleteDatabase: (n: string) => DEL(pre(n)),
       };
+      const DBS = (IDB as unknown as {
+        databases?: () => Promise<Array<{ name?: string; version?: number }>>;
+      }).databases;
+      if (typeof DBS === "function") {
+        const call = DBS.bind(IDB);
+        shim.databases = async () =>
+          (await call())
+            .filter((d) => typeof d.name === "string" && d.name.startsWith(P))
+            .map((d) => ({ name: (d.name as string).slice(P.length), version: d.version }));
+      }
       if (typeof IDB.cmp === "function") {
         const CMP = IDB.cmp.bind(IDB);
         shim.cmp = (a: string, b: string) => CMP(pre(a), pre(b));

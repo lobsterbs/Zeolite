@@ -283,6 +283,24 @@ describe("worker storage scoping (#171)", () => {
     expect(bcNames).toEqual(["zl:site1:ch1"]);
     expect(ch.name).toBe("ch1");
   });
+
+  it("exposes a prefix-filtered databases() view in worker realms (#555)", async () => {
+    const idb = {
+      open: () => ({}),
+      deleteDatabase: () => undefined,
+      databases: async () => [
+        { name: "zl:site1:mine", version: 3 },
+        { name: "zl:site2:mine", version: 1 },
+        { name: "engine", version: 9 },
+      ],
+    };
+    const t: Record<string, unknown> = { indexedDB: idb };
+    applyWorkerStorage(t, "zl:site1:");
+    const I = t.indexedDB as unknown as {
+      databases: () => Promise<Array<{ name?: string; version?: number }>>;
+    };
+    expect(await I.databases()).toEqual([{ name: "mine", version: 3 }]);
+  });
 });
 
 describe("swshim guest forwarding (#477 wave 3)", () => {
