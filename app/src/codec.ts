@@ -726,32 +726,56 @@ export function decodeQueryHandle(u: URL): { destination: string; rootClientId?:
   if (raw === "") return null;
   const parts = raw.split("&");
   const head = NAVQ_PARAM + "=";
-  for (let i = 0; i < parts.length; i++) {
-    if (!parts[i].startsWith(head)) continue;
-    const token = parts[i].slice(head.length);
-    const origin = decodeNavHandle(token);
-    if (origin === null) continue;
+  /* #558: every MAC-verifying occurrence is an engine token, never
+     site data - the re-mint loop (a decoded destination search that
+     still carried a live token got a fresh one appended at the next
+     commit) stacked one identical zlNavh per navigation cycle when
+     only the first occurrence was stripped. All verifying tokens
+     leave the cleaned search; page-authored impostors fail the MAC
+     by definition and keep riding untouched, the documented
+     contract. */
+  const keep: string[] = [];
+  let origin: string | null = null;
+  let root: string | undefined;
+  for (const part of parts) {
+    if (!part.startsWith(head)) {
+      keep.push(part);
+      continue;
+    }
+    const token = part.slice(head.length);
+    const o = decodeNavHandle(token);
     /* Origin-only payload only: a full-destination token pasted into
        the search by a page is a path-shape NAVH token, not a
        committed query route. Fail closed; the NAVH path shape owns
        those tokens. */
-    try {
-      if (new URL(origin).origin !== origin) continue;
-    } catch {
+    let live = false;
+    if (typeof o === "string") {
+      try {
+        live = new URL(o).origin === o;
+      } catch {
+        live = false;
+      }
+    }
+    if (!live) {
+      /* a page-authored impostor, or a full-destination NAVH token:
+         never a committed query-route token */
+      keep.push(part);
       continue;
     }
-    /* The payload names the origin; the committed path and the
-       cleaned search are the real destination tail. */
-    const rest = parts.slice(0, i).concat(parts.slice(i + 1));
-    const cleaned = rest.length > 0 ? "?" + rest.join("&") : "";
-    /* #410: builder-escaped surplus leading slashes restore to the
-       real "//" pathname, the NAVH decode contract. */
-    return {
-      destination: origin + restoreLeadingSlashes(u.pathname) + cleaned,
-      rootClientId: decodeNavHandleRoot(token) ?? undefined,
-    };
+    if (origin === null) {
+      origin = o;
+      root = decodeNavHandleRoot(token) ?? undefined;
+    }
+    /* a later verifying token never rides the destination */
   }
-  return null;
+  if (origin === null) return null;
+  const cleaned = keep.length > 0 ? "?" + keep.join("&") : "";
+  /* #410: builder-escaped surplus leading slashes restore to the
+     real "//" pathname, the NAVH decode contract. */
+  return {
+    destination: origin + restoreLeadingSlashes(u.pathname) + cleaned,
+    rootClientId: root,
+  };
 }
 
 /** #410 (#202 parity): a committed query-route path escapes a surplus
@@ -797,8 +821,39 @@ export function buildQueryHandleUrl(
   if (queryHandlePathShaped(u.pathname)) {
     return null;
   }
+  /* #558: the mint never re-emits a committed URL whose search still
+     carries a live engine token - a destination that rode through a
+     decode (the stacked-handle loop) gets every origin-only
+     MAC-verifying zlNavh param stripped here, so the fresh append can
+     never stack. The strip is raw (no URLSearchParams re-encode), so
+     the search round-trips byte-faithfully; impostor values fail the
+     MAC by definition and keep riding, the documented contract. */
+  const rawSearch =
+    u.search === ""
+      ? []
+      : (u.search.startsWith("?") ? u.search.slice(1) : u.search).split("&");
+  const head = NAVQ_PARAM + "=";
+  const kept: string[] = [];
+  for (const part of rawSearch) {
+    if (!part.startsWith(head)) {
+      kept.push(part);
+      continue;
+    }
+    const o = decodeNavHandle(part.slice(head.length));
+    let live = false;
+    if (typeof o === "string") {
+      try {
+        live = new URL(o).origin === o;
+      } catch {
+        live = false;
+      }
+    }
+    if (!live) kept.push(part);
+  }
   const search =
-    u.search === "" ? "?" + NAVQ_PARAM + "=" + token : u.search + "&" + NAVQ_PARAM + "=" + token;
+    kept.length === 0
+      ? "?" + head + token
+      : "?" + kept.join("&") + "&" + head + token;
   /* #410: the committed path never opens "//" (protocol-relative on
      host assignment); the decode restores the real pathname. */
   return escapeLeadingSlashes(u.pathname) + search + u.hash;

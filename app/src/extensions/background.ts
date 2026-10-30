@@ -36,6 +36,34 @@ import type { ExtensionId, ExtensionRecord } from "./types";
 const BOOT_MARKER = "zl-boot:";
 const SW_IDLE_MS = 30_000;
 
+/* #560: a real background page's self IS the global scope: platform
+   globals (location, atob, btoa, setTimeout, fetch, crypto, ...)
+   read through self like any other window property - Tampermonkey
+   5.5.0 destructures location from self at module scope and reads
+   .origin on it, which threw at boot on the API-only proxy. The
+   API object still shadows (extension API names win), addEventListener
+   stays the no-op it always was, and anything else falls through to
+   the real worker global: self.location.origin in the SW is the
+   engine origin, the exact origin the extension's own pages report
+   for sender-origin comparisons. Exported for the sandbox regression
+   test; the boot is the only caller. */
+export function buildBackgroundSelf(
+  apiObj: Record<string, unknown>,
+): object {
+  const workerGlobal = globalThis as Record<string, unknown>;
+  return new Proxy(
+    {},
+    {
+      get: (_t, prop) => {
+        if (prop === "addEventListener") return () => undefined;
+        const name = String(prop);
+        const v = apiObj[name];
+        return v === undefined ? workerGlobal[name] : v;
+      },
+    },
+  ) as unknown as object;
+}
+
 /** True for MV3 service-worker backgrounds: no scripts, no page, a
     declared service worker. Firefox-style background scripts (MV2 or
     MV3 with background.scripts) are NOT this: they boot eagerly. */
@@ -196,15 +224,7 @@ export async function bootExtension(
     /* Function-scope execution: the scripts see only the API objects.
        self is a proxy over the API surface, NOT the real SW global. */
     const apiObj = ctx.api.browser as Record<string, unknown>;
-    const sandboxSelf = new Proxy(
-      {},
-      {
-        get: (_t, prop) =>
-          prop === "addEventListener"
-            ? () => undefined
-            : apiObj[String(prop)],
-      },
-    ) as unknown as object;
+    const sandboxSelf = buildBackgroundSelf(apiObj);
     const fn = new Function(
       "browser",
       "chrome",
