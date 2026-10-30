@@ -48,6 +48,13 @@ export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
      target at all - the worker terminates the sender origin. */
   "zl:guestRegister",
   "zl:guestUnregister",
+  /* #456 gate 4: the page-side own-404 watcher report (injected by
+     the init script). Names no target and carries no data; the
+     handler recovers the sender's own origin from its route (never
+     a page claim), so a report can only corroborate the sender's
+     OWN origin into the bounded, fail-open hybrid location pass.
+     No new capability. */
+  "zl:spa404",
 ]);
 
 /** Pathname half of the sender classification: true when a client at

@@ -15,6 +15,7 @@
      zl:recordStart recId | zl:recordStop
      zl:find dest cmd pattern options | zl:ping (replies
      { ok, version, degraded, prefix, scheme })
+     zl:spa404 (page own-404 watcher report, #456 gate 4)
      zl:sameSite policy | zl:importSession mode rule
      zl:getJars | zl:clearJar profile origin
      zl:downloadState id status | zl:listMenus extId

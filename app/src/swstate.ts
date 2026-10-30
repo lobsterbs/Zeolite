@@ -215,6 +215,24 @@ export function setAdaptiveTransit(on: boolean): void {
   adaptiveTransit = on;
 }
 
+/* #456 gate 4: automatic #432-class location targeting. ON by
+   default per the issue's hybrid design: corroborated own-404
+   evidence (>= 2 distinct loads AND observed location reads, the
+   store in ./location-targeting) opts an origin into the bounded,
+   fail-open hybrid location pass; an explicit siteconfig rule still
+   wins. The switch is the host kill switch (zl:config
+   locationTargeting). Ephemeral like imageLazy: resets on SW
+   restart, so the module default itself carries the intent. */
+let locationTargeting = true;
+
+export function locationTargetingEnabled(): boolean {
+  return locationTargeting;
+}
+
+export function setLocationTargeting(on: boolean): void {
+  locationTargeting = on;
+}
+
 /* ---- Per-site route table ------------------------------------------ */
 
 /** Sites the user disabled for this engine. Keyed by registrable-ish

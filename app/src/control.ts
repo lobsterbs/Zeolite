@@ -34,8 +34,9 @@ import { beginRecording, finishRecording } from "./recording";
 import { ghosteryListFetch, pageCacheClear, virtualHcaptchaFrameFragment } from "./request";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
-import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled } from "./swstate";
+import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, locationTargetingEnabled, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setLocationTargeting, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled } from "./swstate";
 import { adaptiveEvidenceSnapshot } from "./adaptive-evidence";
+import { locationTargetSnapshot, recordSpa404Report } from "./location-targeting";
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
 import { relayAvailable, relayRegister } from "./relayfetch";
@@ -94,6 +95,7 @@ export interface ControlMessage {
     | "zl:getTracing"
     | "zl:wsOpen"
     | "zl:docCookie"
+    | "zl:spa404"
     | "zl:getVirtualOrigin"
     | "zl:embedderOrigin"
     | "zl:getEmbedder"
@@ -145,6 +147,11 @@ export interface ControlMessage {
   /** zl:config: opt-in learned-transit demotion (#487 phase 4);
       absent keeps the live choice; false is the kill switch. */
   adaptiveTransit?: boolean;
+  /** zl:config: automatic #432-class location targeting (#456 gate
+      4). ON by default; absent keeps the live choice; false is the
+      kill switch (an explicit siteconfig rule still wins over the
+      learned mark). */
+  locationTargeting?: boolean;
   /** zl:config: opt-in refusal of the plaintext ?url= initial
       navigation (#63). Absent keeps the persisted choice (legacy
       ?url= accepted, the migration window); the ack echoes the live
@@ -536,6 +543,9 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         /* Lazy images: parity with the zl:config ack, so an embedder
            (the LB debug readout) reads the live choice from ping. */
         imageLazy: isImageLazy(), adaptiveTransit: adaptiveTransitEnabled(),
+        /* #456 gate 4: the live auto-targeting choice, same
+           embedder-visibility rule as the other toggles. */
+        locationTargeting: locationTargetingEnabled(),
         /* #63: the live ?url= refusal choice, so an embedder detects a
            revert to defaults and re-pushes its config. */
         navHandles: navHandlesEnabled(),
@@ -571,6 +581,9 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       if (typeof msg.imageLazy === "boolean") setImageLazy(msg.imageLazy);
       /* #487 phase 4: learned demotion is opt-in; the ack echoes it. */
       if (typeof msg.adaptiveTransit === "boolean") setAdaptiveTransit(msg.adaptiveTransit);
+      /* #456 gate 4: automatic targeting kill switch; the ack
+         echoes the live value. */
+      if (typeof msg.locationTargeting === "boolean") setLocationTargeting(msg.locationTargeting);
       /* #63: same migration-window rule for the ?url= refusal. */
       if (typeof msg.navHandles === "boolean") setNavHandles(msg.navHandles);
       /* Injector phase 2: same rule for the query-shape routes. */
@@ -578,7 +591,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       setScheme(msg.prefix ?? "/j/");
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
-      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), adaptiveTransit: adaptiveTransitEnabled(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled(), experimental: experimentalSnapshot() });
+      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), adaptiveTransit: adaptiveTransitEnabled(), locationTargeting: locationTargetingEnabled(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled(), experimental: experimentalSnapshot() });
       break;
     }
     case "zl:reloadBypass":
@@ -946,6 +959,19 @@ case "zl:tracing":
       if (cid) registerDocCookiePort(cid, port, origin);
       break;
     }
+    case "zl:spa404": {
+      /* #456 gate 4: the page-side own-404 watcher report (injected
+         by the init script). The sender's own client route is the
+         only origin source (a page claim is never read) and the
+         report carries no data, so this grants no capability: a
+         forged report can only corroborate the sender's OWN origin
+         into the bounded, fail-open hybrid location pass.
+         Corroboration lives in location-targeting.ts; no reply is
+         needed (the watcher sends no port). */
+      const origin = senderOrigin(e);
+      if (origin) recordSpa404Report(origin, sourceClientId);
+      break;
+    }
     case "zl:getVirtualOrigin": {
       /* #130: this client's own virtual origin, recovered from the
          sender's engine route (never a page-supplied claim). The page
@@ -1279,7 +1305,7 @@ case "zl:tracing":
       const clientId = msg.clientId === undefined ? undefined : String(msg.clientId).slice(0, 256);
       const scoped = clientId === undefined ? null : netLogSince(0, clientId);
       reply({ entries: netLogSince(since, clientId), lastSeq: netLogCursor(), generation: netLogGeneration(), clientId: clientId ?? null,
-          version: ZEOLITE_VERSION, stats: scoped === null ? { ...transitStats(), adaptive: adaptiveEvidenceSnapshot() } : {
+          version: ZEOLITE_VERSION, stats: scoped === null ? { ...transitStats(), adaptive: adaptiveEvidenceSnapshot(), locationTarget: locationTargetSnapshot() } : {
             native: scoped.filter(x => x.transport === "NativeTransit").length,
             fallback: scoped.filter(x => x.transport === "RewriteFallback").length,
             fallbacks: scoped.filter(x => x.fallbackReason).map(x => ({ ts: x.ts, url: x.dest, reason: x.fallbackReason, traceId: x.traceId })),
@@ -1441,7 +1467,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
 ]);
 
 
