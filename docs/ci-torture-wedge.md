@@ -1,51 +1,38 @@
-# CI browser torture wedge (nondeterministic)
+# CI browser torture cascade (intermittent transport death)
 
-The browser job's torture suite has failed four times on main with a
-wedge signature that is NOT a rewriter defect. This note records the
-evidence so the next red run can be triaged without re-deriving it.
+Correction of the record (2026-10-30): the first red runs were triaged
+as a position-random runner wedge. That was wrong. In every red run
+the SAME probe fails first and the cascade follows. The trigger is
+deterministic; only its firing is intermittent. Tracked in #514.
 
-## Signature
+## The trigger
 
-- Several tests pass at the start of the run, then a stretch of
-  sequential failures, each "page.goto: Timeout 30000ms exceeded"
-  against the same fixture server, each burning the full 30 s.
-- The affected categories vary run to run (routing, transport,
-  rewriting, isolation); the failures cluster in time, not by
-  feature.
-- The run partially recovers: later tests pass quickly again.
-- Run 41035486199 (head 039c93ac) surfaced the evaluate-timeout
-  variant: a single probe died with "torture probe: page evaluate
-  timed out" AFTER the harness's one-shot wedge restart had already
-  fired and failed again; the goto-timeout variant did not appear at
-  all in that run. Same wedge, different probe seam.
-- Run 41018448365 additionally surfaced
-  SyntaxError: "zeolite: u..." is not valid JSON: an engine error
-  string reached code that expected a JSON envelope. That is a
-  symptom of the wedge (an error path answering where a response
-  was expected), not a rewriting bug.
+- The first failure is always the transport probe "redirect
+  semantics: 301/302/303 rewrite POST to GET, 307/308 preserve
+  method and body" (five body-preserving POST redirects against a
+  direct oracle, suite/e2e/torture.mjs).
+- Runs 41018448365, 41033394111, 41036816363: frame.evaluate fails
+  with SyntaxError: Unexpected token 'z', "zeolite: u"... is not
+  valid JSON. That string is the SW fetch failure response
+  "zeolite: upstream fetch failed: ..." (app/src/request.ts): the
+  probe's engine-side fetch died upstream and the error text reached
+  JSON.parse.
+- Run 41035486199: the stall variant of the same probe ("page
+  evaluate timed out"); everything else in that run passed.
+- The harness wedge restart (engine + browser context) fires in all
+  four runs; the retest fails again each time, and the suite then
+  sees fast error responses or 30 s first-byte-deadline stalls
+  (page.goto timeout cascade, partial or no recovery).
 
-## Evidence that it is a flake, not a regression
+## Why the #511 wave is exonerated
 
-- Run 41018448365 (head e2d5f6c7): red, 6 failures, this exact
-  timeout signature. That head changed only the rewriter invariance
-  test and the torture harness printing; runtime bytes were
-  identical to the previous green run.
-- Run on 87cb2c68 (the ASCII-pure correction of the same test): green.
-- Run 41033394111 (head 9fc67892): red, 8 failures, same signature.
-  The prior heads 87cb2c68 and 9fc67892 differ only by the #511
-  WebSocket-over-relay app changes, which the app job typechecks,
-  builds and unit-tests green; the wedge fires mid-run on pages the
-  ws code never touches.
-- Run 41035486199 (head 039c93ac, docs-only on top of 9fc67892;
-  runtime bytes identical to the green 87cb2c68 build): red, exactly
-  1 failure, the evaluate-timeout variant above. The failed probe
-  is "redirect semantics: 301/302/303 rewrite POST to GET, 307/308
-  preserve method and body" (transport); the neighboring redirect
-  probes passed in the same run: engine-side 302 routing, the 5- and
-  15-hop redirect chains, and the NativeTransit redirect marks. The
-  redirect logic demonstrably worked around the wedged probe.
-- Same runtime bytes red once and green once, twice over: the wedge
-  is nondeterministic.
+- Run 41018448365 (head e2d5f6c7) carries PRE-#511 runtime bytes
+  (identical to the pin 137 build and to the green 87cb2c68 build)
+  and fails the same probe the same way. No torture probe touches
+  page WebSockets.
+- The green 87cb2c68 run started six minutes after the red e2d5f6c7
+  run, in the same runner pool with the same pinned Chromium: the
+  trigger is intermittent, not environmental determinism.
 
 ## What has already been ruled out
 
@@ -56,14 +43,16 @@ evidence so the next red run can be triaged without re-deriving it.
 - The srcset pass routes every candidate through enc();
   deterministic, no scheme-relative emission arm exists.
 - The torture harness prints the full JSON record on failure
-  (torture.mjs), so the next recurrence names the exact assertion
-  and the served attribute, not just the URL.
+  (torture.mjs).
 
 ## Operational notes
 
 - The rerun API (rerun_workflow_run / rerun_failed_jobs) is 403 for
   the integration tokens; a new push is the only retrigger. A
   docs-only commit like this one is the cheapest legitimate retry.
-- Do not add a blind harness retry: with no named mechanism, a retry
-  would only launder the wedge. Fix the wedge when a log names it
-  (netLog and the full-record printing exist for exactly that).
+- Pinning a dist whose browser job failed is acceptable ONLY with
+  the diagnosis above on record (see the pin 135 precedent); the app
+  job (which builds the bundle) is green in every affected run.
+- Do not add a blind harness retry beyond the existing one-shot wedge
+  restart: the retest already fires and fails; the fix belongs in
+  the transport seam (see #514).
