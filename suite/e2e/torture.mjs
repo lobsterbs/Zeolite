@@ -639,9 +639,9 @@ async function main() {
       assert(!proxied[id].src.includes(ORIGIN_A), "img#" + id + " resolved browser-direct to the fixture: " + proxied[id].src);
     }
     assert(proxied.ss && proxied.ss.set, "served page lost the srcset attribute: " + JSON.stringify(proxied.ss));
-    assert(!proxied.ss.set.includes(ORIGIN_A), "served srcset kept a plaintext fixture URL: " + proxied.ss.set);
+    assert(!proxied.ss.set.includes(ORIGIN_A), "served srcset kept a plaintext fixture URL: " + JSON.stringify(proxied.ss));
     assert(proxied.ss.status === 200 && proxied.ss.bytes > 0, "the served srcset candidate does not load through the engine: " + JSON.stringify(proxied.ss));
-    assert(!proxied.ss.url.includes(ORIGIN_A), "srcset candidate resolved browser-direct: " + proxied.ss.url);
+    assert(!proxied.ss.url.includes(ORIGIN_A), "srcset candidate resolved browser-direct: " + JSON.stringify(proxied.ss));
     for (const sel of ["inl", "ext", "imp"]) {
       assert(proxied[sel].includes("url("), "computed background for " + sel + " lost its url(): " + proxied[sel]);
       assert(!proxied[sel].includes(ORIGIN_A), "computed background for " + sel + " kept the plaintext fixture URL: " + proxied[sel]);
