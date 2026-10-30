@@ -4,13 +4,19 @@ Zeolite versions are `MAJOR.MINOR "Substance"`, for example **1.0 Nitride**
 or **1.3 Carbide**.
 
 - The numeric part follows semver: MAJOR breaks compatibility, MINOR adds
-  capability. In Cargo the version is `MAJOR.MINOR.0` (the patch digit is
-  not part of the public identity).
+  capability. In Cargo the version is `MAJOR.MINOR.PATCH` (the patch digit is
+  part of the artifact identity, not the substance name; the pin-bump
+  release policy in docs/roadmap.md increments it, forward-looking
+  from pin 139; earlier releases carry `MAJOR.MINOR.0`).
 - The substance is the name of a real chemical substance. Every MINOR
   release gets a new substance, and substances are never reused.
 - The 1.x line uses the -ide family in roadmap order (Nitride, Oxide,
   Halide, Carbide, Boride, Silicide, Hydride, Sulfide, Telluride,
-  Fullerene); later majors pick new families (2.x opens with Graphene).
+  Fullerene); later majors pick new families (2.x opens with Graphene). The 4.x line takes
+  the zeolite-mineral family per the owner decision of 2026-10-30
+  (Analcime, Chabazite, Clinoptilolite, Erionite, Faujasite,
+  Mordenite, Heulandite in roadmap order; 3.1 is Natrolite; minors
+  draw further names from the same family, for example Ferrierite).
 - The substance is part of the public version, not decoration: it is
   printed by the server at startup, exposed as `zeolite_rewriter::VERSION`,
   exported by the service worker as `ZEOLITE_VERSION`, and returned in the
@@ -71,5 +77,13 @@ other probed site loads.
 Phase 17 (3.1 line follow-through: the srcdoc child-document escape
 #58 and navguard robustness #59) ships on the 3.0 Diamond string,
 following the 2.1 precedent: gates land with the current string in
-place and the string moves at the next cut, 3.1 Onyx. No public
+place and the string moves at the next cut, 3.1 Natrolite (renamed
+from Onyx: Onyx is a variety of chalcedony, not a chemical substance;
+owner decision 2026-10-30). No public
 surface changed; the 3.x API freeze holds.
+
+Pin-bump patch policy (owner decision 2026-10-30): every LobsterBrowse
+dist pin bump increments the patch digit of the current version,
+forward-looking from pin 139; a pin bump that completes a scheduled
+roadmap phase moves the substance instead. The full policy with worked
+examples lives in docs/roadmap.md.
