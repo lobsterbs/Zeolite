@@ -56,3 +56,25 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - Do not add a blind harness retry beyond the existing one-shot wedge
   restart: the retest already fires and fails; the fix belongs in
   the transport seam (see #514).
+
+## Fifth occurrence: the 307-settle variant (2026-10-30, run 41134928744)
+
+- Run 41134928744 (head 4fd5870b, the #557/#548/#555 storage wave plus
+  the #543 fragment wave): the per-code outcomes added in 648e6e5 name
+  the failing code for the first time. The proxied 307 redirect fetch
+  never settles ("Timeout 8000ms exceeded (fetch never settled)");
+  301/302/303 settled before it and 308 was never reached.
+- The in-harness wedge restart fired and the retest failed the same
+  way; the engine log tail shows an upstream relay stream that opened
+  and never closed. No cascade this time: every later probe, including
+  the redirect-chain probe, passed, and browser is the run's only red
+  job (rust/wasm/app/compat green; the app job published the dist
+  bundle normally).
+- The storage/fragment waves are exonerated the same way #511 was:
+  run 41132923104 (head 9da7e236, the Vary metadata, page-cache bound
+  and databases() view code in) is browser-green on this exact probe,
+  and run 41038517509 (head 7cbac22f, docs-only) is red on the same
+  probe with none of this code in. The 307 body-replay-per-hop seam is
+  untouched by both waves.
+- This docs-only commit is the recorded bounded retrigger; if the
+  browser job greens, the wedge stands as the sole cause of the red.
