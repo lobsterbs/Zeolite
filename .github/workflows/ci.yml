@@ -30,7 +30,7 @@ jobs:
         env:
           CARGO_TERM_COLOR: never
         run: |
-          cargo clippy --workspace --all-targets -- -D warnings > clippy.out 2>&1 || true
+          cargo clippy --workspace --all-targets --locked -- -D warnings > clippy.out 2>&1 || true
           tail -c 16000 clippy.out || true
           # Cargo own "spurious network error" retry warnings (a crates.io
           # flake) start with "warning:" and are not lints: filter them or
@@ -42,7 +42,7 @@ jobs:
         env:
           CARGO_TERM_COLOR: never
         run: |
-          cargo test --workspace > test.out 2>&1 || true
+          cargo test --workspace --locked > test.out 2>&1 || true
           tail -c 16000 test.out || true
           grep -m1 -B6 -A14 -E "^error|FAILED|panicked at" test.out > testslice.out || true
           if [ -s testslice.out ]; then
@@ -50,7 +50,7 @@ jobs:
             echo "::error::TEST%0A$D"
             exit 1
           fi
-      - run: cargo check -p zeolite-rewriter -p zeolite-wisp --target wasm32-unknown-unknown
+      - run: cargo check -p zeolite-rewriter -p zeolite-wisp --target wasm32-unknown-unknown --locked
 
   wasm:
     runs-on: ubuntu-latest
@@ -365,7 +365,7 @@ jobs:
         # the wasm artifacts that only the wasm job's artifact carries,
         # not a bare checkout - the first ever compat run died there).
         run: |
-          cargo build -p zeolite-server --release
+          cargo build -p zeolite-server --release --locked
           # ZL_TEST_ALLOW_PRIVATE_DESTS=1 + ZL_TEST_EGRESS=1: the
           # two-key test-only policy escape hatch (#213) so the engine
           # may reach the local fixture origin. One stray variable
@@ -471,7 +471,7 @@ jobs:
           npm install
           npm run build
       - name: Build zeolite-server
-        run: cargo build -p zeolite-server --release
+        run: cargo build -p zeolite-server --release --locked
       - name: Install Playwright Chromium
         run: |
           cd suite/e2e
