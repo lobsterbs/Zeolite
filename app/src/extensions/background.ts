@@ -47,21 +47,134 @@ const SW_IDLE_MS = 30_000;
    engine origin, the exact origin the extension's own pages report
    for sender-origin comparisons. Exported for the sandbox regression
    test; the boot is the only caller. */
+export function buildBackgroundDocument(
+  loadScript?: (src: string) => Promise<void>,
+): Record<string, unknown> {
+  /* #560 residual: Tampermonkey 5.5.0 (the Firefox MV2 build) is a
+     background PAGE: its scripts read document.createElement (a
+     registry module loader that appends script tags and waits for
+     onload/onerror), document.head, document.body,
+     document.documentElement and document.createTextNode (asap
+     setImmediate feature-detects) at boot, so the documentless
+     sandbox failed with "ReferenceError: document is not defined".
+     Inert elements answer the surface; appendChild of a script
+     element carrying a src hands it to loadScript (fetch the
+     package resource, evaluate it under the same Function-scope
+     contract, then fire the element's onload/onerror). Stub
+     elements deliberately lack onreadystatechange: claiming it
+     would steer the asap setImmediate polyfill into a DOM branch
+     whose events never fire here, hanging every queued task; the
+     MessageChannel branch it keeps instead is the worker-correct
+     one. */
+  const maybeLoad = (el: Record<string, unknown>): void => {
+    if (el.tagName !== "SCRIPT" || el.loaded === true) return;
+    const src = String(el["attr:src"] ?? el.src ?? "");
+    if (!src || !loadScript) return;
+    el.loaded = true;
+    void loadScript(src).then(
+      () => {
+        if (typeof el.onload === "function") (el.onload as () => void)();
+      },
+      () => {
+        if (typeof el.onerror === "function") (el.onerror as () => void)();
+      },
+    );
+  };
+  const makeNode = (tag: string): Record<string, unknown> => {
+    const el: Record<string, unknown> = {
+      tagName: tag.toUpperCase(),
+      style: {},
+      onload: null,
+      onerror: null,
+      parentNode: null,
+      children: [] as unknown[],
+      setAttribute(k: unknown, v: unknown) {
+        el["attr:" + String(k)] = String(v);
+      },
+      getAttribute(k: unknown) {
+        const v = el["attr:" + String(k)];
+        return v === undefined ? null : v;
+      },
+      removeAttribute(k: unknown) {
+        delete el["attr:" + String(k)];
+      },
+      appendChild(c: unknown) {
+        (el.children as unknown[]).push(c);
+        if (c !== null && typeof c === "object") {
+          const node = c as Record<string, unknown>;
+          node.parentNode = el;
+          maybeLoad(node);
+        }
+        return c;
+      },
+      removeChild(c: unknown) {
+        const kids = el.children as unknown[];
+        const i = kids.indexOf(c);
+        if (i >= 0) kids.splice(i, 1);
+        if (c !== null && typeof c === "object") {
+          (c as Record<string, unknown>).parentNode = null;
+        }
+        return c;
+      },
+    };
+    return el;
+  };
+  const head = makeNode("head");
+  return {
+    readyState: "complete",
+    currentScript: null,
+    head,
+    body: makeNode("body"),
+    documentElement: makeNode("html"),
+    createElement: (tag: unknown) => makeNode(String(tag)),
+    createTextNode: (text: unknown) => ({ data: String(text), parentNode: null }),
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  };
+}
+
 export function buildBackgroundSelf(
   apiObj: Record<string, unknown>,
+  opts?: { document?: Record<string, unknown> },
 ): object {
+  /* #560 extension: a background page's window IS its global: the
+     sandbox answers window/self/top/parent reads with itself,
+     a document stub when the caller provides one (script/page
+     backgrounds only; Chrome MV3 service-worker backgrounds stay
+     documentless, Chrome parity), and page writes land in a bag
+     the reads see first. Realm identities and location never take
+     a page write: a real page cannot rebind them either, and a bag
+     shadow would break the platform fall-through that fixed the
+     original boot crash. */
   const workerGlobal = globalThis as Record<string, unknown>;
-  return new Proxy(
+  const bag: Record<string, unknown> = {};
+  const self: object = new Proxy(
     {},
     {
       get: (_t, prop) => {
-        if (prop === "addEventListener") return () => undefined;
         const name = String(prop);
+        if (name === "addEventListener") return () => undefined;
+        if (name === "window" || name === "self" || name === "top" || name === "parent") {
+          return self;
+        }
+        if (name === "document") return opts?.document;
+        if (Object.prototype.hasOwnProperty.call(bag, name)) return bag[name];
         const v = apiObj[name];
         return v === undefined ? workerGlobal[name] : v;
       },
+      set: (_t, prop, value) => {
+        const name = String(prop);
+        if (
+          name !== "location" && name !== "document" && name !== "window" &&
+          name !== "self" && name !== "top" && name !== "parent"
+        ) {
+          bag[name] = value;
+        }
+        return true;
+      },
     },
   ) as unknown as object;
+  return self;
 }
 
 /** True for MV3 service-worker backgrounds: no scripts, no page, a
@@ -224,11 +337,67 @@ export async function bootExtension(
     /* Function-scope execution: the scripts see only the API objects.
        self is a proxy over the API surface, NOT the real SW global. */
     const apiObj = ctx.api.browser as Record<string, unknown>;
-    const sandboxSelf = buildBackgroundSelf(apiObj);
+    /* #560 residual: Firefox-style script and page backgrounds run
+       in a DOM page in Firefox; they receive a document stub and a
+       window alias as explicit Function-scope params, so bare reads
+       in the scripts and in every later callback they define resolve
+       against the stub, never against the engine global. The
+       stub's script-tag loader fetches package resources and
+       evaluates them under the same scope contract. Chrome MV3
+       service-worker backgrounds stay documentless (Chrome parity);
+       their document/window params are undefined. */
+    const isSwBg = backgroundIsServiceWorker(rec);
+    const pageDir =
+      bg?.page && bg.page.includes("/")
+        ? bg.page.slice(0, bg.page.lastIndexOf("/") + 1)
+        : "";
+    const docStub = isSwBg
+      ? undefined
+      : buildBackgroundDocument(
+          async (src: string): Promise<void> => {
+            let path = src.split("?")[0].split("#")[0];
+            const scheme = path.indexOf("://");
+            if (scheme >= 0) {
+              const rest = path.slice(scheme + 3);
+              const slash = rest.indexOf("/");
+              path = slash >= 0 ? rest.slice(slash) : "/" + rest;
+            }
+            if (!path.startsWith("/")) path = pageDir + path;
+            const bytes = await extensions.getResource(live.id, path, {
+              fromWeb: false,
+            });
+            if (!bytes) {
+              throw new Error("background script missing from package: " + src);
+            }
+            const evalFn = new Function(
+              "browser",
+              "chrome",
+              "self",
+              "document",
+              "window",
+              '"use strict";\n' +
+                new TextDecoder().decode(bytes),
+            );
+            evalFn(
+              ctx.api.browser,
+              ctx.api.chrome,
+              sandboxSelf,
+              docStub,
+              sandboxSelf,
+            );
+          },
+        );
+    const sandboxSelf = isSwBg
+      ? buildBackgroundSelf(apiObj)
+      : buildBackgroundSelf(apiObj, {
+          document: docStub as Record<string, unknown>,
+        });
     const fn = new Function(
       "browser",
       "chrome",
       "self",
+      "document",
+      "window",
       '"use strict";\n' + code.join("\n;\n"),
     );
     /* #139: polyfill-shaped extensions detect globalThis.browser /
@@ -247,7 +416,7 @@ export async function bootExtension(
     g.browser = ctx.api.browser;
     g.chrome = ctx.api.chrome;
     try {
-      fn(ctx.api.browser, ctx.api.chrome, sandboxSelf);
+      fn(ctx.api.browser, ctx.api.chrome, sandboxSelf, docStub, sandboxSelf);
     } finally {
       if (prevBrowser === undefined) delete g.browser;
       else g.browser = prevBrowser;

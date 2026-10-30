@@ -275,6 +275,23 @@ describe("route-shaped inputs decode, never stack (prel-of-prel mint)", () => {
     expect(state.href).toBe(href);
   });
 });
+describe("carried tokens strip on re-anchor, never stack (#558 residual)", () => {
+  it("replaceState re-emitting the committed URL keeps one token", () => {
+    const { w, state } = makeWin(ENGINE + "/%2Fp?q=1&zlNavh=TOKEN123");
+    applyVloc(w);
+    const h = w.history as { replaceState(s: unknown, t: string, u?: string | null): void };
+    h.replaceState({}, "", "/%2Fp?q=1&zlNavh=TOKEN123&new=2");
+    expect(state.href).toBe(ENGINE + "/%2Fp?q=1&new=2&zlNavh=TOKEN123");
+  });
+
+  it("an already-stacked double carry collapses back to one token", () => {
+    const { w, state } = makeWin(ENGINE + "/%2Fp?q=1&zlNavh=TOKEN123");
+    applyVloc(w);
+    const h = w.history as { pushState(s: unknown, t: string, u?: string | null): void };
+    h.pushState({}, "", "/%2Fp?q=1&zlNavh=TOKEN123&x=2&zlNavh=TOKEN123");
+    expect(state.href).toBe(ENGINE + "/%2Fp?q=1&x=2&zlNavh=TOKEN123");
+  });
+});
 
 describe("backslash-form absolute URLs are cross-origin (#373)", () => {
   it("never resolves a \\\\host form to a same-site virtual path", () => {

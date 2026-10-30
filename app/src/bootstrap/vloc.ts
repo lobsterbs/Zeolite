@@ -286,7 +286,16 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
        on the committed URL. */
     const qCut = base.indexOf("?");
     const path = qCut >= 0 ? base.slice(0, qCut) : base;
-    const query = qCut >= 0 ? base.slice(qCut) : "";
+    /* #558 residual: the page realm cannot hide the committed token
+       (a native read leaks it, the #418 LegacyUnforgeable class), so
+       a page re-emitting its own URL in pushState/replaceState or a
+       location write carried live tokens back; the append below then
+       stacked one identical token per re-anchor. Strip every carried
+       token from the query and append the live one exactly once. */
+    let query = qCut >= 0 ? base.slice(qCut) : "";
+    for (let strip = navqStrip(query); strip !== null; strip = navqStrip(query)) {
+      query = strip[1];
+    }
     return escapeLeading(path) + query + (query ? "&" : "?") + NAVQ + "=" + navq[0] + hash;
   };
 
