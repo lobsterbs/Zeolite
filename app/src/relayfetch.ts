@@ -216,6 +216,48 @@ export function relayHeaderDeadlineMs(init: { headers: Headers; body?: BodyInit 
   return body != null && (size > 512 * 1024 || /^multipart\/form-data\b/i.test(init.headers.get("content-type") ?? ""))
     ? RELAY_UPLOAD_HEADER_DEADLINE_MS : RELAY_HEADER_DEADLINE_MS;
 }
+
+export const RELAY_STALE_PROBE_MS = 6_000;
+const STALE_LOOKUP_BOUND_MS = 1_500;
+/** #558/#561: a registered port can outlive its embedder. A top-level
+    escape (the accounts.google.com ServiceLogin frame-bust class)
+    destroys the register page, so postMessage on the entangled port
+    keeps succeeding silently and the fetch parks for the full header
+    deadline with no host page left to ever answer. Past the stale
+    probe bound with no first frame, look for any live host client:
+    none means channel death (#382 breach class), so the port is
+    dropped and the caller takes the honest fallback path. A live
+    host client keeps the full header deadline (slow hosts still
+    answer). */
+/** True when any window client is an engine host page. A wedged or
+    missing clients API answers true, fail-safe: the probe then never
+    drops a channel it cannot inspect. */
+async function anyHostClientAlive(): Promise<boolean> {
+  const scope: {
+    clients?: { matchAll(o: { type: string }): Promise<Array<{ url?: string }>> };
+  } = typeof self !== "undefined" ? (self as unknown as typeof scope) : (globalThis as unknown as typeof scope);
+  return await new Promise<boolean>((resolve) => {
+    const t = setTimeout(() => resolve(true), STALE_LOOKUP_BOUND_MS);
+    void (async () => {
+      try {
+        const api = scope.clients;
+        if (!api || typeof api.matchAll !== "function") { clearTimeout(t); resolve(true); return; }
+        const cs = (await api.matchAll({ type: "window" })) ?? [];
+        for (const c of cs) {
+          try {
+            if (isHostClient(c as unknown as WinClient)) { clearTimeout(t); resolve(true); return; }
+          } catch { /* unparseable client URL: not a host */ }
+        }
+        clearTimeout(t);
+        resolve(false);
+      } catch {
+        clearTimeout(t);
+        resolve(true);
+      }
+    })();
+  });
+}
+
 /** Dispatch happened, so a POST/PATCH may already have succeeded.
     This terminal error prevents a second transport from duplicating it.
     #501: a relay error carrying pre-dispatch evidence bypasses this class
@@ -368,14 +410,36 @@ async function relayFetchRaw(
       });
     }, relayHeaderDeadlineMs(init));
   });
+  /* #558/#561: stale-channel probe. */
+  let staleTimer: ReturnType<typeof setTimeout> | undefined;
+  const staleProbe = new Promise<null>((resolve) => {
+    staleTimer = setTimeout(async () => {
+      if (hostPort !== null && hostPort !== port) return; /* newer registration owns the channel */
+      if (await anyHostClientAlive()) return;
+      if (hostPort !== port) return; /* re-registered while looking */
+      DIAG.emit({
+        requestId: traceId,
+        traceId,
+        category: "TRANSPORT",
+        cause: "proxy",
+        severity: "warning",
+        stage: "UPSTREAM_REQUEST",
+        message: "relay channel stale: no host client alive; port dropped, fetch falls back",
+        url: dest,
+      });
+      hostPort = null;
+      resolve(null);
+    }, RELAY_STALE_PROBE_MS);
+  });
   let first: RelayMsg | null;
   try {
-    first = await Promise.race([take(), headerDeadline]);
+    first = await Promise.race([take(), headerDeadline, staleProbe]);
   } catch (err) {
     cleanup();
     throw err;
   } finally {
     clearTimeout(deadline);
+    clearTimeout(staleTimer);
   }
   if (!first) {
     cleanup();
