@@ -61,6 +61,38 @@ describe("applyStorage scoped shims (#262 #263 #264)", () => {
     expect(s.absent).toBe(undefined);
   });
 
+  it("exposes databases() filtered to the site prefix with stripped names (#555)", async () => {
+    const w: Record<string, unknown> = {};
+    w.localStorage = fakeStorage();
+    w.sessionStorage = fakeStorage();
+    w.indexedDB = {
+      open: () => ({}),
+      deleteDatabase: () => undefined,
+      databases: async () => [
+        { name: "p1mine", version: 2 },
+        { name: "p2other", version: 1 },
+        { name: "engine-own", version: 7 },
+        {},
+      ],
+    };
+    applyStorage(w, "p1");
+    const I = w.indexedDB as unknown as {
+      databases?: () => Promise<Array<{ name?: string; version?: number }>>;
+    };
+    expect(I.databases).toBeTypeOf("function");
+    expect(await I.databases!()).toEqual([{ name: "mine", version: 2 }]);
+  });
+
+  it("keeps databases() absent when the host factory lacks it (#555)", () => {
+    const w: Record<string, unknown> = {};
+    w.localStorage = fakeStorage();
+    w.sessionStorage = fakeStorage();
+    w.indexedDB = { open: () => ({}), deleteDatabase: () => undefined };
+    applyStorage(w, "p1");
+    const I = w.indexedDB as unknown as { databases?: unknown };
+    expect(I.databases).toBeUndefined();
+  });
+
   it("prefixes db and cache names but not cmp keys (#263)", () => {
     const w: Record<string, unknown> = {};
     const opened: string[] = [];

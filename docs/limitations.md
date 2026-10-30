@@ -93,13 +93,20 @@ route would leak the proxy origin). A TRANSPORT warning DIAG event
 records the omission; referrer-dependent CSRF and analytics may
 misbehave on such requests.
 
-## Page cache eviction is best effort
+## Page cache eviction fails closed
 
-The per-worker page cache is capped (ZL_PAGE_LIMIT entries). If a
-cache eviction delete fails (storage pressure), the cache may exceed
-the cap until entries are dropped; a once-per-worker DIAG warning
-records the condition. Cache stores that fail (storage full) skip
-caching for that response, also with a once-per-worker warning.
+The per-worker page cache is capped (ZL_PAGE_LIMIT entries) as a hard
+bound (#548): room is made before a new entry is admitted, so a
+failed eviction delete (storage pressure) refuses that store instead
+of admitting an entry that could never be trimmed, and one failure
+disables storing for the rest of the worker lifetime - the entry
+count stays at the stuck value and the next worker start retries with
+a clean slate. A once-per-worker DIAG warning records the condition.
+Cache stores that fail (storage full) skip caching for that response,
+also with a once-per-worker warning. Vary responses are cached with
+their variant metadata (the field list plus the selecting request's
+header values) and only serve requests with matching values (#557);
+Vary: * stays uncacheable.
 
 ## TLS and HTTP/2 fingerprints are client-stack
 

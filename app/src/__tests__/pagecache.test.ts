@@ -352,14 +352,20 @@ describe("page cache scope, final URL and size cap (#179, #184, #195)", () => {
     };
   });
 
-  it("never stores private or Vary: Cookie responses (#179)", () => {
+  it("private and Vary: * stay uncacheable; supported Vary is storable (#179, #557)", () => {
     expect(cacheStorable(new Headers({ "cache-control": "private" }))).toBe(false);
     expect(cacheStorable(new Headers({ "cache-control": "max-age=60, private" }))).toBe(false);
-    expect(cacheStorable(new Headers({ vary: "Cookie" }))).toBe(false);
-    expect(cacheStorable(new Headers({ vary: "Accept-Encoding" }))).toBe(false);
-    expect(cacheStorable(new Headers({ vary: "User-Agent" }))).toBe(false);
-    expect(cacheStorable(new Headers({ vary: "Accept-Language, Origin" }))).toBe(false);
+    /* #557: variant metadata rides the entry (x-zl-vary plus the
+       selecting request's values, compared on lookup), so supported
+       Vary is storable; only "*" is unrepresentable. Credential
+       isolation is unchanged (#179): credentialed requests bypass the
+       cache in both directions. */
+    expect(cacheStorable(new Headers({ vary: "Cookie" }))).toBe(true);
+    expect(cacheStorable(new Headers({ vary: "Accept-Encoding" }))).toBe(true);
+    expect(cacheStorable(new Headers({ vary: "User-Agent" }))).toBe(true);
+    expect(cacheStorable(new Headers({ vary: "Accept-Language, Origin" }))).toBe(true);
     expect(cacheStorable(new Headers({ vary: "*" }))).toBe(false);
+    expect(cacheStorable(new Headers({ vary: "Accept-Language, *" }))).toBe(false);
     expect(cacheStorable(new Headers({ vary: "" }))).toBe(true);
   });
 

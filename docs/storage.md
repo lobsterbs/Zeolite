@@ -24,9 +24,11 @@ baseURI, which keeps storage scoped and every shim native.
   wrapped to open `zl:<site>:name` instead. `IDBFactory.cmp` is wrapped
   the same way (both arguments prefixed, so ordering stays consistent
   inside the site scope; absent when the host factory lacks it, never
-  faked). `databases()` is deliberately absent on the shim (an honest
-  unimplemented API beats wrapping it and risking a leak of
-  engine-own database names). The shim is installed with
+  faked). `databases()` is exposed only where the host factory provides
+  it (#555): the native list is filtered to this site's prefix and the
+  prefix is stripped from the returned names, so engine-own and
+  other-site databases never appear; where the host lacks the API it
+  stays honestly absent (never faked). The shim is installed with
   `Object.defineProperty`, not assignment: the Window property is
   accessor-only and the bootstrap is a classic sloppy-mode bundle, so
   the old plain assignment failed silently and left the raw unscoped

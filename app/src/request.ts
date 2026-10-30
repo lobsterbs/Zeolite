@@ -231,6 +231,10 @@ function discardLegacyPageCache(): Promise<void> {
 const ZL_CACHED_AT = "x-zl-cached-at";
 /* #184: the final URL after redirect hops rides stored entries. */
 const ZL_FINAL_URL = "x-zl-final-url";
+/* #557: the stored Vary field list plus the request header values the
+   entry was selected with; a lookup with different values is a miss. */
+const ZL_VARY = "x-zl-vary";
+const ZL_VARY_VALUES = "x-zl-vary-values";
 /* #338: internal bookkeeping headers never reach the page. They stay
    on the stored entry (TTL checks and final-URL recovery read them)
    and are stripped from every served copy. */
@@ -238,6 +242,8 @@ function stripInternalHeaders(h: Headers): Headers {
   const out = new Headers(h);
   out.delete(ZL_CACHED_AT);
   out.delete(ZL_FINAL_URL);
+  out.delete(ZL_VARY);
+  out.delete(ZL_VARY_VALUES);
   return out;
 }
 const ZL_DEFAULT_TTL = 10 * 60 * 1000;
@@ -263,19 +269,58 @@ export function cacheTtl(headers: Headers): number {
 /** #115: only no-store is uncacheable. A no-cache response is stored
     (zero TTL) and revalidated before every use; an entry without
     validators revalidates as an unconditional probe. */
+/** #557: normalized (lowercase, trimmed) Vary field names; an empty
+    Vary header yields []. */
+export function varyFields(headers: Headers): string[] {
+  return (headers.get("vary") ?? "")
+    .split(",")
+    .map((f) => f.trim().toLowerCase())
+    .filter((f) => f !== "");
+}
+
+/** #557: snapshot the varying request header values onto the stored
+    entry. A header absent from the selecting request stores as null so
+    absent-vs-present stays a value change (RFC 9111: a header absent
+    from the stored request only matches a request where it is also
+    absent). */
+export function storeVaryMeta(h: Headers, fields: string[], reqHeaders: Headers): void {
+  if (!fields.length) return;
+  h.set(ZL_VARY, fields.join(","));
+  h.set(ZL_VARY_VALUES, JSON.stringify(fields.map((f) => reqHeaders.get(f))));
+}
+
+/** #557: true when the request carries the same values the entry was
+    selected with. Missing or unparseable metadata fails closed to a
+    miss, never a broader hit. */
+export function varyMatches(hit: Headers, reqHeaders: Headers): boolean {
+  const raw = hit.get(ZL_VARY);
+  if (!raw) return true;
+  const fields = raw.split(",").map((f) => f.trim().toLowerCase()).filter(Boolean);
+  let values: unknown;
+  try {
+    values = JSON.parse(hit.get(ZL_VARY_VALUES) ?? "");
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(values) || values.length !== fields.length) return false;
+  return fields.every((f, i) => reqHeaders.get(f) === values[i]);
+}
+
 export function cacheStorable(headers: Headers): boolean {
   const cc = (headers.get("cache-control") ?? "").toLowerCase();
   /* #179: private responses never enter the shared page cache (it
-     spans jar profiles and sessions), and neither do responses that
-     vary on Cookie. */
+     spans jar profiles and sessions). */
   if (/\bno-store\b/.test(cc)) return false;
   if (/\bprivate\b/.test(cc)) return false;
-  /* #346: the lookup keys on the URL alone, so any response that varies
-     on a request header (Cookie, User-Agent, Accept-Language, Origin, ...)
-     would be served to requests that differ in that header. Until the
-     entry stores its Vary list and compares it on lookup, a varying
-     response is not stored. */
-  if ((headers.get("vary") ?? "").trim() !== "") return false;
+  /* #557: Vary is honored through stored variant metadata (the field
+     list plus the selecting request's values ride the entry and are
+     compared on lookup), so supported variants are cacheable; only
+     "*" (varying on fields the entry cannot represent) stays
+     uncacheable. Credential isolation is unchanged (#179):
+     credentialed requests bypass the cache in both directions, so a
+     Cookie-varying entry only ever serves requests that also carry
+     no credentials. */
+  if (varyFields(headers).includes("*")) return false;
   return true;
 }
 
@@ -302,6 +347,10 @@ export async function pageCacheMatch(
     return null;
   }
   if (!hit) return null;
+  /* #557: a Vary entry serves only the request header values it was
+     stored with; anything else is an honest miss that bypasses to the
+     live path. */
+  if (!varyMatches(hit.headers, req.headers)) return null;
   const at = Number(hit.headers.get(ZL_CACHED_AT) ?? 0);
   const ttl = cacheTtl(hit.headers);
   /* #115: a stored no-store view can only be a legacy entry; it stays
@@ -466,6 +515,10 @@ export async function rangeFromEntry(hit: Response, rangeHeader: string): Promis
    most once per worker restart or they would spam the diag ring. */
 let pageCacheTrimWarned = false;
 let pageCacheStoreWarned = false;
+/* #548: set when eviction fails: storing is refused until the worker
+   restarts, so a storage refusal cannot grow the cache past the page
+   limit (module state doubles as the restart recovery point). */
+let pageCacheDisabled = false;
 
 /** #179: the page cache is shared across jar profiles and sessions, so
     a request carrying credentials (an Authorization header or a jar
@@ -526,6 +579,9 @@ export async function pageCacheStore(
   finalUrl?: string,
   clientId?: string,
 ): Promise<Response | null> {
+  /* #548: once eviction has failed, new entries are refused: the
+     entry bound stays hard instead of growing past the stuck count. */
+  if (pageCacheDisabled) return null;
   /* #115: no-cache entries are stored too - cacheTtl gives them a zero
      TTL, so every use revalidates - and only no-store is never stored. */
   if (!cacheStorable(resp.headers) || resp.status !== 200) return null;
@@ -563,6 +619,39 @@ export async function pageCacheStore(
     const cu = new URL(req.url);
     const croute = decodePath(cu.pathname);
     mapRefreshHeader(storedHeaders, croute ? mergeRouteSearch(croute, cu.search) : cu.href);
+    /* #557: the Vary list and the selecting request's values ride the
+       entry; the lookup compares them (varyMatches). */
+    storeVaryMeta(storedHeaders, varyFields(resp.headers), req.headers);
+    /* #548: make room BEFORE admitting the new entry so the page limit
+       is a hard bound: a failed eviction refuses this store (the page
+       still gets its response) instead of admitting an entry that can
+       never be trimmed. Each pass deletes the oldest entry and
+       re-lists the keys (the old snapshot loop walked past failures
+       and kept admitting entries). One failed eviction disables
+       storing for the rest of this worker lifetime; the next worker
+       start retries with a clean slate. */
+    for (;;) {
+      const keys = await cache.keys();
+      if (keys.length < ZL_PAGE_LIMIT) break;
+      let gone = false;
+      try {
+        gone = await cache.delete(keys[0]);
+      } catch {
+        gone = false;
+      }
+      if (!gone) {
+        pageCacheDisabled = true;
+        if (!pageCacheTrimWarned) {
+          pageCacheTrimWarned = true;
+          DIAG.emit({
+            category: "STORAGE",
+            severity: "warning",
+            message: "page cache eviction failed; storing disabled until the worker restarts so the page limit stays a hard bound",
+          });
+        }
+        return null;
+      }
+    }
     const stored = new Response(resp.body, { status: 200, headers: storedHeaders });
     stored.headers.set(ZL_CACHED_AT, String(Date.now()));
     /* #184: the final URL after redirect hops rides the entry so a
@@ -570,23 +659,6 @@ export async function pageCacheStore(
        served from. */
     if (finalUrl) stored.headers.set(ZL_FINAL_URL, finalUrl);
     await cache.put(req, keepView ? stored.clone() : stored);
-    let keys = await cache.keys();
-    while (keys.length > ZL_PAGE_LIMIT) {
-      const gone = await cache.delete(keys[0]);
-      /* Scout report: a failed eviction used to pass silently and the
-         cache rode over the limit until entries expired. Once per
-         worker lifetime is enough - it is a storage condition, not a
-         per-request defect. */
-      if (!gone && !pageCacheTrimWarned) {
-        pageCacheTrimWarned = true;
-        DIAG.emit({
-          category: "STORAGE",
-          severity: "warning",
-          message: "page cache eviction failed; cache may exceed the page limit until entries expire",
-        });
-      }
-      keys = keys.slice(1);
-    }
     return stored;
   } catch {
     if (!pageCacheStoreWarned) {
