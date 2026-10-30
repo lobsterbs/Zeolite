@@ -1981,6 +1981,81 @@ document.write('<script src=x></script>');
     }
 
     #[test]
+    fn torture_doc_chunk_invariance() {
+        // #512: one CI browser run saw the served srcset candidate
+        // URL-resolve browser-direct while the served attribute
+        // carried no plaintext fixture URL. The rewriter is the only
+        // srcset author, so pin the deterministic contract here: the
+        // SAME document must produce byte-identical output no matter
+        // where the upstream stream splits it. Mirrors the e2e
+        // torture fixture constructs (CRLF-in-tag, unquoted and
+        // padded attributes, unicode src, srcset, iframe, relative
+        // anchor, JS literals).
+        let doc = concat!(
+            "<!doctype html><html><head><title>zl torture</title>\n",
+            "<link rel=\"stylesheet\" href=\"torture.css\">\n",
+            "<style>.tl-inl{background:url(\"img.png\")}</style>\n",
+            "</head><body>\n",
+            "<p id=\"zl-marker\">zl-torture-page</p>\n",
+            "<img id=\"crlf\"\r\n src=\"img.png\" alt=\"c\">\n",
+            "<img id=\"unq\" src=img.png alt=\"u\">\n",
+            "<img id=\"spaced\"    src   =   \"img.png\" alt=\"s\">\n",
+            "<img id=\"uni\" src=\"unicode/å.png\" alt=\"n\">\n",
+            "<img id=\"ss\" srcset=\"img.png 1x, img.png 2x\" alt=\"x\">\n",
+            "<iframe id=\"fru\" src=\"inner.html\"></iframe>\n",
+            "<a id=\"relimg\" href=\"./img.png\">m</a>\n",
+            "<script>\n",
+            "var im2 = new Image(); im2.id = \"tlit\"; im2.src = \"/dir/img.png\"; document.body.appendChild(im2);\n",
+            "</script>\n",
+            "</body></html>"
+        );
+        let base = "http://127.0.0.1:7101/dir/torture.html";
+        let run = |chunks: &[&str]| -> String {
+            let mut r = Rewriter::new(cfg());
+            r.set_base(base);
+            let mut out = String::new();
+            for c in chunks {
+                out.push_str(&r.process(c));
+            }
+            out.push_str(&r.finish());
+            out
+        };
+        let reference = run(&[doc]);
+        let chars: Vec<char> = doc.chars().collect();
+        for k in 1..chars.len() {
+            let a: String = chars[..k].iter().collect();
+            let b: String = chars[k..].iter().collect();
+            let out = run(&[&a, &b]);
+            if out != reference {
+                let pos = out
+                    .bytes()
+                    .zip(reference.bytes())
+                    .position(|(x, y)| x != y)
+                    .unwrap_or(out.len());
+                let w = |s: &str| {
+                    String::from_utf8_lossy(&s.as_bytes()[pos.saturating_sub(30)..(pos + 30).min(s.len())])
+                        .into_owned()
+                };
+                panic!(
+                    "#512: split at char {} diverges at byte {}: got {:?} want {:?}",
+                    k,
+                    pos,
+                    w(&out),
+                    w(&reference)
+                );
+            }
+        }
+        // The finest legal stream: one char per chunk.
+        let singles: Vec<String> = chars.iter().map(|c| c.to_string()).collect();
+        let refs: Vec<&str> = singles.iter().map(|s| s.as_str()).collect();
+        let out = run(&refs);
+        assert_eq!(
+            out, reference,
+            "#512: single-char streaming diverges from the whole-document pass"
+        );
+    }
+
+    #[test]
     fn partial_tag_retained() {
         let mut r = Rewriter::new(cfg());
         r.set_base("https://example.com/");
