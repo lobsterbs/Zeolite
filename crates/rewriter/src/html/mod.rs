@@ -2000,7 +2000,7 @@ document.write('<script src=x></script>');
             "<img id=\"crlf\"\r\n src=\"img.png\" alt=\"c\">\n",
             "<img id=\"unq\" src=img.png alt=\"u\">\n",
             "<img id=\"spaced\"    src   =   \"img.png\" alt=\"s\">\n",
-            "<img id=\"uni\" src=\"unicode/å.png\" alt=\"n\">\n",
+            "<img id=\"uni\" src=\"unicode/\u{e5}.png\" alt=\"n\">\n",
             "<img id=\"ss\" srcset=\"img.png 1x, img.png 2x\" alt=\"x\">\n",
             "<iframe id=\"fru\" src=\"inner.html\"></iframe>\n",
             "<a id=\"relimg\" href=\"./img.png\">m</a>\n",
@@ -2033,8 +2033,10 @@ document.write('<script src=x></script>');
                     .position(|(x, y)| x != y)
                     .unwrap_or(out.len());
                 let w = |s: &str| {
-                    String::from_utf8_lossy(&s.as_bytes()[pos.saturating_sub(30)..(pos + 30).min(s.len())])
-                        .into_owned()
+                    String::from_utf8_lossy(
+                        &s.as_bytes()[pos.saturating_sub(30)..(pos + 30).min(s.len())],
+                    )
+                    .into_owned()
                 };
                 panic!(
                     "#512: split at char {} diverges at byte {}: got {:?} want {:?}",
