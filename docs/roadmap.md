@@ -269,7 +269,7 @@ Closes the 1.6/1.8 limits.
   the cut and stays.
 - Shipped on the 3.0 Diamond version string per the 2.1 precedent
   (gates land with the current string in place); the string moves
-  at the next cut, 3.1 Onyx. The 3.x API freeze holds: no public
+  at the next cut, 3.1 Natrolite. The 3.x API freeze holds: no public
   surface changed in this phase.
 
 ## Unscheduled follow-up: parser-based JS rewriting, location virtualization
@@ -303,44 +303,74 @@ Remaining work, unscheduled:
   plaintext-destination init leak, the exact class the CI pageload
   tests forbid.
 
-## Majors 4.0 to 10.0: proposed program (not yet approved)
+## Majors 3.1 to 10.0: the mineral program (approved 2026-10-30)
 
-Status: proposal. Names, order and themes below are a draft for the
-maintainer to accept or change. Nothing here is scheduled until an
-owner signs off. Each entry is a MAJOR (breaks compatibility), so each
-one picks a new substance family per docs/versioning.md. The family
-chosen here is the alkane series, because every name is a real chemical
-substance, none is used by 1.x to 3.x, and it has exactly seven members.
+Status: approved by the owner on 2026-10-30. This replaces the alkane
+proposal (Methane to Heptane) drafted here before; the themes carry
+over unchanged, the names move to the zeolite-mineral family. Names,
+order and themes below are the plan of record; scheduling still
+follows the cross-cutting gates, and no entry starts while a known
+page-load regression is open.
+
+Each entry is a MAJOR (breaks compatibility), so each one takes a name
+from the zeolite-mineral family per docs/versioning.md. The family
+fits the project: every member is a real chemical substance (a
+framework tectosilicate mineral), none is used by 1.x to 3.x, and the
+family has enough members for the minors inside each major.
 
 | Version | Substance | Theme (open items it would carry) |
 |---|---|---|
-| 4.0 | Methane | JS and location correctness: parser-based JS rewriting (import(), import.meta, new URL, location reads, document.baseURI, fetch/XHR URL arguments); location/document.URL virtualization decision; WebSocket URL forms (#325, #279); Google basejs chunk URLs (#296, open); Google /sorry external script (#290, open); location-form gaps (#331) |
-| 5.0 | Ethane | Transport honesty: abort the upstream transfer when a body is canceled (#348); bounded backpressure instead of whole-response buffering (#347); bounded upstream work after a Wisp TTFB timeout (#255); retries only where they are safe for streamed or side-effecting requests (#251); cookie write-behind that survives service-worker termination (#254) |
-| 6.0 | Propane | Isolation: scope cookie-jar profile state to the requesting host client (#267); scope SharedWorker identity to each virtual site (#260); design phase 2 of virtual service-worker compatibility (#257); a service-worker-safe loader for the plugin API (#256) |
-| 7.0 | Butane | Extensions and cache: WebExtension match-pattern path semantics (#280); file URL match patterns and <all_urls> (#277); derive extension identity from the package (#287); cache Vary beyond Cookie so User-Agent and Accept-Language variants never cross (#346) |
-| 8.0 | Pentane | Unscoped. Reserved for whatever the 4.0 to 7.0 gates reveal. |
-| 9.0 | Hexane | Unscoped. |
-| 10.0 | Heptane | Unscoped. Reserved as the last name in the family; a 10.0 plan needs its own review. |
+| 3.1 | Natrolite | The 3.x line follow-through cut: the string move for the Phase 17 gates (srcdoc child-document escapes, navguard robustness) that shipped on the 3.0 Diamond string. No public surface changes. |
+| 4.0 | Analcime | JS and location correctness: parser-based JS rewriting (import(), import.meta, new URL, location reads, document.baseURI, fetch/XHR URL arguments); location/document.URL virtualization decision; WebSocket URL forms (#325, #279); Google basejs chunk URLs (#296, open); Google /sorry external script (#290, open); location-form gaps (#331) |
+| 5.0 | Chabazite | Transport honesty: abort the upstream transfer when a body is canceled (#348); bounded backpressure instead of whole-response buffering (#347); bounded upstream work after a Wisp TTFB timeout (#255); retries only where they are safe for streamed or side-effecting requests (#251); cookie write-behind that survives service-worker termination (#254) |
+| 6.0 | Clinoptilolite | Isolation: scope cookie-jar profile state to the requesting host client (#267); scope SharedWorker identity to each virtual site (#260); design phase 2 of virtual service-worker compatibility (#257); a service-worker-safe loader for the plugin API (#256) |
+| 7.0 | Erionite | Extensions and cache: WebExtension match-pattern path semantics (#280); file URL match patterns and <all_urls> (#277); derive extension identity from the package (#287); cache Vary beyond Cookie so User-Agent and Accept-Language variants never cross (#346); the first-party engine module/plugin surface formalized from docs/plugins.md (origin-local signed ES modules, typed permissions, stream hooks) so engine-level extensions exist beyond WebExtension compatibility |
+| 8.0 | Faujasite | Unscoped. Reserved for whatever the 4.0 to 7.0 gates reveal. |
+| 9.0 | Mordenite | Unscoped. |
+| 10.0 | Heulandite | Unscoped. Reserved as the last planned name in the family; a 10.0 plan needs its own review. |
 
 Rules that apply to every entry above:
 
-- The 3.x and older deliverables stay where they are. Nothing in this table
-  renames shipped work.
+- The 3.x and older deliverables stay where they are. Nothing in this
+  table renames shipped work.
 - A major is cut only when its own gates are green and no page-load
   regression is open (cross-cutting gates below).
-- Minor releases inside a major take further names from the same family
-  (for example 4.1 takes the next unused alkane after the family is
-  agreed), following the never-reuse rule in docs/versioning.md.
+- Minor releases inside a major take further names from the same
+  family (for example 4.1 Ferrierite), following the never-reuse rule
+  in docs/versioning.md.
+- The 3.1 cut is Onyx renamed Natrolite: Onyx is a variety of
+  chalcedony, not a chemical substance, which the versioning rules
+  require. No other name changes.
+- Stale issue references in the Unscheduled follow-up section above
+  (#146, #144) are re-pointed when the 4.0 plan is scheduled; the
+  open items themselves stay as written.
 
-Open questions for the owner before this table is accepted:
+## Pin-bump release policy (approved 2026-10-30)
 
-1. Approve the alkane family, or pick another family for the 4.x line.
-2. The 3.1 release is planned as Onyx. Onyx is a variety of chalcedony
-   (a mineral), not a chemical substance, which docs/versioning.md
-   requires. Rename it before the cut, or record a deliberate exception.
-3. Several issue numbers in the Unscheduled follow-up section are stale.
-   #146 and #144 now point at unrelated closed issues (see the
-   Unscheduled section). Re-point them before the 4.0 plan is scheduled.
+LobsterBrowse pins the engine dist at a commit and redeploys; each pin
+bump is a release of the engine, so it gets a number. The owner
+delegated the judgment call and it is recorded here:
+
+- Every LobsterBrowse dist pin bump increments the patch digit of the
+  current version: 3.0.0 -> 3.0.1 -> 3.0.2 and so on. The patch digit
+  is part of the artifact identity (cargo version, the /build report,
+  the zl:ping handshake), not of the substance name; the release is
+  still "3.0 Diamond" at a patch level.
+- A pin bump that lands the gates of a scheduled roadmap phase moves
+  the substance instead (the minor cut), following the existing
+  precedent that gates land on the current string and the string
+  moves at the cut. The 3.1 Natrolite cut happens at the pin bump
+  that first ships the Phase 17 follow-through string move.
+- The policy is forward-looking from pin 139: pins up to and including
+  138 shipped without patch digits, and nothing is renumbered
+  retroactively.
+- Worked examples of the judgment: a republish with byte-identical
+  artifacts (a docs-only pin) does not bump; a fix pin that changes
+  engine bytes bumps the patch digit (a pin 119-class fix would have
+  been 3.0.1, and each later fix pin the next digit); a feature pin
+  that adds a capability (a pin 126-class wave, or the pin 138
+  WebSocket-over-relay bridge) bumps the patch digit, and when the
+  wave completes a scheduled phase that cut carries the substance.
 
 ## Cross-cutting gates (every phase)
 
