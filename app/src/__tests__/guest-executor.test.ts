@@ -219,9 +219,14 @@ describe("guest kernel", () => {
 });
 
 describe("guest harness prelude", () => {
-  it("shadows network and storage globals and carries no kernel handles", () => {
+  it("shadows raw network and storage globals and carries no kernel handles", () => {
     const h = guestHarness("https://a.example/", "https://a.example/sw.js");
-    expect(h).toContain('"fetch","XMLHttpRequest","WebSocket","importScripts","caches","indexedDB"');
+    /* #538: fetch and caches are no longer shadowed; they are bridged
+       through the engine port so the engine pipeline owns every byte.
+       XHR, WebSocket, importScripts and indexedDB stay unavailable. */
+    expect(h).toContain('"XMLHttpRequest","WebSocket","importScripts","indexedDB"');
+    expect(h).toContain("guestNetFetch");
+    expect(h).toContain("guestCaches");
     expect(h).toContain("harnessPort");
     expect(h).toContain("guestReady");
     expect(h).toContain('"scope":"https://a.example/"');
@@ -234,6 +239,32 @@ describe("guest harness prelude", () => {
   it("ends with a newline so the guest body starts on its own line", () => {
     const h = guestHarness("https://a.example/", "https://a.example/sw.js");
     expect(h.endsWith("})();\n")).toBe(true);
+  });
+
+  it("installs facades over getter-only accessors like a real Worker realm", () => {
+    /* Real-Chromium oracle (2026-10-30 probe): WorkerGlobalScope.caches
+       is a getter-only accessor, so plain self.caches = ... throws in
+       strict mode, the harness aborts, and the install event then dies
+       on an undefined registration facade. Every override must install
+       through Object.defineProperty and never throw. */
+    const h = guestHarness("https://a.example/", "https://a.example/sw.js");
+    const proto: Record<string, unknown> = {
+      addEventListener(t: string, f: unknown) {
+        const s = this as { __l?: Record<string, unknown[]> };
+        (s.__l ??= {})[t] = [f];
+      },
+    };
+    Object.defineProperty(proto, "caches", { get() { return { native: true }; } });
+    const fakeSelf = Object.create(proto) as Record<string, unknown>;
+    const run = new Function("self", h) as (s: unknown) => void;
+    expect(() => run(fakeSelf)).not.toThrow();
+    const caches = fakeSelf.caches as Record<string, unknown>;
+    expect(typeof caches.open).toBe("function");
+    expect(caches.native).toBeUndefined();
+    expect(typeof fakeSelf.fetch).toBe("function");
+    const reg = fakeSelf.registration as { scope?: string };
+    expect(reg.scope).toBe("https://a.example/");
+    expect(typeof fakeSelf.skipWaiting).toBe("function");
   });
 });
 

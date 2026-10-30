@@ -3,6 +3,24 @@
 Honest gaps, written down rather than papered over (README norm). Each
 entry states what does not work, why, and where the real fix would land.
 
+## Guest service workers are cache-hit-speed, session-scoped guests
+
+A proxied site's service worker script now executes (#538), but in a
+guest realm (a page-created DedicatedWorker behind a harness prelude),
+not as a real service worker, and the emulation keeps honest bounds:
+the engine consults a running guest for at most 250 ms per request, so
+only cache-hit-speed answers are served (a guest answer that needs a
+network fetch falls back to the engine path); guest caches are
+kernel-side and session-scoped, so nothing survives an engine
+restart; clients.matchAll() resolves [] (no client enumeration) and
+guest postMessage reaches the kernel listener only; no controller,
+controllerchange, push, BackgroundSync or messaging surface into
+virtual pages exists; XHR, WebSocket, importScripts and indexedDB stay
+shadowed inside the guest. The real fix for the dispatch budget is a
+longer consultation window with cancellation, and for persistence a
+site-scoped store behind the same quotas; both stay unstarted. Full
+detail: docs/virtual-service-worker-phase2.md, #538 wave section.
+
 ## Content Security Policy is stripped for proxied pages
 
 Both the `Content-Security-Policy` and
