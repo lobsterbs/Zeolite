@@ -1,6 +1,6 @@
 # CI browser torture wedge (nondeterministic)
 
-The browser job's torture suite has failed three times on main with a
+The browser job's torture suite has failed four times on main with a
 wedge signature that is NOT a rewriter defect. This note records the
 evidence so the next red run can be triaged without re-deriving it.
 
@@ -13,6 +13,11 @@ evidence so the next red run can be triaged without re-deriving it.
   rewriting, isolation); the failures cluster in time, not by
   feature.
 - The run partially recovers: later tests pass quickly again.
+- Run 41035486199 (head 039c93ac) surfaced the evaluate-timeout
+  variant: a single probe died with "torture probe: page evaluate
+  timed out" AFTER the harness's one-shot wedge restart had already
+  fired and failed again; the goto-timeout variant did not appear at
+  all in that run. Same wedge, different probe seam.
 - Run 41018448365 additionally surfaced
   SyntaxError: "zeolite: u..." is not valid JSON: an engine error
   string reached code that expected a JSON envelope. That is a
@@ -31,8 +36,16 @@ evidence so the next red run can be triaged without re-deriving it.
   WebSocket-over-relay app changes, which the app job typechecks,
   builds and unit-tests green; the wedge fires mid-run on pages the
   ws code never touches.
-- Same runtime bytes red once and green once: the wedge is
-  nondeterministic.
+- Run 41035486199 (head 039c93ac, docs-only on top of 9fc67892;
+  runtime bytes identical to the green 87cb2c68 build): red, exactly
+  1 failure, the evaluate-timeout variant above. The failed probe
+  is "redirect semantics: 301/302/303 rewrite POST to GET, 307/308
+  preserve method and body" (transport); the neighboring redirect
+  probes passed in the same run: engine-side 302 routing, the 5- and
+  15-hop redirect chains, and the NativeTransit redirect marks. The
+  redirect logic demonstrably worked around the wedged probe.
+- Same runtime bytes red once and green once, twice over: the wedge
+  is nondeterministic.
 
 ## What has already been ruled out
 
