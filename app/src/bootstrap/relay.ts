@@ -226,7 +226,23 @@ addEventListener("message", windowRelay);
  if (NS && site) {
   const LS = w.localStorage as unknown as Storage;
   const K = "swreg";
-  swShimApply(NS as object, { get: () => LS.getItem(K), set: (v: string) => LS.setItem(K, v), clear: () => LS.removeItem(K) }, pageUrl);
+  /* #538: the guest registration basis must be the page's VIRTUAL
+     URL - the kernel canonicalizes script and scope against the
+     decoded page origin, so the raw engine route can never yield a
+     spawnable identity. The virtual-origin marker lands
+     asynchronously, after this bootstrap pass, so the shim gets a
+     lazy base: the marker plus the injected vpath once both are
+     known, else the captured raw URL (the old wave-3 shape, which
+     the kernel safely refuses). */
+  swShimApply(
+    NS as object,
+    { get: () => LS.getItem(K), set: (v: string) => LS.setItem(K, v), clear: () => LS.removeItem(K) },
+    () => {
+      const vo = w.__zlVO;
+      const vp = (w.__ZL as { vpath?: unknown } | undefined)?.vpath;
+      return typeof vo === "string" && vo && typeof vp === "string" && vp[0] === "/" ? vo + vp : pageUrl;
+    },
+  );
  }
 }
 

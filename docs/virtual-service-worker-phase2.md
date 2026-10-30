@@ -269,3 +269,84 @@ Honest deviations of wave 1, all deliberate:
 - The guest-host page (guest-host.html) is served by the engine and hosts isolated guest realms; the live request path consults running guests first under the wave-2 fail-closed budget (see the wave 3 status section above).
 - Tests: app/src/__tests__/worker.test.ts pins the register/unregister forwarding seam; the navhandle gate tests pin the /guest-host.html host path.
 - CI note: run 40684200188 on 968462b failed only the browser torture job after a runner-side upstream failure (the first failing probe parsed the honest "zeolite: upstream fetch failed" error body, then every subsequent probe timed out on page.goto; the e2e.mjs suite and the rust, wasm, app and compat jobs all passed on the same commit). This documentation commit retriggers CI to confirm.
+
+## #538 wave: guest lifecycle acceptance in real Chromium
+
+Issue #538. Two engine defects blocked the full loop; both are fixed
+and the suite/e2e/guest-sw.mjs acceptance (real Chromium, loopback
+fixtures only, ports 6009/7109 deliberately beside e2e.mjs) now
+passes 6/6: proxied page + guest host up, register spawns the realm
+and warms a cache, repeat fetches produce zero further upstream
+hits, clients.matchAll()/claim() resolve and activate waitUntil is
+observable, registration.update() swaps the realm on changed bytes
+with the cache preserved, and unregister() returns the engine path.
+
+### Defect 1: the register page-URL basis was the opaque route
+
+swshim captured the raw engine route as the page URL basis for
+register(), so navigator.serviceWorker.register("sw.js") resolved
+against the engine-origin route base and the scope came out as the
+engine origin path; the kernel could never canonicalize a virtual
+identity and the guest never spawned. Fix: swShimApply accepts a
+page base as string or lazy getter (type SwShimPageBase), resolved
+at each register/getRegistration(s)/ready call; bootstrap/relay.ts
+passes a lazy virtual base (virtual origin marker plus injected
+vpath when both are known, else the captured raw URL), and an
+empty resolution fails closed (register rejects TypeError, the
+getters resolve undefined). Unit suite:
+app/src/__tests__/swshim-base.test.ts.
+
+### Defect 2: the harness died on getter-only WorkerGlobalScope accessors
+
+The guest harness prelude assigned its facades with plain
+strict-mode assignment. In a real DedicatedWorker,
+WorkerGlobalScope.caches is a getter-only accessor, so
+self.caches = ... threw, the harness IIFE aborted, and the install
+event then died on an undefined registration facade (both errors
+observed in the DIAG stream of a real-Chromium probe, 2026-10-30).
+Fix: every override installs through Object.defineProperty (a def()
+helper with an assignment fallback), so no override can abort the
+harness. Regression test: guest-executor.test.ts, "installs facades
+over getter-only accessors like a real Worker realm".
+
+### Shipped #538 capability (beyond wave 3)
+
+- Guest fetch(): bridges through the kernel to guestWireFetch over
+  upstreamFetch, so SSRF, policy, transport decision, diagnostics
+  and the cookie jar all apply; hard outer budget
+  GUEST_NETFETCH_BUDGET_MS (30 s), string bodies only, body cap
+  2 MiB, cookie and host headers dropped (the engine jar owns
+  cookies), methods limited to the fetch-safe list.
+- waitUntil: tracked under GUEST_WAITUNTIL_MS (5 s); the engine
+  never blocks a response on it, and overrun abandons the tracker
+  with a warning, like a browser giving up on a stalled lifetime
+  promise.
+- caches: a real per-(virtual site, scope) CacheStorage facade over
+  kernel-side, quota-bounded storage (8 caches, 64 entries, 16 MiB
+  per origin); teardown on terminate; entries key on the canonical
+  URL with the fragment dropped; Set-Cookie/Set-Cookie2 never
+  stored.
+- registration.update(): refetches the script through the same
+  bridge; identical bytes answer no-change, changed bytes resolve
+  the caller and replace the realm (terminate + spawn over the
+  same record) with the site caches preserved.
+- clients: claim() resolves, matchAll() resolves [] (no client
+  enumeration), get() resolves undefined, openWindow() rejects.
+
+### Honest limits of this wave (unchanged unless listed)
+
+- Guest caches are kernel-side and session-scoped: nothing survives
+  an engine restart.
+- Cache API Vary handling is not modeled; entries key on the exact
+  canonical URL.
+- The 250 ms guest fetch dispatch budget stands: a cache-hit answer
+  is fast enough, but an uncached guest answer that needs a network
+  fetch exceeds it and the engine path serves the request.
+- clients.matchAll() is [] and guest postMessage reaches the
+  kernel listener only; no delivery surface into virtual pages.
+- XMLHTTPRequest, WebSocket, importScripts and indexedDB stay
+  shadowed; controllerchange and push are never dispatched.
+- A page fetch before the realm serves is plain engine traffic
+  (exactly like a real browser during install); the acceptance
+  suite resets the upstream counter after the spawn window for
+  this reason.

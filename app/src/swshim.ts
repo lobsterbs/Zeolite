@@ -164,7 +164,30 @@ export function swShimGet(
     resolves with the virtual registration when one exists (undefined
     otherwise: it never hangs). controller and events stay untouched:
     they belong to the engine's real worker. */
-export function swShimApply(container: object, store: SwShimStore, pageUrl: string): void {
+/** #538: the page-URL basis for the shim. Wave 3 captured the raw
+    engine route at bootstrap, so a page's register("sw.js") resolved
+    against the opaque route base and the kernel could never
+    canonicalize the result - the guest never spawned. The basis is
+    now supplied lazily: relay.ts resolves the page's virtual origin
+    (__zlVO, installed by the virtual-origin marker) plus the injected
+    vpath at call time and falls back to the captured raw URL while
+    either is still unknown (the wave-3 shape, which the kernel
+    safely refuses). An empty resolution fails closed: register
+    rejects with a native-style TypeError and the getters resolve
+    undefined instead of trusting a foreign record. */
+export type SwShimPageBase = string | (() => string);
+
+function shimPageBase(pageUrl: SwShimPageBase): string {
+  let v = "";
+  try {
+    v = typeof pageUrl === "function" ? pageUrl() : pageUrl;
+  } catch {
+    v = "";
+  }
+  return typeof v === "string" && v ? v : "";
+}
+
+export function swShimApply(container: object, store: SwShimStore, pageUrl: SwShimPageBase): void {
   const c = container as Record<string, unknown>;
   try {
     const ctl = c.controller;
@@ -177,7 +200,7 @@ export function swShimApply(container: object, store: SwShimStore, pageUrl: stri
   c.register = ((u: string | URL, o?: { scope?: string }) => {
     /* #474: a native-style rejected promise, not a sync throw. */
     try {
-      const reg = swShimRegister(store, pageUrl, u, o);
+      const reg = swShimRegister(store, shimPageBase(pageUrl), u, o);
       const w = reg.active ?? reg.installing;
       if (w) guestForward({ type: "zl:guestRegister", scriptURL: w.scriptURL, scope: reg.scope });
       return Promise.resolve(reg);
@@ -185,16 +208,22 @@ export function swShimApply(container: object, store: SwShimStore, pageUrl: stri
       return Promise.reject(e);
     }
   }) as unknown;
-  c.getRegistration = ((s?: string) =>
-    Promise.resolve(swShimGet(store, pageUrl, s))) as unknown;
+  c.getRegistration = ((s?: string) => {
+    const b = shimPageBase(pageUrl);
+    return Promise.resolve(b ? swShimGet(store, b, s) : undefined);
+  }) as unknown;
   c.getRegistrations = (() => {
-    const r = swShimGet(store, pageUrl);
+    const b = shimPageBase(pageUrl);
+    const r = b ? swShimGet(store, b) : undefined;
     return Promise.resolve(r ? [r] : []);
   }) as unknown;
   try {
     Object.defineProperty(c, "ready", {
       configurable: true,
-      get: () => Promise.resolve(swShimGet(store, pageUrl)),
+      get: () => {
+        const b = shimPageBase(pageUrl);
+        return Promise.resolve(b ? swShimGet(store, b) : undefined);
+      },
     });
   } catch {
     /* ready stays native: some engines make it read-only */

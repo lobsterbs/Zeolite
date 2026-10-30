@@ -48,7 +48,7 @@ import { adoptResponse } from "./downloads";
 import { flatRed, netLogAnnotateRewrite, netLogPush, type NetDetail } from "./netlog";
 import { traceDecision } from "./tracing";
 import { siteToken } from "./pageload";
-import { guestDispatchFetchForUrl } from "./kernel/guests/executor";
+import { GUEST_FETCH_BODY_MAX, guestDispatchFetchForUrl, guestWireFetch } from "./kernel/guests/executor";
 
 import { altConfigured, altEndpoint, altRegister, altWispFetch, canReplayAfterFailure, wispTransport } from "./transport";
 import { normalizeWispUrl, primaryWispOverrideValue, setPrimaryWispOverride } from "./config";
@@ -936,7 +936,82 @@ export function ghosteryListFetch(dest: string, init?: RequestInit): Promise<Res
   );
 }
 
-/** #179: the page cache spans jar profiles and sessions; clearing the
+/** #538: the guest network bridge. A guest realm's fetch() travels its
+    port to the guest kernel, which validates it fail-closed and hands
+    it here. The request rides upstreamFetch, so SSRF, policy rules,
+    the transport decision (relay/wisp/native, never a raw lambda) and
+    diagnostics all apply exactly as for engine subresources. Cookies:
+    the guest realm is not a controlled client, so the default-profile
+    jar applies (clientless), guest-supplied Cookie and Host headers
+    were already dropped kernel-side like forbidden header names, and
+    response cookies store into the jar here, never onto the engine
+    origin. The bridge never touches handleFetch, so a guest answer
+    can never originate a guest dispatch: recursion stays impossible
+    by construction. */
+guestWireFetch(async (r) => {
+  const traceId = DIAG.trace();
+  const headers = new Headers(r.headers);
+  const jarCookie = cookieHeaderFor(r.url);
+  if (jarCookie && !headers.has("cookie")) headers.set("cookie", jarCookie);
+  const policy = await loadPolicy();
+  const resp = await upstreamFetch(
+    r.url,
+    { method: r.method, headers, body: r.body ?? undefined },
+    policy,
+    "fetch",
+    traceId,
+  );
+  /* Response cookies belong to the jar, exactly as any engine fetch. */
+  const jh = jarHeaders(resp);
+  const gsc = (jh as Headers & { getSetCookie?: () => string[] }).getSetCookie;
+  const setCookies = typeof gsc === "function" ? gsc.call(jh) : [];
+  for (const c of setCookies) applySetCookie(r.url, new Headers([["set-cookie", c]]));
+  const outHeaders: Record<string, string> = {};
+  resp.headers.forEach((v, k) => {
+    if (k !== "set-cookie" && k !== "set-cookie2") outHeaders[k] = v;
+  });
+  const bodyless = r.method === "HEAD" || resp.status === 204 || resp.status === 205 || resp.status === 304;
+  const body = bodyless ? null : await guestBridgeBody(resp);
+  DIAG.emit({
+    traceId,
+    requestId: traceId,
+    category: "TRANSPORT",
+    cause: "proxy",
+    severity: "info",
+    stage: "UPSTREAM_REQUEST",
+    message: "guest fetch served through the engine pipeline (#538)",
+    url: r.url,
+  });
+  return { status: resp.status, statusText: resp.statusText, headers: outHeaders, body };
+});
+
+/** #538: bounded body read for the guest bridge. A response whose
+    content-length already exceeds the cap, or whose stream crosses it,
+    fails the guest fetch closed instead of buffering without end. */
+async function guestBridgeBody(resp: Response): Promise<string> {
+  const cl = resp.headers.get("content-length");
+  if (cl && Number(cl) > GUEST_FETCH_BODY_MAX) {
+    throw new Error("guest bridge response above the size cap");
+  }
+  if (!resp.body) return await resp.text();
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let out = "";
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    if (bytes > GUEST_FETCH_BODY_MAX) {
+      void reader.cancel().catch(() => {});
+      throw new Error("guest bridge response above the size cap");
+    }
+    out += dec.decode(value, { stream: true });
+  }
+  return out + dec.decode();
+}
+
+/** #179: the page cache spans jar profiles and sessions; clearing it
     jar or switching profile drops it so one account's cached pages
     never surface for another. */
 export async function pageCacheClear(): Promise<void> {
@@ -2724,10 +2799,12 @@ export function handleFetch(e: FetchEvent): void {
          served Response verbatim minus privileged cookie headers (an
          invalid status/body combination fails closed); every other
          outcome falls through to the ordinary engine path unchanged.
-         Recursion is provably impossible: guests are network-blind, so
-         a guest answer never originates an engine fetch event, and the
-         pending-id one-shot marker consumes exactly one response per
-         dispatch. An already-aborted request never reaches the guest. */
+         Recursion is provably impossible: guests reach the network only
+         through the #538 bridge over upstreamFetch, which never enters
+         handleFetch, so a guest answer never originates a guest
+         dispatch, and the pending-id one-shot marker consumes exactly
+         one response per dispatch. An already-aborted request never
+         reaches the guest. */
       if (!(e.request.signal && e.request.signal.aborted)) {
         try {
           const gHeaders: Record<string, string> = {};
