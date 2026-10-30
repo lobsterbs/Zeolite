@@ -476,15 +476,49 @@ async function main() {
   });
 
   await check("transport", "redirect semantics: 301/302/303 rewrite POST to GET, 307/308 preserve method and body", async () => {
+    /* #514 diagnostics: per-code try/catch plus a bounded race. An
+       engine-side failure used to surface here as a 200 carrying the
+       SW error text, and JSON.parse turned it into a SyntaxError that
+       ate the message; a hang ate the whole 45s evaluate window. Each
+       code now records its own outcome, so a red run names the failing
+       code and the full error text. The timeout wording keeps the
+       harness wedge-restart signature ("Timeout NNNNNms exceeded"). */
     const probe = `async () => {
       const out = {};
+      const withDeadline = (p, ms) => Promise.race([
+        p,
+        new Promise((res) => setTimeout(() => res({ __deadline: ms }), ms)),
+      ]);
       for (const code of [301, 302, 303, 307, 308]) {
-        const r = await fetch("/api/redir" + code, { method: "POST", headers: { "content-type": "text/zl-t" }, body: "zl-redir-body" });
-        out[code] = JSON.parse(await r.text());
+        try {
+          const r = await withDeadline(fetch("/api/redir" + code, { method: "POST", headers: { "content-type": "text/zl-t" }, body: "zl-redir-body" }), 8000);
+          if (r && r.__deadline) {
+            out[code] = { probeError: "Timeout " + r.__deadline + "ms exceeded (fetch never settled)" };
+            continue;
+          }
+          const text = await r.text();
+          try {
+            out[code] = JSON.parse(text);
+          } catch {
+            out[code] = { probeError: "non-JSON body: " + text.slice(0, 200) };
+          }
+        } catch (e) {
+          out[code] = { probeError: String((e && e.message) || e) };
+        }
       }
       return JSON.stringify(out);
     }`;
     const { direct, proxied } = await dualProbe(probe);
+    /* #514: surface the recorded per-code outcomes before any comparison,
+       with the full engine error text instead of a SyntaxError. */
+    for (const code of [301, 302, 303, 307, 308]) {
+      for (const side of ["direct", "proxied"]) {
+        const rec = (side === "direct" ? direct : proxied)[code];
+        if (rec && typeof rec === "object" && typeof rec.probeError === "string") {
+          throw new Error(side + " " + code + " redirect fetch: " + rec.probeError);
+        }
+      }
+    }
     /* Direct-model sanity: the browser must implement the spec table,
        or the comparison below compares against a broken oracle. */
     for (const code of [301, 302, 303]) {
