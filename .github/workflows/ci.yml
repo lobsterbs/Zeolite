@@ -250,10 +250,16 @@ jobs:
         # inline-script route harvest + the wrapped URL constructor
         # serving decoded data-island destinations; measured 40570,
         # baseline 39501.
+        # Raised 40704 -> 41216 for the storage + navigation
+        # wave: the site-scoped indexedDB.databases() shim (#555,
+        # engine-own and other-site names filtered out in-page) and
+        # the #543 fragment rides (vloc native-hash join, the
+        # navEncode/makeRel fragment splits); measured 41025,
+        # baseline 40570.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 40704 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 40704)"; exit 1; fi
+          if [ "$SIZE" -ge 41216 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 41216)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

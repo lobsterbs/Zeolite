@@ -16,7 +16,7 @@
 /// <reference lib="webworker" />
 import { b64uDecode, b64uEncode, buildNavHandleUrl, buildQueryHandleUrl, decodeClientUrl, decodeExpiredNavHandle, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodeNavHandleRoot, decodePath, decodeQueryHandle, encodeDest, encodeDestLegacy, encodeNavHandle, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, legacyRouteShaped, looksKeyedToken, NAVH, NAVH_TTL_MS, NAVQ_PARAM, passChallengeRedirFixed, queryHandlePathShaped, queryHandleToken, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix, restoreLeadingSlashes } from "./codec";
 
-import { decodeBody, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
+import { decodeBody, mapLocationHeader, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
 import { applyExperimentalCsp } from "./csp-translation";
 import { experimentalEnabled } from "./experimental-flags";
@@ -1481,7 +1481,10 @@ export function navhCleanFromPrel(pathname: string, dest: string): string | null
     u.pathname === "/"
       ? ""
       : u.pathname.replace(/^\/(\/+)/, (_s: string, run: string) => "/" + "%2F".repeat(run.length));
-  return NAVH + "/" + use + path + u.search;
+  /* #543: a destination that still carries a fragment keeps it on the
+     clean form; it rides the committed URL only, the same contract
+     as buildNavHandleUrl. */
+  return NAVH + "/" + use + path + u.search + u.hash;
 }
 function navOutcome(
   e: FetchEvent,
@@ -3648,14 +3651,11 @@ export function handleFetch(e: FetchEvent): void {
              host, and a fetch() consumer resolving the mapped value
              against the engine origin gets a working engine route. */
           if (outHeaders.has("location")) {
-            const loc = outHeaders.get("location");
-            if (loc) {
-              try {
-                outHeaders.set("location", encodeDest(new URL(loc, finalDest ?? target).href));
-              } catch {
-                /* unreachable/relative Location: leave as-is */
-              }
-            }
+            /* #543: the mapped route keeps the destination fragment raw
+               on the committed URL (native anchor scroll and
+               location.hash), and the encoded payload stays
+               fragment-free. Unresolvable values stay as-is. */
+            mapLocationHeader(outHeaders, finalDest ?? target);
           }
           /* #32 follow-up: Refresh is functional, not informational, so its
              url= is mapped to an engine route instead of stripped -

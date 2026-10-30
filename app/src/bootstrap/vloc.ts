@@ -214,6 +214,16 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
     typeof vpath === "string" && vpath.startsWith("/")
       ? vpath
       : fromNative(natUrl) ?? natUrl.pathname + natUrl.search + natUrl.hash;
+  /* #543: a committed engine route can carry the destination fragment
+     raw (NAVH and query handles, marker and mapped Location/Refresh
+     routes mint fragment-free payloads) and the worker never sees a
+     fragment, so a fragment-free injected vpath is not the whole
+     story: the native hash is the only fragment witness and joins
+     the view. A vpath carrying its own hash keeps it (the payload
+     shape; the native hash is absent for those). */
+  if (typeof vpath === "string" && vpath.startsWith("/") && !vpath.includes("#") && natUrl.hash) {
+    cur = cur.split("#")[0] + natUrl.hash;
+  }
 
   /* A navigation-bound input -> virtual path, or null (cross-origin
      or opaque: the caller passes through natively). Absolute

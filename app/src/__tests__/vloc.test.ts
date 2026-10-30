@@ -82,6 +82,21 @@ describe("applyVloc (#236)", () => {
     expect(l.origin).toBe(ENGINE);
   });
 
+  it("joins the committed fragment when the injected vpath is fragment-free (#543)", () => {
+    const { w } = makeWin(ENGINE + ENTRY + "#sec");
+    applyVloc(w, "/real/page");
+    const l = zl(w);
+    expect(l.pathname).toBe("/real/page");
+    expect(l.hash).toBe("#sec");
+    expect(l.href).toBe(ENGINE + "/real/page#sec");
+  });
+
+  it("keeps the vpath fragment when it carried the payload hash (pre-#543 shape)", () => {
+    const { w } = makeWin(ENGINE + ENTRY);
+    applyVloc(w, "/real/page#h");
+    expect(zl(w).hash).toBe("#h");
+  });
+
   it("parses the real path back off a NAVH handle URL", () => {
     const { w } = makeWin(ENGINE + "/__zl_navh__/TOKEN123/real/path?x=1");
     applyVloc(w);

@@ -106,6 +106,14 @@ describe("navEncode", () => {
     expect(m).not.toContain("real.site");
     expect(m).not.toContain("https");
   });
+
+  it("keeps the fragment raw off the marker payload (#543)", () => {
+    const m = navEncode("https://real.site/a?b=1#sec");
+    expect(m.startsWith(NAV + "/")).toBe(true);
+    expect(m.endsWith("#sec")).toBe(true);
+    const b64 = m.slice(NAV.length + 1, m.indexOf("#"));
+    expect(new TextDecoder().decode(b64uDecode(b64)!)).toBe("https://real.site/a?b=1");
+  });
 });
 
 describe("applyNavGuard", () => {
@@ -927,6 +935,13 @@ describe("navguard mint seams (#54 residual 3)", () => {
     const rel = makeRel("/j/abc", ENGINE);
     expect(rel(new URL("https://engine.host/sse/stream") as unknown as string)).toBe(
       "/j/abc" + NAVP + "/" + encodeURIComponent("/sse/stream"),
+    );
+  });
+
+  it("makeRel keeps the fragment raw off the prel tail (#543)", () => {
+    const rel = makeRel("/j/abc", ENGINE)!;
+    expect(rel("dir/page.html#sec")).toBe(
+      "/j/abc" + NAVP + "/" + encodeURIComponent("dir/page.html") + "#sec",
     );
   });
 

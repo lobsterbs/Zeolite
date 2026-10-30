@@ -564,6 +564,18 @@ export function decodeNavHandlePath(tail: string): string | null {
     from a handle-navigated page. Every client-URL-to-destination
     derivation goes through here. */
 export function decodeClientUrl(u: URL): string | null {
+  /* #543: every arm decodes pathname+search and never the hash, but a
+     committed route can carry the destination fragment raw (NAVH and
+     query handles, marker and mapped Location/Refresh routes mint
+     fragment-free payloads). The native fragment is the committed one
+     and wins over any payload hash (the pre-#543 shape); without one
+     the payload survives unchanged. */
+  const d = decodeClientUrlNoHash(u);
+  if (d === null) return null;
+  return u.hash ? d.split("#")[0] + u.hash : d;
+}
+
+function decodeClientUrlNoHash(u: URL): string | null {
   /* #428: navguard's key-free marker is a real engine route too.
      The request path already decodes it, but the shared page/anchor
      oracle did not, so popup handoff could not recover its target. */
@@ -631,7 +643,14 @@ export function buildNavHandleUrl(
           /^(\/)(\/+)/,
           (_s: string, one: string, rest: string) => one + "%2F".repeat(rest.length),
         );
-  return NAVH + "/" + token + path + u.search;
+  /* #543: the destination fragment rides the committed URL only
+     (the token payload stays origin-only and the browser strips
+     fragments before fetch interception), so an initial navigation
+     with a fragment keeps a real location.hash and native anchor
+     scroll in the NAVH path shape - the contract buildQueryHandleUrl
+     already had. The decode is untouched: it reads pathname and
+     search, never the fragment. */
+  return NAVH + "/" + token + path + u.search + u.hash;
 }
 
 /* ---- query-shape committed routes (Injector phase 2) -------------- */

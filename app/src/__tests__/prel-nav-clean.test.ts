@@ -148,6 +148,12 @@ describe("prel navigation redirect to the visible handle form", () => {
     expect(transportMock.calls).toBe(0);
   });
 
+  it("keeps a destination fragment on the clean form (#543)", () => {
+    const clean = navhCleanFromPrel("/__zl_navh__/tok/x/__zl_prel__/%2Fx", "https://example.com/x#sec");
+    expect(clean).not.toBeNull();
+    expect(clean!.endsWith("/x#sec")).toBe(true);
+  });
+
   it("escapes surplus leading slashes in the clean form and round-trips them (#202)", () => {
     const base = buildNavHandleUrl("https://www.google.com/dir/page")!;
     const parent = new URL(base, ORIGIN).pathname;
