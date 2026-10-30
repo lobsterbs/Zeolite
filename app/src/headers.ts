@@ -84,9 +84,36 @@ export function mapRefreshHeader(headers: Headers, dest: string): void {
     if (semi !== -1) v = v.slice(0, semi).trim();
   }
   try {
-    headers.set("refresh", refresh.slice(0, m.index) + "url=" + encodeDest(new URL(v, dest).href));
+    /* #543: the fragment never enters the encoded target - fragments
+       belong to the browser, never the network destination - it
+       rides the mapped route raw so the committed URL keeps a real
+       location.hash and native anchor scroll. */
+    const full = new URL(v, dest);
+    const hash = full.hash;
+    full.hash = "";
+    headers.set("refresh", refresh.slice(0, m.index) + "url=" + encodeDest(full.href) + hash);
   } catch {
     headers.delete("refresh");
+  }
+}
+
+/** #543: a surfaced Location (a 3xx the engine could not follow
+    itself) is mapped to an engine route so the follow stays inside
+    the engine, and the destination fragment rides the mapped route
+    raw instead of entering the token payload: fragments belong to
+    the browser, never the encoded network target. Unresolvable
+    Location values are left as-is (the previous fail-closed
+    contract, unchanged). */
+export function mapLocationHeader(headers: Headers, base: string): void {
+  const loc = headers.get("location");
+  if (!loc) return;
+  try {
+    const full = new URL(loc, base);
+    const hash = full.hash;
+    full.hash = "";
+    headers.set("location", encodeDest(full.href) + hash);
+  } catch {
+    /* unreachable/relative Location: leave as-is */
   }
 }
 

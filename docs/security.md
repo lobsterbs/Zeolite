@@ -250,14 +250,16 @@ Residuals, stated honestly:
   make keep the #34 about: limits, unquoted attribute values inside
   the markup keep their limit, and frames inside a shadow root
   escape the document observer.
-- Fragments after a mapped navigation are an engine-wide bound: the
-  page URL the browser commits is the engine route alone, so a
-  target's fragment (mapped Location, Refresh url=, marker routes)
-  never re-appears in the address bar and fragment-targeted scroll
-  does not happen. Fragment-only references inside a rendered page
-  (#top) stay client-side and keep working. Re-stamping the fragment
-  onto the served route from the decoded destination would be the
-  fix, if a real site ever needs it.
+- Fragments after a mapped navigation ride the committed URL raw
+  (#543): the NAVH handle, marker routes, prel re-anchors, surfaced
+  Location and Refresh url= all mint fragment-free encoded payloads
+  and re-attach the destination fragment onto the engine route, so
+  location.hash and fragment-targeted scroll match the direct
+  control. The fragment never enters the encoded network target
+  (fragments belong to the browser and are never sent upstream), and
+  the host stays opaque: only the fragment bytes, never the
+  destination host, become page-visible. Fragment-only references
+  inside a rendered page (#top) stay client-side and keep working.
 - Cross-origin subresource requests (fetch/XHR) from controlled pages
   are routed through the engine since #34 (see the browser-direct
   HTTP(S) escape section); what remains here is the navigation class

@@ -15,7 +15,7 @@ import {
   setRouteKeys,
   setScheme,
 } from "../codec";
-import { NAV } from "../bootstrap/navguard";
+import { NAV, navEncode } from "../bootstrap/navguard";
 import { challengeReanchorUrl, derefSelfRoute, navhTailDest, navpResolve } from "../request";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "../cpgate";
 
@@ -197,14 +197,32 @@ describe("navhTailDest (#143 follow-up: opaque-route relative recovery)", () => 
 });
 
 describe("handle URL shape (#144: opaque host, visible path)", () => {
-  it("mints NAVH/<token>/<real path> with the query on the route", () => {
+  it("mints NAVH/<token>/<real path> with the query and fragment on the route (#543)", () => {
     setRouteKey(KEY_A);
     const url = buildNavHandleUrl("https://secret.example/dir/page.html?q=1#frag")!;
     expect(url.startsWith(NAVH + "/")).toBe(true);
-    expect(url.endsWith("/dir/page.html?q=1")).toBe(true);
-    /* the host never appears; the path does (the #144 decision) */
+    expect(url.endsWith("/dir/page.html?q=1#frag")).toBe(true);
+    /* the host never appears; the path and the fragment do - the
+       #144 opacity decision keeps the host out, and #543 keeps the
+       fragment on the committed URL so location.hash and fragment
+       scroll match the direct control */
     expect(url).not.toContain("secret.example");
-    expect(url).not.toContain("#");
+    /* the SW decode reads pathname+search only: the fragment never
+       reaches the network target (fragments are never sent upstream) */
+    const tok = url.slice(NAVH.length + 1).split("/")[0];
+    expect(decodeNavHandlePath(tok + "/dir/page.html")).toBe("https://secret.example/dir/page.html");
+  });
+
+  it("decodeClientUrl joins the committed fragment (#543)", () => {
+    setRouteKey(KEY_A);
+    const url = buildNavHandleUrl("https://example.com/dir/page.html#sec")!;
+    const d = decodeClientUrl(new URL(url, "https://engine.example"));
+    expect(d).toBe("https://example.com/dir/page.html#sec");
+    /* a payload fragment without a native one survives unchanged
+       (the pre-#543 marker shape) */
+    const m = navEncode("https://example.com/p#old");
+    const dm = decodeClientUrl(new URL("https://engine.example" + m, "https://engine.example"));
+    expect(dm).toBe("https://example.com/p#old");
   });
 
   it("omits the suffix for a bare-origin destination", () => {

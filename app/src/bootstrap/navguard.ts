@@ -115,7 +115,13 @@ export function makeRel(
     const p = ownOriginPath(s, origin) ?? s;
     if (!routePath || !engPrefix || navExcluded(p, engPrefix) || tokenShaped(p))
       return null;
-    return routePath + NAVP + "/" + encodeURIComponent(p);
+    /* #543: a fragment in the input rides the committed URL raw and
+       stays out of the encoded prel tail (the SW decodes pathname
+       only; vloc joins the native hash). */
+    const cut = p.indexOf("#");
+    const body = cut < 0 ? p : p.slice(0, cut);
+    const tail = cut < 0 ? "" : p.slice(cut);
+    return routePath + NAVP + "/" + encodeURIComponent(body) + tail;
   };
 }
 
@@ -136,7 +142,14 @@ function navB64u(s: string): string {
 /** Absolute destination URL -> engine-local marker route. The SW
     decodes the marker with the shared codec alphabet (b64uDecode). */
 export function navEncode(u: string): string {
-  return NAV + "/" + navB64u(u);
+  /* #543: the fragment never enters the marker payload - it rides
+     the committed URL raw so the browser keeps a real location.hash
+     and native anchor scroll, and the SW decode (pathname only)
+     stays fragment-free. */
+  const cut = u.indexOf("#");
+  const body = cut < 0 ? u : u.slice(0, cut);
+  const tail = cut < 0 ? "" : u.slice(cut);
+  return NAV + "/" + navB64u(body) + tail;
 }
 
 type AnyRecord = Record<string, any>;

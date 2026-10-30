@@ -141,9 +141,11 @@ describe("query-route codec (Injector phase 2)", () => {
       expect(cleaned).toBe(du.search.replace(/^[?]/, ""));
       /* the hash rides the committed URL natively */
       expect(cu.hash).toBe(du.hash);
-      /* decode round-trip: destination byte-exact */
+      /* decode round-trip: the token payload is the byte-exact
+         network target (fragment-free); the page-visible read joins
+         the committed fragment (#543) */
       expect(decodeQueryHandle(cu)?.destination).toBe(expectedDest);
-      expect(decodeClientUrl(cu)).toBe(expectedDest);
+      expect(decodeClientUrl(cu)).toBe(expectedDest + du.hash);
     }
   });
 
@@ -350,7 +352,7 @@ describe("config-gated mint (zl:config / zl:navHandle)", () => {
     expect((re.replies[0] as { route: string }).route.startsWith("/j/")).toBe(true);
   });
 
-  it("keeps the fragment off the handle token and off the decoded target (zl:mint)", async () => {
+  it("keeps the fragment off the handle token and the network target; the read joins it (#543)", async () => {
     const cfg = mkReplies();
     await dispatchCore(
       { type: "zl:config", prefix: "/j/", queryRoutes: true } as unknown as ControlMessage,
@@ -364,7 +366,8 @@ describe("config-gated mint (zl:config / zl:navHandle)", () => {
     const route = (frag.replies[0] as { route: string }).route;
     expect(route.startsWith("/p?a=1&zlNavh=")).toBe(true);
     expect(route.endsWith("#f2")).toBe(true);
-    expect(decodeClientUrl(new URL(route, ORIGIN))).toBe("https://b.example/p?a=1");
+    expect(decodeClientUrl(new URL(route, ORIGIN))).toBe("https://b.example/p?a=1#f2");
+    expect(decodeQueryHandle(new URL(route, ORIGIN))?.destination).toBe("https://b.example/p?a=1");
   });
 
   it("falls back to the path-form route when the query mint refuses an engine path (zl:mint)", async () => {

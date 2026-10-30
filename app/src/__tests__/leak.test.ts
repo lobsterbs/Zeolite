@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { decodePath, encodeDest } from "../codec";
+import { decodeClientUrl, decodePath, encodeDest } from "../codec";
 import { navEncode } from "../bootstrap/navguard";
 import { initScript } from "../pageload";
 import { errorPage } from "../errorpage";
 import {
+  mapLocationHeader,
   mapRefreshHeader,
   stripHostile,
   charsetFromHeader,
@@ -144,6 +145,54 @@ describe("response-header surgery never carries the plaintext destination", () =
    copy is re-encoded UTF-8 with the header saying so. Legacy encodings
    must round-trip; the old always-UTF-8 decode turned them into
    replacement-character garbage. */
+describe("destination fragments ride committed routes raw (#543)", () => {
+  it("navEncode keeps the fragment off the marker payload", () => {
+    const m = navEncode("https://leaky.example.org/private/page#sec");
+    const cut = m.indexOf("#");
+    expect(cut).toBeGreaterThan(0);
+    expect(m.endsWith("#sec")).toBe(true);
+    expect(decodeClientUrl(new URL("https://engine.example" + m.slice(0, cut)))).toBe("https://leaky.example.org/private/page");
+  });
+
+  it("Refresh url= keeps the fragment raw off the encoded target", () => {
+    const h = new Headers({ refresh: '5; url="https://leaky.example.org/next#sec"' });
+    mapRefreshHeader(h, "https://leaky.example.org/private/page");
+    const out = h.get("refresh")!;
+    const cut = out.indexOf("#");
+    expect(out.endsWith("#sec")).toBe(true);
+    expect(decodePath(out.slice(out.indexOf("url=") + 4, cut))).toBe("https://leaky.example.org/next");
+  });
+
+  it("a surfaced Location maps with the fragment riding raw", () => {
+    const h = new Headers({ location: "https://leaky.example.org/next#sec" });
+    mapLocationHeader(h, "https://leaky.example.org/private/page");
+    const out = h.get("location")!;
+    const cut = out.indexOf("#");
+    expect(out).not.toContain("leaky.example.org");
+    expect(out.endsWith("#sec")).toBe(true);
+    expect(decodePath(out.slice(0, cut))).toBe("https://leaky.example.org/next");
+  });
+
+  it("relative surfaced Locations resolve; unresolvable ones stay as-is", () => {
+    const h = new Headers({ location: "/other#sec" });
+    mapLocationHeader(h, "https://leaky.example.org/private/page");
+    const out = h.get("location")!;
+    expect(out.endsWith("#sec")).toBe(true);
+    expect(decodePath(out.slice(0, out.indexOf("#")))).toBe("https://leaky.example.org/other");
+    const bad = new Headers({ location: "https://leaky.example.org:99999" });
+    mapLocationHeader(bad, "https://leaky.example.org/private/page");
+    expect(bad.get("location")).toBe("https://leaky.example.org:99999");
+  });
+
+  it("a fragment-free Location maps exactly as before", () => {
+    const h = new Headers({ location: "https://leaky.example.org/next" });
+    mapLocationHeader(h, "https://leaky.example.org/private/page");
+    const out = h.get("location")!;
+    expect(out).not.toContain("leaky.example.org");
+    expect(decodePath(out)).toBe("https://leaky.example.org/next");
+  });
+});
+
 describe("charset resolution (issue B)", () => {
   const enc = (s: string) => new TextEncoder().encode(s);
 
