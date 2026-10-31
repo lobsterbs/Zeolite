@@ -81,7 +81,7 @@ All long-lived buffers are fixed-size rings:
   fetches are awaited together.
 - libcurl-transport 2.0.6 uses a bounded pool of 64 active connections,
   48 idle cached connections and 8 connections per host. Its defaults
-  were 50/40/6. Transport diagnostics sample peak pending fetches and
+  are 60/50/6. Transport diagnostics sample peak pending fetches and
   mean request-to-headers time every 32 successful Wisp fetches. The
   library does not expose internal queue wait separately, so this
   measure includes local pool wait and upstream time-to-headers.
