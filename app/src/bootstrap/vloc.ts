@@ -129,6 +129,71 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
   /* Injector phase 2: a query-shape committed URL carries the route
      token in the search; re-anchors keep the token and commit the
      real path natively. */
+  /* #532: engine-rewritten nested documents with an about: URL
+     (iframe srcdoc; about:blank frames never have engine-rewritten
+     bytes). The rewriter renames document.URL/documentURI/baseURI
+     reads inside the nested document too (the srcdoc value IS
+     rewritten as a sub-document), but no entry route exists, so
+     the old bail left __zl undefined and every renamed read threw
+     a ReferenceError. The faithful virtual view of an about:
+     document IS its native value: a direct srcdoc document reads
+     about:srcdoc for href, document.URL and baseURI alike. */
+  if (natUrl.protocol === "about:") {
+    const zlAbout = {
+      get href(): string {
+        return nat.href;
+      },
+      get baseURI(): string {
+        return nat.href;
+      },
+      get pathname(): string {
+        return natUrl.pathname;
+      },
+      set pathname(v: string) {
+        try {
+          (nat as unknown as { pathname?: string }).pathname = v;
+        } catch {
+          /* a sealed location keeps the native value */
+        }
+      },
+      get search(): string {
+        return natUrl.search;
+      },
+      get hash(): string {
+        return nat.hash;
+      },
+      set hash(v: string) {
+        try {
+          (nat as { hash: string }).hash = v;
+        } catch {
+          /* a sealed location keeps the native hash */
+        }
+      },
+      origin: natUrl.origin,
+      protocol: natUrl.protocol,
+      host: natUrl.host,
+      hostname: natUrl.hostname,
+      port: natUrl.port,
+      assign(u: string): void {
+        nat.assign(String(u));
+      },
+      replace(u: string): void {
+        nat.replace(String(u));
+      },
+      reload(): void {
+        nat.reload();
+      },
+      toString(): string {
+        return nat.href;
+      },
+    };
+    try {
+      Object.defineProperty(w, "__zl", { value: zlAbout, configurable: true });
+    } catch {
+      /* a sealed realm keeps the native location view */
+    }
+    return;
+  }
   const navq = navqStrip(natUrl.search);
   const navpCut = natUrl.pathname.indexOf(NAVP);
   const entry =
@@ -299,6 +364,97 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
     return escapeLeading(path) + query + (query ? "&" : "?") + NAVQ + "=" + navq[0] + hash;
   };
 
+  /* #532: the virtual document base for __zl.baseURI reads. The
+     served first <base href> is rewritten to an opaque engine
+     route, so the page realm cannot decode it: the worker posts
+     the folded base (hostless, the same #144 relaxation as
+     vpath) as a zl:vbase control message once the rewriter folds
+     it, and servedHrefRaw captures the raw attribute bytes of the
+     first base seen after delivery so a LATER page-set href is
+     recognized as page truth (the delivered value stops applying
+     the moment the raw attribute differs). */
+  let servedVbase: string | null = null;
+  let servedHrefRaw: string | null = null;
+  const firstBaseHref = (): string | null => {
+    try {
+      const doc = w.document as Document | undefined;
+      if (!doc || typeof doc.querySelectorAll !== "function") return null;
+      for (const el of doc.querySelectorAll("base")) {
+        const h = el.getAttribute("href");
+        if (h) return h;
+      }
+    } catch {
+      /* no DOM access: the spec default below */
+    }
+    return null;
+  };
+  /* A page-set base value resolves through the same virtual
+     semantics as navigation inputs: a cross-origin absolute is the
+     page own choice (page-visible data, not engine-injected
+     identity), NAVH/NAVP-shaped route values decode, a plain
+     relative resolves against the current virtual path. */
+  const resolveBase = (raw: string): string => {
+    const s = String(raw);
+    let u: URL;
+    try {
+      u = new NativeURL(s, "http://v" + cur);
+    } catch {
+      return cur;
+    }
+    const lead = s.replace(/^[\u0000-\u0020]+/, "");
+    if (
+      (/^[a-z][a-z0-9+.-]*:/i.test(lead) || /^[\\/][\\/]/.test(lead)) &&
+      u.origin !== origin
+    ) {
+      return s;
+    }
+    if (u.pathname.startsWith(NAVH + "/") || u.pathname.indexOf(NAVP + "/") > 0) {
+      try {
+        const dec = fromNative(
+          new NativeURL("http://v" + u.pathname + u.search + u.hash),
+        );
+        if (dec !== null) return dec;
+      } catch {
+        /* fall through to the plain-path read */
+      }
+    }
+    return u.pathname + u.search + u.hash;
+  };
+  const vbaseOf = (): string => {
+    try {
+      const raw = firstBaseHref();
+      if (raw === null) return origin + cur;
+      if (servedVbase !== null) {
+        if (servedHrefRaw === null) servedHrefRaw = raw;
+        if (raw === servedHrefRaw) return origin + servedVbase;
+      }
+      const resolved = resolveBase(raw);
+      /* a page-chosen cross-origin base is already a full URL: the
+         page wrote it, it is page-visible data, and the native
+         frozen base would be that exact URL too. */
+      if (/^[a-z][a-z0-9+.-]*:/i.test(resolved)) return resolved;
+      return origin + resolved;
+    } catch {
+      return origin + cur;
+    }
+  };
+  {
+    const ns = (w.navigator as
+      | { serviceWorker?: { addEventListener?: (t: string, f: (ev: MessageEvent) => void) => void } }
+      | undefined)?.serviceWorker;
+    if (ns && typeof ns.addEventListener === "function") {
+      ns.addEventListener("message", (ev: MessageEvent) => {
+        const d = ev.data as { type?: unknown; vbase?: unknown } | null;
+        if (!d || d.type !== "zl:vbase") return;
+        const vb = d.vbase;
+        if (typeof vb === "string" && vb.startsWith("/")) servedVbase = vb;
+        if (servedHrefRaw === null && firstBaseHref() !== null) {
+          servedHrefRaw = firstBaseHref();
+        }
+      });
+    }
+  }
+
   const go = (v: string, replace: boolean): void => {
     const s = String(v);
     if (s === "") return;
@@ -372,6 +528,14 @@ export function applyVloc(w: Record<string, unknown>, vpath?: string): void {
   const zl = {
     get href(): string {
       return origin + cur;
+    },
+    /* #532: document.baseURI renames read this view. Spec default
+       (no base element) is the virtual document URL; the served
+       base serves through the delivered hostless value; a page-set
+       base is page truth (live DOM read, dynamic <base> changes
+       reflect immediately). */
+    get baseURI(): string {
+      return vbaseOf();
     },
     set href(v: string) {
       go(v, false);

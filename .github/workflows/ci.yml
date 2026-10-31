@@ -261,13 +261,16 @@ jobs:
         # Raised 41600 -> 41792 for #533: origin-keyed child-slot cache;
         # 41792 -> 43520 for #537: blob-worker /zl-bw/ route head and the
         # page-side wrap helpers ride bootstrap.js (measured 42768).
+        # 43520 -> 44574 for #532: virtual document.baseURI view (zl:vbase
+        # delivery, about:srcdoc faithful view, resolveBase machinery);
+        # measured 44382.
         # resolves lazily (virtual-origin marker + injected vpath
         # at call time) so a page's relative register() lands on the
         # page's virtual URL; measured 41310, baseline 41025.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 43520 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 43520)"; exit 1; fi
+          if [ "$SIZE" -ge 44574 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 44574)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
@@ -497,6 +500,8 @@ jobs:
         run: node suite/e2e/location-policy.mjs
       - name: Location targeting corroborated mark + scoreboard (#456 gate 4)
         run: node suite/e2e/location-targeting.mjs
+      - name: Virtual document base suite (#532)
+        run: node suite/e2e/baseuri.mjs
       - name: Browser E2E suite (issue #35)
         run: |
           node suite/e2e/e2e.mjs 2>&1 | tee browser.out
