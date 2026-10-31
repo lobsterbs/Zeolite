@@ -48,6 +48,9 @@ export interface EngineConfig {
       destinations before fetching them. Absent keeps the engine's
       persisted choice; default off. */
   httpsUpgrade?: boolean;
+  /** Opt-in OPFS replay spool for over-cap streamed bodies on
+      redirect hops (#556). Absent keeps the worker's live choice. */
+  spoolUploads?: boolean;
 }
 
 export class ZeoliteEngine {
@@ -90,7 +93,14 @@ export class ZeoliteEngine {
        refuse (bad prefix) or never answer (message dropped at
        suspension); reporting success then would leave the host
        riding the default prefix while believing its own applied. */
-    const ack = await this.post({ type: "zl:config", prefix: this.config.pathPrefix, httpsUpgrade: this.config.httpsUpgrade });
+    const ack = await this.post({
+      type: "zl:config",
+      prefix: this.config.pathPrefix,
+      httpsUpgrade: this.config.httpsUpgrade,
+      /* #556: forward the spool authorization only when the embedder
+         expressed one; absent keeps the worker's live choice. */
+      ...(this.config.spoolUploads === undefined ? {} : { spoolUploads: this.config.spoolUploads }),
+    });
     return ack.ok === true;
   }
 

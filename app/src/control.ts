@@ -34,7 +34,7 @@ import { beginRecording, finishRecording } from "./recording";
 import { ghosteryListFetch, pageCacheClear, virtualHcaptchaFrameFragment } from "./request";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
-import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, locationTargetingEnabled, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setLocationTargeting, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled } from "./swstate";
+import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, locationTargetingEnabled, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setLocationTargeting, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled, setReplayCapMb, replayCapMbValue, setSpoolUploads, spoolUploadsEnabled } from "./swstate";
 import { adaptiveEvidenceSnapshot } from "./adaptive-evidence";
 import { locationTargetSnapshot, recordSpa404Report } from "./location-targeting";
 import { setTracing, tracingSnapshot } from "./tracing";
@@ -142,6 +142,13 @@ export interface ControlMessage {
   /** zl:config: opt-in engine-side HTTPS upgrade (#53). Absent keeps
       the persisted choice; the ack echoes the live value. */
   httpsUpgrade?: boolean;
+  /** zl:config: opt-in OPFS spool for replaying over-cap streamed
+      bodies on redirect hops (#556). Absent keeps the live choice;
+      off keeps the documented one-shot cap behavior. */
+  spoolUploads?: boolean;
+  /** zl:config: the replay buffering cap in MiB (1-32, default 32);
+      absent keeps the live choice (#556). */
+  replayCapMb?: number;
   /** zl:config: opt-in lazy images; absent keeps the live choice. */
   imageLazy?: boolean;
   /** zl:config: opt-in learned-transit demotion (#487 phase 4);
@@ -577,6 +584,9 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       }
       /* #53: absent leaves the persisted choice (old embedders). */
       if (typeof msg.httpsUpgrade === "boolean") setHttpsUpgrade(msg.httpsUpgrade);
+      /* #556: same rule for the replay-spool authorization. */
+      if (typeof msg.spoolUploads === "boolean") setSpoolUploads(msg.spoolUploads);
+      if (typeof msg.replayCapMb === "number") setReplayCapMb(msg.replayCapMb);
       /* Lazy images: same rule - absent keeps the live choice. */
       if (typeof msg.imageLazy === "boolean") setImageLazy(msg.imageLazy);
       /* #487 phase 4: learned demotion is opt-in; the ack echoes it. */
@@ -591,7 +601,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       setScheme(msg.prefix ?? "/j/");
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
-      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), adaptiveTransit: adaptiveTransitEnabled(), locationTargeting: locationTargetingEnabled(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled(), experimental: experimentalSnapshot() });
+      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), adaptiveTransit: adaptiveTransitEnabled(), locationTargeting: locationTargetingEnabled(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled(), spoolUploads: spoolUploadsEnabled(), replayCapMb: replayCapMbValue(), experimental: experimentalSnapshot() });
       break;
     }
     case "zl:reloadBypass":

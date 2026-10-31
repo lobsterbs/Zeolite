@@ -64,8 +64,9 @@ import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersi
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
    control plane are call sites. */
-import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, siteProfileFor, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
 import { literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome } from "./adaptive-evidence";
+import { spoolBody, SpoolHandle, SpoolUnavailableError } from "./bodyspool";
 
 import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, serveExtensionAsset } from "./extensions";
 
@@ -717,7 +718,13 @@ export function surfaceNotModified(h: Headers): Response {
    Content-Length over the cap keeps the one-shot streaming behavior
    (huge uploads never buffer); an unannounced body that overflows
    the cap fails honestly instead of sending a truncated body. */
-const REPLAY_BODY_CAP = 32 * 1024 * 1024;
+/* #556: the cap lives in swstate (zl:config replayCapMb, 1-32,
+   default 32) so a memory-constrained embedder can tighten it and
+   the e2e suite can exercise the over-cap paths at transport-safe
+   sizes. Chromium never exposes Content-Length on an intercepted
+   request, so the real page traffic reaches the unannounced branch
+   and discovers the cap mid-read. */
+const replayBodyCap = (): number => replayBodyCapBytes();
 
 /* #354: how long a channel-less relay-routed fetch waits for the
    embedder to re-register after the SW broadcast zl:relayLost. */
@@ -745,13 +752,49 @@ export function replayCapTrips(): number {
     never a corrupted body. */
 export async function replayableInit(
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
-  opts: { relayPossible?: boolean; hopReplay?: boolean } = {},
-): Promise<{ method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal }> {
+  opts: { relayPossible?: boolean; hopReplay?: boolean; spoolAuthorized?: boolean } = {},
+): Promise<{ method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal; spool?: SpoolHandle }> {
   const body = init.body;
   if (body == null || typeof (body as ReadableStream).getReader !== "function") return init;
+  /* #556: only the hop path spools. The relay carries string and
+     ArrayBuffer bodies only, so a spooled File would gain nothing
+     there; the hop chain replays a File on every hop. */
+  const spoolEligible = opts.hopReplay === true && opts.spoolAuthorized === true;
+  const trySpool = async (): Promise<SpoolHandle | null> => {
+    if (!spoolEligible) return null;
+    try {
+      return await spoolBody(body as ReadableStream<Uint8Array>);
+    } catch (err) {
+      if (err instanceof SpoolUnavailableError) {
+        /* Storage never opened: the stream is intact and the
+           documented one-shot behavior keeps the request honest. */
+        DIAG.emit({
+          category: "TRANSPORT",
+          severity: "warning",
+          message: "replay spool unavailable; keeping the documented one-shot streaming for this body",
+        });
+        return null;
+      }
+      /* Mid-spool failure: part of the stream is consumed, so the
+         body can never leave intact - fail the request honestly
+         instead of serving a truncated upload. */
+      throw err;
+    }
+  };
   const clRaw = init.headers?.get("content-length") ?? "";
   if (/^\d+$/.test(clRaw)) {
-    if (Number(clRaw) > REPLAY_BODY_CAP) {
+    if (Number(clRaw) > replayBodyCap()) {
+      /* #556: the hop chain replays an over-cap streamed body through
+         the host-authorized OPFS spool instead of surfacing the
+         redirect to the page. */
+      const spool = await trySpool();
+      if (spool) {
+        /* The announced length is replaced by the spooled truth,
+           never the page's claim: the File carries what actually
+           arrived. */
+        init.headers.set("content-length", String(spool.bytes));
+        return { ...init, body: spool.file, spool };
+      }
       /* Huge announced upload: buffer-free one-shot streaming, the
          retry cannot replay it anyway. Counted, not silent. */
       replayCapTripCount++;
@@ -764,6 +807,13 @@ export async function replayableInit(
     }
   } else if (!opts.relayPossible && !opts.hopReplay) {
     return init;
+  } else {
+    /* #556: an unannounced body with a live replay path spools when
+       the host authorized it: even a chunked upload becomes
+       replayable without a memory copy, and the spool cap (not the
+       32 MiB memory cap) bounds it. */
+    const spool = await trySpool();
+    if (spool) return { ...init, body: spool.file, spool };
   }
   const reader = (body as ReadableStream<Uint8Array>).getReader();
   const parts: Uint8Array[] = [];
@@ -772,7 +822,7 @@ export async function replayableInit(
     const { done, value } = await reader.read();
     if (done) break;
     total += value.byteLength;
-    if (total > REPLAY_BODY_CAP) {
+    if (total > replayBodyCap()) {
       replayCapTripCount++;
       DIAG.emit({
         category: "TRANSPORT",
@@ -796,6 +846,34 @@ export async function replayableInit(
   }
   return { ...init, body: buf.buffer };
 }
+
+/* #556: measured transport ceiling for one request body. The vendored
+   artifact full-buffers every body into the wasm heap before the socket
+   sees it; 16 MiB bodies kill the renderer process deterministically,
+   8 MiB ride fine. The spool copy path honors the ceiling with an
+   honest failure instead of a crash. */
+const TRANSPORT_BODY_BOUND = 8 * 1024 * 1024;
+
+/** Materialize the spooled replay source as the one transport-proven
+    body shape (an ArrayBuffer). Throws before any bytes leave when
+    the spooled body exceeds the measured transport ceiling, so the
+    caller serves the honest error strand instead of a renderer
+    crash. Exported for the replay-body regression tests. */
+export async function spoolTransportCopy(spool: SpoolHandle): Promise<ArrayBuffer> {
+  if (spool.bytes > TRANSPORT_BODY_BOUND) {
+    replayCapTripCount++;
+    DIAG.emit({
+      category: "TRANSPORT",
+      severity: "warning",
+      message: "spooled body over the transport body bound; serving the honest error strand",
+    });
+    throw new Error(
+      "zeolite: spooled body exceeds the transport body bound; streaming uploads need transport streaming support",
+    );
+  }
+  return await spool.file.arrayBuffer();
+}
+
 
 async function upstreamFetch(
   dest: string,
@@ -3356,8 +3434,11 @@ export function handleFetch(e: FetchEvent): void {
              captures Set-Cookie on every hop. 303 (and POST on 301/302)
              continues as GET per the fetch spec; 307/308 replay the
              method AND the body, which replayableInit buffers once
-             (cap 32 MiB); a cross-origin hop drops Authorization
-             per spec. Only an announced body over the cap streams one-shot and surfaces with a mapped Location. */
+             (cap zl:config replayCapMb, default 32 MiB); a cross-origin
+             hop drops Authorization
+             per spec. Only an announced body over the cap without the authorized
+             replay spool streams one-shot and surfaces with a mapped
+             Location (#556). */
           let hopUrl = target;
           let hopMethod = e.request.method;
           let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
@@ -3369,13 +3450,32 @@ export function handleFetch(e: FetchEvent): void {
              Content-Length over the cap, which replayableInit streams
              untouched and the loop surfaces per spec. */
           if (hopBody != null) {
-            hopBody =
-              (
-                await replayableInit(
-                  { method: hopMethod, headers: sendHeaders, body: hopBody, signal: e.request.signal },
-                  { hopReplay: true },
-                )
-              ).body ?? null;
+            const buffered = await replayableInit(
+              { method: hopMethod, headers: sendHeaders, body: hopBody, signal: e.request.signal },
+              /* #556: the host-authorized OPFS spool turns an
+                 over-cap streamed body into a replayable File so the
+                 hop chain follows 307/308 (and body-preserving
+                 301/302 on non-POST methods) instead of surfacing
+                 the redirect to the page. */
+              { hopReplay: true, spoolAuthorized: spoolUploadsEnabled() },
+            );
+            hopBody = buffered.body ?? null;
+            if (buffered.spool) {
+              /* #556: the vendored transport adapter refuses a File body
+                 (its socket plumbing throws Failed to fetch), and it
+                 full-buffers whatever it carries into the wasm heap
+                 anyway, so materialize the one proven body shape from
+                 the spool once per chain, bounded by the measured
+                 transport ceiling; over it the request fails honestly
+                 instead of crashing the renderer. */
+              hopBody = await spoolTransportCopy(buffered.spool);
+              /* The spool file is dead weight once the final hop's
+                 request body was sent; the fetch event settles only
+                 after the response stream reaches the page, so
+                 releasing there never races a live hop. A failed
+                 release only leaks a file the orphan sweep reclaims. */
+              e.waitUntil(buffered.spool.release().catch(() => {}));
+            }
           }
           /* The navigation TTFB deadline must abort the upstream fetch,
              not only reject this promise: the request otherwise runs
