@@ -95,8 +95,13 @@ export async function handleExtPageCall(
     try {
       const reply = await MESSENGER.sendMessage(rec.id, {
         extensionId: rec.id,
+        id: rec.id,
         context: "extension-page",
-        url: senderUrl,
+        /* #560: url stays null on purpose. TM-class senders refuse
+           actions from any URL outside their internal page scheme, and
+           the engine's rooted pages have no such URL; a null url
+           classifies as a trusted internal sender. */
+        url: null,
       }, args[0]);
       return { ok: true, response: reply };
     } catch (err) {

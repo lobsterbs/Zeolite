@@ -343,8 +343,11 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
             .then(() => {
               const inner = MESSENGER.connect(extId, pname, {
                 extensionId: extId,
+                id: extId,
                 context: "extension-page",
-                url: srcUrl,
+                /* #560: null for the same TM-class reason as the page
+                   sendMessage sender. */
+                url: null,
               });
               inner.onMessage((m) => {
                 try {
@@ -501,6 +504,7 @@ async function handleExtMessage(
   await wakeExtension(rec.id);
   const response = await MESSENGER.sendMessage(rec.id, {
     extensionId: rec.id,
+    id: rec.id,
     context: "content",
     url: dest,
   }, m.msg);

@@ -35,7 +35,7 @@ export async function getExtensionContext(ext: ExtensionRecord): Promise<Extensi
   const session = new ExtensionStorageArea(ext.id, "session", "session");
   await local.load(db);
   await sync.load(db);
-  const sender = { extensionId: ext.id, context: "background" as const, url: null };
+  const sender = { extensionId: ext.id, id: ext.id, context: "background" as const, url: null };
   const i18n = await resolvePackageI18n(
     typeof ext.manifest.default_locale === "string" ? ext.manifest.default_locale : "",
     (p) => extensions.getResource(ext.id, p, { fromWeb: false }),

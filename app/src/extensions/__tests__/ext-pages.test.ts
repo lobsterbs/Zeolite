@@ -224,6 +224,11 @@ describe("extension pages (#40)", () => {
     expect(r.response).toBe("pong");
     expect(seen).not.toBeNull();
     expect((seen as unknown as { sender: { context: string } }).sender.context).toBe("extension-page");
+    /* #560: TM-class dispatchers classify by sender.id and refuse
+       senders whose url is not an internal page scheme: the page
+       sender must carry the id and no URL. */
+    expect((seen as unknown as { sender: { id?: string } }).sender.id).toBe(rec.id);
+    expect((seen as unknown as { sender: { url?: string | null } }).sender.url).toBeNull();
   });
 
   it("enforces MV3 scoped web_accessible_resources against the page destination (#51)", async () => {
