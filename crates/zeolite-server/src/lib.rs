@@ -1043,9 +1043,9 @@ pub fn build_app(shared: Arc<Shared>) -> Router {
     Router::new()
         .route("/wisp/", get(wisp_handler))
         /* #533: fixed engine-route shapes that bypass the service
-           worker (a sandboxed frame, measured on Chromium) answer the
-           honest notice page. Explicit routes win over the static
-           fallback; controlled traffic never reaches the server. */
+        worker (a sandboxed frame, measured on Chromium) answer the
+        honest notice page. Explicit routes win over the static
+        fallback; controlled traffic never reaches the server. */
         .route("/j/*rest", get(engine_bypass_notice))
         .route("/__zl_nav__/*rest", get(engine_bypass_notice))
         .route("/__zl_prel__/*rest", get(engine_bypass_notice))
@@ -3373,16 +3373,27 @@ mod tests {
             s.read_to_end(&mut buf).await.unwrap();
             String::from_utf8_lossy(&buf).into_owned()
         }
-        for path in ["/j/sometoken", "/__zl_nav__/eHl6", "/__zl_navh__/tok/p", "/__zl_prel__/tail"] {
+        for path in [
+            "/j/sometoken",
+            "/__zl_nav__/eHl6",
+            "/__zl_navh__/tok/p",
+            "/__zl_prel__/tail",
+        ] {
             let text = get_path(addr, path).await;
             let head = text.lines().next().unwrap_or_default().to_string();
             assert!(head.contains("404"), "{path}: {head}");
-            assert!(text.contains("Zeolite engine route"), "{path}: notice body missing");
+            assert!(
+                text.contains("Zeolite engine route"),
+                "{path}: notice body missing"
+            );
         }
         let text = get_path(addr, "/definitely-not-a-file").await;
         let head = text.lines().next().unwrap_or_default().to_string();
         assert!(head.contains("404"), "{head}");
-        assert!(!text.contains("Zeolite engine route"), "a static miss must keep its bare 404");
+        assert!(
+            !text.contains("Zeolite engine route"),
+            "a static miss must keep its bare 404"
+        );
     }
 
     /// Bind the real axum app on an ephemeral port, with ConnectInfo.
