@@ -362,3 +362,105 @@ describe("location member writes reach the view (#182)", () => {
     );
   });
 });
+
+/* #532: the virtual document.baseURI view. A fake DOM supplies the
+   first <base href> raw attribute; the fake serviceWorker listener
+   store lets tests deliver the worker zl:vbase message. */
+describe("__zl.baseURI (#532)", () => {
+  type BaseEl = { href: string; getAttribute(n: string): string | null };
+  const setup = (hrefs: string[], vbase?: string) => {
+    const { w } = makeWin(ENGINE + ENTRY);
+    const swListeners: Array<(ev: { data: unknown }) => void> = [];
+    w.navigator = {
+      serviceWorker: {
+        addEventListener: (_t: string, f: (ev: { data: unknown }) => void) => swListeners.push(f),
+      },
+    };
+    const bases: BaseEl[] = hrefs.map((h) => ({
+      href: h,
+      getAttribute(n: string) {
+        return n === "href" ? this.href : null;
+      },
+    }));
+    w.document = {
+      querySelectorAll: (sel: string) => (sel === "base" ? bases : []),
+    };
+    applyVloc(w, "/real/page");
+    if (vbase !== undefined) {
+      for (const f of swListeners) f({ data: { type: "zl:vbase", vbase } });
+    }
+    const read = () => (w.__zl as { baseURI: string }).baseURI;
+    return { read, bases, swListeners };
+  };
+
+  it("defaults to the virtual document URL without a base element", () => {
+    expect(setup([]).read()).toBe(ENGINE + "/real/page");
+  });
+
+  it("serves the delivered hostless base for the served href", () => {
+    expect(setup(["/j/opaque"], "/assets/dir/?q=1").read()).toBe(ENGINE + "/assets/dir/?q=1");
+  });
+
+  it("captures the served raw href at delivery, then follows page rewrites", () => {
+    const { read, bases } = setup(["/j/opaque"], "/assets/dir/");
+    expect(read()).toBe(ENGINE + "/assets/dir/");
+    /* the page rewrites the href: the delivered value stops applying */
+    bases[0].href = "/x/y/";
+    expect(read()).toBe(ENGINE + "/x/y/");
+  });
+
+  it("a page-set cross-origin base is page truth, returned as-is", () => {
+    const { read, bases } = setup(["/j/opaque"], "/assets/dir/");
+    bases[0].href = "https://other.example/root/";
+    expect(read()).toBe("https://other.example/root/");
+  });
+
+  it("a page-set NAVH-shaped base decodes to the visible path", () => {
+    const { read, bases } = setup(["/j/opaque"], "/assets/dir/");
+    bases[0].href = ENGINE + "/__zl_navh__/tok/real/base/";
+    expect(read()).toBe(ENGINE + "/real/base/");
+  });
+
+  it("without delivery the fallback is the opaque path, never a hang or leak", () => {
+    expect(setup(["/j/opaque"]).read()).toBe(ENGINE + "/j/opaque");
+  });
+
+  it("an empty-href base does not count (HTML first-base rule)", () => {
+    expect(setup(["", "/plain/"]).read()).toBe(ENGINE + "/plain/");
+  });
+
+  it("a delivered base only applies while the first base keeps the served href", () => {
+    const { read, bases, swListeners } = setup(["/j/opaque"], "/assets/dir/");
+    bases[0].href = "/page-set/";
+    expect(read()).toBe(ENGINE + "/page-set/");
+    /* a late delivery after the page rewrite never resurrects the old base */
+    for (const f of swListeners) f({ data: { type: "zl:vbase", vbase: "/late/" } });
+    expect(read()).toBe(ENGINE + "/page-set/");
+  });
+});
+
+describe("about: nested documents (#532)", () => {
+  it("installs a faithful about:srcdoc view instead of leaving __zl undefined", () => {
+    const { w, state } = makeWin("about:srcdoc");
+    applyVloc(w);
+    const l = w.__zl as { href: string; baseURI: string; toString(): string; assign(u: string): void };
+    /* a direct srcdoc document reads about:srcdoc for href,
+       document.URL and baseURI alike */
+    expect(l.href).toBe("about:srcdoc");
+    expect(l.baseURI).toBe("about:srcdoc");
+    expect(l.toString()).toBe("about:srcdoc");
+    /* navigations pass through natively: no entry route exists
+       (an absolute input; the URL parser cannot resolve a
+       relative against an about: base) */
+    l.assign("https://other.example/x");
+    expect(state.href).toBe("https://other.example/x");
+  });
+
+  it("an about:blank frame keeps the same faithful view", () => {
+    const { w } = makeWin("about:blank");
+    applyVloc(w);
+    const l = w.__zl as { href: string; baseURI: string };
+    expect(l.href).toBe("about:blank");
+    expect(l.baseURI).toBe("about:blank");
+  });
+});

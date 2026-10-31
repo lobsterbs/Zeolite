@@ -65,6 +65,15 @@ impl JsRewriter {
         self.inner.take_location_events()
     }
 
+    /// #532: the folded absolute upstream base once the first
+    /// <base href> was seen (None when no base element appeared).
+    /// The serve seam drains it per chunk and posts the hostless
+    /// form to the page so the virtual location view can serve
+    /// document.baseURI reads.
+    pub fn take_base(&self) -> Option<String> {
+        self.inner.effective_base()
+    }
+
     /// Feed one body chunk, get back everything that can be emitted now.
     pub fn process(&mut self, chunk: String) -> String {
         self.inner.process(&chunk)

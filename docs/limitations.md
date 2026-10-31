@@ -157,10 +157,40 @@ path and query ride after the opaque token
 `location.pathname` and pages that build URLs relative to their location
 work without any location virtualization. The destination HOST stays
 opaque - only the token can name it. Routers that string-match the exact
-bare token still cannot work client-side; virtualizing the forgeable
-surfaces (`document.URL`, `documentURI`, `baseURI`) plus a rewriter AST
-pass over free `location` reads stays the tracked direction for those.
-initScript output is CI-tested to never contain the destination host.
+bare token still cannot work client-side. The forgeable document
+surfaces ARE virtualized (#238, #532): `document.URL` and
+`documentURI` reads rename to the virtual location view
+(`__zl.href`) and `document.baseURI` reads to `__zl.baseURI`
+(#532), alongside the rewriter AST pass over free `location`
+reads. The virtual base keeps the same identity model: the real
+base path is visible (the #144 relaxation) and the destination
+host stays opaque - the worker delivers the folded first
+`<base href>` target as a hostless `zl:vbase` control message,
+never as injected source bytes. initScript output is CI-tested
+to never contain the destination host.
+
+## document.baseURI residuals (#532)
+
+The virtual base view is honest about its edges. `HTMLBaseElement`
+`href` reads and writes stay fully native: the served attribute is
+the opaque engine route (a page read sees the route, a page write
+resolves natively). The `zl:vbase` delivery is a best-effort
+control message posted while the document streams: a script that
+reads `document.baseURI` before the message lands reads the opaque
+route path (never the destination host), and the message closes
+the race as soon as it arrives. The delivered base applies only
+while the first base element keeps the served attribute bytes; a
+later page rewrite of the href is page truth immediately (live DOM
+read), and a base element inserted before the served one wins per
+the HTML first-base-in-tree-order rule. Nested engine-rewritten
+`about:srcdoc` documents read their own faithful `about:srcdoc`
+view (a direct srcdoc document reads the same); the rewriter
+renames their reads identically. About:blank frames never carry
+engine-rewritten bytes and stay untouched. Bare `top`/`parent`
+`location` reads stay native for frame-buster identity (the #235
+rule), so a page comparing `document.baseURI` against a native
+top-document read still sees the engine route on the native side
+of the comparison.
 
 ## Referer on undecodable routes
 

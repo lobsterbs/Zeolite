@@ -13,7 +13,7 @@ import { DIAG } from "./diag";
 import { streamAlive, streamDone } from "./streams-alive";
 import { charsetFromHeader, makeDecoder, resolveCharset } from "./headers";
 import { docKind, jsBody } from "./transit";
-import { initScript, initSplicePoint } from "./pageload";
+import { initScript, initSplicePoint, vPath } from "./pageload";
 import { currentPrefix } from "./codec";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { sriScanner } from "./sri";
@@ -217,6 +217,12 @@ export function rewriteStream(
      the raw import-map script bodies of the decoded upstream
      text (see importmaps.ts). */
   onImportmap?: (body: string) => void,
+  /* #532: optional sink for the effective document base once the
+     first <base href> folded; receives the HOSTLESS form (the
+     same #144 relaxation as vpath) so the virtual location view
+     can serve document.baseURI reads. Fired once per distinct
+     folded base, at most a couple of times per document. */
+  onVbase?: (vbase: string) => void,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const modP = rewriter();
@@ -263,6 +269,18 @@ export function rewriteStream(
         const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
         configureLocation(rw, resolveLocationPolicy(base, rule));
         for (const path of rule.inject ?? []) rw.add_injection(path);
+        /* #532: drain the folded base per chunk (first base wins,
+           the rewriter tracks it); one post per distinct value. */
+        let lastVbase: string | null = null;
+        const drainBase = () => {
+          if (!onVbase) return;
+          const b = (rw as unknown as { take_base?: () => string | undefined }).take_base?.();
+          if (b && b !== lastVbase) {
+            lastVbase = b;
+            const vb = vPath(b);
+            if (vb) onVbase(vb);
+          }
+        };
         if (rule.block?.length) rw.set_blocked_hosts(rule.block);
         if (deps!.lazyImages()) rw.set_lazy_images();
         for (const u of csInject) rw.add_injection(u);
@@ -313,6 +331,7 @@ export function rewriteStream(
             if (rest) emit(rw.process(rest));
             const tail = rw.finish();
             reportLocation(rw, base);
+            drainBase();
             if (tail) controller.enqueue(encoder.encode(tail));
             controller.close();
             onDone?.();
@@ -323,6 +342,7 @@ export function rewriteStream(
             sriScan?.feed(t); mapScan?.feed(t);
             emit(rw.process(t));
             reportLocation(rw, base);
+            drainBase();
             continue;
           }
           if (decoder !== null) {
