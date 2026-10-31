@@ -110,11 +110,55 @@ SW: no DOM, no page globals.
   fetch/XHR remains application data, even with a `text/html` or
   `application/xhtml+xml` response type; only document-loading
   destinations run the streaming HTML rewriter and bootstrap injection.
-- A response body transform is opt-in and gated: the SW applies it
+- A buffered body transform is opt-in and gated: the SW applies it
   only when content-length is known and <= BODY_LIMIT (512 KiB), and
   never for documents or stylesheets (the streaming rewriter owns
-  those). Oversized or unknown-size responses pass through untouched.
+  those). The first declared transform wins, stream or buffered alike.
+- A STREAMING body transform (#552) is opt-in and un-gated by size:
+  the handler declares a stream TransformStream with a required
+  maxInputBytes bound and an optional firstOutputMs deadline, and
+  the SW pipes the raw body through it with native backpressure. See
+  the streaming contract below.
 - Transformed responses are not written to the page cache.
+
+## Streaming transform contract (#552)
+
+A response handler may return { stream, maxInputBytes, firstOutputMs? }
+where stream is a TransformStream of byte chunks. Ordering and bounds:
+
+- Ordering: the same seam as the buffered arm, after hostile-header
+  surgery and before SRI verification, the page cache and the
+  HTML/CSS/JS rewriters. A streamed response returns before those
+  branches, so it is never page-cached and never re-rewritten,
+  exactly like a buffered transform.
+- Eligibility: never documents (HTML navigation destinations) or
+  stylesheets (the streaming rewriter owns those), and never an
+  engine-owned control asset (the /zl-bw/ prelude route, the worker
+  prelude and engine assets return from the fetch handler before the
+  interception seam, so a stream transform cannot reach them at all).
+- Bounds, enforced by engine-owned guards around the plugin pipe:
+  a known content-length above maxInputBytes never enters the pipe
+  (the raw body serves untouched: fail open, decided before any byte
+  flows); an unknown-length body that crosses maxInputBytes mid-flight
+  errors the pipe, and a first output chunk that misses firstOutputMs
+  errors the pipe. A violating transform turns into network-error-
+  shaped semantics for the page (an aborted body, like an upstream
+  disconnect), never a raw-and-transformed mixture, and never a hang.
+- Native pipe semantics carry the rest: backpressure reaches upstream
+  unchanged (the engine retains nothing beyond the pipe queues), a
+  page-side cancel propagates back upstream, an upstream error
+  propagates forward to the page. Status and headers are preserved;
+  the stale upstream content-length is dropped because a transform
+  changes the body length.
+- Compatibility: the buffered body arm stays exactly as it was.
+  Within one handler result the stream outranks the body; across
+  handlers the first declared transform of either kind wins.
+- Memory stays bounded: the engine never buffers a streamed body
+  (only the pipe queues, bounded by their queuing strategies and
+  native backpressure), and the declared maxInputBytes caps what the
+  guards track. First output is not delayed by the engine: the pipe
+  forwards as soon as the transform produces a chunk (the fixtures
+  pin a first chunk delivered while the upstream is still open).
 - Blocked requests fail at the network level for every non-navigate
   context (a network-error response, like a real blocker: fetch probes
   reject, subresources never load, #500); navigations keep the honest
@@ -141,4 +185,6 @@ deep-integration line; Ghostery network matching added on the
 Ghostery integration line). Honest limits: rules.kdl stays global
 (per-site compatibility stays in siteconfig.kdl; per-site adblock and
 UA arrive at runtime via zl:rules); Ghostery cosmetic filters are not
-applied; transformed responses are not page-cached.
+applied; transformed responses are not page-cached. The streaming
+transform arm (#552) carries unknown-length and large bodies behind
+declared bounds; the buffered arm stays capped at BODY_LIMIT.

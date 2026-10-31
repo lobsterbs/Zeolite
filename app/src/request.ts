@@ -1814,6 +1814,91 @@ export function zlBwHead(prefix: string, site: string, base: string): string {
   );
 }
 
+/* ---- #552: streaming response transforms (engine-owned guards) ---
+   The interception response kind may declare a streaming transform
+   (intercept.ts InterceptStreamTransform). The engine wraps the
+   plugin pipe in two guards it owns:
+   - the upstream guard counts raw bytes entering the plugin pipe: a
+     known content-length over the declared cap never enters it (the
+     caller serves the raw body untouched, fail open), and an
+     unknown-length body that crosses the cap mid-flight errors the
+     whole pipe (the page sees an aborted body, never a corrupted
+     raw-and-transformed mixture);
+   - the downstream guard errors the pipe when the plugin misses its
+   declared first-output deadline (a stalling transform becomes a
+   network-error-shaped failure, not a hang).
+   Everything else is native pipeThrough semantics: backpressure
+   reaches upstream unchanged, a page-side cancel propagates back, an
+   upstream error propagates forward. Exported for the regression
+   tests. */
+export interface ZlStreamGuards {
+  upstream: TransformStream<Uint8Array, Uint8Array>;
+  downstream: TransformStream<Uint8Array, Uint8Array>;
+}
+
+export function zlStreamGuards(
+  maxBytes: number,
+  firstOutputMs?: number,
+): ZlStreamGuards {
+  let seen = 0;
+  let firstOutput = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let downstreamController: TransformStreamDefaultController<Uint8Array> | null =
+    null;
+  const kill = (message: string): void => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    try {
+      downstreamController?.error(new Error(message));
+    } catch {
+      /* already closed: nothing to fail */
+    }
+  };
+  const upstream = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      seen += chunk.byteLength;
+      if (seen > maxBytes) {
+        kill("zl: stream transform over the declared maxInputBytes");
+        controller.error(
+          new Error("zl: body over the declared transform cap"),
+        );
+        return;
+      }
+      if (timer === null && !firstOutput && firstOutputMs !== undefined) {
+        timer = setTimeout(
+          () => kill("zl: stream transform missed the first-output deadline"),
+          firstOutputMs,
+        );
+      }
+      controller.enqueue(chunk);
+    },
+  });
+  const downstream = new TransformStream<Uint8Array, Uint8Array>({
+    start(controller) {
+      downstreamController = controller;
+    },
+    transform(chunk, controller) {
+      if (!firstOutput) {
+        firstOutput = true;
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      }
+      controller.enqueue(chunk);
+    },
+    flush() {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  });
+  return { upstream, downstream };
+}
+
 export function scheduleJarClientPrune(): void {
   if (++jarPruneTicks % 128 !== 0 || jarPruneInFlight) return;
   jarPruneInFlight = true;
@@ -4149,9 +4234,49 @@ export function handleFetch(e: FetchEvent): void {
           if (rIc.headers) {
             for (const [k, v] of Object.entries(rIc.headers)) outHeaders.set(k, v);
           }
+          /* #552: the streaming transform arm. Same eligibility as the
+             buffered arm (never documents or stylesheets: the
+             streaming rewriter owns those), but NO size gate: the raw
+             body pipes through the declared TransformStream with
+             native backpressure, so unknown-length and large bodies
+             transform too. Fail open, decided before any byte flows: a
+             known content-length over the declared maxInputBytes never
+             enters the pipe (the raw body serves untouched). Engine-
+             own routes (/zl-bw/, the prelude, the engine assets) return
+             from the fetch handler long before this site, so a stream
+             transform can never touch engine-owned control assets.
+             A transform changes the body length, so a stale upstream
+             content-length must never reach the page (the browser
+             honors it and truncates or hangs the body). */
+          if (
+            rIc.stream &&
+            !(DOC_DESTS.has(dest) && isHtml(resp)) &&
+            !isCss(resp) &&
+            resp.body
+          ) {
+            const st = rIc.stream;
+            const clen = Number(resp.headers.get("content-length") ?? -1);
+            if (!(clen >= 0 && clen > st.maxInputBytes)) {
+              const g = zlStreamGuards(st.maxInputBytes, st.firstOutputMs);
+              outHeaders.delete("content-length");
+              WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
+              return new Response(
+                resp.body
+                  .pipeThrough(g.upstream)
+                  .pipeThrough(st.stream)
+                  .pipeThrough(g.downstream),
+                { status: resp.status, headers: outHeaders },
+              );
+            }
+          }
           if (rIc.body && !(DOC_DESTS.has(dest) && isHtml(resp)) && !isCss(resp)) {
             const clen = Number(resp.headers.get("content-length") ?? -1);
             if (clen >= 0 && clen <= BODY_LIMIT) {
+              /* The buffered transform changes the body length too: a
+                 stale upstream content-length would truncate a grown
+                 body or hang a shrunk one, so it never reaches the
+                 page. */
+              outHeaders.delete("content-length");
               WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
               return new Response(rIc.body(await resp.text()), {
                 status: resp.status,
