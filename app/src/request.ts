@@ -920,6 +920,9 @@ async function upstreamFetch(
   policy: CompiledPolicy,
   rtype: ResourceType,
   traceId: string,
+  /* #577: isolated = fail without touching the shared client (the
+     ghostery list load). */
+  isolated = false,
 ): Promise<Response> {
   if (init.signal?.aborted) {
     throw init.signal.reason ?? new DOMException("request aborted", "AbortError");
@@ -1022,7 +1025,7 @@ async function upstreamFetch(
   }
   /* #226: thread the trace id so cooldown relay failures are
      attributed in the diagnostics ring. */
-  return wispTransport.fetch(dest, init, traceId);
+  return wispTransport.fetch(dest, init, traceId, { isolated });
 }
 
 /** #290 residual (2026-10-20 sorry-page report): recovery candidates
@@ -1049,7 +1052,7 @@ export function ghosteryListFetch(dest: string, init?: RequestInit): Promise<Res
   const headers = new Headers(init?.headers);
   const method = init?.method ?? "GET";
   return loadPolicy().then((policy) =>
-    upstreamFetch(dest, { method, headers }, policy, "fetch", DIAG.trace()),
+    upstreamFetch(dest, { method, headers }, policy, "fetch", DIAG.trace(), true),
   );
 }
 
