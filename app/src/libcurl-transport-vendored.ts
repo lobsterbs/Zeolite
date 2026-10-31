@@ -4,7 +4,7 @@ import { installWispAuthSocket } from "./wisp-auth";
 
    The package is AGPL-3.0-only and its dist is 2.1 MB, so it is
    never committed: the CI workflow vendors it (npm i
-   @mercuryworkshop/libcurl-transport@2.0.5, copies the dists into
+   @mercuryworkshop/libcurl-transport@2.0.6, copies the dists into
    app/public/libcurl) and the built engine serves it at
    /libcurl/index.mjs. This module loads that bundle at runtime and
    degrades to a clear error when vendoring has not run (the compat
@@ -16,8 +16,8 @@ import { installWispAuthSocket } from "./wisp-auth";
    built engine must honor AGPL-3.0 for the transport and the
    combined work.
 
-   Verified API (dist/index.d.ts, v2.0.5): class LibcurlClient
-   { constructor({ wisp, websocket?, proxy?, transport? });
+   Verified API (dist/index.d.ts, v2.0.6): class LibcurlClient
+   { constructor({ wisp, websocket?, proxy?, transport?, connections? });
      init(): Promise<void>; ready: boolean;
      request(remote, method, body, headers, signal?):
        Promise<{ body, headers, status, statusText }> }
@@ -41,7 +41,7 @@ interface LibcurlClientLike {
     headers: RawHeaders,
     signal: AbortSignal | undefined,
   ): Promise<TransferrableResponse>;
-  /* WebSocket (verified in dist/index.d.ts v2.0.5): TLS-terminated
+  /* WebSocket (verified in dist/index.d.ts v2.0.6): TLS-terminated
      ws over the wisp transport. Returns [send, close]. */
   connect(
     url: URL,
@@ -64,6 +64,12 @@ function moduleUrl(): string {
      /libcurl/index.mjs next to the service worker scope. */
   return new URL("libcurl/index.mjs", self.location.origin + "/").href;
 }
+
+/* libcurl-transport maps these to HTTPSession.set_connections:
+   [active connections, idle connection cache, per-host connections].
+   The upstream defaults are [50, 40, 6]; raise per-host parallelism
+   modestly while keeping both global pools bounded. */
+export const LIBCURL_CONNECTIONS = [64, 48, 8] as const;
 
 let client: LibcurlClientLike | null = null;
 let initPromise: Promise<void> | null = null;
@@ -408,7 +414,7 @@ async function loadBundle(url: string): Promise<{ LibcurlClient?: unknown; defau
 
 /* Issue #11: close-delimited empty-body responses.
 
-   libcurl.js 0.7.4 resolves HTTPSession.fetch only when the body
+   libcurl.js 0.7.5 resolves HTTPSession.fetch only when the body
    starts (first chunk) or cleanly ends (error === 0). An
    empty-body response that is close-delimited (no content-length,
    no chunked framing) never produces a body chunk, and the peer
@@ -419,7 +425,7 @@ async function loadBundle(url: string): Promise<{ LibcurlClient?: unknown; defau
    Fix: replace CurlSession.prototype.stream_response at load time
    (a patch on the vendored bundle's own objects; the AGPL artifact
    stays untouched and uncommitted) with a transcription of the
-   0.7.4 source plus one change: on error 56 with no body chunk
+   0.7.5 source plus one change: on error 56 with no body chunk
    surfaced, and only when the received header set declares a
    close-delimited body (no transfer-encoding, content-length
    absent or zero), fire the headers callback first. http.js
@@ -751,7 +757,7 @@ async function getClient(cfg: { websocket: string }): Promise<LibcurlClientLike>
         throw new Error(MISSING);
       }
       const Ctor = (mod.LibcurlClient ?? mod.default) as
-        | (new (o: { wisp: string; websocket?: string }) => LibcurlClientLike)
+        | (new (o: { wisp: string; websocket?: string; connections?: number[] }) => LibcurlClientLike)
         | undefined;
       if (typeof Ctor !== "function") {
         initPromise = null;
@@ -763,7 +769,7 @@ async function getClient(cfg: { websocket: string }): Promise<LibcurlClientLike>
          module-level connection cache, so a post-reset reinit gets
          a fresh WispTransport instead of the wedged one. */
       const wispUrl = bustWispUrl(cfg.websocket, wispGeneration);
-      const c = new Ctor({ wisp: wispUrl, websocket: wispUrl });
+      const c = new Ctor({ wisp: wispUrl, websocket: wispUrl, connections: [...LIBCURL_CONNECTIONS] });
       await c.init();
       /* Issue #11 patch: a missing seam is a hard init failure (the
          transport-gate workflow catches layout drift in CI before any
@@ -935,7 +941,7 @@ async function ensureAlt(): Promise<LibcurlClientLike> {
         throw new Error(MISSING);
       }
       const Ctor = (mod.LibcurlClient ?? mod.default) as
-        | (new (o: { wisp: string; websocket?: string }) => LibcurlClientLike)
+        | (new (o: { wisp: string; websocket?: string; connections?: number[] }) => LibcurlClientLike)
         | undefined;
       if (typeof Ctor !== "function") {
         altInitPromise = null;
@@ -945,7 +951,7 @@ async function ensureAlt(): Promise<LibcurlClientLike> {
          reinit after a reset rides a fresh WispTransport and a new
          WebSocket, never the wedged cached one. */
       const wispUrl = bustWispUrl(url, altGeneration);
-      const c = new Ctor({ wisp: wispUrl, websocket: wispUrl });
+      const c = new Ctor({ wisp: wispUrl, websocket: wispUrl, connections: [...LIBCURL_CONNECTIONS] });
       await c.init();
       const session = (c as LibcurlClientLike & { session?: unknown }).session;
       if (!session || !applyTransportEOF(session)) {
@@ -963,7 +969,7 @@ async function ensureAlt(): Promise<LibcurlClientLike> {
 }
 
 /* ---- #454: fresh-session dispatch for non-idempotent requests -------
-   libcurl.js 0.7.4 pools upstream connections per session (each
+   libcurl.js 0.7.5 pools upstream connections per session (each
    HTTPSession is a separate wasm curl multi handle with its own
    connection cache). When a REUSED pooled connection dies before any
    response byte, the wasm's libcurl re-sends the request once on a
@@ -1345,8 +1351,8 @@ export function openWebSocket(
     (code, reason) => h.onclose(code, reason),
     (error) => h.onerror(error),
   );
-  /* No ping/lastPongAt seam (#61): connect() (dist 2.0.5, libcurl.js
-     0.7.4) exposes no WS control-frame surface, so the wsbridge
+  /* No ping/lastPongAt seam (#61): connect() (dist 2.0.6, libcurl.js
+     0.7.5) exposes no WS control-frame surface, so the wsbridge
      keepalive watchdog stays off against this transport. If a future
      transport build grows WS ping support, add the optional
      ping()/lastPongAt() pair here and the watchdog arms itself. */

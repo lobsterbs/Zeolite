@@ -372,6 +372,40 @@ async function fetchWithDeadline(
   return deliveryResponse(await attemptDelivery(transport, () => fetchWithDeadlineRaw(fetcher, dest, init), traceId));
 }
 
+/* Measure successful requests from transport dispatch until headers.
+   libcurl does not expose queue wait separately, so this includes any
+   local pool wait and upstream time-to-headers. No URL is retained. */
+let wispMetricActive = 0;
+let wispMetricPeak = 0;
+let wispMetricCount = 0;
+let wispMetricTotalMs = 0;
+
+async function measureWispFetch(request: () => Promise<Response>): Promise<Response> {
+  const started = Date.now();
+  wispMetricActive++;
+  wispMetricPeak = Math.max(wispMetricPeak, wispMetricActive);
+  try {
+    const response = await request();
+    wispMetricCount++;
+    wispMetricTotalMs += Date.now() - started;
+    if (wispMetricCount === 32) {
+      DIAG.emit({
+        category: "TRANSPORT",
+        severity: "info",
+        message:
+          "Wisp sample: 32 successful fetches; peak pending=" + wispMetricPeak +
+          "; mean request-to-headers=" + Math.round(wispMetricTotalMs / wispMetricCount) + "ms",
+      });
+      wispMetricCount = 0;
+      wispMetricTotalMs = 0;
+      wispMetricPeak = wispMetricActive;
+    }
+    return response;
+  } finally {
+    wispMetricActive--;
+  }
+}
+
 async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Promise<Response> {
   /* Loading-indicator accounting (zl:loadState): the transport seam
      is the one place every upstream request passes through, so the
@@ -443,7 +477,7 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
     /* #415: remember which client generation serves this request */
     const curlGen = curlGeneration;
     try {
-      const resp = await fetchWithDeadline(zlCurlFetch, dest, init, "wisp", traceId);
+      const resp = await measureWispFetch(() => fetchWithDeadline(zlCurlFetch, dest, init, "wisp", traceId));
       /* A first-byte success is evidence the socket is healthy:
          clear the storm window and any cooldown. */
       stallClear();
@@ -479,7 +513,7 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
       /* #415: one shared reset per generation, not one per failure */
       await sharedCurlReset(curlGen);
       try {
-        return await fetchWithDeadline(zlCurlFetch, dest, init, "wisp", traceId);
+        return await measureWispFetch(() => fetchWithDeadline(zlCurlFetch, dest, init, "wisp", traceId));
       } catch (err2) {
         /* #226: a stall on the fresh connection is the strongest
            evidence the socket is wedged; count it before rethrowing
