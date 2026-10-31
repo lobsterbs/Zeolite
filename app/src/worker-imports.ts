@@ -15,7 +15,9 @@
      consistent with the classic-worker story),
    - bare specifiers (node-style package names) pass through: without
      a resolver there is nothing honest to map them to (same
-     documented limit as pages),
+     documented limit as pages). #554: the serve seams may pass a
+     page-import-map resolver; a hit routes the mapped target, a
+     miss keeps the bare specifier verbatim (the native failure),
    - opaque (data:/blob:), engine-local and already-encoded engine
      routes pass through untouched (the decode-side unwrap peels any
      stale binding).
@@ -55,16 +57,25 @@ function passthrough(abs: URL, engineOrigin: string): boolean {
 }
 
 /** Route one module specifier into an engine route, or return it
-    unchanged. Exported for tests. */
+    unchanged. Exported for tests. #554: the optional bare resolver
+    (the served page's recorded import map) routes bare specifiers;
+    without it, or on a miss, they stay verbatim. */
 export function routeModuleSpecifier(
   prefix: string,
   workerUrl: string,
   engineOrigin: string,
   spec: string,
+  bare?: (spec: string) => string | null,
 ): string {
   /* Bare specifier: no scheme, not root- or dot-relative. */
   if (!/^[a-z][a-z0-9+.-]*:/i.test(spec) && !spec.startsWith("/") && !spec.startsWith(".")) {
-    return spec;
+    const mapped = bare?.(spec);
+    if (!mapped) return spec;
+    try {
+      return routeAbs(prefix, engineOrigin, new URL(mapped), mapped);
+    } catch {
+      return spec;
+    }
   }
   let abs: URL;
   try {
@@ -72,11 +83,18 @@ export function routeModuleSpecifier(
   } catch {
     return spec;
   }
-  if (passthrough(abs, engineOrigin)) return spec;
-  if (isEnginePath(abs.pathname)) return spec; // already a route: decode peels
-  /* Encode in the LIVE prefix: this pass runs in the SW realm, where a
-     zl:config rotation may have changed the shape; resetting to the
-     default prefix here would flip every later encode (issue #20). */
+  return routeAbs(prefix, engineOrigin, abs, spec);
+}
+
+/** Shared tail of the specifier pipeline: opaque, engine-local and
+    already-encoded specifiers stay verbatim (the decode-side unwrap
+    peels any stale binding); everything else routes in the LIVE
+    prefix - this pass runs in the SW realm, where a zl:config
+    rotation may have changed the shape, and resetting to the default
+    prefix here would flip every later encode (issue #20). */
+function routeAbs(prefix: string, engineOrigin: string, abs: URL, verbatim: string): string {
+  if (passthrough(abs, engineOrigin)) return verbatim;
+  if (isEnginePath(abs.pathname)) return verbatim; // already a route: decode peels
   setScheme(prefix);
   return encodeDest(abs.href);
 }
@@ -266,6 +284,7 @@ export function rewriteModuleWorkerImports(
   workerUrl: string,
   engineOrigin: string,
   src: string,
+  bare?: (spec: string) => string | null,
 ): string {
   if (!src.includes("import") && !src.includes("from")) return src;
   const n = src.length;
@@ -358,7 +377,7 @@ export function rewriteModuleWorkerImports(
           const end = findStringEnd(src, q + 1, src.charCodeAt(q));
           if (end !== -1) {
             const spec = src.slice(q + 1, end);
-            const routed = routeModuleSpecifier(prefix, workerUrl, engineOrigin, spec);
+            const routed = routeModuleSpecifier(prefix, workerUrl, engineOrigin, spec, bare);
             if (routed !== spec) {
               out += src.slice(i, q) + src[q] + routed + src[q];
               i = end + 1;
