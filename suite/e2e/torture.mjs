@@ -150,7 +150,11 @@ async function frameWith(pg, sel) {
    probes (the iframe) use the inner marker. */
 async function openProxied(target, sel = "#zl-marker") {
   const pg = await context.newPage();
-  await pg.goto(ENGINE + "/?url=" + encodeURIComponent(target));
+  /* ttfb: the #477 wedge-class test seam (see engine.ts swScriptUrl):
+     a wedged vendored request fails at the shrunk engine deadline
+     instead of hanging past the case budget, so the recorded
+     reset/retry path runs inside the check. */
+  await pg.goto(ENGINE + "/?url=" + encodeURIComponent(target) + "&ttfb=6000");
   let frame = null;
   try {
     frame = await waitFor("proxied frame for " + target, 45000, () => frameWith(pg, sel));
@@ -675,7 +679,16 @@ async function main() {
     assert(proxied.ss && proxied.ss.set, "served page lost the srcset attribute: " + JSON.stringify(proxied.ss));
     assert(!proxied.ss.set.includes(ORIGIN_A), "served srcset kept a plaintext fixture URL: " + JSON.stringify(proxied.ss));
     assert(proxied.ss.status === 200 && proxied.ss.bytes > 0, "the served srcset candidate does not load through the engine: " + JSON.stringify(proxied.ss));
-    assert(!proxied.ss.url.includes(ORIGIN_A), "srcset candidate resolved browser-direct: " + JSON.stringify(proxied.ss));
+    /* #510: the URL parse seam virtualizes route-shaped inputs on a
+       memo hit, so the href a page script resolves from a correctly
+       rewritten candidate is EITHER the engine route (decode still
+       pending: the anchorshim race) or the true destination it
+       decodes to (the known fixture URL). Any other plaintext href
+       is a wrong decode or an unrewritten attribute and fails. */
+    assert(
+      !proxied.ss.url.includes(ORIGIN_A) || proxied.ss.url === ORIGIN_A + "/dir/img.png",
+      "srcset candidate resolved to a wrong URL: " + JSON.stringify(proxied.ss),
+    );
     for (const sel of ["inl", "ext", "imp"]) {
       assert(proxied[sel].includes("url("), "computed background for " + sel + " lost its url(): " + proxied[sel]);
       assert(!proxied[sel].includes(ORIGIN_A), "computed background for " + sel + " kept the plaintext fixture URL: " + proxied[sel]);

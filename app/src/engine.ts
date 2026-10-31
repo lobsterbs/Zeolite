@@ -19,6 +19,20 @@
 
 import { encodeDest, setScheme } from "./codec";
 
+/* Test seam for the #477 wedge class: the e2e harnesses run under
+   per-case budgets (seconds) while the engine's honest recovery from
+   a wedged vendored request is the transport's 30s first-byte
+   deadline, so a wedged fetch can never settle inside a harness
+   budget. The shell propagates a whitelisted "ttfb" param to the SW
+   script URL; the worker clamps the value to a sane range. Production
+   embeds never pass the param, so the script URL stays "/sw.js".
+   Pure so the seam is unit-gated (__tests__/ttfb-seam.test.ts). */
+export function swScriptUrl(pageSearch: string): string {
+  const raw = new URLSearchParams(pageSearch).get("ttfb");
+  if (raw === null || !/^\d+$/.test(raw)) return "/sw.js";
+  return "/sw.js?ttfb=" + raw;
+}
+
 export interface EngineConfig {
   /** Wisp endpoint; defaults to wss(s)://<engine-origin>/wisp/. */
   wispUrl?: string;
@@ -59,7 +73,7 @@ export class ZeoliteEngine {
        dies at script evaluation and nothing below register() ever
        runs - invisible to every Node-level test, caught only by the
        browser suite (issue #35). Chromium 91+. */
-    const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/", type: "module" });
+    const reg = await navigator.serviceWorker.register(swScriptUrl(typeof location === "undefined" ? "" : location.search), { scope: "/", type: "module" });
     await navigator.serviceWorker.ready;
 
     let tries = 0;

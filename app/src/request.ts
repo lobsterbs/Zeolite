@@ -3512,6 +3512,21 @@ export function handleFetch(e: FetchEvent): void {
                 injectedKeys.add(k);
               }
             }
+            /* #477-class wedge guard: the vendored wrapper tears a
+               completed request down through a DEFERRED wasm-side
+               removal (a 1ms timer in the artifact's request
+               lifecycle), and this loop issues the next hop in the
+               same task, inside that cleanup window. When the hop
+               rides the same curl session while the previous handle
+               is being removed, the new transfer's response can be
+               consumed on the wire yet dispatch to no JS callback:
+               the fetch wedges forever with no error (reproduced on
+               pristine parent engine sources; load-timing dependent,
+               and it only bites the immediate-replay hop shape).
+               Yield past the deferred removal before issuing the
+               hop; the 10ms bound is invisible next to a redirect
+               round trip. */
+            await new Promise((r) => setTimeout(r, 10));
             resp = await withDeadline(
               upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
               reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
