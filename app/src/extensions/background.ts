@@ -289,15 +289,15 @@ export async function bootExtension(
       code.push(new TextDecoder().decode(bytes));
     } else if (live.background?.page) {
       /* #505: MV2 background.page. Chrome hosts the page in a real
-         DOM document; this engine's background sandbox has no DOM, so
-         the page's classic scripts are extracted and executed
+         DOM document; this engine's background sandbox has no DOM,
+         so the page's classic scripts are extracted and executed
          instead, in document order, and background.page takes
-         precedence over background.scripts exactly as in Chrome. A
-         page script that touches document or window throws at boot
-         and fails the background with the error recorded; the
-         compatibility matrix states that limit instead of hiding it.
-         A page with no scripts is a valid inert background (Chrome
-         parity). */
+         precedence over background.scripts exactly as in Chrome.
+         #560: the scripts receive the document stub and the window
+         alias as Function-scope params, so a page script that reads
+         the DOM surface boots instead of crashing; the compatibility
+         matrix documents the stub's limits. A page with no scripts
+         is a valid inert background (Chrome parity). */
       const pagePath = live.background.page;
       const pageBytes = await extensions.getResource(live.id, pagePath, { fromWeb: false });
       if (!pageBytes) {
