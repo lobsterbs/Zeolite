@@ -35,7 +35,7 @@ import { ghosteryListFetch, pageCacheClear, virtualHcaptchaFrameFragment } from 
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
 import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, locationTargetingEnabled, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setLocationTargeting, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled, setReplayCapMb, replayCapMbValue, setSpoolUploads, spoolUploadsEnabled } from "./swstate";
-import { adaptiveEvidenceSnapshot } from "./adaptive-evidence";
+import { adaptiveEvidenceReset, adaptiveEvidenceSnapshot } from "./adaptive-evidence";
 import { locationTargetSnapshot, recordSpa404Report } from "./location-targeting";
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
@@ -1296,6 +1296,8 @@ case "zl:tracing":
           wsBridge.closeAll();
           // 1.4 Boride: cookies do not survive an engine switch.
           jarClear();
+          // #539: learned transit evidence does not survive teardown.
+          adaptiveEvidenceReset();
           // #254: the empty jar is durable before the ack.
           await flushJarPersist();
           // Drop every cache this SW owns, then unregister. Existing

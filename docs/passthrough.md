@@ -91,6 +91,38 @@ These are deliberate; the #96 check does not assert them equal.
   webRequest are security filtering, outside the pass-through
   contract by design.
 
+## Adaptive transit evidence (#487, #539)
+
+The engine records bounded, privacy-preserving per-origin evidence
+about the JS body pass (specifiers, URL literals): hostname and
+counters only, 512 origins drop-oldest, 7-day TTL. The single
+behavior-changing signal is the learned literal-pass demotion: after
+three literal-pass failures across at least two distinct traces on
+one origin, the NEXT serve of a JS body from that origin may skip the
+literal pass. The demotion is opt-in (zl:config adaptiveTransit) and
+never touches documents, CSS, workers or the runtime seams.
+
+Failure-source classification (#539) keeps every other observation
+non-demoting by construction:
+
+- Upstream statuses (3xx/4xx/5xx) are recorded per class. An
+  application 404 is indistinguishable from an upstream one at the
+  serve seam, so no status can ever demote.
+- Challenge-flagged bodies (cf-mitigated, cdn-cgi) are recorded as
+  challenge pages and stay verbatim.
+- Transport failures and rewrite-stage failures (decode, specifiers)
+  are recorded as their own classes; only the literal pass's own
+  throw (recordBodyPassFailure) feeds the demotion gate.
+- Evidence is stamped with the engine version; a version change wipes
+  the learned state, and zl:teardown removes it entirely.
+- The kill switch persists in the route-config KDL shape
+  (adaptive-transit #false), so a worker restart cannot silently
+  rearm a demotion the operator turned off. A manual KDL native rule
+  still wins earlier in the request path.
+
+The zl:stats diagnostics view reports the snapshot (version, origins,
+dropped, version resets, per-origin counters).
+
 ## Enforcement
 
 `node suite/e2e/e2e.mjs` runs the comparison on every push (the
