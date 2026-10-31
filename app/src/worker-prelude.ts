@@ -221,13 +221,18 @@ export function installWorkerPrelude(route: string): void {
           try {
             const mod = !!(o && o.type === "module");
             const bw = engineOrigin + "/zl-bw/?c=" + encodeURIComponent(JSON.stringify({ s: site, b: workerUrl }));
-            /* static import declaration for module wrappers (see relay.ts) */
+            /* static import declaration for module wrappers (see
+               relay.ts); the module wrapper self-revokes at the end
+               of its body because Chromium 131 resolves a module
+               worker's blob asynchronously, past this constructor,
+               so an immediate revoke kills the load */
             const src = mod
-              ? "import " + JSON.stringify(bw) + ";\n" + text
+              ? "import " + JSON.stringify(bw) + ";\n" + text +
+                "\n;try{URL.revokeObjectURL(self.location.href)}catch{}"
               : "importScripts(" + JSON.stringify(bw) + ");\n" + text;
             const wu = G.URL!.createObjectURL(new G.Blob!([src], { type: "text/javascript" }));
             const wk = new OW(wu, o);
-            try { G.URL!.revokeObjectURL(wu); } catch { /* best effort */ }
+            if (!mod) try { G.URL!.revokeObjectURL(wu); } catch { /* best effort */ }
             return wk;
           } catch { /* fall through to native */ }
         }
