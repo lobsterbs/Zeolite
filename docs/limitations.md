@@ -16,10 +16,20 @@ restart; clients.matchAll() resolves [] (no client enumeration) and
 guest postMessage reaches the kernel listener only; no controller,
 controllerchange, push, BackgroundSync or messaging surface into
 virtual pages exists; XHR, WebSocket, importScripts and indexedDB stay
-shadowed inside the guest. The real fix for the dispatch budget is a
+shadowed inside the guest. Registration itself is truthful (#576):
+script and scope arguments the JS rewriter minted into engine token
+routes are decoded back through the bounded zl:decodeRoutes oracle,
+the page register() promise settles only when the kernel confirms
+the guest realm is running, and a rejection carries the kernel real
+reason. One visible consequence stays: a page-realm caches read (a
+site own CacheStorage probe) sees the engine real, empty per-origin
+cache because guest caches live kernel-side, so such test pages
+honestly report "empty" while the guest serves its warmed cache on
+fetch. The real fix for the dispatch budget is a
 longer consultation window with cancellation, and for persistence a
 site-scoped store behind the same quotas; both stay unstarted. Full
-detail: docs/virtual-service-worker-phase2.md, #538 wave section.
+detail: docs/virtual-service-worker-phase2.md, #538 wave and #576
+sections.
 
 ## Opaque-sandbox frames bypass the engine interception
 

@@ -159,17 +159,25 @@ describe("guest kernel", () => {
     expect(k.active()[0].state).toBe("spawning");
   });
 
-  it("refuses a second spawn while the guest is running", () => {
+  it("#576: a same-identity re-register is a native-style success; a different script for the live origin is refused", () => {
     const k = new GuestKernel(() => 0);
     const host = new FakePort();
     k.registerHost(host);
     k.spawn(spawnMsg(), () => {});
     const origin = (host.sent[0] as { origin: string }).origin;
     host.deliver({ kind: "zl:guestSpawned", origin, port: new FakePort() });
+    /* Same scriptURL + scope: ok, no respawn (sites re-register on
+       every load; the native container also resolves this). */
     const again = collect();
     k.spawn(spawnMsg(), again.push);
-    expect(again.replies[0].ok).toBe(false);
-    expect(again.replies[0].error).toContain("already active");
+    expect(again.replies[0].ok).toBe(true);
+    expect(again.replies[0].origin).toBe(origin);
+    expect(host.sent.filter((m) => (m as { op?: string }).op === "spawn").length).toBe(1);
+    /* A different script for the same live origin is a real error. */
+    const third = collect();
+    k.spawn({ ...spawnMsg(), scriptURL: "https://a.example/sw2.js" }, third.push);
+    expect(third.replies[0].ok).toBe(false);
+    expect(third.replies[0].error).toContain("already active for this origin");
   });
 
   it("drops the record when the host reports a spawn failure", () => {

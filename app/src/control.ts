@@ -414,6 +414,18 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          script travels the normal policy/transport path and is bounded
          like a host spawn; the realm itself stays network-blind. */
       const gr = msg as unknown as { scriptURL?: unknown; scope?: unknown };
+      /* #576: every rejection is also a bounded diagnostic, so a
+         failed virtual registration is observable in the panel. */
+      const grReject = (error: string, technical: string): void => {
+        DIAG.emit({
+          category: "SERVICE_WORKER",
+          severity: "warning",
+          cause: "failure",
+          message: "guest register rejected",
+          technicalReason: technical.slice(0, 160),
+        });
+        reply({ ok: false, error });
+      };
       let pageUrl: string | null = null;
       const src = e.source as Client | null;
       if (src && src.url) {
@@ -424,7 +436,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         }
       }
       if (!pageUrl || typeof gr.scriptURL !== "string" || !gr.scriptURL) {
-        reply({ ok: false, error: "guest register needs a verified page and a script URL" });
+        grReject("guest register needs a verified page and a script URL", "no verified page or script URL");
         break;
       }
       let identity: ReturnType<typeof canonicalGuestRegistration>;
@@ -435,7 +447,10 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
           typeof gr.scope === "string" ? gr.scope : undefined,
         );
       } catch (err) {
-        reply({ ok: false, error: err instanceof TypeError ? err.message : "invalid guest registration" });
+        grReject(
+          err instanceof TypeError ? err.message : "invalid guest registration",
+          "canonicalGuestRegistration rejected the inputs",
+        );
         break;
       }
       let script = "";
@@ -446,11 +461,24 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         script = "";
       }
       if (script.length === 0 || script.length > GUEST_SCRIPT_MAX) {
-        reply({ ok: false, error: "guest script fetch failed, empty, or above the size cap" });
+        grReject(
+          "guest script fetch failed, empty, or above the size cap",
+          identity.scriptURL.slice(0, 120),
+        );
         break;
       }
+      DIAG.emit({
+        category: "SERVICE_WORKER",
+        severity: "info",
+        cause: "unknown",
+        message: "guest register accepted",
+        technicalReason: identity.origin,
+      });
+      /* #576: confirm true defers the reply until the kernel sees
+         zl:guestSpawned, so the page register() promise settles only
+         on a guest realm that is actually running. */
       guestSpawn(
-        { pageUrl: identity.origin + "/", scriptURL: identity.scriptURL, scope: identity.scope, script },
+        { pageUrl: identity.origin + "/", scriptURL: identity.scriptURL, scope: identity.scope, script, confirm: true },
         reply,
       );
       break;

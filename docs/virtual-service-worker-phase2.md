@@ -333,6 +333,41 @@ over getter-only accessors like a real Worker realm".
 - clients: claim() resolves, matchAll() resolves [] (no client
   enumeration), get() resolves undefined, openWindow() rejects.
 
+### #576: truthful registration end to end
+
+- Arguments: the JS-literal rewriter mints a proxied page's URL
+  literals into engine token routes, so register() can arrive with an
+  opaque engine URL as its script or scope argument. The shim
+  recognizes engine-origin arguments and asks the worker to decode
+  them over zl:decodeRoutes (page-admitted, bounded per message,
+  DECODE_ROUTES_MAX routes at 2048 chars each); a token that fails
+  to decode fails closed with a native-style TypeError("Origin"), and
+  a non-token argument passes through untouched.
+- Timing: a registration before the virtual-origin marker lands is
+  queued behind a bounded wait (baseWaitMs, 2 s, 25 ms poll) and
+  fails closed if the virtual base never arrives: the raw engine
+  route is never used as a registration base.
+- Settling: the register forward rides a reply port; the kernel
+  defers its reply until zl:guestSpawned (confirm: true), passes a
+  zl:guestSpawnFailed through, and reaps a dead handshake as "guest
+  spawn handshake timed out". The page promise therefore resolves
+  only on a guest realm that is actually running; the store is
+  written only after the kernel confirms, so a rejected registration
+  leaves prior records intact.
+- Same-identity re-register: a live realm with the same scriptURL and
+  scope answers ok without a respawn (native parity; real sites
+  re-register on every load); a caller arriving mid-spawn piggybacks
+  on the pending handshake. A different script for the live origin
+  still errors.
+- Diagnostics: every zl:guestRegister rejection emits a bounded
+  SERVICE_WORKER diagnostic ("guest register rejected"), and an
+  accepted registration emits "guest register accepted" before the
+  deferred spawn.
+- Verified: suite/e2e/guest-sw.mjs grows two checks (honest rejection
+  without a host, success after the host lands) and
+  https://webbrowsertools.com/test-service-worker/ reports "Service
+  worker is activated" through the engine.
+
 ### Honest limits of this wave (unchanged unless listed)
 
 - Guest caches are kernel-side and session-scoped: nothing survives
