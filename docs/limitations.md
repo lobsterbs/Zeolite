@@ -254,3 +254,31 @@ stylesheet bytes itself.
 - Only script src and link rel=stylesheet href integrity metadata
   is scanned; integrity passed to fetch() is ignored.
 
+## Import maps are recorded, not fully implemented
+
+Import map awareness (#554) has two seams with honest limits:
+
+- The wasm rewriter rewrites import map bodies: mapped values and
+  URL-like keys ride engine routes, bare and scope keys stay
+  verbatim, and a malformed or oversized (over 256 KiB) map
+  passes through unrewritten. Scope keys are rewritten only in
+  the split route form (origin token + verbatim path); a scope
+  key with a query or fragment is left alone.
+- A module worker created by the page resolves bare specifiers
+  through the owning page's recorded imports map at the serve
+  seam. Only the top-level imports member is honored: scope
+  resolution needs the URL of the importing module, which the
+  serve seam does not know, so scoped bare specifiers stay bare
+  and fail natively, exactly as before #554.
+- The per-page map registry is memory-only per service worker
+  lifetime: a worker restart forgets the maps, and later
+  workers fall back to the native bare-specifier failure until
+  the page is served again.
+- Array fallback targets return the first parseable http(s)
+  entry: resolution is by URL parse, not a probe, so a dead
+  first fallback is returned before a live second one, matching
+  what a fetch-time fallback would discover only after a
+  failed load.
+- Bare specifier resolution in page scripts (not workers) is
+  native: the browser resolves them against the REWRITTEN map
+  the rewriter served inline.
