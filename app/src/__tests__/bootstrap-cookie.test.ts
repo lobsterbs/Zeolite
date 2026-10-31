@@ -33,6 +33,14 @@ function installRealm(): { jarPort: PortLike | null; doc: Record<string, unknown
 
 const settle = () => new Promise<void>((res) => setTimeout(res, 0));
 
+/* CI timing (run 41224320035, app job): a MessagePort reply in Node is
+   a macrotask drained after the timers phase, so a single setTimeout(0)
+   tick can lose the race on a loaded runner and the jar view reads
+   empty. Poll bounded ticks until the reply condition holds. */
+async function ticks(until?: () => boolean, max = 200): Promise<void> {
+  for (let i = 0; i < max && !(until && until()); i++) await settle();
+}
+
 describe("deletionShaped (#534)", () => {
   it("detects max-age 0 and negative", () => {
     expect(deletionShaped("b=; Max-Age=0")).toBe(true);
@@ -56,14 +64,14 @@ describe("document.cookie optimistic copy (#534)", () => {
   it("serves the jar view after the reply lands", async () => {
     const { jarPort, doc } = installRealm();
     jarPort!.postMessage({ cookie: "a=1; b=2" });
-    await settle();
+    await ticks(() => (doc as unknown as Document).cookie === "a=1; b=2");
     expect((doc as unknown as Document).cookie).toBe("a=1; b=2");
   });
 
   it("a deletion-shaped write removes the name immediately (#534 contract)", async () => {
     const { jarPort, doc } = installRealm();
     jarPort!.postMessage({ cookie: "a=1; b=2" });
-    await settle();
+    await ticks(() => (doc as unknown as Document).cookie === "a=1; b=2");
     (doc as unknown as Document).cookie = "b=; Max-Age=0";
     /* no jar reply has landed: the stale value must already be gone */
     expect((doc as unknown as Document).cookie).toBe("a=1");
@@ -72,11 +80,11 @@ describe("document.cookie optimistic copy (#534)", () => {
   it("a plain write stays optimistic and a later jar reply corrects", async () => {
     const { jarPort, doc } = installRealm();
     jarPort!.postMessage({ cookie: "a=1" });
-    await settle();
+    await ticks(() => (doc as unknown as Document).cookie === "a=1");
     (doc as unknown as Document).cookie = "a=2";
     expect((doc as unknown as Document).cookie).toBe("a=2");
     jarPort!.postMessage({ cookie: "a=9" });
-    await settle();
+    await ticks(() => (doc as unknown as Document).cookie === "a=9");
     expect((doc as unknown as Document).cookie).toBe("a=9");
   });
 });
