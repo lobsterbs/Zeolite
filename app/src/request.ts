@@ -57,7 +57,14 @@ import { raceBoot } from "./lifecycle";
 
 
 import {PROXY_INJECTED_HEADERS, acceptLanguageValue, applyChUa, navigationAccept, secFetchHeaders, virtualOriginHeaders, virtualRefererFallback} from "./origin";
-import { capContexts, contextOf, establishContext, resolveRelative, VCTX_CAP } from "./vctx";
+import {
+  capContexts,
+  contextOf,
+  establishContext,
+  establishFromClientUrl,
+  resolveRelative,
+  VCTX_CAP,
+} from "./vctx";
 import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
 import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfilesReady, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
@@ -1639,6 +1646,55 @@ export function navhCleanFromPrel(pathname: string, dest: string): string | null
      as buildNavHandleUrl. */
   return NAVH + "/" + use + path + u.search + u.hash;
 }
+/* #535: a service-worker restart wipes the in-memory context map
+   while every proxied page it served stays open. The page's next
+   same-origin relative request arrives with a client id this fresh
+   worker has never seen; with the referrer stripped (a no-referrer
+   document, a SharedWorker that never had referrer semantics) the
+   recovery chain recovers nothing and the honest 404 strands a live
+   page. The fetch event carries the recovery key: the
+   browser-committed client URL, readable for every client this
+   worker controls and decodable only when engine-shaped. Rehydrate
+   the client's context from it once, on the first miss, then let the
+   ordinary resolution chain run. Fail-closed by construction: a
+   client URL that does not decode to an http(s) engine route (a
+   blob: worker client, the landing page) yields no context, so
+   those requests keep the honest error. The referrer survives
+   below this seam as the compatibility hint it already was. */
+async function rehydrateClientContext(
+  clientId: string | undefined,
+): Promise<import("./vctx").VirtualContext | undefined> {
+  if (!clientId) return undefined;
+  const known = contextOf(VCTX, clientId);
+  if (known) return known;
+  let client = null as null | Awaited<ReturnType<typeof self.clients.get>>;
+  try {
+    client = await raceBoot(
+      self.clients.get(clientId),
+      "virtual context rehydrate client lookup",
+      PRE_DEADLINE_BOUND_MS,
+    );
+  } catch {
+    /* boot-deadline miss: no context, the caller keeps the honest error */
+    return undefined;
+  }
+  if (!client || !client.url) return undefined;
+  const ctx = establishFromClientUrl(VCTX, clientId, client.url, decodeClientUrl);
+  if (!ctx) return undefined;
+  capContexts(VCTX, VCTX_CAP);
+  const rtid = DIAG.trace(clientId);
+  DIAG.emit({
+    traceId: rtid,
+    requestId: rtid,
+    category: "SERVICE_WORKER",
+    severity: "info",
+    stage: "REQUEST_INTERCEPTED",
+    message:
+      "virtual context rehydrated from the browser-committed client URL after a worker restart (#535)",
+    url: ctx.currentUrl,
+  });
+  return ctx;
+}
 function navOutcome(
   e: FetchEvent,
   url: URL,
@@ -2334,6 +2390,11 @@ export function handleFetch(e: FetchEvent): void {
           const stripped = url.pathname.slice(currentPrefix().length);
           const relTail = (stripped === "" ? "/" : stripped) + url.search;
           raw = resolveRelative(VCTX, e.clientId, relTail);
+          /* #535: a restarted worker has never seen this client id;
+             rehydrate the context from the browser-committed client
+             URL before the referrer compat fallback runs. */
+          if (!raw && (await rehydrateClientContext(e.clientId)))
+            raw = resolveRelative(VCTX, e.clientId, relTail);
           if (!raw && e.request.referrer)
             raw = referrerDest(e.request.referrer, relTail);
           if (raw) carriesQuery = false;
@@ -2415,9 +2476,17 @@ export function handleFetch(e: FetchEvent): void {
            segments, or a tail that does not decode to an http(s)
            destination) is untouched. */
         const legacyFirst = decodeLegacyRoute(url.pathname);
-        const ctxDest = legacyFirst
+        let ctxDest = legacyFirst
           ? null
           : resolveRelative(VCTX, e.clientId, url.pathname + url.search);
+        /* #535: a worker restart wiped this client's context; the
+           browser-committed client URL re-establishes it before the
+           bare path is declared unresolvable. */
+        if (!legacyFirst && !ctxDest) {
+          const rehydrated = await rehydrateClientContext(e.clientId);
+          if (rehydrated)
+            ctxDest = resolveRelative(VCTX, e.clientId, url.pathname + url.search);
+        }
         if (legacyFirst) {
           const ltid = DIAG.trace(e.resultingClientId || e.clientId);
           DIAG.emit({
@@ -2598,7 +2667,8 @@ export function handleFetch(e: FetchEvent): void {
            destination - the origin an unproxied page would have
            echoed into redir; the request's own route path backs
            the navh-handle fallback. */
-        const homeCtx = contextOf(VCTX, e.clientId);
+        const homeCtx =
+          contextOf(VCTX, e.clientId) ?? (await rehydrateClientContext(e.clientId));
         const homeOrigin =
           homeCtx && /^https?:/i.test(homeCtx.targetOrigin) ? homeCtx.targetOrigin : null;
         const fixed = passChallengeRedirFixed(target, self.location.origin, homeOrigin, url.pathname);
@@ -2657,7 +2727,8 @@ export function handleFetch(e: FetchEvent): void {
          even with an empty referrer); the client URL decode remains
          the fallback (unknown after a restart, for instance). */
       let initiator: string | undefined;
-      const ctx = contextOf(VCTX, e.clientId);
+      const ctx =
+        contextOf(VCTX, e.clientId) ?? (await rehydrateClientContext(e.clientId));
       if (ctx) initiator = ctx.currentUrl;
       if (initiator === undefined) {
         try {
@@ -3386,7 +3457,8 @@ export function handleFetch(e: FetchEvent): void {
              virtual context first (a SW-assigned key, not a page-supplied
              string); the referrer decode is the compat fallback.
              Navigations are top-level for lax purposes. */
-          const initCtx = contextOf(VCTX, e.clientId);
+          const initCtx =
+            contextOf(VCTX, e.clientId) ?? (await rehydrateClientContext(e.clientId));
           const reqCtx: CookieRequestContext = {
             /* #267: the jar profile follows the requesting client. */
             clientId: cookieClientId,

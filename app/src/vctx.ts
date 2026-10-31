@@ -109,3 +109,29 @@ export function capContexts(map: Map<string, VirtualContext>, max: number): void
     map.delete(id);
   }
 }
+
+/** #535: a service-worker restart wipes this map while every proxied
+    page it served stays open, and their next same-origin relative
+    request arrives with a client id the fresh worker has never seen.
+    The browser-committed client URL is the one recovery source the
+    worker can trust: decode it with the engine's own route decoder (a
+    parameter, keeping this module pure) and install the context whole.
+    Any URL the decoder rejects (a blob: worker client, the landing
+    page, a pushed non-route path) installs nothing: fail-closed, the
+    caller keeps the honest error. */
+export function establishFromClientUrl(
+  map: Map<string, VirtualContext>,
+  clientId: string,
+  clientUrl: string,
+  decode: (u: URL) => string | null,
+): VirtualContext | null {
+  let u: URL;
+  try {
+    u = new URL(clientUrl);
+  } catch {
+    return null;
+  }
+  const target = decode(u);
+  if (!target) return null;
+  return establishContext(map, clientId, target);
+}
