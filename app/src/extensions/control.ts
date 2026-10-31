@@ -324,8 +324,75 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
         reply({ ok: false, error: "no such extension" });
         break;
       }
-      const call = (ep.msg ?? {}) as { path?: unknown; args?: unknown };
+      const call = (ep.msg ?? {}) as { path?: unknown; args?: unknown; port?: unknown; name?: unknown };
       const path = Array.isArray(call.path) ? call.path : [];
+      /* #560: page-world runtime.connect opens a duplex port instead
+         of an RPC: the page transfers one MessageChannel end here and
+         the SW pairs it with a real extension port, so background
+         onConnect listeners receive the far end. The bridge owns
+         e.ports[0] for its lifetime; the RPC reply port is untouched. */
+      if (call.port === "connect") {
+        const chan = (e.ports && e.ports[0]) || null;
+        const pname = typeof call.name === "string" ? call.name : "";
+        if (!chan) {
+          reply({ ok: false, error: "connect needs a transferred port" });
+          break;
+        }
+        e.waitUntil(
+          wakeExtension(extId)
+            .then(() => {
+              const inner = MESSENGER.connect(extId, pname, {
+                extensionId: extId,
+                context: "extension-page",
+                url: srcUrl,
+              });
+              inner.onMessage((m) => {
+                try {
+                  chan.postMessage({ t: "m", msg: m });
+                } catch {
+                  /* page end already closed */
+                }
+              });
+              inner.onDisconnect(() => {
+                try {
+                  chan.postMessage({ t: "d" });
+                } catch {
+                  /* page end already closed */
+                }
+                chan.close();
+              });
+              chan.onmessage = (ev: MessageEvent) => {
+                const d = (ev.data ?? {}) as { t?: string; msg?: unknown };
+                if (d.t === "p") {
+                  try {
+                    inner.postMessage(d.msg);
+                  } catch {
+                    /* background port already disconnected */
+                  }
+                } else if (d.t === "d") {
+                  try {
+                    inner.disconnect();
+                  } catch {
+                    /* already disconnected */
+                  }
+                  chan.close();
+                }
+              };
+              chan.start();
+              chan.postMessage({ t: "ok" });
+            })
+            .catch((err: unknown) => {
+              try {
+                chan.postMessage({ t: "err", msg: String(err) });
+              } catch {
+                /* already closed */
+              }
+              chan.close();
+            }),
+        );
+        break;
+      }
+
       /* runtime.sendMessage needs the background booted to have
          listeners; other page calls answer from the shared context. */
       const wake =

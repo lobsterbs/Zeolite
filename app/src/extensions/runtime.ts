@@ -34,7 +34,7 @@ import { isApiDetached } from "./apis";
 import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
 import type { ExtensionStorageArea, StorageValue } from "./storage";
-import type { ExtensionMessenger, MessageListener, ConnectListener, MessageSender } from "./messaging";
+import type { ExtensionMessenger, MessageListener, ConnectListener, MessageSender, ExtensionPort } from "./messaging";
 import { ALARMS } from "./alarms";
 import type { Alarm, AlarmCreateInfo } from "./alarms";
 import { MGMT, infoOf } from "./management";
@@ -71,6 +71,51 @@ export interface ApiDeps {
       getMessage answers "" like Chrome answers a missing name. */
   i18n?: I18nResolved;
   manager?: ExtensionManager;
+}
+
+/* #560: Chrome Port shape over the raw ExtensionPort. Chrome
+   delivers connected ports with onMessage/onDisconnect as event
+   objects (addListener/removeListener/hasListener); the raw
+   ExtensionPort exposes them as subscribe methods, which TM-class
+   extension code cannot drive. */
+function chromePortShape(p: ExtensionPort): {
+  name: string;
+  sender: MessageSender;
+  postMessage(m: unknown): void;
+  disconnect(): void;
+  onMessage: { addListener(l: (m: unknown) => void): void; removeListener(l: (m: unknown) => void): void; hasListener(l: (m: unknown) => void): boolean };
+  onDisconnect: { addListener(l: () => void): void; removeListener(l: () => void): void; hasListener(l: () => void): boolean };
+} {
+  const msg: ((m: unknown) => void)[] = [];
+  const disc: (() => void)[] = [];
+  p.onMessage((m) => {
+    for (const l of msg) l(m);
+  });
+  p.onDisconnect(() => {
+    for (const l of disc) l();
+  });
+  return {
+    name: p.name,
+    sender: p.sender,
+    postMessage: (m: unknown) => p.postMessage(m),
+    disconnect: () => p.disconnect(),
+    onMessage: {
+      addListener: (l) => msg.push(l),
+      removeListener: (l) => {
+        const i = msg.indexOf(l);
+        if (i >= 0) msg.splice(i, 1);
+      },
+      hasListener: (l) => msg.includes(l),
+    },
+    onDisconnect: {
+      addListener: (l) => disc.push(l),
+      removeListener: (l) => {
+        const i = disc.indexOf(l);
+        if (i >= 0) disc.splice(i, 1);
+      },
+      hasListener: (l) => disc.includes(l),
+    },
+  };
 }
 
 function wrapArea(area: ExtensionStorageArea): Record<string, unknown> {
@@ -248,8 +293,13 @@ export function buildApi(
     sendMessage: (msg: unknown): Promise<unknown> =>
       deps.messenger.sendMessage(ext.id, sender, msg),
     onMessage: bridged<MessageListener>((l) => deps.messenger.onMessage(ext.id, l)),
-    connect: (name: string) => deps.messenger.connect(ext.id, name, sender),
-    onConnect: bridged<ConnectListener>((l) => deps.messenger.onConnect(ext.id, l)),
+    /* #560: both port surfaces are Chrome-shaped: onMessage and
+       onDisconnect are event objects, matching how TM-class
+       extension code drives a connected port. */
+    connect: (name: string) => chromePortShape(deps.messenger.connect(ext.id, name, sender)) as unknown as ExtensionPort,
+    onConnect: bridged<ConnectListener>((l) =>
+      deps.messenger.onConnect(ext.id, (raw) => l(chromePortShape(raw) as unknown as ExtensionPort)),
+    ),
     get lastError(): null {
       return null;
     },
