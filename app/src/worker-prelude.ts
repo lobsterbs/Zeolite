@@ -221,8 +221,9 @@ export function installWorkerPrelude(route: string): void {
           try {
             const mod = !!(o && o.type === "module");
             const bw = engineOrigin + "/zl-bw/?c=" + encodeURIComponent(JSON.stringify({ s: site, b: workerUrl }));
+            /* static import declaration for module wrappers (see relay.ts) */
             const src = mod
-              ? "await import(" + JSON.stringify(bw) + ");\n" + text
+              ? "import " + JSON.stringify(bw) + ";\n" + text
               : "importScripts(" + JSON.stringify(bw) + ");\n" + text;
             const wu = G.URL!.createObjectURL(new G.Blob!([src], { type: "text/javascript" }));
             const wk = new OW(wu, o);

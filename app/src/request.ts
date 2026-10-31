@@ -64,6 +64,7 @@ import {
   establishFromClientUrl,
   resolveRelative,
   VCTX_CAP,
+  type VirtualContext,
 } from "./vctx";
 import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
 import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfilesReady, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
@@ -1663,7 +1664,7 @@ export function navhCleanFromPrel(pathname: string, dest: string): string | null
    below this seam as the compatibility hint it already was. */
 async function rehydrateClientContext(
   clientId: string | undefined,
-): Promise<import("./vctx").VirtualContext | undefined> {
+): Promise<VirtualContext | undefined> {
   if (!clientId) return undefined;
   const known = contextOf(VCTX, clientId);
   if (known) return known;

@@ -72,7 +72,7 @@ describe("blob worker wrapper helpers (#537)", () => {
       'importScripts("' + prelude + '");\nSRC',
     );
     expect(zlBlobWrapSource("module", prelude, "SRC")).toBe(
-      'await import("' + prelude + '");\nSRC',
+      'import "' + prelude + '";\nSRC',
     );
   });
 });
@@ -213,7 +213,7 @@ describe("applyRelay blob worker wrapping (#537)", () => {
       const W = w.Worker as unknown as new (u: string, o?: unknown) => unknown;
       new W("blob:https://engine.host/mod", { type: "module" });
       const src = String((log.blobs[0].parts as string[])[0]);
-      expect(src.startsWith('await import("https://engine.host/zl-bw/?c=')).toBe(true);
+      expect(src.startsWith('import "https://engine.host/zl-bw/?c=')).toBe(true);
     });
   });
 
