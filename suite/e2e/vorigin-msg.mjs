@@ -9,7 +9,16 @@
    opaque-sandbox platform limit: a sandboxed frame without
    allow-same-origin bypasses the service worker entirely, so its
    document load serves the engine bypass notice instead of the page
-   (#533). Ports 6027/7128/7129 never collide with the other suites. */
+   (#533). Ports 6027/7128/7129 never collide with the other suites.
+
+   First CI execution (run 41187774104) failed the leaf chain: the
+   parent posted downToLeaf as soon as the leaf ELEMENT existed in
+   the mid DOM, before the leaf document installed its listener, so
+   the message was lost on a slow runner. The docPoll now waits for
+   the leaf run beacon (window.__zlLeafRun) before runMatrix, and
+   the mid leafUp handler records raw-vs-proxy tags for ev.source
+   and the live contentWindow read so any future identity divergence
+   names its side in the failure detail. */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
@@ -104,6 +113,9 @@ function midBody() {
 '    if (d.kind === "leafUp") {' +
 '      M.leafUpOrigin = ev.origin;' +
 '      M.leafUpSrcEqCW = (function () { try { var el = document.getElementById("leaf"); return ev.source === el.contentWindow; } catch (e) { return "ERR"; } })();' +
+'      try { M.srcTag = (ev.source.window === ev.source) ? "raw" : "proxy"; } catch (e) { M.srcTag = "err"; }' +
+'      try { var elX = document.getElementById("leaf"); M.cwTag = (elX.contentWindow.window === elX.contentWindow) ? "raw" : "proxy"; } catch (e) { M.cwTag = "err"; }' +
+'      try { M.srcStash = typeof ev.source.__zlNativePM === "function"; } catch (e) { M.srcStash = "err"; }' +
 '      try { window.parent.postMessage({ kind: "midUp" }, M.vo); M.midUpPost = "ok"; } catch (e) { M.midUpPost = "throw:" + String(e); }' +
 '    }' +
 '  });' +
@@ -137,7 +149,7 @@ function leafBody() {
 '    if ((typeof vo === "string" && vo) || Date.now() - t0 > 8000) run(typeof vo === "string" && vo ? vo : location.origin);' +
 '    else setTimeout(poll, 100);' +
 '  })();' +
-'  function run(vo) { L.vo = vo; L.realOrigin = location.origin; try { window.parent.postMessage({ kind: "leafUp" }, vo); L.leafUp = "ok"; } catch (e) { L.leafUp = "throw:" + String(e); } L.started = true; }' +
+'  function run(vo) { window.__zlLeafRun = true; L.vo = vo; L.realOrigin = location.origin; try { window.parent.postMessage({ kind: "leafUp" }, vo); L.leafUp = "ok"; } catch (e) { L.leafUp = "throw:" + String(e); } L.started = true; }' +
 '})();' +
 '</script></body></html>';
 }
@@ -180,7 +192,9 @@ function parentBody() {
 '    (function docPoll() {' +
 '      var midDoc = null;' +
 '      try { midDoc = IFR("mid").contentDocument; } catch (e) {}' +
-'      var midReady = !!(midDoc && midDoc.getElementById && midDoc.getElementById("leaf"));' +
+'      var leafWin = null; try { leafWin = (midDoc && midDoc.getElementById) ? midDoc.getElementById("leaf").contentWindow : null; } catch (e) {}' +
+'      var leafReady = false; try { leafReady = !!(leafWin && leafWin.__zlLeafRun); } catch (e) {}' +
+'      var midReady = !!(midDoc && midDoc.getElementById && midDoc.getElementById("leaf")) && leafReady;' +
 '      if (midReady || waited > 20000) { runMatrix(); return; }' +
 '      waited += 250; setTimeout(docPoll, 250);' +
 '    })();' +
@@ -349,7 +363,7 @@ function assertPass(mode, f) {
   ok(pm.downPortOk === true, mode + " downstream port round trip");
   ok(!!same && same.downPortPost === "ok", mode + " child posted on downstream port");
   const mid = f.mid;
-  ok(!!mid && mid.leafUpSrcEqCW === true, mode + " mid ev.source === leaf contentWindow (#533 fix)", mid && mid.leafUpSrcEqCW);
+  ok(!!mid && mid.leafUpSrcEqCW === true, mode + " mid ev.source === leaf contentWindow (#533 fix)", mid && JSON.stringify({ eq: mid.leafUpSrcEqCW, srcTag: mid.srcTag, cwTag: mid.cwTag, stash: mid.srcStash }));
   ok(!!mid && mid.midUpPost === "ok", mode + " mid relayed leafUp upward");
   ok(logIndexOf(pm, "midUp") !== -1, mode + " midUp delivered to parent");
   ok(logIndexOf(pm, "leafUp") !== -1 || logIndexOf(pm, "midUp") !== -1, mode + " leaf upward chain visible");
