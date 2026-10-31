@@ -6,8 +6,9 @@
    rows for the open (status 101) and the final close (code + byte
    totals), DIAG events for abnormal closes, and the tracing hook.
 
-   Pages route ws(s):// through the zl:wsOpen control message; ws:// is
-   upgraded to wss:// before a transport sees it. #511 adds the second
+   Pages route ws(s):// through the zl:wsOpen control message; ws://
+   passes through as plaintext over the same wisp tunnel (#511).
+   #511 adds the second
    factory: when the embedder registered a relay channel, the control
    plane opens page WebSockets on the relay bridge (embedder-side
    egress) instead of the wisp transport; both share this accounting

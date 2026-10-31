@@ -4896,6 +4896,23 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
   const skip = new Set([
     "host",
     "connection",
+    /* Hop-by-hop headers (RFC 7230 6.1) never travel upstream. The
+       physical browser attaches h2c upgrade tokens ("Upgrade: h2c",
+       "HTTP2-Settings", and a Connection header naming them) to
+       engine-origin navigations; replaying them upstream broke strict
+       origins (a Node server with an upgrade listener reads the replay
+       as a protocol upgrade, destroys the socket, and the page dies as
+       an empty-reply 502 - reproduced end to end by the #525
+       computed-sink suite fixture). */
+    "upgrade",
+    "http2-settings",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
     "referer",
     "origin",
     "cookie",
@@ -4913,6 +4930,17 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
        copying them upstream is a proxy tell no real browser sends. */
     ...PROXY_INJECTED_HEADERS,
   ]);
+  /* RFC 7230 6.1: every header the request's own Connection header names
+     is hop-by-hop for this hop too; the set above covers the tokens
+     observed in the wild, this covers whatever a browser or embedder
+     invents next. */
+  const connHeader = req.headers.get("connection");
+  if (connHeader) {
+    for (const tok of connHeader.split(",")) {
+      const name = tok.trim().toLowerCase();
+      if (name) skip.add(name);
+    }
+  }
   for (const [k, v] of req.headers) {
     if (!skip.has(k.toLowerCase())) out.set(k, v);
   }
