@@ -1,9 +1,1 @@
-//! JS rewriting entry points.
-
-pub mod antiframe;
-pub mod globals;
-pub mod literals;
-
-pub use antiframe::antiframe;
-pub use globals::rewrite_globals;
-pub use literals::{has_origin_pinning_regex, rewrite_inline, rewrite_script};
+[{"type":"resource","resource":{"uri":"sprite://mcp-zeolite-2/file?path=%2Fhome%2Fsprite%2Fz525%2Fcrates%2Frewriter%2Fsrc%2Fjs%2Fmod.rs&workingDir=%2Fhome%2Fsprite%2Fz525","mimeType":"text/plain","text":"//! JS rewriting entry points.\n\npub mod antiframe;\npub mod globals;\npub mod literals;\npub mod meta;\n\npub use antiframe::antiframe;\npub use globals::rewrite_globals;\npub use literals::{has_origin_pinning_regex, rewrite_inline, rewrite_script};\npub use meta::rewrite_import_meta_url;\n"}}]
