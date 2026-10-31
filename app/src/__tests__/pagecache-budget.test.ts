@@ -37,6 +37,7 @@ afterEach(() => {
 function setup(): void {
   (globalThis as { self?: unknown }).self = { location: { origin: "https://zl.test" } };
   (globalThis as { caches?: unknown }).caches = {
+    keys: async () => ["zeolite-pages-v2", "zeolite-pages-index-v1"],
     open: async (name: string) => name === "zeolite-pages-index-v1" ? indexCache : pageCache,
   };
 }
