@@ -116,8 +116,17 @@ export const zlBlobWrapSource = (kind: "classic" | "module", preludeUrl: string,
      dynamic-import shape (the CI SWIMPORT gate), and a static import
      evaluates the prelude before the module body either way. The
      /zl-bw/ response is a plain script with no exports, a valid ES
-     module, and blob-worker fetches reach the SW like any other. */
-  ? "import " + JSON.stringify(preludeUrl) + ";\n" + text
+     module, and blob-worker fetches reach the SW like any other.
+     The module wrapper also revokes its OWN blob URL at the end of
+     the module body: Chromium 131 resolves a module worker's blob
+     script asynchronously, after the constructor returns, so the
+     page-side immediate revoke that is safe for the synchronous
+     classic load would kill the module load instead (an empty
+     worker error event; the prelude import never reaches the SW).
+     The module body only runs once the load succeeded, so the
+     self-revoke is both late enough and bounded. */
+  ? "import " + JSON.stringify(preludeUrl) + ";\n" + text +
+    "\n;try{URL.revokeObjectURL(self.location.href)}catch{}"
   : "importScripts(" + JSON.stringify(preludeUrl) + ");\n" + text;
 
 export const zlSyncBlobText = (u: string): string | null => {
@@ -303,10 +312,16 @@ addEventListener("message", windowRelay);
    super(wrapped ?? u, o);
    this.addEventListener("message", relay);
    tapChannel(this);
-   /* #537: the wrapper blob is pinned by the worker's own pending
-      load (the same guarantee native code relies on when it revokes
-      a URL right after construction), so the entry can go now. */
-   if (wrapped) {
+   /* #537: the CLASSIC wrapper blob is pinned by the worker's own
+      synchronous pending load (the same guarantee native code relies
+      on when it revokes a URL right after construction), so the entry
+      can go now. A MODULE wrapper must NOT be revoked here: Chromium
+      131 resolves the module worker's blob script asynchronously,
+      after the constructor returns, so revoking now kills the load
+      (an empty worker error event; the prelude import never reaches
+      the SW). The module wrapper source self-revokes at the end of
+      its body instead (see zlBlobWrapSource). */
+   if (wrapped && (!o || o.type !== "module")) {
     try {
      URL.revokeObjectURL(wrapped);
     } catch { /* best effort */ }
