@@ -389,8 +389,10 @@ function validPageCacheUsage(value: unknown): value is PageCacheUsage {
 }
 
 async function writePageCacheUsage(req: Request, index: Cache | null, fields: string[], usage: PageCacheUsage): Promise<void> {
-  if (!index) return;
+  /* Keep exact in-memory accounting even when a minimal CacheStorage
+     host has no separate persistent metadata cache. */
   pageCacheUsage.set(pageCacheIdentity(req, fields), usage);
+  if (!index) return;
   const headers = new Headers({ "content-type": "application/json" });
   if (fields.length) headers.set("vary", fields.join(", "));
   try {
@@ -407,7 +409,7 @@ async function pageCacheUsageFor(req: Request, cache: Cache, index: Cache | null
   }
   const fields = (entry?.headers.get(ZL_VARY) ?? "").split(",").map((field) => field.trim().toLowerCase()).filter(Boolean);
   const identity = pageCacheIdentity(req, fields);
-  const memory = index ? pageCacheUsage.get(identity) : undefined;
+  const memory = pageCacheUsage.get(identity);
   if (memory) return { identity, fields, usage: memory };
   if (index) {
     try {
