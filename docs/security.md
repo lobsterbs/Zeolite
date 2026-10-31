@@ -442,6 +442,27 @@ check walks every captured request URL and the proxied page's
 resource-timing names and fails on any `/j/` or `/__zl_navh__/` tail
 that legacy-decodes to http(s); the list above is what it pins.
 
+## Virtual-origin postMessage identity (#533)
+
+Cross-window postMessage target origins are rewritten to the real
+engine origin and delivery runs the recipient's stashed native, so
+the incumbent realm of a delivered event is the genuine caller. The
+sender identity repair keeps strict page checks working in nested
+engine frames: a stashed child's ev.source is the identical proxy that
+iframe.contentWindow returns. The cache is a non-enumerable child-window
+slot (__zlCP, the same honest marker family as __zlVO and __zlNativePM)
+holding a map keyed by the minting realm's origin, so the contentWindow
+getter, the virtual-origin relabel and the window.parent seam converge
+on one proxy per child and realm even when the parent page's module
+instance and the child realm's own bootstrap instance both mint; a
+sealed child falls back to a per-instance WeakMap, and a child with no
+stash keeps its raw window identity. The control plane never rides
+postMessage. Direct-vs-proxied acceptance lives in
+suite/e2e/vorigin-msg.mjs (#533), which also pins the engine-origin
+ev.origin divergence, the delivered-only proxied classes (wrong-origin
+and cross-site slash posts), and the readable cross contentDocument
+divergence while cross-site storage and cookies stay partitioned.
+
 ## Known open items (honest, not fixed by 3.0)
 
 - SameSite approximation quality: referrer-derived site context is

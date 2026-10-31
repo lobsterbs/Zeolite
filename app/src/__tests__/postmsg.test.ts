@@ -124,8 +124,8 @@ describe("applyPostMessage (#128 -> #130 native delivery)", () => {
     const got = (proto as Record<string, unknown>).contentWindow as Record<string, unknown>;
     expect(got).not.toBe(child);
     expect(typeof got.postMessage).toBe("function");
-    expect(childProxyOf(child)).toBe(got);
-    expect(childProxyOf({})).toBeUndefined();
+    expect(childProxyOf(child, "https://engine.example")).toBe(got);
+    expect(childProxyOf({}, "https://engine.example")).toBeUndefined();
   });
 
   it("replays legacy three-arg calls for the real origin untouched", () => {
@@ -455,7 +455,7 @@ describe("mintChildProxy (#132 identity race)", () => {
     const b = mintChildProxy("https://engine.example", child);
     expect(a).toBe(b);
     expect(a).not.toBe(child);
-    expect(childProxyOf(child)).toBe(a);
+    expect(childProxyOf(child, "https://engine.example")).toBe(a);
   });
 
   it("keeps a stash-less child raw", () => {

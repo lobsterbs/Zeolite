@@ -257,13 +257,15 @@ jobs:
         # navEncode/makeRel fragment splits); measured 41025,
         # baseline 40570.
         # Raised 41216 -> 41408 for #538: the swshim page base
+        # Raised 41408 -> 41600 for #533: virtual-origin child-proxy realm cache
+        # Raised 41600 -> 41792 for #533: origin-keyed child-slot cache
         # resolves lazily (virtual-origin marker + injected vpath
         # at call time) so a page's relative register() lands on the
         # page's virtual URL; measured 41310, baseline 41025.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 41408 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 41408)"; exit 1; fi
+          if [ "$SIZE" -ge 41792 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 41792)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
@@ -568,6 +570,23 @@ jobs:
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
             grep -E "^\[FAIL\]|HARNESS-ERROR" csp.out | head -20 | while IFS= read -r l; do echo "::error::CSP $l"; done
+            exit 1
+          fi
+      - name: Virtual-origin postMessage suite (#533)
+        # Direct-vs-proxied acceptance for the virtual-origin
+        # messaging seam: nested-frame ev.source identity converges
+        # with iframe.contentWindow (the __zlCP child slot keyed
+        # by the minting realm origin), MessageChannel port
+        # transfers work both ways, cross-site storage stays
+        # partitioned while the proxied cross contentDocument
+        # readability divergence is pinned, and opaque-sandbox
+        # frames that bypass the engine receive the bypass notice.
+        # Ports 6027/7128/7129 never collide with the other suites.
+        run: |
+          node suite/e2e/vorigin-msg.mjs 2>&1 | tee vorigin.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\[FAIL\]|HARNESS-ERROR" vorigin.out | head -20 | while IFS= read -r l; do echo "::error::VORIGIN $l"; done
             exit 1
           fi
       - name: Injector differential suite (queryRoutes off vs on)

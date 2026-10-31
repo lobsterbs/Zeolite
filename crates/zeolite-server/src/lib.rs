@@ -27,7 +27,7 @@ use axum::{
     extract::{connect_info::ConnectInfo, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -1010,6 +1010,30 @@ async fn deny_sensitive(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// #533: engine routes are served by the engine's service worker, and
+/// the server normally never sees them. Chromium never asks the
+/// worker for some contexts - measured with CDP
+/// (Network.responseReceived.fromServiceWorker false on the frame
+/// document request): a sandboxed frame (an iframe whose sandbox
+/// attribute omits allow-same-origin, so the frame origin is opaque)
+/// loads its document navigation browser-direct, so an
+/// engine-routed sandboxed frame hit the static fallback and
+/// rendered a silent blank page. The route tokens are worker-state
+/// MACs and deliberately unreadable here, so the server cannot
+/// proxy the document; it answers the fixed engine-route shapes
+/// with this honest notice instead. Rotated zl:config prefixes are
+/// worker-side and keep the plain 404 (a documented residual).
+const ENGINE_BYPASS_NOTICE: &str = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Zeolite engine route</title></head>\n<body style=\"font: 14px/1.5 system-ui, sans-serif; color: #222; margin: 3rem auto; max-width: 34rem;\">\n<h1>Zeolite engine route</h1>\n<p>This address is a route of the Zeolite browsing engine and loads\nthrough the engine itself. The browser reached it without the\nengine (for example from a frame whose sandbox attribute removes\nsame-origin access, or after the engine was removed), so the\ndocument cannot be shown here.</p>\n<p>Open the address in a page controlled by the engine, or give the\nembedding frame same-origin access.</p>\n</body></html>\n";
+
+async fn engine_bypass_notice() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [("cache-control", "no-store")],
+        Html(ENGINE_BYPASS_NOTICE),
+    )
+        .into_response()
+}
+
 pub fn build_app(shared: Arc<Shared>) -> Router {
     // Name the active resolver at startup: the pinned-DNS choice
     // (src/dns.rs) must be visible in every embedder's logs.
@@ -1018,6 +1042,14 @@ pub fn build_app(shared: Arc<Shared>) -> Router {
     let frame_ancestors = shared.cfg.frame_ancestors.clone();
     Router::new()
         .route("/wisp/", get(wisp_handler))
+        /* #533: fixed engine-route shapes that bypass the service
+           worker (a sandboxed frame, measured on Chromium) answer the
+           honest notice page. Explicit routes win over the static
+           fallback; controlled traffic never reaches the server. */
+        .route("/j/*rest", get(engine_bypass_notice))
+        .route("/__zl_nav__/*rest", get(engine_bypass_notice))
+        .route("/__zl_prel__/*rest", get(engine_bypass_notice))
+        .route("/__zl_navh__/*rest", get(engine_bypass_notice))
         .fallback_service(
             tower_http::services::ServeDir::new(static_dir).append_index_html_on_directories(true),
         )
@@ -3324,6 +3356,34 @@ mod tests {
     // ---- Socket-level auth and exposure tests (2026-10-07 audit).
     // The CONTINUE-first bypass could not be caught by check_auth
     // unit tests: only a real socket drives the handshake loop. ----
+
+    /// #533: an engine-route document the browser loads without the
+    /// service worker (a sandboxed frame, measured on Chromium with
+    /// CDP fromServiceWorker=false) must land on the honest notice
+    /// page, not a silent bare 404. A plain static miss keeps its
+    /// bare 404.
+    #[tokio::test]
+    async fn engine_route_bypass_serves_notice() {
+        let addr = serve_app(Config::default()).await;
+        async fn get_path(addr: SocketAddr, path: &str) -> String {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut buf = Vec::new();
+            s.read_to_end(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        for path in ["/j/sometoken", "/__zl_nav__/eHl6", "/__zl_navh__/tok/p", "/__zl_prel__/tail"] {
+            let text = get_path(addr, path).await;
+            let head = text.lines().next().unwrap_or_default().to_string();
+            assert!(head.contains("404"), "{path}: {head}");
+            assert!(text.contains("Zeolite engine route"), "{path}: notice body missing");
+        }
+        let text = get_path(addr, "/definitely-not-a-file").await;
+        let head = text.lines().next().unwrap_or_default().to_string();
+        assert!(head.contains("404"), "{head}");
+        assert!(!text.contains("Zeolite engine route"), "a static miss must keep its bare 404");
+    }
 
     /// Bind the real axum app on an ephemeral port, with ConnectInfo.
     async fn serve_app(cfg: Config) -> SocketAddr {
