@@ -1,1 +1,125 @@
-[{"type":"resource","resource":{"uri":"sprite://mcp-zeolite-2/file?path=app%2Fsrc%2Fextensions%2Fpagebridge.ts&workingDir=%2Fhome%2Fsprite%2FZeolite","mimeType":"text/plain","text":"/* Zeolite extension subsystem: the extension-page bridge (#40).\n\n   Served at /zl-ext/<id>/__page.js with a config embedded ahead of\n   this source by serve.ts. The bridge turns browser.* calls on an\n   extension-origin page (options, popup) into zl:extPage RPCs over a\n   MessageChannel to the service worker. The SW verifies the sender is\n   a client registered as that extension's page, then walks the\n   extension's real API object, so the API surface here is exactly\n   what the SW whitelist allows.\n\n   getURL stays client-side: an extension page's package resources\n   live on this origin under /zl-ext/<id>/.\n\n   No events, no ports: the page cannot receive pushes, and the SW\n   refuses those paths (documented in ./compat). */\n\nexport const PAGE_BRIDGE_SOURCE = `(function () {\n  \"use strict\";\n  var cfg = ZL_PAGE_CFG;\n  function ctl() {\n    return navigator.serviceWorker && navigator.serviceWorker.controller;\n  }\n  function call(path, args) {\n    return new Promise(function (resolve, reject) {\n      var c = ctl();\n      if (!c) {\n        reject(new Error(\"zeolite: page not controlled by the engine service worker\"));\n        return;\n      }\n      var mc = new MessageChannel();\n      var t = setTimeout(function () {\n        reject(new Error(\"zeolite: extension page call timed out\"));\n      }, 30000);\n      mc.port1.onmessage = function (ev) {\n        clearTimeout(t);\n        var d = ev.data || {};\n        if (d.ok) resolve(d.response);\n        else reject(new Error(d.error || \"zeolite: extension page call failed\"));\n      };\n      c.postMessage({ type: \"zl:extPage\", extId: cfg.ext, msg: { path: path, args: args } }, [mc.port2]);\n    });\n  }\n  var browser = {};\n  for (var i = 0; i < cfg.calls.length; i++) {\n    (function (dotted) {\n      var segs = dotted.split(\".\");\n      var node = browser;\n      for (var j = 0; j < segs.length - 1; j++) {\n        if (!node[segs[j]]) node[segs[j]] = {};\n        node = node[segs[j]];\n      }\n      node[segs[segs.length - 1]] = function () {\n        return call(segs, Array.prototype.slice.call(arguments));\n      };\n    })(cfg.calls[i]);\n  }\n  browser.runtime = browser.runtime || {};\n  browser.runtime.id = cfg.ext;\n  browser.runtime.getURL = function (p) {\n    return cfg.base + (p.charAt(0) === \"/\" ? p : \"/\" + p);\n  };\n  for (var n = 0; cfg.ns && n < cfg.ns.length; n++) {\n    if (!browser[cfg.ns[n]]) browser[cfg.ns[n]] = {};\n  }\n  if (browser.extension && browser.extension.inIncognitoContext === undefined) {\n    browser.extension.inIncognitoContext = false;\n  }\n  /* #560: chrome.i18n in the page world. The SW embeds the package\n     resolved _locales in ZL_PAGE_CFG; getMessage expands $NAME$\n     placeholders first (their content may itself carry $n), then\n     maps $1..$9 onto the substitutions; a missing name answers \"\"\n     like Chrome. getAcceptLanguages keeps its callback/promise dual\n     shape through chromeApi. */\n  if (cfg.i18n) {\n    var msgs = cfg.i18n.messages || {};\n    browser.i18n = browser.i18n || {};\n    browser.i18n.getMessage = function (name, subs) {\n      if (typeof name !== \"string\") return \"\";\n      var e = msgs[name.toLowerCase()];\n      if (!e || typeof e.message !== \"string\") return \"\";\n      var arr = Array.isArray(subs)\n        ? subs.map(String)\n        : subs === undefined || subs === null\n          ? []\n          : [String(subs)];\n      var out = \"\";\n      var m = e.message;\n      for (var i = 0; i < m.length; i++) {\n        if (m.charAt(i) !== \"$\") { out += m.charAt(i); continue; }\n        var j = m.indexOf(\"$\", i + 1);\n        if (j === -1) { out += \"$\"; continue; }\n        var inner = m.slice(i + 1, j);\n        var ph = e.placeholders && e.placeholders[inner.toLowerCase()];\n        if (/^[A-Za-z0-9_@]+$/.test(inner) && ph !== undefined) {\n          out += ph;\n          i = j;\n        } else {\n          out += \"$\";\n        }\n      }\n      var fin = \"\";\n      for (var k = 0; k < out.length; k++) {\n        if (out.charAt(k) !== \"$\") { fin += out.charAt(k); continue; }\n        var inner2 = out.slice(k + 1, k + 2);\n        if (/^[1-9]$/.test(inner2)) {\n          var idx = Number(inner2) - 1;\n          if (idx < arr.length) { fin += arr[idx]; k += 1; continue; }\n        }\n        fin += \"$\";\n      }\n      return fin;\n    };\n    browser.i18n.getUILanguage = function () { return cfg.i18n.locale; };\n    browser.i18n.getAcceptLanguages = function () {\n      return Promise.resolve(\n        navigator.languages && navigator.languages.length\n          ? Array.prototype.slice.call(navigator.languages)\n          : [cfg.i18n.locale],\n      );\n    };\n  }\n  window.browser = browser;\n  window.chrome = browser;\n})();\n`;\n"}}]
+/* Zeolite extension subsystem: the extension-page bridge (#40).
+
+   Served at /zl-ext/<id>/__page.js with a config embedded ahead of
+   this source by serve.ts. The bridge turns browser.* calls on an
+   extension-origin page (options, popup) into zl:extPage RPCs over a
+   MessageChannel to the service worker. The SW verifies the sender is
+   a client registered as that extension's page, then walks the
+   extension's real API object, so the API surface here is exactly
+   what the SW whitelist allows.
+
+   getURL stays client-side: an extension page's package resources
+   live on this origin under /zl-ext/<id>/.
+
+   No events, no ports: the page cannot receive pushes, and the SW
+   refuses those paths (documented in ./compat). */
+
+export const PAGE_BRIDGE_SOURCE = `(function () {
+  "use strict";
+  var cfg = ZL_PAGE_CFG;
+  function ctl() {
+    return navigator.serviceWorker && navigator.serviceWorker.controller;
+  }
+  function call(path, args) {
+    return new Promise(function (resolve, reject) {
+      var c = ctl();
+      if (!c) {
+        reject(new Error("zeolite: page not controlled by the engine service worker"));
+        return;
+      }
+      var mc = new MessageChannel();
+      var t = setTimeout(function () {
+        reject(new Error("zeolite: extension page call timed out"));
+      }, 30000);
+      mc.port1.onmessage = function (ev) {
+        clearTimeout(t);
+        var d = ev.data || {};
+        if (d.ok) resolve(d.response);
+        else reject(new Error(d.error || "zeolite: extension page call failed"));
+      };
+      c.postMessage({ type: "zl:extPage", extId: cfg.ext, msg: { path: path, args: args } }, [mc.port2]);
+    });
+  }
+  var browser = {};
+  for (var i = 0; i < cfg.calls.length; i++) {
+    (function (dotted) {
+      var segs = dotted.split(".");
+      var node = browser;
+      for (var j = 0; j < segs.length - 1; j++) {
+        if (!node[segs[j]]) node[segs[j]] = {};
+        node = node[segs[j]];
+      }
+      node[segs[segs.length - 1]] = function () {
+        return call(segs, Array.prototype.slice.call(arguments));
+      };
+    })(cfg.calls[i]);
+  }
+  browser.runtime = browser.runtime || {};
+  browser.runtime.id = cfg.ext;
+  browser.runtime.getURL = function (p) {
+    return cfg.base + (p.charAt(0) === "/" ? p : "/" + p);
+  };
+  for (var n = 0; cfg.ns && n < cfg.ns.length; n++) {
+    if (!browser[cfg.ns[n]]) browser[cfg.ns[n]] = {};
+  }
+  if (browser.extension && browser.extension.inIncognitoContext === undefined) {
+    browser.extension.inIncognitoContext = false;
+  }
+  /* #560: chrome.i18n in the page world. The SW embeds the package
+     resolved _locales in ZL_PAGE_CFG; getMessage expands $NAME$
+     placeholders first (their content may itself carry $n), then
+     maps $1..$9 onto the substitutions; a missing name answers ""
+     like Chrome. getAcceptLanguages keeps its callback/promise dual
+     shape through chromeApi. */
+  if (cfg.i18n) {
+    var msgs = cfg.i18n.messages || {};
+    browser.i18n = browser.i18n || {};
+    browser.i18n.getMessage = function (name, subs) {
+      if (typeof name !== "string") return "";
+      var e = msgs[name.toLowerCase()];
+      if (!e || typeof e.message !== "string") return "";
+      var arr = Array.isArray(subs)
+        ? subs.map(String)
+        : subs === undefined || subs === null
+          ? []
+          : [String(subs)];
+      var out = "";
+      var m = e.message;
+      for (var i = 0; i < m.length; i++) {
+        if (m.charAt(i) !== "$") { out += m.charAt(i); continue; }
+        var j = m.indexOf("$", i + 1);
+        if (j === -1) { out += "$"; continue; }
+        var inner = m.slice(i + 1, j);
+        var ph = e.placeholders && e.placeholders[inner.toLowerCase()];
+        if (/^[A-Za-z0-9_@]+$/.test(inner) && ph !== undefined) {
+          out += ph;
+          i = j;
+        } else {
+          out += "$";
+        }
+      }
+      var fin = "";
+      for (var k = 0; k < out.length; k++) {
+        if (out.charAt(k) !== "$") { fin += out.charAt(k); continue; }
+        var inner2 = out.slice(k + 1, k + 2);
+        if (/^[1-9]$/.test(inner2)) {
+          var idx = Number(inner2) - 1;
+          if (idx < arr.length) { fin += arr[idx]; k += 1; continue; }
+        }
+        fin += "$";
+      }
+      return fin;
+    };
+    browser.i18n.getUILanguage = function () { return cfg.i18n.locale; };
+    browser.i18n.getAcceptLanguages = function () {
+      return Promise.resolve(
+        navigator.languages && navigator.languages.length
+          ? Array.prototype.slice.call(navigator.languages)
+          : [cfg.i18n.locale],
+      );
+    };
+  }
+  window.browser = browser;
+  window.chrome = browser;
+})();
+`;

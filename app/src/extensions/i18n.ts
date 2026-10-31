@@ -1,1 +1,125 @@
-[{"type":"resource","resource":{"uri":"sprite://mcp-zeolite-2/file?path=app%2Fsrc%2Fextensions%2Fi18n.ts&workingDir=%2Fhome%2Fsprite%2FZeolite","mimeType":"text/plain","text":"/* Zeolite extension subsystem: chrome.i18n (#560 residual).\n\n   getMessage answers from the package's own _locales exactly like\n   Chrome resolves at runtime: candidate locales are the worker\n   navigator's language, its primary subtag, then the manifest\n   default_locale; the first messages.json that exists wins. Lookups\n   are case-insensitive (Chrome folds message names); a missing name\n   answers \"\". $NAME$ placeholders from the entry expand first (their\n   content may itself carry $n), then $1..$9 map onto the\n   substitutions. getUILanguage/getAcceptLanguages report the resolved\n   locale - the engine has no locale host beyond the worker's\n   navigator, which compat.ts states plainly. detectLanguage is\n   absent: no language detector ships in a service-worker engine. */\n\nexport interface I18nEntry {\n  message: string;\n  placeholders: Record<string, string>;\n}\n\nexport interface I18nResolved {\n  locale: string;\n  messages: Record<string, I18nEntry>;\n}\n\n/* Chrome folds message names case-insensitively; message keys here\n   lowercase on parse so getMessage(\"Hello\") == getMessage(\"HELLO\").\n   Placeholder names lowercase the same way. */\nexport function messagesFromJson(raw: unknown): Record<string, I18nEntry> {\n  if (typeof raw !== \"object\" || raw === null) return {};\n  const out: Record<string, I18nEntry> = {};\n  for (const [key, v] of Object.entries(raw as Record<string, unknown>)) {\n    const name = key.toLowerCase();\n    if (typeof v === \"string\") {\n      out[name] = { message: v, placeholders: {} };\n      continue;\n    }\n    if (typeof v !== \"object\" || v === null) continue;\n    const msg = (v as Record<string, unknown>).message;\n    if (typeof msg !== \"string\") continue;\n    const ph: Record<string, string> = {};\n    const rawPh = (v as Record<string, unknown>).placeholders;\n    if (typeof rawPh === \"object\" && rawPh !== null) {\n      for (const [pk, pv] of Object.entries(rawPh as Record<string, unknown>)) {\n        if (\n          typeof pv === \"object\" &&\n          pv !== null &&\n          typeof (pv as Record<string, unknown>).content === \"string\"\n        ) {\n          ph[pk.toLowerCase()] = (pv as Record<string, unknown>).content as string;\n        }\n      }\n    }\n    out[name] = { message: msg, placeholders: ph };\n  }\n  return out;\n}\n\nexport async function resolvePackageI18n(\n  defaultLocale: string,\n  read: (path: string) => Promise<Uint8Array | null>,\n): Promise<I18nResolved> {\n  const nav =\n    typeof navigator !== \"undefined\" && typeof navigator.language === \"string\"\n      ? navigator.language\n      : \"\";\n  const candidates: string[] = [];\n  if (nav) {\n    candidates.push(nav);\n    const primary = nav.split(\"-\")[0];\n    if (primary && primary !== nav) candidates.push(primary);\n  }\n  if (defaultLocale) candidates.push(defaultLocale);\n  for (const lc of candidates) {\n    for (const p of [\"_locales/\" + lc + \"/messages.json\", \"/_locales/\" + lc + \"/messages.json\"]) {\n      const bytes = await read(p);\n      if (!bytes) continue;\n      try {\n        return { locale: lc, messages: messagesFromJson(JSON.parse(new TextDecoder().decode(bytes))) };\n      } catch {\n        /* malformed messages.json: keep looking; Chrome falls back too */\n      }\n    }\n  }\n  return { locale: defaultLocale || \"en\", messages: {} };\n}\n\nexport function i18nGetMessage(res: I18nResolved, name: unknown, substitutions?: unknown): string {\n  if (typeof name !== \"string\") return \"\";\n  const entry = res.messages[name.toLowerCase()];\n  if (!entry) return \"\";\n  const subs: string[] = Array.isArray(substitutions)\n    ? substitutions.map(String)\n    : substitutions === undefined || substitutions === null\n      ? []\n      : [String(substitutions)];\n  /* Placeholders first: their content may itself carry $n. */\n  let out = entry.message.replace(/\\$([A-Za-z0-9_@]+)\\$/g, (full, key: string) => {\n    const ph = entry.placeholders[key.toLowerCase()];\n    return ph !== undefined ? ph : full;\n  });\n  out = out.replace(/\\$([1-9])/g, (full, d: string) => {\n    const i = Number(d) - 1;\n    return i < subs.length ? subs[i] : full;\n  });\n  return out;\n}\n\nexport function makeI18nNs(res: I18nResolved): {\n  getMessage(name: unknown, substitutions?: unknown): string;\n  getUILanguage(): string;\n  getAcceptLanguages(): Promise<string[]>;\n} {\n  return {\n    getMessage: (name, substitutions) => i18nGetMessage(res, name, substitutions),\n    getUILanguage: () => res.locale,\n    getAcceptLanguages: () =>\n      Promise.resolve(\n        typeof navigator !== \"undefined\" &&\n          Array.isArray(navigator.languages) &&\n          navigator.languages.length\n          ? [...navigator.languages]\n          : [res.locale],\n      ),\n  };\n}\n"}}]
+/* Zeolite extension subsystem: chrome.i18n (#560 residual).
+
+   getMessage answers from the package's own _locales exactly like
+   Chrome resolves at runtime: candidate locales are the worker
+   navigator's language, its primary subtag, then the manifest
+   default_locale; the first messages.json that exists wins. Lookups
+   are case-insensitive (Chrome folds message names); a missing name
+   answers "". $NAME$ placeholders from the entry expand first (their
+   content may itself carry $n), then $1..$9 map onto the
+   substitutions. getUILanguage/getAcceptLanguages report the resolved
+   locale - the engine has no locale host beyond the worker's
+   navigator, which compat.ts states plainly. detectLanguage is
+   absent: no language detector ships in a service-worker engine. */
+
+export interface I18nEntry {
+  message: string;
+  placeholders: Record<string, string>;
+}
+
+export interface I18nResolved {
+  locale: string;
+  messages: Record<string, I18nEntry>;
+}
+
+/* Chrome folds message names case-insensitively; message keys here
+   lowercase on parse so getMessage("Hello") == getMessage("HELLO").
+   Placeholder names lowercase the same way. */
+export function messagesFromJson(raw: unknown): Record<string, I18nEntry> {
+  if (typeof raw !== "object" || raw === null) return {};
+  const out: Record<string, I18nEntry> = {};
+  for (const [key, v] of Object.entries(raw as Record<string, unknown>)) {
+    const name = key.toLowerCase();
+    if (typeof v === "string") {
+      out[name] = { message: v, placeholders: {} };
+      continue;
+    }
+    if (typeof v !== "object" || v === null) continue;
+    const msg = (v as Record<string, unknown>).message;
+    if (typeof msg !== "string") continue;
+    const ph: Record<string, string> = {};
+    const rawPh = (v as Record<string, unknown>).placeholders;
+    if (typeof rawPh === "object" && rawPh !== null) {
+      for (const [pk, pv] of Object.entries(rawPh as Record<string, unknown>)) {
+        if (
+          typeof pv === "object" &&
+          pv !== null &&
+          typeof (pv as Record<string, unknown>).content === "string"
+        ) {
+          ph[pk.toLowerCase()] = (pv as Record<string, unknown>).content as string;
+        }
+      }
+    }
+    out[name] = { message: msg, placeholders: ph };
+  }
+  return out;
+}
+
+export async function resolvePackageI18n(
+  defaultLocale: string,
+  read: (path: string) => Promise<Uint8Array | null>,
+): Promise<I18nResolved> {
+  const nav =
+    typeof navigator !== "undefined" && typeof navigator.language === "string"
+      ? navigator.language
+      : "";
+  const candidates: string[] = [];
+  if (nav) {
+    candidates.push(nav);
+    const primary = nav.split("-")[0];
+    if (primary && primary !== nav) candidates.push(primary);
+  }
+  if (defaultLocale) candidates.push(defaultLocale);
+  for (const lc of candidates) {
+    for (const p of ["_locales/" + lc + "/messages.json", "/_locales/" + lc + "/messages.json"]) {
+      const bytes = await read(p);
+      if (!bytes) continue;
+      try {
+        return { locale: lc, messages: messagesFromJson(JSON.parse(new TextDecoder().decode(bytes))) };
+      } catch {
+        /* malformed messages.json: keep looking; Chrome falls back too */
+      }
+    }
+  }
+  return { locale: defaultLocale || "en", messages: {} };
+}
+
+export function i18nGetMessage(res: I18nResolved, name: unknown, substitutions?: unknown): string {
+  if (typeof name !== "string") return "";
+  const entry = res.messages[name.toLowerCase()];
+  if (!entry) return "";
+  const subs: string[] = Array.isArray(substitutions)
+    ? substitutions.map(String)
+    : substitutions === undefined || substitutions === null
+      ? []
+      : [String(substitutions)];
+  /* Placeholders first: their content may itself carry $n. */
+  let out = entry.message.replace(/\$([A-Za-z0-9_@]+)\$/g, (full, key: string) => {
+    const ph = entry.placeholders[key.toLowerCase()];
+    return ph !== undefined ? ph : full;
+  });
+  out = out.replace(/\$([1-9])/g, (full, d: string) => {
+    const i = Number(d) - 1;
+    return i < subs.length ? subs[i] : full;
+  });
+  return out;
+}
+
+export function makeI18nNs(res: I18nResolved): {
+  getMessage(name: unknown, substitutions?: unknown): string;
+  getUILanguage(): string;
+  getAcceptLanguages(): Promise<string[]>;
+} {
+  return {
+    getMessage: (name, substitutions) => i18nGetMessage(res, name, substitutions),
+    getUILanguage: () => res.locale,
+    getAcceptLanguages: () =>
+      Promise.resolve(
+        typeof navigator !== "undefined" &&
+          Array.isArray(navigator.languages) &&
+          navigator.languages.length
+          ? [...navigator.languages]
+          : [res.locale],
+      ),
+  };
+}
