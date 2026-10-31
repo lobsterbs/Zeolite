@@ -846,6 +846,186 @@ async function main() {
     return out;
   });
 
+  /* ---- cookie surface (#534) --------------------------------------
+     The cookieStore facade, the optimistic document.cookie deletion,
+     per-site jar scoping and the SameSite matrix under the approx
+     knob. The cross-site fixture hostname is a *.localhost name:
+     Chromium maps it to loopback by spec and glibc resolves it, and
+     its registrable domain differs from 127.0.0.1, so it is genuinely
+     cross-site for both native Chromium and the schemeful jar key.
+     Honest residuals, matching docs/cookies.md: the SameSite knob is
+     an approximation (every engine request is engine-initiated and the
+     site context comes from the verified virtual initiator, not a
+     reduced Referer), and Secure cookies are not readable on http
+     pages and not attached over http requests, native-consistent. */
+
+  await check("api: cookieStore facade is jar-backed (#534)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const out = await evalIn(frame, "cookiestore", `async () => {
+      if (typeof cookieStore !== "object" || cookieStore === null) return JSON.stringify({ facade: false });
+      await cookieStore.set("zl_cs", "1");
+      const after = await cookieStore.getAll();
+      const rec = await cookieStore.get("zl_cs");
+      await cookieStore.delete({ name: "zl_cs", path: "/" });
+      const gone = await cookieStore.getAll();
+      return JSON.stringify({
+        facade: true,
+        set: after.some((i) => i.name === "zl_cs" && i.value === "1"),
+        get: !!rec && rec.value === "1" && !("domain" in rec),
+        deleted: !gone.some((i) => i.name === "zl_cs"),
+        domainMember: after.some((i) => "domain" in i),
+      });
+    }`);
+    const r = JSON.parse(out);
+    assert(r.facade, "no cookieStore facade in the proxied page");
+    assert(r.set, "set/getAll round-trip failed: " + out);
+    assert(r.get, "get() record wrong: " + out);
+    assert(r.deleted, "delete did not remove the record: " + out);
+    assert(!r.domainMember, "records leaked a domain member: " + out);
+    return out;
+  });
+
+  await check("api: cookieStore change event and HttpOnly hiding (#534)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const out = await evalIn(frame, "cschange", `async () => {
+      const events = [];
+      cookieStore.addEventListener("change", (e) => events.push(e));
+      await fetch("/setcookie3");
+      const t0 = Date.now();
+      while (!events.some((e) => e.changed.some((i) => i.name === "fxs")) && Date.now() - t0 < 8000) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      await fetch("/setcookie4");
+      await new Promise((r) => setTimeout(r, 800));
+      const items = await cookieStore.getAll();
+      return JSON.stringify({
+        fxsEvent: events.some((e) => e.changed.some((i) => i.name === "fxs")),
+        hasFxs: items.some((i) => i.name === "fxs"),
+        hasFxh: items.some((i) => i.name === "fxh"),
+        fxhInEvents: events.some((e) => [...e.changed, ...e.deleted].some((i) => i.name === "fxh")),
+        docCookie: document.cookie,
+      });
+    }`, 20000);
+    const r = JSON.parse(out);
+    assert(r.fxsEvent, "change event never named fxs: " + out);
+    assert(r.hasFxs, "fxs missing from getAll: " + out);
+    assert(!r.hasFxh, "HttpOnly fxh leaked into the facade: " + out);
+    assert(!r.fxhInEvents, "HttpOnly fxh leaked into a change event: " + out);
+    assert(!r.docCookie.includes("fxh"), "HttpOnly fxh leaked into document.cookie: " + out);
+    return out;
+  });
+
+  await check("api: document.cookie deletion leaves no stale readable value (#534)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const out = await evalIn(frame, "cookiedel", `async () => {
+      document.cookie = "zl_del=1; path=/";
+      const before = document.cookie;
+      document.cookie = "zl_del=1; Max-Age=0; path=/";
+      const after = document.cookie;
+      return JSON.stringify({ before, after });
+    }`);
+    const r = JSON.parse(out);
+    assert(r.before.includes("zl_del=1"), "set not visible: " + out);
+    assert(!r.after.includes("zl_del"), "stale value readable after deletion: " + out);
+    return out;
+  });
+
+  await check("api: virtual-site cookie isolation (#534)", async () => {
+    const { frame } = await openProxied("http://cookietest.localhost:7101/dir/page.html");
+    const outA = await evalIn(frame, "isoA", `async () => {
+      await cookieStore.set("zl_iso", "a");
+      return JSON.stringify(await cookieStore.getAll());
+    }`);
+    assert(JSON.parse(outA).some((i) => i.name === "zl_iso"), "zl_iso not set on the fixture host: " + outA);
+    const { frame: frameB } = await openProxied(ORIGIN_B + "/dir/page.html");
+    const outB = await evalIn(frameB, "isoB", `async () => {
+      return JSON.stringify({ items: await cookieStore.getAll(), doc: document.cookie });
+    }`);
+    const r = JSON.parse(outB);
+    assert(!r.items.some((i) => i.name === "zl_iso"), "cross-site facade leak: " + outB);
+    assert(!r.doc.includes("zl_iso"), "cross-site document.cookie leak: " + outB);
+    return outB;
+  });
+
+  await check("api: SameSite matrix under the approx knob (#534)", async () => {
+    const SS_A = "http://cookietest.localhost:7101";
+    const SS_B = "http://cookietest.localhost:7102";
+    const { page: pageA, frame: frameA } = await openProxied(SS_A + "/dir/page.html");
+    const knob = await hostControl(pageA, { type: "zl:sameSite", policy: "approx" });
+    assert(knob?.ok !== false, "sameSite knob rejected: " + JSON.stringify(knob));
+    /* Seed the three cookies same-site; ssNone is Secure so it is
+       stored but never readable on this http page. */
+    const seeded = await evalIn(frameA, "ssseed", `async () => {
+      await fetch("/setsamesite?c=strict");
+      await fetch("/setsamesite?c=lax");
+      await fetch("/setsamesite?c=none");
+      await new Promise((r) => setTimeout(r, 500));
+      return JSON.stringify((await cookieStore.getAll()).map((i) => i.name));
+    }`, 20000);
+    const seededNames = JSON.parse(seeded);
+    assert(seededNames.includes("ssStrict") && seededNames.includes("ssLax"),
+      "Strict/Lax cookies missing from the facade: " + seeded);
+    assert(!seededNames.includes("ssNone"),
+      "Secure None cookie readable on an http page: " + seeded);
+    /* Same-site subresource (same scheme and registrable domain,
+       different port): Strict and Lax attach; the Secure None
+       cookie is not attached over http. */
+    const { page: pageSame, frame: frameSame } = await openProxied(SS_B + "/dir/page.html");
+    await hostControl(pageSame, { type: "zl:sameSite", policy: "approx" });
+    const sameSite = await evalIn(frameSame, "sssame", `async () => {
+      const r = await fetch("${SS_A}/zl-echocookie", { credentials: "include" });
+      return await r.text();
+    }`);
+    assert(sameSite && sameSite.includes("ssStrict=1") && sameSite.includes("ssLax=1"),
+      "same-site subresource did not attach Strict/Lax: " + JSON.stringify(sameSite));
+    assert(!sameSite.includes("ssNone"), "Secure cookie attached over http: " + JSON.stringify(sameSite));
+    /* Cross-site subresource: neither Strict nor Lax attaches. */
+    const { page: pageX, frame: frameX } = await openProxied(ORIGIN_B + "/dir/page.html");
+    await hostControl(pageX, { type: "zl:sameSite", policy: "approx" });
+    const crossSite = await evalIn(frameX, "sscross", `async () => {
+      const r = await fetch("${SS_A}/zl-echocookie", { credentials: "include" });
+      return await r.text();
+    }`);
+    assert(!crossSite || (!crossSite.includes("ssStrict") && !crossSite.includes("ssLax")),
+      "cross-site subresource attached Strict/Lax: " + JSON.stringify(crossSite));
+    /* Cross-site navigation from the ORIGIN_B page to SS_A: the
+       request is navigation-shaped (mode navigate) with a verified
+       cross-site initiator, so Lax attaches and Strict does not
+       under the schemeful approx. #276: the two subresource legs
+       carry credentials include, the contract a cross-origin
+       (different port) or cross-site fetch needs before the jar
+       considers any cookie at all. */
+    await evalIn(frameX, "ssnavgo", `async () => {
+      const a = document.createElement("a");
+      a.id = "zl-nav-go";
+      a.href = "${SS_A}/nav-cookie.html";
+      a.textContent = "go";
+      document.body.appendChild(a);
+    }`);
+    /* Trusted input: the navguard only routes user-driven clicks. */
+    await frameX.locator("#zl-nav-go").click();
+    /* The navguard serves the trusted click at a navh handle route
+       (/nav-cookie.html?zlNavh=...), not an opaque /j/ route, so the
+       frame search matches the route by prefix, not via frameWith. */
+    const navFrame = await waitFor("nav-cookie frame", 45000, async () => {
+      for (const f of pageX.frames()) {
+        try {
+          if (!f.url().startsWith(ENGINE + "/nav-cookie.html")) continue;
+          if ((await f.locator("#zl-nav-cookie").count()) > 0) return f;
+        } catch {}
+      }
+      return null;
+    });
+    const navCookie = await evalIn(navFrame, "ssnav", `async () => {
+      return document.getElementById("zl-nav-cookie").textContent;
+    }`);
+    assert(navCookie.includes("ssLax=1"), "navigation did not attach Lax: " + navCookie);
+    assert(!navCookie.includes("ssStrict"), "navigation attached Strict: " + navCookie);
+    /* Restore the shipped default for every later check. */
+    await hostControl(pageA, { type: "zl:sameSite", policy: "off" });
+    return "lax/strict/none matrix ok";
+  });
+
   /* ---- pass-through invariant (#96) --------------------------------
      The NativeTransit contract: a request classified native leaves
      the browser's semantics intact. The identical probe suite runs
@@ -1506,11 +1686,27 @@ async function main() {
     return "same-site only";
   });
 
-  await check("isolation: cookieStore is absent, not faked (#37)", async () => {
+  await check("isolation: cookieStore is the jar-backed facade, never the native store (#37, #534)", async () => {
+    /* #37 removed the native engine-origin CookieStore; #534 replaces
+       the removal with the per-virtual-site facade. The invariant that
+       survives: the page NEVER holds the engine-origin native store. */
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
-    const t = await evalIn(frame, "cookieStore type", `() => typeof window.cookieStore`);
-    eq(t, "undefined", "cookieStore must be removed (documented absence), not faked");
-    return "absent";
+    const out = await evalIn(frame, "cookieStore facade", `async () => {
+      if (typeof window.cookieStore !== "object" || !window.cookieStore) return "missing";
+      const rec = await cookieStore.get("zl_absent_probe");
+      const entries = await cookieStore.getAll();
+      return JSON.stringify({
+        own: Object.keys(window.cookieStore).sort().join(","),
+        probeNull: rec === null,
+        noDomain: entries.every((i) => !("domain" in i)),
+      });
+    }`);
+    const r = JSON.parse(out);
+    assert(r.own === "addEventListener,delete,get,getAll,onchange,removeEventListener,set",
+      "facade surface changed: " + out);
+    assert(r.probeNull, "get() of a missing name must resolve null: " + out);
+    assert(r.noDomain, "facade records leaked a domain member: " + out);
+    return "facade";
   });
 
   await check("privacy: no browser-direct fixture request in the network capture (#34)", async () => {

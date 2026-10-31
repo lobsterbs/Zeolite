@@ -4,7 +4,8 @@
 
 import { buildNavHandleUrl, buildQueryHandleUrl, currentPrefix, decodeClientUrl, encodeDest, mintableDest, setScheme } from "./codec";
 import type { JarConflictRule } from "./cookies";
-import { documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
+import { cookieStoreOp, documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
+import type { FacadeCookie } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
 import { GUEST_SCRIPT_MAX, guestRegisterHost, guestSpawn, guestTerminate, type GuestPortLike } from "./kernel/guests/executor";
 /* #477: canonical registration identity; inputs from untrusted pages
@@ -952,14 +953,26 @@ case "zl:tracing":
         reply({ ok: false, error: "bad zl:docCookie" });
         break;
       }
-      const handle = (set?: unknown) => {
+      /* #534: the same port also carries cookieStore facade ops
+         ({ cs, rid }); the reply echoes rid and adds the structured
+         record view. The document.cookie shim ignores both extras. */
+      type CsMsg = { op?: unknown; init?: unknown; rid?: unknown };
+      const handle = (set?: unknown, cs?: CsMsg) => {
         /* #267: the port's own client scopes the jar view. */
         const cid = (e.source as { id?: string } | null)?.id;
         if (typeof set === "string") documentCookieWrite(origin, set, cid);
-        port.postMessage({ ok: true, cookie: documentCookieRead(origin, cid) });
+        let items: FacadeCookie[] | undefined;
+        if (cs && typeof cs === "object" && typeof cs.rid === "number") {
+          const init = cs.init && typeof cs.init === "object" ? (cs.init as Record<string, unknown>) : undefined;
+          items = cookieStoreOp(typeof cs.op === "string" ? cs.op : undefined, init, origin, cid).items;
+        }
+        port.postMessage({ ok: true, cookie: documentCookieRead(origin, cid), items, rid: cs?.rid });
       };
-      handle(msg.set);
-      port.onmessage = (ev: MessageEvent) => handle((ev.data as { set?: unknown }).set);
+      handle(msg.set, (msg as { cs?: CsMsg }).cs);
+      port.onmessage = (ev: MessageEvent) => {
+        const d = ev.data as { set?: unknown; cs?: CsMsg };
+        handle(d.set, d.cs);
+      };
       /* #35: keep the port so the fetch path can push jar updates
          (Set-Cookie on a proxied response) into this client's
          optimistic document.cookie copy. Same origin-trust rule as the

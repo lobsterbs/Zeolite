@@ -21,12 +21,14 @@
      anchor by name, parent.frames["a-<id>"], so an empty name broke
      the widget's cross-frame channel); top-level windows have no
      frame element and still start from empty.
-   - cookieStore: it reads the real engine-origin cookie jar, not the
-     virtual per-site jar. It cannot be implemented correctly on top of
-     the jar (async semantics, change events) without faking, so it is
-     removed and feature detection sees an absent API that falls back
-     to the virtual document.cookie - honest absence, never a fake
-     (issue #37 constraint: do not fake APIs).
+   - cookieStore: #534 replaces the #37 removal with a per-virtual-
+     site facade over the authoritative jar: get/getAll/set/delete,
+     change events and expiry semantics ride the same zl:docCookie
+     control channel as document.cookie, never the native
+     engine-origin CookieStore. The record omits the upstream Domain
+     string (the page host is opaque), a page-supplied Domain is
+     ignored (host-only admission), and HttpOnly records are never
+     exposed (the #337 rule).
 
    Every install is defineProperty-based: on a read-only context the
    API stays native and the gap is documented (docs/matrix.md). Plain
@@ -34,6 +36,7 @@
    no-ops in the classic sloppy-mode bundle - the #35 lesson. */
 
 import type { ScopedStorages } from "./storage";
+import { applyCookieStore } from "./cookiestore";
 
 /* The real channel the wrapper forwards to. */
 interface RealChannel {
@@ -318,16 +321,21 @@ export function applyIsolation(
   }
 
   /* ---- cookieStore ----------------------------------------------------- */
+  /* #534: the #37 removal is replaced by the per-virtual-site
+     facade (never the native engine-origin CookieStore). Same
+     install discipline as every other surface here: a window that
+     refuses the install keeps the native API and the gap is
+     documented in docs/matrix.md. */
   try {
-    /* Delete when configurable, so "cookieStore" in window is false. */
     delete (w as unknown as Record<string, unknown>).cookieStore;
   } catch {
-    /* not configurable: the undefined shim below applies */
+    /* not configurable: the defineProperty below may still apply */
   }
   try {
-    if (w.cookieStore !== undefined) {
+    const store = applyCookieStore(P.slice(3, -1), w);
+    if (store) {
       Object.defineProperty(w, "cookieStore", {
-        value: undefined,
+        value: store,
         configurable: true,
       });
     }

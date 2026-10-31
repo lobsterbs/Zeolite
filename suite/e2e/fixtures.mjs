@@ -330,6 +330,36 @@ export function startFixture(port) {
            cache would serve it without an upstream hit, so the jar
            admission the probe needs would never run). */
         send(res, "text/plain", "cookie-set", { "set-cookie": "fx2=1; Path=/" });
+      } else if (path === "/setcookie3") {
+        /* #534: a readable cookie for the cookieStore change-event
+           check; one Set-Cookie per response so the answer never
+           depends on how a multi-header value was joined. */
+        send(res, "text/plain", "cookie-set", { "set-cookie": "fxs=1; Path=/" });
+      } else if (path === "/setcookie4") {
+        /* #534: an HttpOnly cookie the facade and document.cookie must
+           both hide. */
+        send(res, "text/plain", "cookie-set", { "set-cookie": "fxh=1; Path=/; HttpOnly" });
+      } else if (path === "/setsamesite") {
+        /* #534: one SameSite matrix cookie per call (c=strict|lax|none).
+           None carries Secure; loopback origins are trustworthy, so
+           Chromium stores it and so does the jar admission. */
+        const c = (req.url ?? "").split("?")[1]?.split("=")[1];
+        const ck = c === "strict" ? "ssStrict=1; Path=/; SameSite=Strict"
+          : c === "lax" ? "ssLax=1; Path=/; SameSite=Lax"
+          : c === "none" ? "ssNone=1; Path=/; SameSite=None; Secure"
+          : null;
+        if (!ck) { res.writeHead(400).end(); return; }
+        send(res, "text/plain", "cookie-set", { "set-cookie": ck });
+      } else if (path === "/zl-echocookie") {
+        /* #534: the exact Cookie header the request carried. */
+        send(res, "application/json", JSON.stringify({ cookie: req.headers.cookie ?? "" }),
+          { "cache-control": "no-store" });
+      } else if (path === "/nav-cookie.html") {
+        /* #534: top-level navigation attachment proof: the fixture
+           renders the Cookie header of the navigation request itself
+           into the document. */
+        send(res, "text/html; charset=utf-8",
+          `<!doctype html><p id="zl-nav-cookie">${(req.headers.cookie ?? "").replace(/</g, "&lt;")}</p>`);
       } else if (path === "/sw-probe.js") {
         send(res, "text/javascript", "self.addEventListener('install', () => {});\n");
       } else if (path === "/api/methods") {
@@ -538,7 +568,11 @@ document.getElementById("zl-spa-go").addEventListener("click", function () {
     });
   });
   return new Promise((resolve) => {
-    server.listen(port, "127.0.0.1", () => {
+    /* #534: dual-stack loopback. The *.localhost cross-site fixture
+     hostname resolves to ::1 first on glibc (nss myhostname) and to
+     127.0.0.1 inside Chromium; binding "::" serves both without
+     changing the 127.0.0.1 origins every other check uses. */
+  server.listen(port, "::", () => {
       resolve({
         server,
         origin,
