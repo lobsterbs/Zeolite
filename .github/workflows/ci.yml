@@ -648,6 +648,20 @@ jobs:
             grep -E "^\\[FAIL\\]|HARNESS-ERROR" sri.out | head -20 | while IFS= read -r l; do echo "::error::SRI $l"; done
             exit 1
           fi
+      - name: Import map suite (#554)
+        # Real-Chromium acceptance for import-map awareness: the wasm
+        # rewriter keeps page import maps resolvable (values ride engine
+        # routes, bare keys stay), and the engine records each served
+        # document's map so module workers resolve bare specifiers
+        # through the owning page's map at the serve seam; unknown bare
+        # specifiers still fail natively. Ports 6036/7136 never collide.
+        run: |
+          node suite/e2e/importmap.mjs 2>&1 | tee impmap.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\\[FAIL\\]|HARNESS-ERROR" impmap.out | head -20 | while IFS= read -r l; do echo "::error::IMPMAP $l"; done
+            exit 1
+          fi
       - name: Injector differential suite (queryRoutes off vs on)
         run: |
           node suite/e2e/differential.mjs 2>&1 | tee diff.out

@@ -35,6 +35,36 @@ describe("routeModuleSpecifier", () => {
 
 });
 
+describe("routeModuleSpecifier #554 bare resolver", () => {
+  const map = (spec: string) =>
+    spec === "react" ? "https://esm.sh/react@18" : null;
+
+  it("routes a bare specifier the resolver maps, through the engine codec", () => {
+    const out = routeModuleSpecifier(P, W, E, "react", map);
+    expect(out.startsWith(P)).toBe(true);
+    expect(decodePath(out)).toBe("https://esm.sh/react@18");
+  });
+
+  it("keeps a bare specifier verbatim on a resolver miss or absence", () => {
+    expect(routeModuleSpecifier(P, W, E, "nope", map)).toBe("nope");
+    expect(routeModuleSpecifier(P, W, E, "react")).toBe("react");
+    expect(routeModuleSpecifier(P, W, E, "react", () => null)).toBe("react");
+  });
+
+  it("returns an engine-local mapped target verbatim", () => {
+    expect(routeModuleSpecifier(P, W, E, "react", () => E + "/local.js")).toBe(E + "/local.js");
+  });
+
+  it("routes bare specifiers end to end in a worker body", () => {
+    const src = 'import { h } from "react";\nexport { x } from "react-dom/client"';
+    const out = rewriteModuleWorkerImports(P, W, E, src, (spec) =>
+      spec === "react" ? "https://esm.sh/react" : spec === "react-dom/client" ? "https://esm.sh/react-dom/client" : null,
+    );
+    expect(decodePath(out.match(/from "([^"]+)"/)![1])).toBe("https://esm.sh/react");
+    expect(decodePath(out.match(/export \{ x \} from "([^"]+)"/)![1])).toBe("https://esm.sh/react-dom/client");
+  });
+});
+
 describe("rewriteModuleWorkerImports", () => {
   it("rewrites static import, side-effect import and export-from", () => {
     const src = [
@@ -56,6 +86,16 @@ describe("rewriteModuleWorkerImports", () => {
   it("leaves bare specifiers, import.meta and non-import code untouched", () => {
     const src = 'import x from "react";\nconst u = import.meta.url;\nconst s = "from \\"not-a-spec\\"";';
     expect(rewriteModuleWorkerImports(P, W, E, src)).toBe(src);
+  });
+
+  it("#554 a classic worker body (no import heads) passes through verbatim", () => {
+    /* The serve pass is mode-agnostic by contract: Chromium sends a
+       module worker script fetch with mode "same-origin" and
+       destination "worker", identical to a classic worker fetch, so
+       both kinds share one pass. A classic body has no import
+       heads, so the pass must be a verbatim no-op for it. */
+    const src = "self.onmessage = (e) => postMessage(e.data * 2);";
+    expect(rewriteModuleWorkerImports(P, W, E, src, () => "https://esm.sh/x")).toBe(src);
   });
 
   it("is a pure text pass: same input, same output", () => {

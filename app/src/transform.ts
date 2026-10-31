@@ -17,6 +17,7 @@ import { initScript, initSplicePoint } from "./pageload";
 import { currentPrefix } from "./codec";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { sriScanner } from "./sri";
+import { importmapScanner } from "./importmaps";
 
 /** SW-side state seam (issue #86). */
 export interface TransformDeps {
@@ -212,6 +213,10 @@ export function rewriteStream(
      the decoded upstream text before the rewriter drops the
      integrity attributes (see sri.ts). */
   onSri?: (abs: string, integrity: string) => void,
+  /* #554: optional collector for the document import maps; fed
+     the raw import-map script bodies of the decoded upstream
+     text (see importmaps.ts). */
+  onImportmap?: (body: string) => void,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const modP = rewriter();
@@ -242,6 +247,10 @@ export function rewriteStream(
            body (injectInit=false) is programmatic data, never a
            document with subresource integrity metadata. */
         const sriScan = onSri && injectInit && /html/i.test(contentType) ? sriScanner(base, onSri) : null;
+        /* #554: same document shape as the SRI scan - a served
+           document import maps are recorded for module-worker
+           bare-specifier resolution (see importmaps.ts). */
+        const mapScan = onImportmap && injectInit && /html/i.test(contentType) ? importmapScanner(onImportmap) : null;
         const emit = (out: string) => {
           if (out) controller.enqueue(encoder.encode(out));
         };
@@ -284,7 +293,7 @@ export function rewriteStream(
                sequence truncated at end-of-stream used to be dropped
                silently (issue B). */
             let rest = decoder === null ? "" : decoder.decode();
-            if (rest) sriScan?.feed(rest);
+            if (rest) sriScan?.feed(rest); mapScan?.feed(rest);
             if (!injected) {
               if (decoder === null) {
                 decoder = makeDecoder(resolveCharset(contentType, cat(held), true));
@@ -292,7 +301,7 @@ export function rewriteStream(
                 /* #531: a single-chunk document held entirely before the
                    decoder resolved builds its head here - the one head
                    build that never passed a feed site. */
-                sriScan?.feed(head);
+                sriScan?.feed(head); mapScan?.feed(head);
                 held = [];
                 rest = decoder.decode();
               } else {
@@ -311,13 +320,13 @@ export function rewriteStream(
           }
           if (injected) {
             const t = decoder!.decode(value, { stream: true });
-            sriScan?.feed(t);
+            sriScan?.feed(t); mapScan?.feed(t);
             emit(rw.process(t));
             reportLocation(rw, base);
             continue;
           }
           if (decoder !== null) {
-            { const t = decoder.decode(value, { stream: true }); sriScan?.feed(t); head += t; }
+            { const t = decoder.decode(value, { stream: true }); sriScan?.feed(t); mapScan?.feed(t); head += t; }
           } else {
             held.push(value);
             heldLen += value.length;
@@ -325,7 +334,7 @@ export function rewriteStream(
                Three bytes suffice to decide every supported BOM. */
             if (heldLen < (headerLabel ? 3 : 1024)) continue;
             decoder = makeDecoder(resolveCharset(contentType, cat(held), true));
-            { const t = decoder.decode(cat(held), { stream: true }); sriScan?.feed(t); head += t; }
+            { const t = decoder.decode(cat(held), { stream: true }); sriScan?.feed(t); mapScan?.feed(t); head += t; }
             held = [];
           }
           const at = initSplicePoint(head);
