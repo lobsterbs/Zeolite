@@ -468,6 +468,59 @@ ev.origin divergence, the delivered-only proxied classes (wrong-origin
 and cross-site slash posts), and the readable cross contentDocument
 divergence while cross-site storage and cookies stay partitioned.
 
+## Engine-side subresource integrity (#531)
+
+A rewriting proxy cannot serve browser-native SRI: the page's
+integrity attribute hashes the upstream bytes, and the engine
+rewrites every script and stylesheet body it serves, so transformed
+bytes can never match an upstream hash. The hash of the transformed
+body cannot ride the already-served HTML either. The rewriter
+therefore drops browser-facing integrity attributes from script and
+link tags, and the engine verifies integrity itself.
+
+The chain (app/src/sri.ts, unit-gated in sri.test.ts, browser-gated
+by suite/e2e/sri.mjs):
+
+- Document serves scan their decoded upstream text pre-rewrite
+  (incremental scanner, chunk-boundary safe, entity-decoded URLs)
+  and record (absolute subresource URL, integrity metadata) pairs
+  into a per-client registry. Memory-only by design, like the #33
+  virtual-context map: a worker restart forgets expectations and the
+  next document serve repopulates them. Bounded: 128 entries per
+  client, 256 clients, 256 KiB scanned text, 64 KiB tag hold.
+- A navigation clears the stale page's expectations for the
+  resulting client before the new document's scan repopulates them.
+- Fresh GET 200-299 script and stylesheet subresources with a live
+  expectation verify over RAW upstream bytes with WebCrypto
+  (SHA-256/384/512) before any transform runs. A blocked body never
+  reaches the page: the engine serves a 500 no-store response with a
+  JS/CSS-typed comment body and the x-zl-sri: blocked marker.
+- The x-zl-sri response header carries the decision: verified,
+  blocked, skipped:body-too-large (4 MiB raw-body cap),
+  skipped:unsupported-algorithm, skipped:malformed,
+  skipped:no-candidates, skipped:cache-transformed-body.
+- Unsupported algorithms fall back to the compatibility serve,
+  which is parity, not divergence: Chromium skips tokens with
+  unknown algorithms and, with no supported candidate left, ignores
+  the attribute entirely. Pinned by the direct-mode controls in
+  suite/e2e/sri.mjs.
+- Cache contract: documents and stylesheets are stored raw, so
+  cache-hit serves verify again over the stored raw bytes and a
+  tampered cached stylesheet still blocks. Cached script entries
+  hold TRANSFORMED copies (the fresh path's composed branches store
+  their own bodies), so a cache-hit script records the verdict but
+  never blocks: a mismatch there is ambiguous between tampered
+  storage and a legitimately rewritten body, and verification
+  already ran over the raw upstream bytes when the entry was fresh.
+
+Honest residuals: only script src and link rel=stylesheet href tags
+are scanned (preload/modulepreload destinations inherit the
+script gate only when the browser issues them as script
+destinations); integrity metadata the page passes to fetch() is
+ignored (the request is a programmatic read, not a subresource
+load); and bodies over the 4 MiB cap serve with the
+skipped:body-too-large marker rather than blocking.
+
 ## Known open items (honest, not fixed by 3.0)
 
 - SameSite approximation quality: referrer-derived site context is

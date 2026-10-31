@@ -306,3 +306,39 @@ describe("stream lifecycle (#201)", () => {
   });
 });
 
+
+describe("rewriteStream (#531 sri collector)", () => {
+  it("collects script and stylesheet integrity pairs from a served document", async () => {
+    const notes: Array<[string, string]> = [];
+    const doc =
+      '<html><head><script src="/a.js" integrity="sha256-AAA"></script>' +
+      '<link rel="stylesheet" href="/s.css" integrity="sha512-BBB"></head><body>hi</body></html>';
+    await readAll(
+      rewriteStream(streamOf([doc]), BASE, {}, [], "text/html", undefined, true, (abs, integ) =>
+        notes.push([abs, integ]),
+      ),
+    );
+    expect(notes).toEqual([
+      ["https://target.example/a.js", "sha256-AAA"],
+      ["https://target.example/s.css", "sha512-BBB"],
+    ]);
+  });
+
+  it("holds a tag split across chunks and skips collection for fetch/XHR html", async () => {
+    const notes: Array<[string, string]> = [];
+    const doc = '<html><head><script src="/split.js" integrity="sha256-K"></script></head></html>';
+    await readAll(
+      rewriteStream(streamOf([doc.slice(0, 22), doc.slice(22)]), BASE, {}, [], "text/html", undefined, true, (abs, integ) =>
+        notes.push([abs, integ]),
+      ),
+    );
+    expect(notes).toEqual([["https://target.example/split.js", "sha256-K"]]);
+    const none: Array<[string, string]> = [];
+    await readAll(
+      rewriteStream(streamOf([doc]), BASE, {}, [], "text/html", undefined, false, (abs, integ) =>
+        none.push([abs, integ]),
+      ),
+    );
+    expect(none).toEqual([]);
+  });
+});
