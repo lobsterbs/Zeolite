@@ -65,7 +65,8 @@ remain untouched. This cap bounds AST work, **not total response buffering**:
 the pre-existing URL-literal/HTML raw-script paths can still retain larger
 bodies. Streaming candidate passthrough needs a separate pipeline change.
 
-Each rewriter retains at most 32 pending reason records; the service worker
+Each rewriter retains at most 32 pending reason records (newer events past
+the bound are dropped, not queued); the service worker
 drains those into the existing bounded diagnostic ring. Reasons distinguish
 `disabled`, `no-candidate`, `size-cap`, `parse-failure`, `no-reads` and
 `rewritten`. Messages contain only fixed reason names and counts, never source
@@ -80,15 +81,19 @@ apply these controls.
 
 - Decide the default-off migration without regressing existing deployments.
 - Bound total candidate buffering across the other rewrite passes.
-- Scoreboard (nightly compat run) evidence for the auto-marked origins and
-  the shipped play2048.co rule; the heuristic has not been measured against
-  a live corpus yet.
+- Scoreboard evidence for the auto-marked origins now exists at engine level
+  (real Chromium probe in `suite/e2e/location-targeting.mjs`: corroborated
+  mark, scoreboard stats, hybrid flip, hostname scoping and the kill switch);
+  nightly live-corpus measurement and the shipped play2048.co rule remain
+  outstanding.
 - Keep dynamic eval, worker source, computed properties, shorthand bindings,
   and browser-owned location surfaces explicitly unsupported where applicable.
 
 A real Chromium fixture (`suite/e2e/location-policy.mjs`) checks the generated
-WASM and execution of direct versus rewritten location reads. The existing
-browser CI job gates it. Full proxied live-site rollout remains unverified.
+WASM and execution of direct versus rewritten location reads; a second
+engine-level probe (`suite/e2e/location-targeting.mjs`) drives the corroborated
+auto-mark end to end. The existing browser CI job gates both. Full proxied
+live-site rollout remains unverified.
 
 Tests cover policy validation, CDN/page ownership, inline/external wiring,
 read/write AST safety, cap skips, parser failure and bounded telemetry. These
