@@ -70,7 +70,10 @@ export type DiagStage =
   | "REDIRECT_HOP"
   | "REDIRECTED"
   | "PINNED_SCRIPT"
-  | "ADAPTIVE_RECOVERY";
+  | "ADAPTIVE_RECOVERY"
+  /* #456: an over-cap script/worker body serves verbatim (the
+     buffering bound); informational, never a failure point. */
+  | "RAW_BODY_CAP";
 
 export type DiagDeliveryState =
   | "definitely-not-delivered"
@@ -125,7 +128,7 @@ export function classifyStageFailure(stage: DiagStage): {
   category: DiagCategory;
   cause: DiagCause;
 } {
-  if (stage.startsWith("REWRITE")) return { category: "REWRITE", cause: "rewrite" };
+  if (stage.startsWith("REWRITE") || stage === "RAW_BODY_CAP") return { category: "REWRITE", cause: "rewrite" };
   if (stage === "REQUEST_CREATED" || stage === "REQUEST_INTERCEPTED") return { category: "TRANSPORT", cause: "proxy" };
   return { category: "TRANSPORT", cause: "upstream" };
 }
