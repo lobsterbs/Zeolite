@@ -7,6 +7,8 @@ import {
   mintPageToken,
   registerPageClient,
   pageClientOf,
+  rootedPageGrant,
+  serveRootedExtPage,
   EXT_ROUTE,
 } from "../serve";
 import { handleExtPageCall, pageCallList, pageNamespaceList } from "../pageapi";
@@ -271,14 +273,15 @@ describe("zl:openExtPage dispatch (LB #76 open-options button)", () => {
     const r = replies[0] as { ok: boolean; url?: string; error?: string };
     expect(r.ok).toBe(true);
     expect(r.url).toBeTruthy();
-    expect(r.url!.startsWith(EXT_ROUTE + rec.id + "/options.html?zlPageTok=")).toBe(true);
+    expect(r.url!.startsWith("/options.html?zlExt=" + rec.id + "&zlPageTok=")).toBe(true);
     const u = new URL("https://sw.example" + r.url);
-    const served = await serveExtensionAsset(new Request(u.href), u, {
-      nav: true,
-      resultingClientId: "open1",
-    });
+    const grant = rootedPageGrant(new Request(u.href), u, undefined);
+    const served = grant
+      ? await serveRootedExtPage(grant, "open1")
+      : new Response("zeolite: grant expected");
     expect(served.status).toBe(200);
     expect(await served.text()).toContain("options");
+    expect(pageClientOf("open1")).toBe(rec.id);
   });
 
   it("answers honestly for a missing page or unknown extension", async () => {

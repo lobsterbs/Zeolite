@@ -409,10 +409,11 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
     }
     case "zl:openExtPage": {
       /* #40: host-only. Resolves an extension's options or popup
-         page, mints a 5-minute page token and answers the /zl-ext/
-         URL the host should navigate a tab to. The token is the only
-         way a first navigation gets past the WAR gate for a non-WAR
-         page. */
+         page and mints a 5-minute page token. #560: the URL is
+         ROOTED at the origin root (/options.html?zlExt=...) because
+         extension page worlds dispatch their boot on
+         location.pathname; the token grants the first navigation and
+         registered page clients self-navigate without one. */
       const op = msg as { extId?: unknown; which?: unknown };
       const which = op.which === "popup" ? "popup" : "options";
       const extId = typeof op.extId === "string" ? op.extId : "";
@@ -423,7 +424,7 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
         reply({ ok: false, error: "no such " + which + " page" });
         break;
       }
-      reply({ ok: true, url: EXT_ROUTE + orec.id + norm + "?zlPageTok=" + mintPageToken(orec.id, norm) });
+      reply({ ok: true, url: norm + "?zlExt=" + orec.id + "&zlPageTok=" + mintPageToken(orec.id, norm) });
       break;
     }
     default:
