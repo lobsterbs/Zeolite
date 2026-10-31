@@ -103,6 +103,21 @@ impl Rewriter {
         self.cfg.location_max_bytes = max_bytes.clamp(1, crate::js::globals::MAX_BYTES);
     }
 
+    /// #532: the effective document base once the first <base href>
+    /// folded (issue #36 first-base-wins): the ABSOLUTE upstream base
+    /// URL later relative URLs fold against, or None when no base
+    /// element was seen. The serve seam drains it per chunk and
+    /// delivers the hostless form to the page (the virtual
+    /// document.baseURI view); the host itself never crosses into
+    /// the page realm.
+    pub fn effective_base(&self) -> Option<String> {
+        if self.base_seen {
+            Some(self.base.clone())
+        } else {
+            None
+        }
+    }
+
     pub fn take_location_events(&self) -> String {
         self.location_events
             .borrow_mut()
@@ -2643,6 +2658,27 @@ document.write('<script src=x></script>');
             out
         );
         assert_eq!(decode_entities(srcdoc_val), "<p>hi & bye</p>");
+    }
+
+    #[test]
+    fn effective_base_tracks_the_first_base_only() {
+        // #532: effective_base reports the folded absolute upstream
+        // base once the first <base href> folded, None before any
+        // base element appeared, and only the FIRST base counts.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/dir/page.html");
+        assert_eq!(r.effective_base(), None);
+        let mut r2 = Rewriter::new(cfg());
+        r2.set_base("https://example.com/dir/page.html");
+        let out = r2.process(
+            "<head><base href=\"assets/\"><base href=\"https://ignored.example.com/\"></head>",
+        );
+        assert!(out.contains("base href="));
+        assert_eq!(
+            r2.effective_base().as_deref(),
+            Some("https://example.com/dir/assets/")
+        );
+        assert!(!r2.effective_base().unwrap().contains("ignored"));
     }
 
     #[test]

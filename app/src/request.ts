@@ -198,6 +198,25 @@ export function withBodyStallDeadline(resp: Response, ms: number, traceId: strin
   return out;
 }
 
+/* #532: deliver the effective document base to the owning page as a
+   zl:vbase control message (the HOSTLESS form, the same #144
+   relaxation as vpath; the virtual location view serves it as
+   __zl.baseURI). Best-effort and bounded: a page that never
+   receives it keeps the honest fallback (the virtual document
+   URL, the spec default without a base element). */
+function pushVbase(clientId: string, resultingClientId: string, vbase: string): void {
+  const id = resultingClientId || clientId;
+  if (!id) return;
+  void (async () => {
+    try {
+      const client = await raceBoot(self.clients.get(id), "vbase client lookup", PRE_DEADLINE_BOUND_MS);
+      client?.postMessage({ type: "zl:vbase", vbase });
+    } catch {
+      /* no client: the page keeps the fallback view */
+    }
+  })();
+}
+
 export function withDeadline<T>(
   p: Promise<T>,
   ms: number,
@@ -3533,7 +3552,10 @@ export function handleFetch(e: FetchEvent): void {
               return new Response(
                 rewriteStream(hit.body, cacheRewriteBase(hit, target), chRule, csInject, hitCt, () => {
                   if (e.request.mode === "navigate") WEBNAV.completed(target);
-                }, true, docSri, docMap),
+                }, true, docSri, docMap,
+                /* #532: the cache-hit rewrite folds the same first
+                   base; the message rides the served stream. */
+                (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb)),
                 { status: hit.status, headers: hitHeaders },
               );
             }
@@ -4435,6 +4457,8 @@ export function handleFetch(e: FetchEvent): void {
               return new Response(
                 rewriteStream(
                   resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone, true, docSri, docMap,
+                  /* #532: the effective-base delivery seam. */
+                  (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
                 ),
                 {
                   status: resp.status,
@@ -4455,6 +4479,8 @@ export function handleFetch(e: FetchEvent): void {
                 rewriteStream(
                   sniffReader, finalDest ?? target, rule, csInject, "text/html", rewriteDone,
                   true, docSri, docMap,
+                  /* #532: the sniffed document folds the same. */
+                  (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
                 ),
                 {
                   status: resp.status,
