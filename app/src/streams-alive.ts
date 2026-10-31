@@ -10,6 +10,10 @@
    pin the worker forever and block updates, so the ping stops when
    the last stream settles. */
 let active = 0;
+/* #577: how many rewrite streams have settled since the worker
+   started; the ghostery list-load gate reads it so the kick cannot
+   fire before the engine has served its first proxied body. */
+let settled = 0;
 const byHost = new Map<string, number>();
 function streamHost(url?: string): string {
   if (!url) return "";
@@ -50,6 +54,7 @@ export function streamAlive(url?: string): void {
     of going negative on an unbalanced call. */
 export function streamDone(url?: string): void {
   active = Math.max(0, active - 1);
+  settled += 1;
   const host = streamHost(url);
   if (host) {
     const count = byHost.get(host) ?? 0;
@@ -68,6 +73,14 @@ export function streamDone(url?: string): void {
 /** Streams currently pumping (test seam). */
 export function activeStreams(host?: string): number {
   return host ? byHost.get(host) ?? 0 : active;
+}
+
+/** True once at least one rewrite stream has settled (test seam;
+    the #577 list-load gate reads it: in the boot window every
+    counter reads zero vacuously, so the kick must wait for the
+    first proxied body to finish). */
+export function firstStreamSettled(): boolean {
+  return settled > 0;
 }
 
 /** True while the heartbeat interval is armed (test seam). */

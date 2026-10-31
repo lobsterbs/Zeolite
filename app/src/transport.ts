@@ -40,7 +40,12 @@ export { currentEngine, openWebSocket, altRegister, altConfigured, altEndpoint, 
 export interface Transport {
   /** Proxied fetch. Connect-class failures reset the client and
       retry at most once (issue #74 behavior, preserved verbatim). */
-  fetch(dest: string, init?: RequestInit, traceId?: string): Promise<Response>;
+  /* #577: opts.isolated marks a request whose failure says nothing
+     about the shared client (the ghostery list load): the wisp path
+     fails it without the shared reset+retry and without storm
+     accounting, so a dead or slow list origin cannot poison page
+     traffic riding the same client. */
+  fetch(dest: string, init?: RequestInit, traceId?: string, opts?: { isolated?: boolean }): Promise<Response>;
   /* #226: traceId is diagnostic correlation for cooldown relay
      failures; absent means unattributed, never a crash. */
   /** Initialize the client (idempotent); rejects on init failure and
@@ -372,7 +377,7 @@ async function fetchWithDeadline(
   return deliveryResponse(await attemptDelivery(transport, () => fetchWithDeadlineRaw(fetcher, dest, init), traceId));
 }
 
-async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Promise<Response> {
+async function wispFetch(dest: string, init?: RequestInit, traceId?: string, opts?: { isolated?: boolean }): Promise<Response> {
   /* Loading-indicator accounting (zl:loadState): the transport seam
      is the one place every upstream request passes through, so the
      in-flight counter rides it; the finally covers every settle
@@ -450,6 +455,12 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string): Pr
       return resp;
     } catch (err) {
       if (!isConnectClassError(deliveryCause(err)) && !(deliveryCause(err) instanceof WispStallError)) throw err;
+      /* #577: an isolated request fails alone. The shared reset would
+         kill every in-flight page request on the same client when a
+         list origin is unreachable (SSL/connect failures), and its
+         stall would feed the page-storm detector: neither is page
+         evidence. The list load owns its own backoff. */
+      if (opts?.isolated) throw err;
       /* #251: a non-idempotent method or a one-shot body must not
          ride the reset+retry: the side effect may already have
          happened upstream. Record the stall for the storm detector
