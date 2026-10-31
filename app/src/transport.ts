@@ -187,6 +187,30 @@ async function ensureCurl(): Promise<void> {
    so its answer is neither transferred nor served. */
 let WISP_TTFB_DEADLINE_MS = 30_000;
 
+/* Test seam for the #477 wedge class (see engine.ts swScriptUrl): the
+   e2e shell registers the SW with a whitelisted ttfb query on the
+   script URL so a wedged vendored request fails inside the harness
+   case budget and the recorded reset/retry path runs. Clamped to
+   [1000, 30000]; anything else (absent, non-numeric, out of range)
+   keeps the production 30s default. Pure, unit-gated in
+   __tests__/ttfb-seam.test.ts. */
+export function parseTtfbDeadline(search: string): number | undefined {
+  if (typeof search !== "string" || search === "") return undefined;
+  const m = /(?:^|[?&])ttfb=(\d{3,5})(?:&|$)/.exec(search.startsWith("?") ? search.slice(1) : search);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n < 1000 || n > 30_000) return undefined;
+  return n;
+}
+{
+  /* The SW script URL is the only place the registration param is
+     visible to the worker; jsdom/node tests have no matching search
+     and keep the default. */
+  const swSearch = (globalThis as { location?: { search?: string } }).location?.search;
+  const seam = typeof swSearch === "string" ? parseTtfbDeadline(swSearch) : undefined;
+  if (seam !== undefined) WISP_TTFB_DEADLINE_MS = seam;
+}
+
 /* 2026-10-11 YouTube-class stall storm (user diag): one wedged wisp
    socket makes every in-flight request eat the full 30s TTFB
    deadline, and each one resets and retries the same singleton, so a
