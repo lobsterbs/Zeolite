@@ -51,14 +51,52 @@ export const PAGE_BRIDGE_SOURCE = `(function () {
         node = node[segs[j]];
       }
       node[segs[segs.length - 1]] = function () {
-        return call(segs, Array.prototype.slice.call(arguments));
+        var args = Array.prototype.slice.call(arguments);
+        /* #560: Chrome callback shape. A trailing function argument
+           is the callback: it is resolved with the call outcome
+           (undefined on failure) while the promise return is kept
+           for promise-style callers. */
+        var cb = null;
+        if (args.length > 0 && typeof args[args.length - 1] === "function") {
+          cb = args.pop();
+        }
+        var p = call(segs, args);
+        if (cb) {
+          p.then(
+            function (r) { cb(r); },
+            function () { cb(undefined); }
+          );
+        }
+        return p;
       };
     })(cfg.calls[i]);
   }
   browser.runtime = browser.runtime || {};
   browser.runtime.id = cfg.ext;
+  /* #560: synchronous getManifest (Chrome parity): the manifest is
+     embedded in ZL_PAGE_CFG by the SW; pages read its fields during
+     boot, so the promise-shaped materialized call must be
+     overridden. */
+  browser.runtime.getManifest = function () {
+    return cfg.manifest;
+  };
+  /* #560: HTML pages are served ROOTED at the origin root so the
+     page's location.pathname matches real extension origins (page
+     boot dispatch chains key on it). Navigating there is granted via
+     the page's registered client id or a host-minted page token.
+     Every other resource keeps the /zl-ext/ package base, which is
+     also the <base href> injected into rooted pages, so both forms
+     resolve to the same asset route. */
   browser.runtime.getURL = function (p) {
-    return cfg.base + (p.charAt(0) === "/" ? p : "/" + p);
+    var norm = p.charAt(0) === "/" ? p : "/" + p;
+    var dot = norm.lastIndexOf(".");
+    if (dot !== -1) {
+      var ext = norm.slice(dot + 1).toLowerCase();
+      if (ext === "html" || ext === "htm") {
+        return norm + (norm.indexOf("?") === -1 ? "?" : "&") + "zlExt=" + cfg.ext;
+      }
+    }
+    return cfg.base + norm;
   };
   for (var n = 0; cfg.ns && n < cfg.ns.length; n++) {
     if (!browser[cfg.ns[n]]) browser[cfg.ns[n]] = {};

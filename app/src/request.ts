@@ -88,7 +88,7 @@ const MAPS = newImportmapRegistry();
 import { classifyServeFailure, literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome, recordServeFailure } from "./adaptive-evidence";
 import { spoolBody, SpoolHandle, SpoolUnavailableError } from "./bodyspool";
 
-import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, serveExtensionAsset } from "./extensions";
+import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, rootedPageGrant, serveExtensionAsset, serveRootedExtPage } from "./extensions";
 
 
 declare const self: ServiceWorkerGlobalScope;
@@ -2109,6 +2109,32 @@ export function handleFetch(e: FetchEvent): void {
         ),
       );
       return;
+    }
+    /* #560: rooted extension pages (#40 sibling): a navigation whose
+       URL carries zlExt for an extension the engine knows is served
+       at the origin root (see extensions/serve). Engine /zl* routes
+       can never be shadowed, and rootedPageGrant failing closed
+       (null) means the request falls through to virtual handling
+       untouched. */
+    if (e.request.mode === "navigate" || reqDest(e.request) === "document") {
+      const rooted = rootedPageGrant(e.request, url, e.clientId || undefined);
+      if (rooted) {
+        e.respondWith(
+          (async () => {
+            /* Restart-safe: like the /zl-ext/ branch above, a rooted
+               page needs the restored extension registry. */
+            if (engineReady) await raceBoot(engineReady, "extension subsystem boot");
+            return serveRootedExtPage(rooted, e.resultingClientId || undefined);
+          })().catch(
+            (err) =>
+              new Response("zeolite: rooted extension page failed: " + String(err), {
+                status: 500,
+                headers: { "content-type": "text/plain" },
+              }),
+          ),
+        );
+        return;
+      }
     }
   }
   /* Issue #17: the route classification below depends on the restored

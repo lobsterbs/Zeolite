@@ -29,7 +29,9 @@ export {
   backgroundIsServiceWorker,
 } from "./background";
 export {
+  rootedPageGrant,
   serveExtensionAsset,
+  serveRootedExtPage,
   parseServePath,
   EXT_ROUTE,
   CS_ROUTE,
