@@ -99,6 +99,7 @@ declare const self: ServiceWorkerGlobalScope;
    old handler did. A null-tolerant seam: the entrypoint always
    injects before any fetch event can arrive. */
 let engineReady: Promise<void> | null = null;
+let coldStartTimingRecorded = false;
 
 export function initEngine(ready: Promise<void>): void {
   engineReady = ready;
@@ -227,12 +228,13 @@ export function withDeadline<T>(
 
 /* ---- Page cache (ported from the v3 worker) -------------------- */
 /* Cache-first for proxied GETs with stale-while-revalidate. Freshness
-   honors Cache-Control: max-age when present (no-store and no-cache
-   skip the cache entirely); the fallback TTL is 10 minutes. 60-entry cap, FIFO
-   eviction. x-zl-cached-at carries the stored-at time. */
+   honors Cache-Control. Entry count and total retained bytes are bounded;
+   a small metadata bucket tracks size and last-use time without
+   rewriting cached response bodies on every hit. */
 
 
 const ZL_PAGES = "zeolite-pages-v2";
+const ZL_PAGE_INDEX = "zeolite-pages-index-v1";
 /* v1 may contain responses cached by the old worker without per-client
    credential context. Never reuse those entries after profile isolation. */
 const ZL_PAGES_PRE_CLIENT_ISOLATION = "zeolite-pages-v1";
@@ -250,6 +252,7 @@ function discardLegacyPageCache(): Promise<void> {
   return legacyPageCacheCleanup;
 }
 const ZL_CACHED_AT = "x-zl-cached-at";
+const ZL_PAGE_BYTES = "x-zl-page-bytes";
 /* #184: the final URL after redirect hops rides stored entries. */
 const ZL_FINAL_URL = "x-zl-final-url";
 /* #557: the stored Vary field list plus the request header values the
@@ -262,6 +265,7 @@ const ZL_VARY_VALUES = "x-zl-vary-values";
 function stripInternalHeaders(h: Headers): Headers {
   const out = new Headers(h);
   out.delete(ZL_CACHED_AT);
+  out.delete(ZL_PAGE_BYTES);
   out.delete(ZL_FINAL_URL);
   out.delete(ZL_VARY);
   out.delete(ZL_VARY_VALUES);
@@ -269,9 +273,12 @@ function stripInternalHeaders(h: Headers): Headers {
 }
 const ZL_DEFAULT_TTL = 10 * 60 * 1000;
 const ZL_PAGE_LIMIT = 60;
-/* #195: bodies above this size never enter the page cache (the
-   clone() tee buffers them whole in memory). */
+const ZL_PAGE_TOTAL_MAX = 32 * 1024 * 1024;
 const ZL_PAGE_STORE_MAX = 4 * 1024 * 1024;
+type PageCacheUsage = { bytes: number; lastUsed: number };
+const pageCacheUsage = new Map<string, PageCacheUsage>();
+let pageCacheReservedBytes = 0;
+let pageCacheMutation: Promise<void> = Promise.resolve();
 /* One in-flight stale refresh per cache key: concurrent stale hits
    coalesce into a single upstream fetch instead of one each. */
 const staleRefreshInFlight = new Map<string, Promise<void>>();
@@ -345,6 +352,173 @@ export function cacheStorable(headers: Headers): boolean {
   return true;
 }
 
+function storedVaryFields(headers?: Headers): string[] {
+  return (headers?.get(ZL_VARY) ?? "").split(",").map((field) => field.trim().toLowerCase()).filter(Boolean);
+}
+
+function pageCacheIdentity(req: Request, fields: string[]): string {
+  return JSON.stringify([req.url, fields, fields.map((field) => req.headers.get(field))]);
+}
+
+function withPageCacheMutation<T>(work: () => Promise<T>): Promise<T> {
+  const next = pageCacheMutation.then(work);
+  pageCacheMutation = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+async function pageCacheIndex(pageCache: Cache): Promise<Cache | null> {
+  try {
+    /* Full CacheStorage has keys(). Minimal host/test shims sometimes
+       expose only open() and alias all names to one backing map. In that
+       degraded environment, retain size metadata on the page entry and
+       use its stored timestamp as FIFO fallback instead of polluting it. */
+    if (typeof caches.keys !== "function") return null;
+    const index = await caches.open(ZL_PAGE_INDEX);
+    return index === pageCache ? null : index;
+  } catch {
+    return null;
+  }
+}
+
+function validPageCacheUsage(value: unknown): value is PageCacheUsage {
+  if (!value || typeof value !== "object") return false;
+  const usage = value as { bytes?: unknown; lastUsed?: unknown };
+  return typeof usage.bytes === "number" && Number.isSafeInteger(usage.bytes) &&
+    usage.bytes >= 0 && usage.bytes <= ZL_PAGE_STORE_MAX &&
+    typeof usage.lastUsed === "number" && Number.isFinite(usage.lastUsed) && usage.lastUsed >= 0;
+}
+
+async function writePageCacheUsage(req: Request, index: Cache | null, fields: string[], usage: PageCacheUsage): Promise<void> {
+  /* Keep exact in-memory accounting even when a minimal CacheStorage
+     host has no separate persistent metadata cache. */
+  pageCacheUsage.set(pageCacheIdentity(req, fields), usage);
+  if (!index) return;
+  const headers = new Headers({ "content-type": "application/json" });
+  if (fields.length) headers.set("vary", fields.join(", "));
+  try {
+    await index.put(req, new Response(JSON.stringify(usage), { headers }));
+  } catch {
+    /* The page entry carries a conservative byte estimate as restart fallback. */
+  }
+}
+
+async function pageCacheUsageFor(req: Request, cache: Cache, index: Cache | null, knownEntry?: Response): Promise<{ identity: string; fields: string[]; usage: PageCacheUsage }> {
+  let entry = knownEntry;
+  if (!entry) {
+    try { entry = await cache.match(req) ?? undefined; } catch { /* account conservatively */ }
+  }
+  const fields = (entry?.headers.get(ZL_VARY) ?? "").split(",").map((field) => field.trim().toLowerCase()).filter(Boolean);
+  const identity = pageCacheIdentity(req, fields);
+  const memory = pageCacheUsage.get(identity);
+  if (memory) return { identity, fields, usage: memory };
+  if (index) {
+    try {
+      const metadata = await index.match(req);
+      if (metadata) {
+        const value: unknown = await metadata.json();
+        if (validPageCacheUsage(value)) {
+          pageCacheUsage.set(identity, value);
+          return { identity, fields, usage: value };
+        }
+      }
+    } catch {
+      /* Rebuild invalid or missing metadata from the page entry. */
+    }
+  }
+  const rawBytes = entry?.headers.get(ZL_PAGE_BYTES) ?? entry?.headers.get("content-length");
+  const declared = rawBytes !== null && rawBytes !== undefined && /^\d+$/.test(rawBytes) ? Number(rawBytes) : NaN;
+  const cachedAt = Number(entry?.headers.get(ZL_CACHED_AT) ?? 0);
+  const usage = {
+    bytes: Number.isSafeInteger(declared) && declared >= 0 && declared <= ZL_PAGE_STORE_MAX ? declared : ZL_PAGE_STORE_MAX,
+    lastUsed: Number.isFinite(cachedAt) && cachedAt > 0 ? cachedAt : 0,
+  };
+  await writePageCacheUsage(req, index, fields, usage);
+  return { identity, fields, usage };
+}
+
+function touchPageCache(req: Request, hit: Response, cache: Cache): void {
+  void withPageCacheMutation(async () => {
+    const index = await pageCacheIndex(cache);
+    const old = await pageCacheUsageFor(req, cache, index, hit);
+    await writePageCacheUsage(req, index, old.fields, { ...old.usage, lastUsed: Date.now() });
+  }).catch(() => {});
+}
+
+function disablePageCacheAfterEvictionFailure(): void {
+  pageCacheDisabled = true;
+  if (pageCacheTrimWarned) return;
+  pageCacheTrimWarned = true;
+  DIAG.emit({
+    category: "STORAGE",
+    severity: "warning",
+    message: "page cache capacity could not be maintained; storing disabled until the worker restarts",
+  });
+}
+
+async function deletePageCacheEntry(req: Request, cache: Cache, index: Cache | null, identity: string): Promise<void> {
+  await withPageCacheMutation(async () => {
+    let removed = false;
+    try { removed = await cache.delete(req); } catch { /* fail closed below */ }
+    if (!removed) {
+      disablePageCacheAfterEvictionFailure();
+      return;
+    }
+    if (index) {
+      try {
+        const metadata = await index.match(req);
+        if (metadata && !(await index.delete(req))) {
+          disablePageCacheAfterEvictionFailure();
+          return;
+        }
+      } catch {
+        disablePageCacheAfterEvictionFailure();
+        return;
+      }
+    }
+    pageCacheUsage.delete(identity);
+  });
+}
+
+async function reservePageCacheSpace(req: Request, cache: Cache, index: Cache | null, fields: string[], bytes: number): Promise<boolean> {
+  return withPageCacheMutation(async () => {
+    if (pageCacheDisabled) return false;
+    const keys = await cache.keys();
+    const rows = await Promise.all(keys.map(async (key) => ({ key, ...(await pageCacheUsageFor(key, cache, index)) })));
+    const identity = pageCacheIdentity(req, fields);
+    const candidates = rows.filter((row) => row.identity !== identity)
+      .sort((a, b) => a.usage.lastUsed - b.usage.lastUsed || a.key.url.localeCompare(b.key.url));
+    let count = candidates.length;
+    let totalBytes = pageCacheReservedBytes + bytes + candidates.reduce((total, row) => total + row.usage.bytes, 0);
+    while (count + 1 > ZL_PAGE_LIMIT || totalBytes > ZL_PAGE_TOTAL_MAX) {
+      const victim = candidates.shift();
+      if (!victim) return false;
+      let removed = false;
+      try { removed = await cache.delete(victim.key); } catch { /* fail closed below */ }
+      if (!removed) {
+        disablePageCacheAfterEvictionFailure();
+        return false;
+      }
+      if (index) {
+        try {
+          const metadata = await index.match(victim.key);
+          if (metadata && !(await index.delete(victim.key))) {
+            disablePageCacheAfterEvictionFailure();
+            return false;
+          }
+        } catch {
+          disablePageCacheAfterEvictionFailure();
+          return false;
+        }
+      }
+      pageCacheUsage.delete(victim.identity);
+      count--;
+      totalBytes -= victim.usage.bytes;
+    }
+    pageCacheReservedBytes += bytes;
+    return true;
+  });
+}
+
 /* #94 + #35: ONE copy of the JS-transform destination set - the
    refresh and no-cache revalidation skips must both match the
    serve-time transform branches: a raw upstream body must never
@@ -362,8 +536,10 @@ export async function pageCacheMatch(
   context: CookieRequestContext = {},
 ): Promise<Response | null> {
   let hit: Response | undefined;
+  let cache: Cache;
   try {
-    hit = await (await caches.open(ZL_PAGES)).match(req);
+    cache = await caches.open(ZL_PAGES);
+    hit = await cache.match(req) ?? undefined;
   } catch {
     return null;
   }
@@ -372,6 +548,7 @@ export async function pageCacheMatch(
      stored with; anything else is an honest miss that bypasses to the
      live path. */
   if (!varyMatches(hit.headers, req.headers)) return null;
+  touchPageCache(req, hit, cache);
   const at = Number(hit.headers.get(ZL_CACHED_AT) ?? 0);
   const ttl = cacheTtl(hit.headers);
   /* #115: a stored no-store view can only be a legacy entry; it stays
@@ -391,7 +568,8 @@ export async function pageCacheMatch(
        revalidated - the raw upstream 200 must not overwrite the
        composed copy the next hit would serve. */
     if (cacheRefreshSkipsEntry(req, hit)) {
-      try { await (await caches.open(ZL_PAGES)).delete(req); } catch { /* no storage */ }
+      const index = await pageCacheIndex(cache);
+      await deletePageCacheEntry(req, cache, index, pageCacheIdentity(req, storedVaryFields(hit.headers)));
       return null;
     }
     return await revalidateBeforeUse(req, hit, context);
@@ -423,7 +601,8 @@ export async function pageCacheMatch(
              skip must match the serve-time transform branches). */
           const jsServe = cacheRefreshSkipsEntry(req, hit);
           if (jsServe) {
-            await (await caches.open(ZL_PAGES)).delete(req);
+            const index = await pageCacheIndex(cache);
+            await deletePageCacheEntry(req, cache, index, pageCacheIdentity(req, storedVaryFields(hit.headers)));
           } else {
             /* #115: the refresh carries the stored validators so the
                origin can answer 304; a 304 keeps the stored body and
@@ -616,72 +795,47 @@ export async function pageCacheStore(
     if (!sroute) sroute = recoverPath(su.pathname);
     if (requestHasCredentials(req, sroute ? mergeRouteSearch(sroute, su.search) : su.href, clientId)) return null;
   }
-  /* #195: big bodies never enter the page cache - the clone() tee
-     buffers them whole in memory while the cache write trails the page
-     read. The length header is authoritative when present; a missing
-     one is usually a chunked dynamic document, which stays cacheable.
-     ponytail: unknown-length streams stay stored; a counting wrapper
-     is the upgrade if a live site lands multi-MB chunked docs here. */
-  const clen = Number(resp.headers.get("content-length") ?? NaN);
-  if (clen > ZL_PAGE_STORE_MAX) return null;
+  const lengthHeader = resp.headers.get("content-length");
+  const declaredBytes = lengthHeader !== null && /^\d+$/.test(lengthHeader) ? Number(lengthHeader) : null;
+  if (declaredBytes !== null && declaredBytes > ZL_PAGE_STORE_MAX) return null;
+  const reserveBytes = declaredBytes ?? ZL_PAGE_STORE_MAX;
+  let reserved = false;
+  let oversized = false;
   try {
     const cache = await caches.open(ZL_PAGES);
-    /* Issue #2 + hostile-header hygiene: the cache must never store the
-       target's CORS or hostile response headers - cache hits bypass the
-       live surgery path, so a stored target ACAO would break module
-       scripts and a stored Set-Cookie would replay against the engine
-       origin on every hit. The jar already captured Set-Cookie on the
-       live path; the stored copy is the surgered view. */
+    const index = await pageCacheIndex(cache);
     const storedHeaders = stripHostile(resp.headers);
     applyEngineCors(storedHeaders, self.location.origin, req.credentials);
-    /* Cache hits bypass the live surgery path, so the stored view must
-       carry the mapped Refresh too (a target-host url= here would
-       replay against the browser on every hit). */
     const cu = new URL(req.url);
     const croute = decodePath(cu.pathname);
     mapRefreshHeader(storedHeaders, croute ? mergeRouteSearch(croute, cu.search) : cu.href);
-    /* #557: the Vary list and the selecting request's values ride the
-       entry; the lookup compares them (varyMatches). */
-    storeVaryMeta(storedHeaders, varyFields(resp.headers), req.headers);
-    /* #548: make room BEFORE admitting the new entry so the page limit
-       is a hard bound: a failed eviction refuses this store (the page
-       still gets its response) instead of admitting an entry that can
-       never be trimmed. Each pass deletes the oldest entry and
-       re-lists the keys (the old snapshot loop walked past failures
-       and kept admitting entries). One failed eviction disables
-       storing for the rest of this worker lifetime; the next worker
-       start retries with a clean slate. */
-    for (;;) {
-      const keys = await cache.keys();
-      if (keys.length < ZL_PAGE_LIMIT) break;
-      let gone = false;
-      try {
-        gone = await cache.delete(keys[0]);
-      } catch {
-        gone = false;
-      }
-      if (!gone) {
-        pageCacheDisabled = true;
-        if (!pageCacheTrimWarned) {
-          pageCacheTrimWarned = true;
-          DIAG.emit({
-            category: "STORAGE",
-            severity: "warning",
-            message: "page cache eviction failed; storing disabled until the worker restarts so the page limit stays a hard bound",
-          });
+    const fields = varyFields(resp.headers);
+    storeVaryMeta(storedHeaders, fields, req.headers);
+    if (!(await reservePageCacheSpace(req, cache, index, fields, reserveBytes))) return null;
+    reserved = true;
+    /* #115 revalidation serves the original stream. Meter a clone so an
+       oversized cache branch cannot error the live response branch. */
+    const cacheSource = keepView ? resp.clone() : resp;
+    let bodyBytes = 0;
+    const body = cacheSource.body?.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        bodyBytes += chunk.byteLength;
+        if (bodyBytes > ZL_PAGE_STORE_MAX || bodyBytes > reserveBytes) {
+          oversized = true;
+          throw new RangeError("page cache body exceeded its byte budget");
         }
-        return null;
-      }
-    }
-    const stored = new Response(resp.body, { status: 200, headers: storedHeaders });
+        controller.enqueue(chunk);
+      },
+    })) ?? null;
+    const stored = new Response(body, { status: 200, headers: storedHeaders });
     stored.headers.set(ZL_CACHED_AT, String(Date.now()));
-    /* #184: the final URL after redirect hops rides the entry so a
-       cache hit rewrites against the base the document was actually
-       served from. */
+    stored.headers.set(ZL_PAGE_BYTES, String(reserveBytes));
     if (finalUrl) stored.headers.set(ZL_FINAL_URL, finalUrl);
-    await cache.put(req, keepView ? stored.clone() : stored);
-    return stored;
+    await cache.put(req, stored);
+    await writePageCacheUsage(req, index, fields, { bytes: bodyBytes, lastUsed: Date.now() });
+    return keepView ? new Response(resp.body, { status: 200, headers: storedHeaders }) : stored;
   } catch {
+    if (oversized) return null;
     if (!pageCacheStoreWarned) {
       pageCacheStoreWarned = true;
       DIAG.emit({
@@ -692,6 +846,8 @@ export async function pageCacheStore(
     }
     /* storage full or unavailable: skip caching */
     return null;
+  } finally {
+    if (reserved) pageCacheReservedBytes = Math.max(0, pageCacheReservedBytes - reserveBytes);
   }
 }
 
@@ -1116,7 +1272,12 @@ export async function pageCacheClear(): Promise<void> {
   try {
     await discardLegacyPageCache();
     const cache = await caches.open(ZL_PAGES);
-    for (const k of await cache.keys()) await cache.delete(k);
+    const index = await pageCacheIndex(cache);
+    await withPageCacheMutation(async () => {
+      for (const k of await cache.keys()) await cache.delete(k);
+      if (index) for (const k of await index.keys()) await index.delete(k);
+      pageCacheUsage.clear();
+    });
   } catch {
     /* no storage: nothing to clear */
   }
@@ -2045,27 +2206,52 @@ export function handleFetch(e: FetchEvent): void {
     else releaseGhosteryHold();
   };
   const responsePromise = (async () => {
-      await routeReady;
-      /* #394: the persisted jar-profile map restores before any
-         cookie or cache decision, so a restarted worker does not
-         silently route a session-profile page onto the durable
-         default jar. Memoized: one cache read per worker lifetime. */
-      await jarProfilesReady();
-      /* Route-key restoration is needed to authenticate the NAVH host
-         binding. Re-run this after the cold-start gate before any
-         cookie or cache decision. */
+      const bootTimes: string[] = [];
+      const timeBoot = async <T>(name: string, task: Promise<T>): Promise<T> => {
+        const started = Date.now();
+        try {
+          return await task;
+        } finally {
+          bootTimes.push(name + "=" + (Date.now() - started) + "ms");
+        }
+      };
+      /* Route-key and cookie-profile snapshots are independent. Start
+         them alongside legacy cleanup and the existing worker boot.
+         Cookie identity is assigned only after both snapshots settle. */
+      const legacyCacheReady = timeBoot(
+        "legacy-cache",
+        raceBoot(discardLegacyPageCache(), "legacy page cache discard", PRE_DEADLINE_BOUND_MS),
+      );
+      const engineBootReady = engineReady
+        ? timeBoot("engine", raceBoot(engineReady, "engine boot"))
+        : Promise.resolve(undefined);
+      await Promise.all([
+        timeBoot("route", routeReady),
+        timeBoot("jar-profiles", jarProfilesReady()),
+      ]);
       cookieClientId = inheritJarClient(
         e.clientId || undefined,
         e.resultingClientId || undefined,
         url.href,
       );
-      /* Wave-32: bounded - see PRE_DEADLINE_BOUND_MS. */
-      await raceBoot(recoverJarClientRoot(), "jar client root recovery", PRE_DEADLINE_BOUND_MS);
-      await raceBoot(discardLegacyPageCache(), "legacy page cache discard", PRE_DEADLINE_BOUND_MS);
-      /* #249: a wedged boot step (storage, extension boot) must not
-         hang the whole fetch path; serve degraded past the
-         deadline. */
-      if (engineReady) await raceBoot(engineReady, "engine boot");
+      /* Root recovery needs the restored profile mapping. It can
+         overlap legacy cleanup and the already-running worker boot. */
+      await Promise.all([
+        timeBoot(
+          "jar-root",
+          raceBoot(recoverJarClientRoot(), "jar client root recovery", PRE_DEADLINE_BOUND_MS),
+        ),
+        legacyCacheReady,
+        engineBootReady,
+      ]);
+      if (!coldStartTimingRecorded) {
+        coldStartTimingRecorded = true;
+        DIAG.emit({
+          category: "SERVICE_WORKER",
+          severity: "info",
+          message: "cold request startup: " + bootTimes.join(", "),
+        });
+      }
       /* Route computation. Three shapes reach this handler:
          - foreign-origin http(s) requests (#34): the whole URL is the
            destination. Only requests from proxied documents are
@@ -3192,13 +3378,12 @@ export function handleFetch(e: FetchEvent): void {
         /* Phase 1 (1.1 Oxide): rules engine + interception API. Data
            rules first, then programmatic handlers; a block from either
            wins, before cache and transport. See docs/interception.md. */
-        const engineRules = await loadRules();
+        const [engineRules, policy] = await Promise.all([loadRules(), loadPolicy()]);
         const rtype = classifyRtype(dest, "").toLowerCase() as ResourceType;
         /* #135/#136: compatibility policy. A matching rule upgrades
            the default native decision onto the rewrite path; native
            is already the default and required rewrites cannot be
            demoted, so the upgrade is the only effect. */
-        const policy = await loadPolicy();
         const policyRule = behaviorMatch(policy, target, rtype);
         if (policyRule && policyRule.route === "rewrite" && decision.mode === "NativeTransit") {
           decision = {
