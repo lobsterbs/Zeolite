@@ -3095,6 +3095,28 @@ export function handleFetch(e: FetchEvent): void {
         target = arFixed;
       }
 
+      /* #565: the Disqus Universal Embed Code loader names the
+         page in t_u= (t_i=) from the document URL (LegacyUnforgeable,
+         the #112 co= class): on a virtualized page the parameter
+         names this deployment, Disqus validates it against the
+         forum's Trusted Domains, and the thread area shows "We
+         were unable to load Disqus". Virtualize a t_u=/t_i= whose
+         origin names this deployment at the seam the engine owns. */
+      const dqFixed = virtualDisqusPageUrl(target, e.request.referrer, self.location.origin, initiator);
+      if (dqFixed !== target) {
+        const dqid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: dqid,
+          requestId: dqid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "disqus t_u/t_i virtualized to the page url",
+          url: target,
+        });
+        target = dqFixed;
+      }
+
       /* #509: the Telegram Login widget loader builds
          oauth.telegram.org/auth with an origin= minted from
          window.location.origin (LegacyUnforgeable, the #112 co=
@@ -5322,6 +5344,60 @@ export function virtualAuthorizeRedirect(target: string, referrer: string, engin
   );
 }
 
+/** #565: the Disqus Universal Embed Code loader names the page in
+    t_u= (t_i=) from the document URL (LegacyUnforgeable, the #112
+    co= class): on a virtualized page the parameter names this
+    deployment, Disqus validates it against the forum's Trusted
+    Domains, and the thread area shows "We were unable to load
+    Disqus". Virtualize a t_u=/t_i= whose origin names this
+    deployment on the disqus.com embed-comments request at the
+    seam the engine owns; an identifier that is not a URL naming
+    this deployment is the page's own choice and passes through.
+    Rendering fidelity only. */
+export function virtualDisqusPageUrl(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host !== "disqus.com") return target;
+  if (!u.pathname.startsWith("/embed/comments/")) return target;
+  let eo: URL;
+  try {
+    eo = new URL(engineOrigin);
+  } catch {
+    return target;
+  }
+  /* No honest widget-side fallback exists: without a decoded page
+     URL the trusted-domain check has nothing real to validate, so
+     the request passes through unchanged. */
+  const page = referrerPageUrl(referrer, initiator);
+  if (!page) return target;
+  let out = u.href;
+  for (const key of ["t_u", "t_i"]) {
+    const m = new RegExp("([?&])" + key + "=([^&]*)").exec(new URL(out).search);
+    if (!m || !m[2]) continue;
+    let dec: string;
+    try {
+      dec = decodeURIComponent(m[2]);
+    } catch {
+      continue;
+    }
+    let du: URL;
+    try {
+      du = new URL(dec);
+    } catch {
+      continue;
+    }
+    if (!/^https?:$/.test(du.protocol)) continue;
+    if (du.origin !== eo.origin) continue;
+    out = out.replace(m[0], m[1] + key + "=" + encodeURIComponent(page));
+  }
+  return out;
+}
+
 /** A frame fragment is browser-only and never reaches handleFetch.
     zl:mint still sees the original URL, so a verified sender can
     normalize the hCaptcha frame's host= there before route encoding.
@@ -5399,6 +5475,42 @@ function referrerOrigin(referrer: string, initiator?: string): string | null {
       ref = decodeLegacyRoute(refU.pathname);
     }
     return ref ? new URL(ref).origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/* #565: the Disqus t_u=/t_i= rewrite needs the page's full virtual
+   URL (origin + path + query), not just the origin: mirror the
+   referrerOrigin decode chain and keep the destination. The
+   initiator is the client's decoded current URL (ctx.currentUrl or
+   decodeClientUrl of the client URL), so its href is already the
+   page's virtual URL. */
+function referrerPageUrl(referrer: string, initiator?: string): string | null {
+  if (initiator) {
+    try {
+      const u = new URL(initiator);
+      if (u.protocol === "https:" || u.protocol === "http:") return u.href;
+    } catch { /* malformed context falls through */ }
+  }
+  if (!referrer) return null;
+  try {
+    const refU = new URL(referrer, "https://zl.invalid/");
+    let ref = decodePath(refU.pathname);
+    if (!ref && refU.pathname.startsWith(NAVH + "/")) {
+      /* #144 split identity: the navh token carries the origin and
+         the route carries the real path and query, so the page's
+         full virtual URL is the decoded destination plus the route
+         search. */
+      const nd = decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1));
+      if (nd) ref = nd + (refU.search || "");
+    }
+    if (!ref && queryHandleToken(refU.search) !== null)
+      ref = decodeQueryHandle(refU)?.destination ?? null;
+    if (!ref) {
+      ref = decodeLegacyRoute(refU.pathname);
+    }
+    return ref ?? null;
   } catch {
     return null;
   }
