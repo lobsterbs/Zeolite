@@ -998,6 +998,30 @@ interface FreshSession {
 }
 type FreshSessionCtor = new (options: Record<string, unknown>) => FreshSession;
 
+/** #525: the vendored wasm curl client defaults every request to
+    CURLOPT_HTTP_VERSION_2_0 (upstream libcurl.js client/libcurl/http.c),
+    which on a cleartext http:// upstream makes curl attempt an h2c
+    upgrade: the request leaves with "Upgrade: h2c", "HTTP2-Settings"
+    and a Connection header naming them. Strict origins (a Node server
+    with an upgrade listener) classify that as a protocol upgrade,
+    destroy the socket, and the page dies as an empty-reply 502 -
+    reproduced end to end by the #525 computed-sink suite fixture.
+    http_set_options parses a "_libcurl_http_version" params key
+    (1.1 -> CURLOPT_HTTP_VERSION_1_1), so pin cleartext requests to
+    HTTP/1.1; https upstreams keep the default (ALPN negotiates h2
+    with no upgrade tokens on the wire). */
+function curlParams(
+  remote: URL,
+  method: string,
+  headersObj: Record<string, string>,
+  body: BodyInit | null,
+  signal: AbortSignal | undefined,
+): Record<string, unknown> {
+  const params: Record<string, unknown> = { method, headers: headersObj, body, redirect: "manual", signal };
+  if (remote.protocol === "http:") params._libcurl_http_version = 1.1;
+  return params;
+}
+
 /** #454: dispatch one request through a libcurl client, giving
     non-idempotent methods a per-request session (fresh connection,
     no pooled reuse, no libcurl re-send after a connection death).
@@ -1024,6 +1048,31 @@ export async function libcurlRequest(
     typeof pooled.close_now !== "function" ||
     typeof pooled.constructor !== "function"
   ) {
+    /* #525: a cleartext pooled request needs the same HTTP/1.1 pin
+       the fresh-session path applies (curlParams), while keeping the
+       pooled session alive. Dispatch through the pooled session fetch
+       when the bundle exposes it, mirroring the wrapper conversion
+       (body, raw_headers, status, statusText). https remotes and
+       bundle drift keep the wrapper request. */
+    const pooledSession = pooled as unknown as FreshSession | undefined;
+    if (
+      remote.protocol === "http:" &&
+      pooledSession &&
+      typeof pooledSession.fetch === "function"
+    ) {
+      const headersObj: Record<string, string> = {};
+      for (const [key, value] of headers) headersObj[key] = value;
+      const payload = await pooledSession.fetch(
+        remote.href,
+        curlParams(remote, method, headersObj, body, signal),
+      );
+      return {
+        body: payload.body as TransferrableResponse["body"],
+        headers: payload.raw_headers ?? [],
+        status: payload.status,
+        statusText: payload.statusText,
+      };
+    }
     return c.request(remote, method, body, headers, signal);
   }
   const Ctor = pooled.constructor as FreshSessionCtor;
@@ -1032,13 +1081,7 @@ export async function libcurlRequest(
   try {
     const headersObj: Record<string, string> = {};
     for (const [key, value] of headers) headersObj[key] = value;
-    payload = await session.fetch(remote.href, {
-      method,
-      headers: headersObj,
-      body,
-      redirect: "manual",
-      signal,
-    });
+    payload = await session.fetch(remote.href, curlParams(remote, method, headersObj, body, signal));
   } catch (err) {
     session.close_now();
     throw err;

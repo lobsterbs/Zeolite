@@ -74,10 +74,10 @@ describe("ws-runtime wiring (#88)", () => {
     expect(closeRows.some((r) => r.verdict === "ws:closed")).toBe(true);
   });
 
-  it("upgrades ws:// before the transport sees it", () => {
+  it("passes ws:// through unchanged before the transport sees it (#525)", () => {
     const p = fakePort();
     wsBridge.open(p, "ws://example.com/chat", []);
-    expect(mock.opens[mock.opens.length - 1]!.url).toBe("wss://example.com/chat");
+    expect(mock.opens[mock.opens.length - 1]!.url).toBe("ws://example.com/chat");
   });
 
   it("an abnormal close emits a DIAG failure and an aborted netlog row", () => {

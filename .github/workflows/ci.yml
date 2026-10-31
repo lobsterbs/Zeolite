@@ -527,6 +527,20 @@ jobs:
             grep -E "^\[FAIL\]|HARNESS-ERROR" guest.out | head -20 | while IFS= read -r l; do echo "::error::GUEST-SW $l"; done
             exit 1
           fi
+      - name: Computed-URL sink differential suite (#525)
+        # Direct-vs-proxied acceptance for runtime-computed URL
+        # operands (fetch, dynamic import, element property, Worker,
+        # module Worker, WebSocket, postMessage target): every case
+        # must settle with the same value in both modes and the
+        # upstream hit sets must match. Ports 6023/7123 never collide
+        # with e2e.mjs (6002/7101) or guest-sw (6009/7109).
+        run: |
+          node suite/e2e/computed-sinks.mjs 2>&1 | tee csink.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\[FAIL\]|HARNESS-ERROR" csink.out | head -20 | while IFS= read -r l; do echo "::error::CSINK $l"; done
+            exit 1
+          fi
       - name: Injector differential suite (queryRoutes off vs on)
         run: |
           node suite/e2e/differential.mjs 2>&1 | tee diff.out

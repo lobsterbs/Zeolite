@@ -137,16 +137,16 @@ describe("WsBridge", () => {
     expect(port.posted.at(-1)).toMatchObject({ code: 1006, clean: false });
   });
 
-  it("upgrades ws:// to wss:// and records the decision", () => {
+  it("passes ws:// through unchanged and records the plaintext decision (#525)", () => {
     const { hooks, rec } = fakeHooks();
     const { factory, handlers } = fakeFactory();
     const b = new WsBridge(factory, hooks);
     const p = fakePort();
     b.open(p, "ws://example.com/chat", ["chat"]);
-    expect(handlers[0].url).toBe("wss://example.com/chat");
+    expect(handlers[0].url).toBe("ws://example.com/chat");
     expect(handlers[0].protocols).toEqual(["chat"]);
     expect(rec.attempts).toEqual([{ url: "ws://example.com/chat", upgraded: true }]);
-    expect((rec.traces as Array<{ rule?: string }>).some((t) => t.rule === "upgrade")).toBe(true);
+    expect((rec.traces as Array<{ rule?: string }>).some((t) => t.rule === "plaintext")).toBe(true);
   });
 
   it("relays open and messages, accounts bytes both ways", () => {

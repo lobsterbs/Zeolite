@@ -951,3 +951,65 @@ describe("split-origin legacy routes decode ahead of the context recovery", () =
     expect(decodeClientUrl(new URL(loc, ORIGIN))).toBe("https://prev.example/dir/img.png");
   });
 });
+
+/* #525 computed-sink suite fallout: the physical browser's hop-by-hop
+   tokens (h2c upgrade on engine-origin navigations) must never be
+   replayed upstream; strict origins answer a replayed Upgrade with a
+   destroyed socket and the page dies as an empty-reply 502. */
+describe("forwardedHeaders drops hop-by-hop tokens (#525)", () => {
+  const req = (headers: Record<string, string>) =>
+    ({
+      method: "GET",
+      mode: "navigate",
+      destination: "document",
+      credentials: "include",
+      headers: new Headers(headers),
+      referrer: "",
+    }) as unknown as Request;
+
+  it("drops the h2c upgrade tokens a Chromium navigation carries", () => {
+    const out = forwardedHeaders(
+      req({
+        accept: "text/html",
+        upgrade: "h2c",
+        "http2-settings": "AAMAAABkAAQAAQAAAAIAAAAA",
+        connection: "Upgrade, HTTP2-Settings",
+        "upgrade-insecure-requests": "1",
+      }),
+      "https://site.example/dir/page.html",
+    );
+    expect(out.get("upgrade")).toBe(null);
+    expect(out.get("http2-settings")).toBe(null);
+    expect(out.get("connection")).toBe(null);
+    expect(out.get("accept")).toBe("text/html");
+  });
+
+  it("drops a header the request's own Connection token names", () => {
+    const out = forwardedHeaders(
+      req({
+        "x-custom-hop": "must-not-travel",
+        connection: "X-Custom-Hop",
+        "accept-language": "en-US",
+      }),
+      "https://site.example/dir/page.html",
+    );
+    expect(out.get("x-custom-hop")).toBe(null);
+    expect(out.get("accept-language")).toBe("en-US");
+  });
+
+  it("drops the standard keep-alive and proxy hop set", () => {
+    const out = forwardedHeaders(
+      req({
+        "keep-alive": "timeout=5",
+        "proxy-connection": "keep-alive",
+        te: "trailers",
+        "transfer-encoding": "chunked",
+      }),
+      "https://site.example/dir/page.html",
+    );
+    expect(out.get("keep-alive")).toBe(null);
+    expect(out.get("proxy-connection")).toBe(null);
+    expect(out.get("te")).toBe(null);
+    expect(out.get("transfer-encoding")).toBe(null);
+  });
+});

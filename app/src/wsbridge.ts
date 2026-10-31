@@ -5,9 +5,12 @@
    transport: TLS terminates there, a raw wisp TCP stream runs
    underneath), relays events both ways, keeps per-connection
    accounting through hooks and drops every connection from the
-   registry at close or teardown. ws:// is upgraded to wss:// before
-   the factory sees it, so plaintext WebSocket never leaves the
-   transport. */
+   registry at close or teardown. #525: ws:// passes through as
+   written. The old force-upgrade to wss:// sent a TLS ClientHello
+   to every plaintext-ws origin (an http site cannot answer it,
+   the handshake never settles and the page socket stalls), while
+   cleartext http already rides the same wisp tunnel; the trace
+   marks plaintext passthrough. */
 
 export interface WsHandle {
   send(data: unknown): void;
@@ -118,18 +121,19 @@ export class WsBridge {
   }
 
   open(port: PortLike, url: string, protocols: string[], headers?: Array<[string, string]>): void {
-    const upgraded = url.startsWith("ws://");
-    const target = upgraded ? "wss://" + url.slice("ws://".length) : url;
-    if (upgraded) {
+    const plaintext = url.startsWith("ws://");
+    /* #525: no scheme upgrade (see the header). */
+    const target = url;
+    if (plaintext) {
       this.hooks.trace({
         subsystem: "websocket",
-        rule: "upgrade",
+        rule: "plaintext",
         original: url,
         result: target,
         resource: "websocket",
       });
     }
-    const token = this.hooks.attempt(url, upgraded);
+    const token = this.hooks.attempt(url, plaintext);
     const conn: Conn = {
       handle: null as unknown as WsHandle,
       token,

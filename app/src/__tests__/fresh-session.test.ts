@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { libcurlRequest } from "../libcurl-transport-vendored";
 
 /* #454: a non-idempotent request must ride a per-request session (a
@@ -9,6 +9,7 @@ class FakeSession {
   static instances: FakeSession[] = [];
   static log: string[] = [];
   static nextResult: unknown = null;
+  static lastParams: Record<string, unknown> | null = null;
   options: Record<string, unknown>;
   closed = 0;
   constructor(options: Record<string, unknown>) {
@@ -17,6 +18,7 @@ class FakeSession {
     FakeSession.log.push("ctor");
   }
   async fetch(_url: string, params: Record<string, unknown>) {
+    FakeSession.lastParams = params;
     FakeSession.log.push("fetch " + String(params.method));
     const r = FakeSession.nextResult;
     if (r instanceof Error) throw r;
@@ -72,7 +74,7 @@ describe("fresh-session dispatch (#454)", () => {
 
   it("keeps idempotent methods on the pooled client (#454)", async () => {
     const { request, c } = setup(null);
-    await libcurlRequest(c, new URL("http://up.example/"), "GET", null, HEADERS, undefined);
+    await libcurlRequest(c, new URL("https://up.example/"), "GET", null, HEADERS, undefined);
     expect(request).toHaveBeenCalledTimes(1);
     expect(FakeSession.instances.length).toBe(0);
   });
@@ -114,6 +116,54 @@ describe("fresh-session dispatch (#454)", () => {
     const request = vi.fn().mockResolvedValue({ body: null, headers: [], status: 200, statusText: "OK" });
     const c = { request, session: { options: {} } } as unknown as Parameters<typeof libcurlRequest>[0];
     await libcurlRequest(c, new URL("http://up.example/commit"), "POST", null, HEADERS, undefined);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+});
+/* #525: the vendored wasm curl defaults to CURLOPT_HTTP_VERSION_2_0,
+   which on a cleartext upstream attaches h2c upgrade tokens
+   ("Upgrade: h2c", "HTTP2-Settings", a Connection header naming them).
+   Strict origins classify the request as a protocol upgrade and
+   destroy it; both dispatch paths pin cleartext requests to
+   HTTP/1.1 via the _libcurl_http_version params key, https keeps
+   the default (ALPN negotiates h2 with no wire tokens). */
+describe("cleartext HTTP/1.1 pin (#525)", () => {
+  beforeEach(() => {
+    FakeSession.lastParams = null;
+  });
+
+  it("a pooled cleartext GET rides the pooled session fetch with the 1.1 pin and stays open (#525)", async () => {
+    const { request, c } = setup({ body: null, status: 200, statusText: "OK", raw_headers: [] });
+    const res = await libcurlRequest(c, new URL("http://up.example/ping"), "GET", null, HEADERS, undefined);
+    expect(request).not.toHaveBeenCalled();
+    expect(FakeSession.instances.length).toBe(0);
+    expect(FakeSession.lastParams?.["_libcurl_http_version"]).toBe(1.1);
+    expect(FakeSession.lastParams?.["redirect"]).toBe("manual");
+    expect(res.status).toBe(200);
+    const pooled = (c as unknown as { session: FakeSession }).session;
+    expect(pooled.closed).toBe(0);
+  });
+
+  it("a fresh cleartext POST carries the same 1.1 pin (#525)", async () => {
+    const { request, c } = setup({ body: null, status: 204, statusText: "", raw_headers: [] });
+    await libcurlRequest(c, new URL("http://up.example/commit"), "POST", null, HEADERS, undefined);
+    expect(request).not.toHaveBeenCalled();
+    expect(FakeSession.lastParams?.["_libcurl_http_version"]).toBe(1.1);
+  });
+
+  it("https requests keep the wrapper path and carry no version pin (#525)", async () => {
+    const { request, c } = setup(null);
+    await libcurlRequest(c, new URL("https://up.example/"), "GET", null, HEADERS, undefined);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(FakeSession.lastParams).toBeNull();
+  });
+
+  it("a pooled session without fetch falls back to the wrapper request even on cleartext (#525)", async () => {
+    const request = vi.fn().mockResolvedValue({ body: null, headers: [], status: 200, statusText: "OK" });
+    const c = {
+      request,
+      session: { close_now() {}, constructor: FakeSession, options: {} },
+    } as unknown as Parameters<typeof libcurlRequest>[0];
+    await libcurlRequest(c, new URL("http://up.example/"), "GET", null, HEADERS, undefined);
     expect(request).toHaveBeenCalledTimes(1);
   });
 });
