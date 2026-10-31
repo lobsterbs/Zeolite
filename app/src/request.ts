@@ -73,6 +73,13 @@ import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersi
    per-site profile cache) lives in ./swstate; the engine and the
    control plane are call sites. */
 import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { newSriRegistry, SRI_VERIFY_BYTE_CAP, sriBlockedResponse, sriClearClient, sriExpectation, sriNote, sriVerifyBytes } from "./sri";
+
+/* #531 SRI: engine-side subresource integrity registry. Memory-only by
+   design (like VCTX): expectations bind a document client to the
+   integrity attributes its HTML carried, and a worker restart
+   simply forgets them (page reload repopulates). */
+const SRI = newSriRegistry();
 import { literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome } from "./adaptive-evidence";
 import { spoolBody, SpoolHandle, SpoolUnavailableError } from "./bodyspool";
 
@@ -3006,9 +3013,18 @@ export function handleFetch(e: FetchEvent): void {
          loads record under the worker's own reserved client, so worker
          requests inherit an explicit context, never a page referrer
          (rule 5). Subresource routes never touch the entry. */
+      /* #531 SRI: document rewrites feed this collector; expectations
+         bind to the resulting document client. */
+      const docSri = (abs: string, integrity: string): void => {
+        const c = e.resultingClientId || e.clientId;
+        if (c) sriNote(SRI, c, abs, integrity);
+      };
       if (e.request.mode === "navigate" || isWorkerDestination(e.request.destination)) {
         const newClient = e.resultingClientId || e.clientId;
         if (newClient && establishContext(VCTX, newClient, target)) capContexts(VCTX, VCTX_CAP);
+        /* #531: the stale page's expectations must not gate the next
+           document's subresources. */
+        if (e.request.mode === "navigate") sriClearClient(SRI, newClient);
       }
 
       /* #477 P3: fetch bridging into the guest realm. The request has
@@ -3383,12 +3399,39 @@ export function handleFetch(e: FetchEvent): void {
               return new Response(
                 rewriteStream(hit.body, cacheRewriteBase(hit, target), chRule, csInject, hitCt, () => {
                   if (e.request.mode === "navigate") WEBNAV.completed(target);
-                }),
+                }, true, docSri),
                 { status: hit.status, headers: hitHeaders },
               );
             }
             if (isCss(hit) && hit.body && !chNative) {
               const hitCt = hit.headers.get("content-type") ?? "text/css";
+              /* #531 SRI: a cached stylesheet with a live expectation
+                 verifies over its raw upstream bytes before rewrite. */
+              const cssExp =
+                e.request.destination === "style" ? sriExpectation(SRI, e.clientId, target) : undefined;
+              if (cssExp) {
+                const cssBytes = await hit.arrayBuffer();
+                const cssVerdict = await sriVerifyBytes(
+                  cssBytes, cssExp, cssBytes.byteLength > SRI_VERIFY_BYTE_CAP,
+                );
+                hitHeaders.set("x-zl-sri", cssVerdict);
+                if (cssVerdict === "blocked") {
+                  DIAG.emit({
+                    category: "BLOCKED",
+                    severity: "warning",
+                    message: "subresource integrity check failed for cached stylesheet",
+                    url: target,
+                  });
+                  return sriBlockedResponse("style", hit.status);
+                }
+                hitHeaders.set("content-type", utf8ContentType(hitCt));
+                return new Response(
+                  cssRewriteStream(
+                    new Response(cssBytes).body!, cacheRewriteBase(hit, target), hitCt,
+                  ),
+                  { status: hit.status, headers: hitHeaders },
+                );
+              }
               hitHeaders.set("content-type", utf8ContentType(hitCt));
               return new Response(cssRewriteStream(hit.body, cacheRewriteBase(hit, target), hitCt), {
                 status: hit.status,
@@ -3418,7 +3461,30 @@ export function handleFetch(e: FetchEvent): void {
               !chNative
             ) {
               const jsCt = hit.headers.get("content-type") ?? "";
-              const raw0 = decodeBody(await hit.arrayBuffer(), jsCt);
+              /* #531 SRI: a cached script with a live expectation
+                 verifies over its raw upstream bytes; the specifier
+                 pass then works from the same buffer. */
+              const jsExp =
+                e.request.destination === "script"
+                  ? sriExpectation(SRI, e.clientId, target)
+                  : undefined;
+              const hitBuf = await hit.arrayBuffer();
+              if (jsExp) {
+                /* Cached script entries hold TRANSFORMED copies (the
+                   fresh path stores its own composed body), so a
+                   mismatch here is ambiguous: tampered storage vs a
+                   legitimately rewritten body. Verification already
+                   ran over the raw upstream bytes when the entry was
+                   fresh; the cache serve records, never blocks. */
+                const jsVerdict = await sriVerifyBytes(
+                  hitBuf, jsExp, hitBuf.byteLength > SRI_VERIFY_BYTE_CAP,
+                );
+                hitHeaders.set(
+                  "x-zl-sri",
+                  jsVerdict === "verified" ? "verified" : "skipped:cache-transformed-body",
+                );
+              }
+              const raw0 = decodeBody(hitBuf, jsCt);
               let src = rewriteModuleWorkerImports(
                 currentPrefix(),
                 cacheRewriteBase(hit, target),
@@ -3924,6 +3990,7 @@ export function handleFetch(e: FetchEvent): void {
               const navClient = e.resultingClientId || e.clientId;
               if (navClient && establishContext(VCTX, navClient, finalDest))
                 capContexts(VCTX, VCTX_CAP);
+              if (e.request.mode === "navigate") sriClearClient(SRI, navClient);
             }
           }
           /* 1.4 Boride: capture Set-Cookie into the per-origin jar before
@@ -4067,6 +4134,39 @@ export function handleFetch(e: FetchEvent): void {
           /* The upstream content type, used by the rewrite branches
              below (charset resolution, honest classification). */
           const respCt = resp.headers.get("content-type") ?? "";
+          /* #531 SRI: fresh scripts and stylesheets with a live
+             expectation verify over raw upstream bytes before any
+             transform runs; a blocked body never reaches the page. */
+          if (
+            e.request.method === "GET" &&
+            resp.body &&
+            resp.status >= 200 &&
+            resp.status < 300 &&
+            (dest === "script" || dest === "style")
+          ) {
+            const freshExp = sriExpectation(SRI, e.clientId, target);
+            if (freshExp) {
+              const freshBytes = await resp.arrayBuffer();
+              const freshVerdict = await sriVerifyBytes(
+                freshBytes, freshExp, freshBytes.byteLength > SRI_VERIFY_BYTE_CAP,
+              );
+              outHeaders.set("x-zl-sri", freshVerdict);
+              if (freshVerdict === "blocked") {
+                DIAG.emit({
+                  category: "BLOCKED",
+                  severity: "warning",
+                  message: "subresource integrity check failed for " + dest,
+                  url: target,
+                });
+                return sriBlockedResponse(dest, resp.status);
+              }
+              resp = new Response(freshBytes, {
+                status: resp.status,
+                statusText: resp.statusText,
+                headers: resp.headers,
+              });
+            }
+          }
           /* #35 (browser E2E): script/worker JS bodies flow through a
              serve-time transform below (specifier pass, worker
              prelude), and each of those branches stores its TRANSFORMED
@@ -4154,7 +4254,9 @@ export function handleFetch(e: FetchEvent): void {
                  charset corrupts the page. */
               outHeaders.set("content-type", utf8ContentType(respCt));
               return new Response(
-                rewriteStream(resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone),
+                rewriteStream(
+                  resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone, true, docSri,
+                ),
                 {
                   status: resp.status,
                   headers: outHeaders,
@@ -4171,7 +4273,10 @@ export function handleFetch(e: FetchEvent): void {
             if (sniffHead && sniffsAsHtml(sniffHead)) {
               outHeaders.set("content-type", "text/html; charset=utf-8");
               return new Response(
-                rewriteStream(sniffReader, finalDest ?? target, rule, csInject, "text/html", rewriteDone),
+                rewriteStream(
+                  sniffReader, finalDest ?? target, rule, csInject, "text/html", rewriteDone,
+                  true, docSri,
+                ),
                 {
                   status: resp.status,
                   headers: outHeaders,

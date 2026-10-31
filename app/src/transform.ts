@@ -16,6 +16,7 @@ import { docKind, jsBody } from "./transit";
 import { initScript, initSplicePoint } from "./pageload";
 import { currentPrefix } from "./codec";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
+import { sriScanner } from "./sri";
 
 /** SW-side state seam (issue #86). */
 export interface TransformDeps {
@@ -207,6 +208,10 @@ export function rewriteStream(
   /* #414: false keeps the URL pass but skips the init splice - a
      fetch/XHR HTML body is a programmatic read, never a document. */
   injectInit = true,
+  /* #531: optional collector for the document SRI metadata; fed
+     the decoded upstream text before the rewriter drops the
+     integrity attributes (see sri.ts). */
+  onSri?: (abs: string, integrity: string) => void,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const modP = rewriter();
@@ -233,6 +238,10 @@ export function rewriteStream(
            rewrite but no bootstrap splice, so a plain-text API answer
            behind an HTML content-type survives byte intact. */
         const init = injectInit ? initScript(base, deps!.fpScript() ?? (await deps!.siteScript(base))) : "";
+        /* #531: scan only document-shaped rewrites; a fetch/XHR HTML
+           body (injectInit=false) is programmatic data, never a
+           document with subresource integrity metadata. */
+        const sriScan = onSri && injectInit && /html/i.test(contentType) ? sriScanner(base, onSri) : null;
         const emit = (out: string) => {
           if (out) controller.enqueue(encoder.encode(out));
         };
@@ -275,10 +284,15 @@ export function rewriteStream(
                sequence truncated at end-of-stream used to be dropped
                silently (issue B). */
             let rest = decoder === null ? "" : decoder.decode();
+            if (rest) sriScan?.feed(rest);
             if (!injected) {
               if (decoder === null) {
                 decoder = makeDecoder(resolveCharset(contentType, cat(held), true));
                 head = decoder.decode(cat(held), { stream: true });
+                /* #531: a single-chunk document held entirely before the
+                   decoder resolved builds its head here - the one head
+                   build that never passed a feed site. */
+                sriScan?.feed(head);
                 held = [];
                 rest = decoder.decode();
               } else {
@@ -296,12 +310,14 @@ export function rewriteStream(
             return;
           }
           if (injected) {
-            emit(rw.process(decoder!.decode(value, { stream: true })));
+            const t = decoder!.decode(value, { stream: true });
+            sriScan?.feed(t);
+            emit(rw.process(t));
             reportLocation(rw, base);
             continue;
           }
           if (decoder !== null) {
-            head += decoder.decode(value, { stream: true });
+            { const t = decoder.decode(value, { stream: true }); sriScan?.feed(t); head += t; }
           } else {
             held.push(value);
             heldLen += value.length;
@@ -309,7 +325,7 @@ export function rewriteStream(
                Three bytes suffice to decide every supported BOM. */
             if (heldLen < (headerLabel ? 3 : 1024)) continue;
             decoder = makeDecoder(resolveCharset(contentType, cat(held), true));
-            head += decoder.decode(cat(held), { stream: true });
+            { const t = decoder.decode(cat(held), { stream: true }); sriScan?.feed(t); head += t; }
             held = [];
           }
           const at = initSplicePoint(head);
