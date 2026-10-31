@@ -502,6 +502,13 @@ jobs:
         run: node suite/e2e/location-targeting.mjs
       - name: Virtual document base suite (#532)
         run: node suite/e2e/baseuri.mjs
+      - name: Live-corpus location targeting measurement (#456, report-only)
+        run: node suite/e2e/location-targeting-live.mjs
+      - name: Upload live location targeting measurement (#456)
+        uses: actions/upload-artifact@v4
+        with:
+          name: location-targeting-measurement
+          path: suite/location-targeting.json
       - name: Browser E2E suite (issue #35)
         run: |
           node suite/e2e/e2e.mjs 2>&1 | tee browser.out
