@@ -111,7 +111,13 @@ export const zlBwUrl = (origin: string, site: string, base: string): string =>
 
 export const zlBlobWrapSource = (kind: "classic" | "module", preludeUrl: string, text: string): string =>
  kind === "module"
-  ? "await import(" + JSON.stringify(preludeUrl) + ");\n" + text
+  /* #537: a module wrapper rides a STATIC import declaration, not a
+     dynamic import() call: the declaration text must not carry the
+     dynamic-import shape (the CI SWIMPORT gate), and a static import
+     evaluates the prelude before the module body either way. The
+     /zl-bw/ response is a plain script with no exports, a valid ES
+     module, and blob-worker fetches reach the SW like any other. */
+  ? "import " + JSON.stringify(preludeUrl) + ";\n" + text
   : "importScripts(" + JSON.stringify(preludeUrl) + ");\n" + text;
 
 export const zlSyncBlobText = (u: string): string | null => {
