@@ -32,6 +32,12 @@ function install(): { store: Record<string, unknown>; jarPort: PortLike | null }
 
 const settle = () => new Promise<void>((res) => setTimeout(res, 0));
 
+/* CI timing, same race as bootstrap-cookie.test.ts (run 41224320035):
+   poll bounded ticks for jar pushes instead of one setTimeout(0) tick. */
+async function ticks(until?: () => boolean, max = 200): Promise<void> {
+  for (let i = 0; i < max && !(until && until()); i++) await settle();
+}
+
 describe("cookieStore facade (#534)", () => {
   it("returns null without a controller or site token", () => {
     Object.defineProperty(globalThis, "navigator", { value: { serviceWorker: {} }, configurable: true, writable: true });
@@ -103,16 +109,16 @@ describe("cookieStore facade (#534)", () => {
     (store.onchange as unknown) = null;
     (store.addEventListener as (t: string, h: (ev: unknown) => void) => void)("change", handler);
     jarPort!.postMessage({ ok: true, cookie: "a=1; b=2" });
-    await settle();
+    await ticks(() => events.length === 1);
     jarPort!.postMessage({ ok: true, cookie: "a=1; c=3" });
-    await settle();
+    await ticks(() => events.length === 2);
     expect(events).toEqual([
       { type: "change", changed: [{ name: "a", value: "1" }, { name: "b", value: "2" }], deleted: [] },
       { type: "change", changed: [{ name: "c", value: "3" }], deleted: [{ name: "b", value: "2" }] },
     ]);
     (store.removeEventListener as (t: string, h: (ev: unknown) => void) => void)("change", handler);
     jarPort!.postMessage({ ok: true, cookie: "a=1" });
-    await settle();
+    await ticks(undefined, 50);
     expect(events.length).toBe(2);
   });
 });
