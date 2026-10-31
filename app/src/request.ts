@@ -1761,6 +1761,40 @@ let jarPruneTicks = 0;
 let jarPruneInFlight = false;
 
 /* Exported for the #366 prune-options regression test only. */
+/* #537: page-created blob workers never reach this handler as script
+   loads (Chromium serves blob: worker scripts from the blob store,
+   no fetch event), so the page bootstrap wraps them: it inlines the
+   original blob source behind an importScripts()/import() of the
+   /zl-bw/ engine route, and the branch in the fetch handler below
+   serves the prelude with the creating page's site token and
+   virtual base baked into the head. The token carries page-known
+   data only (the opaque site token and the page's own virtual
+   URL), never an engine secret; a malformed token fails closed. */
+export function zlBwTokenParse(search: string): { s: string; b: string } | null {
+  let raw: string | null = null;
+  try {
+    raw = new URLSearchParams(search).get("c");
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  try {
+    const t = JSON.parse(raw) as { s?: unknown; b?: unknown };
+    if (typeof t.s !== "string" || typeof t.b !== "string" || !t.s || !t.b) return null;
+    return { s: t.s, b: t.b };
+  } catch {
+    return null;
+  }
+}
+
+export function zlBwHead(prefix: string, site: string, base: string): string {
+  return (
+    "self.__ZL_PREFIX__=" + JSON.stringify(prefix) + ";\n" +
+    "self.__ZL_SITE__=" + JSON.stringify(site) + ";\n" +
+    "self.__ZL_WORKER_BASE__=" + JSON.stringify(base) + ";\n"
+  );
+}
+
 export function scheduleJarClientPrune(): void {
   if (++jarPruneTicks % 128 !== 0 || jarPruneInFlight) return;
   jarPruneInFlight = true;
@@ -1830,6 +1864,7 @@ export function handleFetch(e: FetchEvent): void {
      origin test: their origin is "null" or a foreign blob origin, and
      they stay browser-owned in every case. */
   if (isOpaqueUrl(url)) {
+
     /* #171: opaque WORKER scripts still execute engine-prepended
        prelude bytes, so their realm is engine-shaped; without a baked
        site token the worker's indexedDB/caches/BroadcastChannel stay
@@ -1877,7 +1912,42 @@ export function handleFetch(e: FetchEvent): void {
   const foreign = url.origin !== self.location.origin;
   if (!foreign) {
     if (url.pathname.startsWith("/wisp/")) return; // transport endpoint: passthrough
-    /* Extension routes: web-accessible resources and extension pages
+    /* #537: blob-worker prelude route (see zlBwTokenParse). The
+       request is a worker's importScripts()/import() of an engine
+       route; the token carries the creating page's site and virtual
+       base. Fail closed on anything malformed. */
+    if (url.pathname === "/zl-bw/") {
+      const tok = zlBwTokenParse(url.search);
+      if (!tok) {
+        e.respondWith(new Response("zeolite: bad blob-worker token", { status: 404, headers: { "content-type": "text/plain" } }));
+        return;
+      }
+      e.respondWith(
+        (async () => {
+          if (engineReady) await raceBoot(engineReady, "blob-worker prelude");
+          /* The token base is whatever the creating context could
+             see: a virtual URL (late markers, nested parents) or its
+             own engine route (an early page bootstrap, before the
+             virtual-origin marker lands). Decode engine routes to the
+             virtual URL so both shapes give the worker the same base. */
+          let base = tok.b;
+          try {
+            const bu = new URL(tok.b, self.location.origin);
+            if (bu.origin === self.location.origin) base = decodeClientUrl(bu) ?? tok.b;
+          } catch { /* keep the token base as-is */ }
+          return new Response(
+            zlBwHead(currentPrefix(), tok.s, base) +
+              (await workerPrelude()) +
+              "\nself.__zlPreludeInit&&self.__zlPreludeInit(" +
+              JSON.stringify(encodeDestLegacy(e.request.url) ?? "") +
+              ");\n",
+            { status: 200, headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" } },
+          );
+        })(),
+      );
+      return;
+    }
+        /* Extension routes: web-accessible resources and extension pages
        (/zl-ext/, #40) and the content-script bridge + declared
        script files (/zl-cs/). */
     if (url.pathname.startsWith(EXT_ROUTE) || url.pathname.startsWith(CS_ROUTE)) {

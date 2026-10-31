@@ -95,6 +95,82 @@ export const tapChannel = (t: Worker | MessagePort): void => {
  } as unknown as (...a: unknown[]) => void;
 };
 
+/* #537: page-created blob workers never surface as script requests -
+   Chromium serves blob: worker scripts from the blob store without a
+   fetch event, so the SW-side prelude injection cannot reach them.
+   The page bootstrap wraps them instead: the original blob source is
+   read synchronously (a sync XHR completes before app code can revoke
+   the URL), inlined behind an importScripts()/import() of the
+   engine's /zl-bw/ prelude route, and the real constructor receives
+   a fresh wrapper blob URL. The route token carries page-known data
+   only (the opaque site token and the page's own virtual URL), never
+   an engine secret. Any failure falls back to the native constructor.
+   Both helpers are exported for the regression tests. */
+export const zlBwUrl = (origin: string, site: string, base: string): string =>
+ origin + "/zl-bw/?c=" + encodeURIComponent(JSON.stringify({ s: site, b: base }));
+
+export const zlBlobWrapSource = (kind: "classic" | "module", preludeUrl: string, text: string): string =>
+ kind === "module"
+  ? "await import(" + JSON.stringify(preludeUrl) + ");\n" + text
+  : "importScripts(" + JSON.stringify(preludeUrl) + ");\n" + text;
+
+export const zlSyncBlobText = (u: string): string | null => {
+ try {
+  const x = new XMLHttpRequest();
+  x.open("GET", u, false);
+  x.send(null);
+  return x.status === 200 && typeof x.responseText === "string" ? x.responseText : null;
+ } catch {
+  return null;
+ }
+};
+
+const zlVbaseOf = (w: Record<string, unknown>, pageUrl: string): string => {
+ const vo = w.__zlVO;
+ const vp = (w.__ZL as { vpath?: unknown } | undefined)?.vpath;
+ return typeof vo === "string" && vo && typeof vp === "string" && vp[0] === "/" ? vo + vp : pageUrl;
+};
+
+export const zlWrapWorkerUrl = (
+ w: Record<string, unknown>,
+ site: string,
+ pageUrl: string,
+ u: string,
+ o?: { type?: string },
+): string | null => {
+ if (typeof u !== "string" || !u.startsWith("blob:")) return null;
+ if (!site) return null;
+ /* The page's location is virtualized (vorigin), so pageUrl's origin
+  is the VIRTUAL origin: the prelude URL must be same-origin with the
+  engine or the SW cannot serve it (a cross-origin module import
+  would CORS-fail, a classic importScripts would be foreign-routed).
+  The controller's scriptURL carries the real engine origin; no
+  controller means no engine context at all, so the wrap fails closed
+  to the native constructor. */
+ const ctl = swc();
+ if (!ctl || typeof ctl.scriptURL !== "string") return null;
+ let origin = "";
+ try {
+  origin = new URL(ctl.scriptURL).origin;
+ } catch {
+  return null;
+ }
+ const base = zlVbaseOf(w, pageUrl);
+ if (!base) return null;
+ const text = zlSyncBlobText(u);
+ if (text === null) return null;
+ const kind = o && o.type === "module" ? "module" : "classic";
+ const src = zlBlobWrapSource(kind, zlBwUrl(origin, site, base), text);
+ try {
+  const U = (globalThis as unknown as { URL?: { createObjectURL?: unknown } }).URL;
+  const B = (globalThis as unknown as { Blob?: new (p: unknown[], o2?: { type: string }) => unknown }).Blob;
+  if (!U || typeof U.createObjectURL !== "function" || !B) return null;
+  return U.createObjectURL(new B([src], { type: "text/javascript" }));
+ } catch {
+  return null;
+ }
+};
+
 export function applyRelay(w: Record<string, unknown>, site: string, pageUrl: string): void {
 /* ---- worker WebSocket relay + serviceWorker shim ------------------- */
 /* 1.6 Hydride: workers have no direct channel to the service worker.
@@ -157,6 +233,13 @@ addEventListener("message", windowRelay);
     ponytail: inline SharedWorker arg union - this lib set lacks
     SharedWorkerOptions (name/type/credentials members only). */
  type SWArg = string | { name?: string; type?: string; credentials?: string };
+ /* #537: wrapper blob URLs for blob SharedWorkers are cached per
+  (script URL, site, mode): the browser keys shared-worker identity
+  by resolved script URL, so two tabs of the same virtual site must
+  get the SAME wrapper URL to keep sharing one context. Cached
+  wrappers are never revoked: a later tab must still be able to load
+  the same URL. */
+ const swBlobWrapCache = new Map<string, string>();
  const OSW = w.SharedWorker as (new (u: string, o?: SWArg) => SharedWorker) | undefined;
  if (OSW) {
  const SWC: new (u: string, o?: SWArg) => SharedWorker = OSW;
@@ -181,7 +264,13 @@ addEventListener("message", windowRelay);
     typeof o === "string"
      ? o + suffix
      : { ...(o ?? {}), name: ((o && o.name) || "") + suffix };
-   super(u, scoped);
+   const skey = u + "\u0000" + site + "\u0000" + mode;
+   let wrapped = swBlobWrapCache.get(skey) ?? null;
+   if (!wrapped) {
+    wrapped = zlWrapWorkerUrl(w, site, pageUrl, u, typeof o === "object" && o ? o : undefined);
+    if (wrapped) swBlobWrapCache.set(skey, wrapped);
+   }
+   super(wrapped ?? u, scoped);
    this.port.addEventListener("message", relay);
    tapChannel(this.port);
   }
@@ -204,9 +293,18 @@ addEventListener("message", windowRelay);
  const WC: new (u: string, o?: WorkerOptions) => Worker = OW;
  class ZlWorker extends WC {
   constructor(u: string, o?: WorkerOptions) {
-   super(u, o);
+   const wrapped = zlWrapWorkerUrl(w, site, pageUrl, u, o);
+   super(wrapped ?? u, o);
    this.addEventListener("message", relay);
    tapChannel(this);
+   /* #537: the wrapper blob is pinned by the worker's own pending
+      load (the same guarantee native code relies on when it revokes
+      a URL right after construction), so the entry can go now. */
+   if (wrapped) {
+    try {
+     URL.revokeObjectURL(wrapped);
+    } catch { /* best effort */ }
+   }
   }
  }
  try {

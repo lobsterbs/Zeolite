@@ -20,15 +20,17 @@ describe("routeWorkerUrl (1.6: importScripts and worker fetch)", () => {
 
   it("routes a relative argument through the engine codec", () => {
     const out = routeWorkerUrl(P, W, E, "lib.js");
-    expect(out.startsWith(P)).toBe(true);
+    /* #537: routed inputs come back as absolute engine URLs, so a
+       blob worker realm (opaque location) can resolve them too. */
+    expect(out.startsWith(E + P)).toBe(true);
     setScheme(P);
-    expect(decodePath(out)).toBe("https://api.site/lib.js");
+    expect(decodePath(out.slice(E.length))).toBe("https://api.site/lib.js");
   });
 
   it("routes an absolute upstream argument", () => {
     const out = routeWorkerUrl(P, W, E, "https://cdn.other/x.js");
     setScheme(P);
-    expect(decodePath(out)).toBe("https://cdn.other/x.js");
+    expect(decodePath(out.slice(E.length))).toBe("https://cdn.other/x.js");
   });
 
   it("passes engine-local and opaque arguments through untouched", () => {
@@ -40,13 +42,13 @@ describe("routeWorkerUrl (1.6: importScripts and worker fetch)", () => {
   it("routes a root-relative worker fetch input against the worker URL (issue #4)", () => {
     const out = routeWorkerUrl(P, W, E, "/data.json");
     setScheme(P);
-    expect(decodePath(out)).toBe("https://api.site/data.json");
+    expect(decodePath(out.slice(E.length))).toBe("https://api.site/data.json");
   });
 
   it("routes a relative worker fetch input against the worker script directory (issue #4)", () => {
     const out = routeWorkerUrl(P, W, E, "api/data.json");
     setScheme(P);
-    expect(decodePath(out)).toBe("https://api.site/api/data.json");
+    expect(decodePath(out.slice(E.length))).toBe("https://api.site/api/data.json");
   });
 
   it("installWorkerPrelude keeps the worker URL in the closure (issue #32)", () => {
