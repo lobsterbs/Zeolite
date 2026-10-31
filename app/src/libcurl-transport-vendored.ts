@@ -67,7 +67,7 @@ function moduleUrl(): string {
 
 /* libcurl-transport maps these to HTTPSession.set_connections:
    [active connections, idle connection cache, per-host connections].
-   The upstream defaults are [50, 40, 6]; raise per-host parallelism
+   The upstream defaults are [60, 50, 6]; raise per-host parallelism
    modestly while keeping both global pools bounded. */
 export const LIBCURL_CONNECTIONS = [64, 48, 8] as const;
 
