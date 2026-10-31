@@ -21,6 +21,24 @@ longer consultation window with cancellation, and for persistence a
 site-scoped store behind the same quotas; both stay unstarted. Full
 detail: docs/virtual-service-worker-phase2.md, #538 wave section.
 
+## Opaque-sandbox frames bypass the engine interception
+
+An iframe carrying a sandbox attribute without allow-same-origin (for
+example sandbox="allow-scripts") gets an opaque origin, and Chromium
+does not make opaque-origin frames service-worker clients (the same
+client-binding class as the srcdoc crbug noted in the matrix): their
+route fetches bypass the engine entirely. The engine answers such
+bypassed internal routes (/j/, /__zl_nav__/, /__zl_prel__/,
+/__zl_navh__/) with a fixed bypass notice, a 404 carrying no-store and
+a short marker body ("Zeolite engine route"), so the bypass is
+observable and never leaks upstream content or a fake success; a
+static miss outside those namespaces keeps the bare 404 (#533).
+Residual: the sandboxed child runs its raw page scripts outside
+engine control, a platform limit; the real fix would need a
+client-binding-free interception host, the same one the srcdoc gap
+needs. The direct-vs-proxied suite pins the bypass notice and never
+runs the opaque children proxied.
+
 ## Content Security Policy is stripped for proxied pages
 
 Both the `Content-Security-Policy` and

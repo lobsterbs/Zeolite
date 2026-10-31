@@ -43,20 +43,47 @@
 import { NativeURL } from "./anchorshim";
 type AnyRecord = Record<string, any>;
 
-/* #132: the child-proxy cache. One map per realm (each realm loads
-   its own bootstrap instance). Populated by the contentWindow
-   getter or minted on demand by vorigin relabel, so every surface
-   hands out the identical proxy object. */
+/* #132: the child-proxy cache. The slot hangs off the CHILD window
+   itself (#533), keyed by the minting realm's origin string: every
+   seam in one realm (the contentWindow getter, the vorigin relabel,
+   window.parent) mints with that realm's origin, so all of them
+   converge on the identical proxy for a given child no matter which
+   module instance runs first. navguard guardChild applies this
+   module's sender shim into a still-loading engine realm (the
+   parent page's instance, before the child document's own
+   bootstrap exists), and the realm's own bootstrap later runs a
+   SECOND instance of this same module; a realm-keyed or module-scope
+   cache minted two different proxies for one child (#533 probe: the
+   parent instance's contentWindow getter handed out one proxy, the
+   realm's own vorigin relabel presented the other, so strict
+   ev.source === iframe.contentWindow checks failed in every nested
+   engine frame). Keying by origin also keeps the two proxy families
+   apart: a child realm's window.parent proxy of ITS parent is keyed
+   by the child's origin, so an opaque inline realm (origin "null")
+   and a real engine frame (engine origin) never share one proxy.
+   A string key in the __zl* family: page-visible exactly like
+   __zlVO and __zlNativePM (a documented honest marker) and
+   non-enumerable so enumeration never lists it. This module map
+   stays the honest fallback for a child that refuses the
+   property. */
 const childProxies = new WeakMap<object, AnyRecord>();
+const SLOT = "__zlCP";
 
-/* The cached child proxy for a child window this realm has already
-   read through contentWindow, or undefined. A child never read that
-   way keeps its raw window identity: a raw reference held by page
-   code then still compares equal to the delivered ev.source. */
-export function childProxyOf(child: unknown): AnyRecord | undefined {
+/* The cached child proxy minted for the given realm origin, or
+   undefined. A child never minted keeps its raw window identity: a
+   raw reference held by page code then still compares equal to the
+   delivered ev.source. */
+export function childProxyOf(child: unknown, real: string): AnyRecord | undefined {
   const c = child as AnyRecord | null;
   if (!c || typeof c !== "object") return undefined;
-  return childProxies.get(c);
+  let m: AnyRecord | undefined;
+  try {
+    m = c[SLOT] as AnyRecord | undefined;
+  } catch {
+    return childProxies.get(c); /* unreachable slot: the fallback map */
+  }
+  if (!m || typeof m.get !== "function") return childProxies.get(c);
+  return m.get(real) as AnyRecord | undefined;
 }
 
 /* Mint (or fetch) the shared child proxy for a same-origin child
@@ -69,11 +96,28 @@ export function childProxyOf(child: unknown): AnyRecord | undefined {
    converge on one proxy, so the first need mints it and every
    later read (getter or relabel) finds the same cache entry
    (#132 race). */
-export function mintChildProxy(real: string, child: unknown): AnyRecord | undefined {
+export function mintChildProxy(
+  real: string,
+  child: unknown,
+): AnyRecord | undefined {
   const c = child as AnyRecord | null;
   if (!c || typeof c !== "object") return undefined;
-  let px = childProxies.get(c);
-  if (px) return px;
+  let m: AnyRecord | undefined;
+  try {
+    m = c[SLOT] as AnyRecord | undefined;
+  } catch {
+    return undefined; /* cross-origin child: raw identity */
+  }
+  if (!m || typeof m.get !== "function") {
+    m = new Map<string, AnyRecord>();
+    try {
+      Object.defineProperty(c, SLOT, { value: m, configurable: true });
+    } catch {
+      m = undefined; /* sealed child: the per-instance fallback below */
+    }
+  }
+  const cached = m ? (m.get(real) as AnyRecord | undefined) : childProxies.get(c);
+  if (cached) return cached;
   let np: ((...a: unknown[]) => void) | undefined;
   try {
     np = c.__zlNativePM;
@@ -81,8 +125,9 @@ export function mintChildProxy(real: string, child: unknown): AnyRecord | undefi
     return undefined; /* cross-origin child: raw identity */
   }
   if (typeof np !== "function") return undefined;
-  px = proxyOf(c, senderPm(c, np, real));
-  childProxies.set(c, px);
+  const px = proxyOf(c, senderPm(c, np, real));
+  if (m) m.set(real, px);
+  else childProxies.set(c, px);
   return px;
 }
 
@@ -94,7 +139,7 @@ export function mintChildProxy(real: string, child: unknown): AnyRecord | undefi
    compare then catches a stashed child, and a raw return means
    the child has no bootstrap yet and keeps its raw identity. */
 export function childProxyByFrame(w: AnyRecord, real: string, src: unknown): AnyRecord | undefined {
-  const hit = childProxyOf(src);
+  const hit = childProxyOf(src, real);
   if (hit) return hit;
   try {
     const els = (w.document as Document | undefined)?.querySelectorAll("iframe,frame");
