@@ -1218,7 +1218,13 @@ async function main() {
     return out;
   });
 
-  await check("api: navigator.serviceWorker.register in a proxied page is a virtual record", async () => {
+    /* #576: registration is truthful now. Without a connected guest
+     host page the kernel cannot run the guest realm, so the page
+     register() promise rejects with the kernel real reason instead
+     of resolving a phase-1 virtual record that claimed success.
+     The register-to-activated path with a guest host connected is
+     proven in guest-sw.mjs. */
+  await check("api: navigator.serviceWorker.register without a guest host rejects honestly (#576)", async () => {
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "swshim", `async () => {
       try {
@@ -1226,7 +1232,7 @@ async function main() {
         return r ? "ok" : "none";
       } catch (e) { return "REJECTED " + e; }
     }`);
-    eq(out, "ok", "virtual registration");
+    eq(out, "REJECTED TypeError: no guest host page connected", "honest rejection without a guest host page");
     return out;
   });
 
