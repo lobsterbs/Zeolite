@@ -57,9 +57,12 @@ import {
   ADAPTIVE_TTL_MS,
   adaptiveEvidenceReset,
   adaptiveEvidenceSnapshot,
+  adaptiveEvidenceVersionForTests,
+  classifyServeFailure,
   literalPassDemotion,
   recordBodyPassFailure,
   recordJsServeOutcome,
+  recordServeFailure,
 } from "../adaptive-evidence";
 import { setAdaptiveTransit } from "../swstate";
 
@@ -271,5 +274,75 @@ describe("serve path records outcomes and gates the learned skip (#487)", () => 
     setAdaptiveTransit(false);
     await (await serve("c-f5")).text();
     expect(transformMock.rewriteCalls).toBe(5);
+  });
+});
+
+
+describe("failure-source classification and version invalidation (#539)", () => {
+  beforeEach(() => {
+    adaptiveEvidenceReset();
+    adaptiveEvidenceVersionForTests(null);
+  });
+
+  afterEach(() => {
+    adaptiveEvidenceVersionForTests(null);
+  });
+
+  it("classifies upstream statuses, challenge pages, transport and rewrite-stage failures", () => {
+    expect(classifyServeFailure(200, null, false)).toBeNull();
+    expect(classifyServeFailure(null, null, false)).toBeNull();
+    expect(classifyServeFailure(302, null, false)).toBe("UPSTREAM_3XX");
+    expect(classifyServeFailure(404, null, false)).toBe("UPSTREAM_4XX");
+    expect(classifyServeFailure(503, null, false)).toBe("UPSTREAM_5XX");
+    expect(classifyServeFailure(null, "transport", false)).toBe("TRANSPORT_ERROR");
+    expect(classifyServeFailure(null, "rewrite", false)).toBe("REWRITE_STAGE_ERROR");
+    expect(classifyServeFailure(404, null, true)).toBe("CHALLENGE_PAGE");
+  });
+
+  it("recorded failure classes are observe-only and never demote", () => {
+    for (let i = 0; i < 50; i++) {
+      recordServeFailure("https://n.example/app.js", "UPSTREAM_3XX");
+      recordServeFailure("https://n.example/app.js", "UPSTREAM_4XX");
+      recordServeFailure("https://n.example/app.js", "UPSTREAM_5XX");
+      recordServeFailure("https://n.example/app.js", "TRANSPORT_ERROR");
+      recordServeFailure("https://n.example/app.js", "CHALLENGE_PAGE");
+      recordServeFailure("https://n.example/app.js", "REWRITE_STAGE_ERROR");
+    }
+    expect(literalPassDemotion("https://n.example/app.js")).toBe(false);
+    const e = adaptiveEvidenceSnapshot().entries.find((x) => x.origin === "n.example");
+    expect(e).toBeDefined();
+    expect(e!.upstream3xx).toBe(50);
+    expect(e!.upstream4xx).toBe(50);
+    expect(e!.upstream5xx).toBe(50);
+    expect(e!.challengePages).toBe(50);
+    expect(e!.transportErrors).toBe(50);
+    expect(e!.rewriteStageErrors).toBe(50);
+    /* Corroborated body-pass failures on the same origin still demote:
+       the observe-only classes stay independent of the demotion gate. */
+    recordBodyPassFailure("https://n.example/app.js", "t0");
+    recordBodyPassFailure("https://n.example/app.js", "t1");
+    recordBodyPassFailure("https://n.example/app.js", "t1");
+    expect(literalPassDemotion("https://n.example/app.js")).toBe(true);
+  });
+
+  it("an engine-version change wipes learned state", () => {
+    adaptiveEvidenceVersionForTests("1.0.0");
+    recordBodyPassFailure("https://v.example/a.js", "t0");
+    recordBodyPassFailure("https://v.example/a.js", "t1");
+    recordBodyPassFailure("https://v.example/a.js", "t1");
+    expect(literalPassDemotion("https://v.example/a.js")).toBe(true);
+    adaptiveEvidenceVersionForTests("1.0.1");
+    expect(literalPassDemotion("https://v.example/a.js")).toBe(false);
+    const snap = adaptiveEvidenceSnapshot();
+    expect(snap.origins).toBe(0);
+    expect(snap.version).toBe("1.0.1");
+    expect(snap.versionResets).toBe(1);
+  });
+
+  it("teardown reset clears the store, counters and version stamp", () => {
+    recordBodyPassFailure("https://r.example/a.js", "t0");
+    adaptiveEvidenceReset();
+    expect(adaptiveEvidenceSnapshot().origins).toBe(0);
+    expect(literalPassDemotion("https://r.example/a.js")).toBe(false);
   });
 });

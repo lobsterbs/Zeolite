@@ -28,7 +28,7 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
+import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, isChallengeMitigated, type TransitDecision } from "./transit";
 import { loadPolicy, behaviorMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
 import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
@@ -72,7 +72,7 @@ import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersi
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
    control plane are call sites. */
-import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setAdaptiveTransit, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
 import { newSriRegistry, SRI_VERIFY_BYTE_CAP, sriBlockedResponse, sriClearClient, sriExpectation, sriNote, sriVerifyBytes } from "./sri";
 import { newImportmapRegistry, importmapNote, resolveBareImport, pageKeyOf } from "./importmaps";
 
@@ -85,7 +85,7 @@ const SRI = newSriRegistry();
    importmaps.ts); module-worker serve seams resolve bare specifiers
    through the recorded map of the owning page. */
 const MAPS = newImportmapRegistry();
-import { literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome } from "./adaptive-evidence";
+import { classifyServeFailure, literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome, recordServeFailure } from "./adaptive-evidence";
 import { spoolBody, SpoolHandle, SpoolUnavailableError } from "./bodyspool";
 
 import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, serveExtensionAsset } from "./extensions";
@@ -1360,12 +1360,16 @@ const routeRestore: Promise<void> = (async () => {
     const cache = await caches.open(ZL_ROUTE_CACHE);
     const hit = await cache.match(routeKeyUrl());
     if (hit) {
-      /* KDL shape: route-config prefix "/j/" https-upgrade #true nav-handles #false */
+      /* KDL shape: route-config prefix "/j/" https-upgrade #true nav-handles #false adaptive-transit #false */
       const [node] = parseKdl(await hit.text());
       if (node && node.name === "route-config") {
         setScheme(typeof node.props.prefix === "string" ? node.props.prefix : "/j/");
         if (typeof node.props["https-upgrade"] === "boolean") setHttpsUpgrade(node.props["https-upgrade"]);
         if (typeof node.props["nav-handles"] === "boolean") setNavHandles(node.props["nav-handles"]);
+        /* #539: the learned-transit kill switch persists with the route
+           shape: a worker restart must not silently rearm demotion
+           that the operator turned off. */
+        if (typeof node.props["adaptive-transit"] === "boolean") setAdaptiveTransit(node.props["adaptive-transit"]);
         /* 2026-10-15: the announced public wisp endpoint persists with
            the route shape so an idle-killed worker instance restores
            it on restart - the embedder re-announces only on
@@ -1446,6 +1450,8 @@ export async function persistRoute(prefix: string): Promise<void> {
           (isHttpsUpgrade() ? "#true" : "#false") +
           " nav-handles " +
           (navHandlesEnabled() ? "#true" : "#false") +
+          " adaptive-transit " +
+          (adaptiveTransitEnabled() ? "#true" : "#false") +
           (altEndpoint() ? " wisp-endpoint " + JSON.stringify(altEndpoint()) : "") +
           (primaryWispOverrideValue() ? " wisp-primary " + JSON.stringify(primaryWispOverrideValue()) : ""),
       ),
@@ -4394,6 +4400,12 @@ export function handleFetch(e: FetchEvent): void {
              rewriter gap (#36): the parser path, not this seam. */
           if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body && !policyNativeJs && !cdnCgiNative) {
             curStage = "REWRITE_STARTED";
+            /* #539: the response's own status class is observe-only
+               evidence. An upstream 3xx/4xx/5xx or a challenge-flagged
+               body is upstream's answer, never proof the rewrite broke
+               the site: an application 404 is indistinguishable from
+               an upstream one at this seam, so no status demotes. */
+            recordServeFailure(target, classifyServeFailure(resp.status, null, isChallengeMitigated(resp.headers)));
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
             const jsRaw = decodeBody(await resp.arrayBuffer(), respCt);
@@ -4507,6 +4519,13 @@ export function handleFetch(e: FetchEvent): void {
              category and cause (a rewrite failure was mislabeled
              TRANSPORT/upstream before). */
           const failure = classifyStageFailure(curStage);
+          /* #539: a transport or rewrite-stage failure on a JS serve
+             destination is observe-only evidence. The only demoting
+             signal remains the literal pass's own throw, recorded at
+             its own catch; a decode or transport failure never
+             demotes. */
+          if (JS_TRANSFORM_DESTS.has(e.request.destination))
+            recordServeFailure(target, classifyServeFailure(null, failure.cause === "rewrite" ? "rewrite" : "transport", false));
           DIAG.failure({
             traceId,
             category: failure.category,
