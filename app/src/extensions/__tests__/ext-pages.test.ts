@@ -9,7 +9,8 @@ import {
   pageClientOf,
   EXT_ROUTE,
 } from "../serve";
-import { handleExtPageCall, pageCallList } from "../pageapi";
+import { handleExtPageCall, pageCallList, pageNamespaceList } from "../pageapi";
+import { PAGE_BRIDGE_SOURCE } from "../pagebridge";
 import { MESSENGER } from "../context";
 import { dispatchExtControl } from "../control";
 import type { ExtensionRecord } from "../types";
@@ -294,5 +295,34 @@ describe("zl:openExtPage dispatch (LB #76 open-options button)", () => {
       { e: {} as ExtendableMessageEvent, reply },
     );
     expect(replies[1]).toMatchObject({ ok: false, error: "no such options page" });
+  });
+});
+
+describe("page namespace objects (#560)", () => {
+  let nseq = 0;
+  async function nsExt(mv: number, perms: string[]): Promise<ExtensionRecord> {
+    await extensions.startup();
+    const manifest = {
+      manifest_version: mv,
+      name: "NsExt #" + ++nseq,
+      version: "1.0",
+      permissions: perms,
+    };
+    const { id } = await extensions.installFiles(
+      new Map([["manifest.json", enc.encode(JSON.stringify(manifest))]]),
+    );
+    return extensions.get(id)!;
+  }
+  it("lists namespace objects from the manifest surface", async () => {
+    expect(pageNamespaceList(await nsExt(2, ["storage"]))).toEqual(["extension"]);
+    expect(pageNamespaceList(await nsExt(2, ["webRequest", "webRequestBlocking"]))).toEqual([
+      "extension",
+      "webRequest",
+    ]);
+    expect(pageNamespaceList(await nsExt(3, ["storage"]))).toEqual([]);
+  });
+  it("materializes cfg.ns namespaces in the page bridge source", () => {
+    expect(PAGE_BRIDGE_SOURCE).toContain("cfg.ns");
+    expect(PAGE_BRIDGE_SOURCE).toContain("inIncognitoContext");
   });
 });
