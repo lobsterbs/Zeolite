@@ -366,9 +366,12 @@ function withPageCacheMutation<T>(work: () => Promise<T>): Promise<T> {
   return next;
 }
 
-async function pageCacheIndex(): Promise<Cache | null> {
+async function pageCacheIndex(pageCache: Cache): Promise<Cache | null> {
   try {
-    return await caches.open(ZL_PAGE_INDEX);
+    const index = await caches.open(ZL_PAGE_INDEX);
+    /* Some embedded/test CacheStorage shims alias every cache name to
+       one bucket. Keep the live page cache authoritative in that case. */
+    return index === pageCache ? null : index;
   } catch {
     return null;
   }
@@ -430,7 +433,7 @@ async function pageCacheUsageFor(req: Request, cache: Cache, index: Cache | null
 
 function touchPageCache(req: Request, hit: Response, cache: Cache): void {
   void withPageCacheMutation(async () => {
-    const index = await pageCacheIndex();
+    const index = await pageCacheIndex(cache);
     const old = await pageCacheUsageFor(req, cache, index, hit);
     await writePageCacheUsage(req, index, old.fields, { ...old.usage, lastUsed: Date.now() });
   }).catch(() => {});
@@ -560,7 +563,7 @@ export async function pageCacheMatch(
        revalidated - the raw upstream 200 must not overwrite the
        composed copy the next hit would serve. */
     if (cacheRefreshSkipsEntry(req, hit)) {
-      const index = await pageCacheIndex();
+      const index = await pageCacheIndex(cache);
       await deletePageCacheEntry(req, cache, index, pageCacheIdentity(req, storedVaryFields(hit.headers)));
       return null;
     }
@@ -593,7 +596,7 @@ export async function pageCacheMatch(
              skip must match the serve-time transform branches). */
           const jsServe = cacheRefreshSkipsEntry(req, hit);
           if (jsServe) {
-            const index = await pageCacheIndex();
+            const index = await pageCacheIndex(cache);
             await deletePageCacheEntry(req, cache, index, pageCacheIdentity(req, storedVaryFields(hit.headers)));
           } else {
             /* #115: the refresh carries the stored validators so the
@@ -795,7 +798,7 @@ export async function pageCacheStore(
   let oversized = false;
   try {
     const cache = await caches.open(ZL_PAGES);
-    const index = await pageCacheIndex();
+    const index = await pageCacheIndex(cache);
     const storedHeaders = stripHostile(resp.headers);
     applyEngineCors(storedHeaders, self.location.origin, req.credentials);
     const cu = new URL(req.url);
@@ -1264,7 +1267,7 @@ export async function pageCacheClear(): Promise<void> {
   try {
     await discardLegacyPageCache();
     const cache = await caches.open(ZL_PAGES);
-    const index = await pageCacheIndex();
+    const index = await pageCacheIndex(cache);
     await withPageCacheMutation(async () => {
       for (const k of await cache.keys()) await cache.delete(k);
       if (index) for (const k of await index.keys()) await index.delete(k);

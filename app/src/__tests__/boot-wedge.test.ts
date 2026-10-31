@@ -60,8 +60,12 @@ const mkEvent = (routeUrl: string) => {
 };
 
 const hang = (): Promise<never> => new Promise(() => {});
+let legacyCacheDeleteStarted = false;
+let rootRecoveryStartedWhileLegacyCleanupPending = false;
 
 beforeEach(async () => {
+  legacyCacheDeleteStarted = false;
+  rootRecoveryStartedWhileLegacyCleanupPending = false;
   /* settle the module-eval route restore first, then pin the route key
      (a fresh idb mints its own key; the encoded route must decode with
      THIS key - see prel-nav-clean.test.ts). */
@@ -74,10 +78,18 @@ beforeEach(async () => {
   vi.stubGlobal("self", {
     location: { origin: ORIGIN },
     registration: { scope: ORIGIN + "/" },
-    clients: { get: () => hang() },
+    clients: {
+      get: () => {
+        rootRecoveryStartedWhileLegacyCleanupPending = legacyCacheDeleteStarted;
+        return hang();
+      },
+    },
   });
   vi.stubGlobal("caches", {
-    delete: () => hang(),
+    delete: () => {
+      legacyCacheDeleteStarted = true;
+      return hang();
+    },
     open: async () => {
       throw new Error("no cache storage");
     },
@@ -90,12 +102,12 @@ describe("pre-deadline awaits are bounded (wave-32 wedge class)", () => {
     async () => {
       const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy(DEST));
       handleFetch(ev);
-      /* Jar-root recovery and legacy-cache cleanup now share their
-         bounded 1.5s window instead of serially paying both deadlines. */
-      const started = Date.now();
+      /* The cache cleanup remains unresolved when client-root recovery
+         begins, proving independent gates overlap without a clock bound. */
       const served = await armed[0]!;
 
-      expect(Date.now() - started).toBeLessThan(2800);
+      expect(legacyCacheDeleteStarted).toBe(true);
+      expect(rootRecoveryStartedWhileLegacyCleanupPending).toBe(true);
       expect(served.status).toBe(200);
       expect(transportMock.calls).toBe(1);
       expect(transportMock.urls[0]).toBe(DEST);
