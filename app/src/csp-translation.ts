@@ -1,15 +1,25 @@
-/* #452: conservative, OFF-BY-DEFAULT CSP translation prototype.
-   CSP is not a URL-rewriting language: 'self' on the shared engine
-   origin can grant access to another virtual site's resources, and
-   simply keeping upstream host sources will block engine routes.
-   Do not feed candidate output to a live Response without real
-   Chromium enforcement and injection compatibility tests.
+/* #452: conservative, OFF-BY-DEFAULT CSP translation prototype,
+   now an opt-in enforcement seam (#527). CSP is not a URL-rewriting
+   language: 'self' on the shared engine origin can grant access to
+   another virtual site's resources, and simply keeping upstream host
+   sources would block engine routes. The enforcement accepts only the
+   audited deny-only subset, marks every translation decision visibly
+   (the x-zl-csp response header) and leaves every unsupported policy
+   stripped, never passed through.
 
    This pure planner only accepts a tiny, provably deny-only subset
    of source-list directives. It deliberately rejects directives with
    origins, paths, wildcards, nonce/hash, strict-dynamic, reports,
    sandbox, fallback semantics or embedding meaning rather than
-   silently dropping or broadening them. The 2026-10-28 audit added worker-src, frame-src and child-src 'none' as representable (the engine page runtime creates no workers and injects no frames into proxied documents); frame-ancestors and connect-src stay rejected (the engine embeds proxied pages in its own UI frame and the page runtime legitimately fetches minted engine routes), and nonce/hash stay rejected (injected scripts cannot carry the upstream nonce and the rewriter mutates inline bodies, so upstream hashes fail). A rejection emits no policy. */
+   silently dropping or broadening them. The 2026-10-28 audit added
+   worker-src, frame-src and child-src 'none' as representable (the
+   engine page runtime creates no workers and injects no frames into
+   proxied documents); frame-ancestors and connect-src stay rejected
+   (the engine embeds proxied pages in its own UI frame and the page
+   runtime legitimately fetches minted engine routes), and nonce/hash
+   stay rejected (injected scripts cannot carry the upstream nonce
+   and the rewriter mutates inline bodies, so upstream hashes fail).
+   A rejection emits no policy. */
 
 export type CspUnsupportedReason =
   | "oversize" | "invalid-syntax" | "duplicate-directive"
@@ -82,12 +92,18 @@ export function planCspHeaders(headers: { get(name: string): string | null }): {
   };
 }
 
-/** #452 opt-in runtime subset. This is ONLY a monotonic-denial
+/** #452/#527 opt-in runtime subset. This is ONLY a monotonic-denial
     restoration after the engine's normal stripping of unsafe upstream
     headers. The planner rejects origins, paths, fallbacks, nonces,
     wildcard sources, reporting, or any other directive. A rejected
     upstream CSP stays stripped, never copied through unmodified.
-    Only a proxied HTML document may receive this experimental header. */
+    Only a proxied HTML document may receive this experimental header.
+    #527: every decision is visible. An enforced candidate sets the
+    x-zl-csp marker naming exactly the translated directives; an
+    unsupported policy sets the marker with the typed reason. The
+    marker values are engine-generated (whitelisted directive names or
+    a reason enum), never upstream source text, so nothing upstream
+    can inject through them. */
 export function applyExperimentalCsp(
   downstream: Headers,
   upstream: { get(name: string): string | null },
@@ -99,8 +115,12 @@ export function applyExperimentalCsp(
   const raw = upstream.get("content-security-policy");
   if (!raw) return false;
   const plan = planCspTranslation(raw);
-  if (plan.kind !== "candidate") return false;
+  if (plan.kind !== "candidate") {
+    downstream.set("x-zl-csp", "unsupported " + plan.reason);
+    return false;
+  }
   downstream.set("content-security-policy", plan.policy);
+  downstream.set("x-zl-csp", "enforced " + plan.directives.join(","));
   /* Report-only endpoints can leak from the browser to upstream
      reports; the generic hostile-header stripper keeps removing it. */
   downstream.delete("content-security-policy-report-only");

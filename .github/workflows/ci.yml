@@ -555,6 +555,21 @@ jobs:
             grep -E "^\[FAIL\]|HARNESS-ERROR" rspool.out | head -20 | while IFS= read -r l; do echo "::error::RSPOOL $l"; done
             exit 1
           fi
+      - name: CSP enforcement differential suite (#527)
+        # Direct-vs-proxied acceptance for the opt-in deny-only CSP
+        # translation: enforced and unsupported decisions are visible
+        # (x-zl-csp), the block-class violation set matches the direct
+        # browser oracle while the allow side stays intact, unsupported
+        # policies stay stripped and never widen, and meta policies
+        # stay consistent with the header path. Ports 6026/7127 never
+        # collide with the other suites.
+        run: |
+          node suite/e2e/csp-enforce.mjs 2>&1 | tee csp.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\[FAIL\]|HARNESS-ERROR" csp.out | head -20 | while IFS= read -r l; do echo "::error::CSP $l"; done
+            exit 1
+          fi
       - name: Injector differential suite (queryRoutes off vs on)
         run: |
           node suite/e2e/differential.mjs 2>&1 | tee diff.out

@@ -158,3 +158,60 @@ describe("CSP deny-only translation safety subset (#452)", () => {
   });
 });
 
+
+describe("visible translation decisions (#527)", () => {
+  it("marks an enforced candidate with the translated directives only", () => {
+    const raw = new Headers({ "content-security-policy": "frame-src 'none'; object-src 'none'" });
+    const out = stripHostile(raw);
+    expect(applyExperimentalCsp(out, raw, "text/html", true)).toBe(true);
+    expect(out.get("content-security-policy")).toBe("frame-src 'none'; object-src 'none'");
+    expect(out.get("x-zl-csp")).toBe("enforced frame-src,object-src");
+  });
+
+  it("marks an unsupported policy with the typed reason and keeps it stripped", () => {
+    const raw = new Headers({ "content-security-policy": "script-src 'self' https://cdn.example" });
+    const out = stripHostile(raw);
+    expect(applyExperimentalCsp(out, raw, "text/html", true)).toBe(false);
+    expect(out.get("x-zl-csp")).toBe("unsupported unsupported-directive");
+    expect(out.has("content-security-policy")).toBe(false);
+  });
+
+  it("never emits a marker when no upstream CSP exists", () => {
+    const raw = new Headers({ "content-type": "text/html" });
+    const out = stripHostile(raw);
+    expect(applyExperimentalCsp(out, raw, "text/html", true)).toBe(false);
+    expect(out.has("x-zl-csp")).toBe(false);
+  });
+
+  it("never emits a marker on non-document resources", () => {
+    const raw = new Headers({ "content-security-policy": "object-src 'none'" });
+    const out = stripHostile(raw);
+    expect(applyExperimentalCsp(out, raw, "text/javascript", true)).toBe(false);
+    expect(out.has("x-zl-csp")).toBe(false);
+    expect(applyExperimentalCsp(out, raw, "text/html", false)).toBe(false);
+    expect(out.has("x-zl-csp")).toBe(false);
+  });
+
+  it("the enforced policy never carries an origin, scheme or quoted source (shared-origin isolation pin)", () => {
+    const raw = new Headers({
+      "content-security-policy":
+        "object-src 'none'; base-uri 'none'; form-action 'none'; worker-src 'none'; frame-src 'none'; child-src 'none'",
+    });
+    const out = stripHostile(raw);
+    expect(applyExperimentalCsp(out, raw, "text/html; charset=utf-8", true)).toBe(true);
+    const policy = out.get("content-security-policy") ?? "";
+    expect(policy).toMatch(/^[a-z-]+ 'none'(; [a-z-]+ 'none')*$/);
+    expect(policy).not.toContain(":");
+    const marker = out.get("x-zl-csp") ?? "";
+    expect(marker).not.toContain("://");
+  });
+
+  it("the marker never carries upstream source text", () => {
+    const raw = new Headers({ "content-security-policy": "object-src https://secret.example/path?token=hidden 'none'" });
+    const out = stripHostile(raw);
+    expect(applyExperimentalCsp(out, raw, "text/html", true)).toBe(false);
+    const flat = JSON.stringify([...out.entries()]);
+    expect(flat).not.toContain("secret.example");
+    expect(flat).not.toContain("hidden");
+  });
+});

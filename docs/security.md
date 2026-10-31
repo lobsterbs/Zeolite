@@ -115,9 +115,13 @@ app/src/__tests__/leak.test.ts):
   tradeoff of an interception engine: the proxied page must run inside
   the embedding application, so the origin's confinement headers
   cannot survive. Consequences, stated honestly:
-  - The proxied page's CSP/XFO protections are gone; isolation of the
+  - The proxied page's CSP/XFO protections are gone by default; isolation of the
     proxied page from the host app is the HOST's responsibility (its
-    own CSP, iframe sandboxing).
+    own CSP, iframe sandboxing). An opt-in deny-only CSP restoration
+    exists behind the cspTranslation experimental flag (#527): the
+    audited 'none' directives are served on proxied documents with a
+    visible x-zl-csp decision marker, every unsupported policy stays
+    stripped and never widened. See docs/limitations.md.
   - Set-Cookie is captured into the per-origin jar before being
     stripped, so the page never sees raw Set-Cookie headers; cookies
     only flow through jar-controlled Cookie headers.
@@ -444,8 +448,10 @@ that legacy-decodes to http(s); the list above is what it pins.
   approximate for engine-initiated subresource requests; the knob
   stays opt-in.
 - CSP of the embedding application is the host's job; Zeolite cannot
-  restore the proxied page's own confinement headers and still
-  function.
+  fully restore the proxied page's own confinement headers and still
+  function. The opt-in deny-only subset (cspTranslation flag, #527)
+  restores what is provably safe and reports every decision; full
+  source-list translation remains open.
 - The compat-suite policy hatch exists; deployments must verify they
   never export ZL_TEST_ALLOW_PRIVATE_DESTS (or ZL_TEST_EGRESS).
 - Fingerprinting resistance is spoofing, not anonymity: timing,

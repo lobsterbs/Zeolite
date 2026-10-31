@@ -32,15 +32,23 @@ upstream CSP never names, so honoring the policy would block the page's
 own scripts and subresources. Consequence: a proxied page runs without
 its CSP protection; the engine's origin isolation and hostile-header
 stripping are the remaining guardrails. A CSP pass that rewrites
-directive sources is the only real fix and is deliberately not faked.
+directive sources is the only real fix and is deliberately not faked; an
+opt-in deny-only subset can be restored (see the subsection below).
 
-### CSP opt-in prototype (#452)
+### CSP opt-in deny-only enforcement (#452, #527)
 
-`app/src/csp-translation.ts` contains a **pure, not-yet-enforcing** parser
-and conservative candidate planner. It accepts only a small deny-only subset
+`app/src/csp-translation.ts` holds the parser, the conservative
+candidate planner and the enforcement seam. Behind the cspTranslation
+experimental flag (zl:config experimental, off by default) the request
+pipeline serves an audited deny-only subset on proxied HTML documents
 (`object-src 'none'`, `base-uri 'none'`, `form-action 'none'`,
-`worker-src 'none'`, `frame-src 'none'`, `child-src 'none'`).
-The 2026-10-28 audit conclusions: worker/frame/child `none` is
+`worker-src 'none'`, `frame-src 'none'`, `child-src 'none'`) and marks
+every decision visibly on the response: an enforced candidate sets
+`x-zl-csp: enforced <directives>`, an unsupported policy stays stripped
+and sets `x-zl-csp: unsupported <reason>`. The marker values are
+engine-generated (whitelisted directive names or a reason enum), never
+upstream source text.
+The 2026-10-28 audit conclusions still govern the subset: worker/frame/child `none` is
 representable (the engine page runtime creates no workers and injects
 no frames into proxied documents, and a site declaring them `none`
 had none upstream either); `frame-ancestors` stays rejected (the
@@ -56,17 +64,28 @@ mutates inline script bodies, so upstream hashes fail);
 (an opaque origin breaks the proxied page own storage semantics).
 Origin/path source lists, `'self'`, fallback directives, report-only
 policies, reports and malformed policies return a typed
-**unsupported** reason: nothing is emitted or silently widened. The current request pipeline still
-strips CSP and CSP meta as before; no new header or browser enforcement has
-been enabled. This is strictly a preparation stage, **not a CSP security
-restoration**.
+**unsupported** reason: nothing is emitted or silently widened.
 
-To enable it safely, #452 still needs origin-scoped engine route matching,
-an injection nonce/hash design, preservation of full policy semantics and
-real Chromium fixtures for allow/block, frames, workers, inline scripts,
-report-only and embedding isolation. A shared engine origin is not
-equivalent to a virtual site's `'self'`; mapping one to the other would
-weaken isolation.
+Real-Chromium acceptance lives in suite/e2e/csp-enforce.mjs (#527):
+with the flag on, the proxied document securitypolicyviolation set
+(frame-src, worker-src, object-src, base-uri, form-action) is identical
+to the direct browser oracle while the page own resources still load;
+the served policy is byte-identical to the upstream one and carries no
+origin, scheme or quoted source, so enforcement can never grant one
+virtual site access to another through the shared engine origin; with
+the flag off the old stripped behavior holds, unmarked. The honest
+divergences are pinned, not hidden: the engine cannot honor
+`script-src 'self'`-class policies (the proxied page runs its inline
+script where the direct oracle blocks it), report-only policies are
+never enforced, and meta policies are dropped by the rewriter so the
+effective policy is exactly the header-path decision (the direct
+oracle honors a meta policy the engine cannot represent).
+
+Still open for #527, honestly: origin/path source lists, `'self'`,
+nonce/hash, strict-dynamic, report-only and violation reporting have
+no safe translation; a shared engine origin is not equivalent to a
+virtual site's `'self'`, and mapping one to the other would weaken
+isolation. The opt-in stays off by default until those gates close.
 
 ## Redirect hops with a body over the replay cap
 
