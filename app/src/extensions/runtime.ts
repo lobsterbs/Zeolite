@@ -252,6 +252,20 @@ export function buildApi(
     onInstalled: makeEvent<(details: unknown) => void>(),
     onStartup: makeEvent<() => void>(),
   };
+  /* MV2 chrome.extension: Chrome keeps this namespace on every MV2
+     context and removed it in MV3, so it mounts for MV2 records only.
+     inIncognitoContext is false (the engine has no incognito
+     browsing); getBackgroundPage/getViews answer like a context with
+     no live page; getURL shares the runtime implementation. */
+  const extensionNs =
+    ext.manifestVersion === 2
+      ? {
+          inIncognitoContext: false,
+          getURL: runtime.getURL,
+          getBackgroundPage: (): null => null,
+          getViews: (): unknown[] => [],
+        }
+      : undefined;
   /* #50: Firefox gates browser.storage on the "storage" permission;
      mounted only when granted - like cookies/notifications/webRequest -
      so feature detection answers honestly and the background/page
@@ -530,6 +544,7 @@ export function buildApi(
 
   const browser: Record<string, unknown> = {
     runtime,
+    ...(extensionNs ? { extension: extensionNs } : {}),
     ...(storageNs && !isApiDetached("storage") ? { storage: storageNs } : {}),
     tabs: tabsNs,
     windows: windowsNs,

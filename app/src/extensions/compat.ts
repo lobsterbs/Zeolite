@@ -24,6 +24,7 @@ export const COMPAT: Record<string, CompatEntry> = {
   "runtime.onInstalled": { supported: "yes", reason: "fires at first background boot with {reason: \"install\"}" },
   "runtime.onStartup": { supported: "yes", reason: "fires at every later background boot" },
   "background scripts (MV2 & Firefox MV3)": { supported: "yes", reason: "executed in a function scope with the extension API object; no engine-global access" },
+  "chrome.extension (MV2)": { supported: "yes", reason: "inIncognitoContext false (the engine has no incognito contexts), getURL shared with runtime, getBackgroundPage null and getViews []; MV3 records get no namespace, Chrome parity" },
   "runtime.onMessageExternal": { supported: "no", reason: "cross-extension messaging not implemented" },
   "storage.local": { supported: "yes", reason: "mounted only with the 'storage' permission, as in Firefox (#50)" },
   "storage.sync": { supported: "partial", reason: "real API, but sync is local persistence only; no account backend" },

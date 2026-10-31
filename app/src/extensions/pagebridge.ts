@@ -59,6 +59,12 @@ export const PAGE_BRIDGE_SOURCE = `(function () {
   browser.runtime.getURL = function (p) {
     return cfg.base + (p.charAt(0) === "/" ? p : "/" + p);
   };
+  for (var n = 0; cfg.ns && n < cfg.ns.length; n++) {
+    if (!browser[cfg.ns[n]]) browser[cfg.ns[n]] = {};
+  }
+  if (browser.extension && browser.extension.inIncognitoContext === undefined) {
+    browser.extension.inIncognitoContext = false;
+  }
   window.browser = browser;
   window.chrome = browser;
 })();

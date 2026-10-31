@@ -24,7 +24,7 @@ import { contentScriptMatches } from "./content-scripts";
 import { BRIDGE_SOURCE } from "./bridge";
 import { LISTENER_SOURCE } from "./scripting";
 import { PAGE_BRIDGE_SOURCE } from "./pagebridge";
-import { pageCallList } from "./pageapi";
+import { pageCallList, pageNamespaceList } from "./pageapi";
 import type { ExtensionRecord } from "./types";
 
 export const EXT_ROUTE = "/zl-ext/";
@@ -288,7 +288,7 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
        its zl:extPage messages). */
     const body =
       "var ZL_PAGE_CFG = " +
-      JSON.stringify({ ext: sr.id, base: EXT_ROUTE + sr.id, calls: pageCallList(rec) }) +
+      JSON.stringify({ ext: sr.id, base: EXT_ROUTE + sr.id, calls: pageCallList(rec), ns: pageNamespaceList(rec) }) +
       ";\n" +
       PAGE_BRIDGE_SOURCE;
     return new Response(body, {

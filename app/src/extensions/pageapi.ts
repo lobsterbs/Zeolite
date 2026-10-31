@@ -56,6 +56,19 @@ export function pageCallList(rec: ExtensionRecord): string[] {
   return calls;
 }
 
+/* #560: namespace objects the page bridge materializes without
+   callable methods. MV2 chrome.extension (Chrome removed it in MV3)
+   and webRequest behind its permission (Chrome exposes the namespace
+   on extension pages too; the Firefox-only filterResponseData stays
+   undefined, Chrome parity). Feature detection touching these
+   namespaces reads a defined object instead of crashing. */
+export function pageNamespaceList(rec: ExtensionRecord): string[] {
+  const ns: string[] = [];
+  if (rec.manifestVersion === 2) ns.push("extension");
+  if (rec.permissions.includes("webRequest")) ns.push("webRequest");
+  return ns;
+}
+
 export async function handleExtPageCall(
   rec: ExtensionRecord,
   senderUrl: string | null,

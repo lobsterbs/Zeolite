@@ -217,3 +217,43 @@ describe("browser.downloads", () => {
     DOWNLOADS.setDispatch(null);
   });
 });
+
+describe("MV2 chrome.extension namespace (#560)", () => {
+  it("mounts on MV2 records with Chrome-parity values", async () => {
+    const { api } = await install("Mv2ExtNs", ["storage"]);
+    const e = api.browser.extension as Record<string, unknown> | undefined;
+    expect(e).toBeDefined();
+    expect(e!.inIncognitoContext).toBe(false);
+    expect(typeof e!.getURL).toBe("function");
+    expect((e!.getBackgroundPage as () => null)()).toBeNull();
+    expect((e!.getViews as () => unknown[])()).toEqual([]);
+    const c = api.chrome.extension as Record<string, unknown> | undefined;
+    expect(c).toBeDefined();
+    expect(c!.inIncognitoContext).toBe(false);
+  });
+  it("is absent for MV3 records (Chrome removed it)", async () => {
+    await extensions.startup();
+    const manifest = {
+      manifest_version: 3,
+      name: "Mv3ExtNs",
+      version: "1.0",
+      permissions: ["storage"],
+    };
+    const { id } = await extensions.installFiles(
+      new Map([["manifest.json", enc.encode(JSON.stringify(manifest))]]),
+    );
+    const rec = extensions.get(id)!;
+    const storage = {
+      local: new ExtensionStorageArea(id, "local", "local"),
+      sync: new ExtensionStorageArea(id, "sync", "sync"),
+      session: new ExtensionStorageArea(id, "session", "session"),
+    };
+    const api = buildApi(
+      rec,
+      { extensionId: id, context: "background", url: null },
+      { messenger: new ExtensionMessenger(), storage },
+    );
+    expect(api.browser.extension).toBeUndefined();
+    expect(api.chrome.extension).toBeUndefined();
+  });
+});
