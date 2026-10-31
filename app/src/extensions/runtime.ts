@@ -349,6 +349,19 @@ export function buildApi(
     /* Register-only until the background runtime phase fires them. */
     onInstalled: makeEvent<(details: unknown) => void>(),
     onStartup: makeEvent<() => void>(),
+    /* #573: Chrome exposes the external messaging event surfaces on
+       runtime. TM-class background boot registers every listener
+       surface (onMessage, onConnect, onConnectExternal) during
+       startup; an undefined namespace aborts the whole bootstrap
+       with a TypeError inside the init chain, leaving the
+       extension deaf: options pages ping forever and never render.
+       There is no external sender in this model (the messenger
+       refuses cross-extension sends), so these register listeners
+       but never fire (compat matrix records them honestly). */
+    onMessageExternal: makeEvent<
+      (msg: unknown, sender: unknown, sendResponse: unknown) => void
+    >(),
+    onConnectExternal: makeEvent<(port: unknown) => void>(),
   };
   /* MV2 chrome.extension: Chrome keeps this namespace on every MV2
      context and removed it in MV3, so it mounts for MV2 records only.

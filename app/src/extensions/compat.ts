@@ -2,7 +2,7 @@
 
    Machine-readable, per API. "partial" means the surface exists with
    real behavior but known gaps; "no" entries carry the reason. This is
-   the honest compatibility contract â nothing is listed as supported
+   the honest compatibility contract Ã¢ÂÂ nothing is listed as supported
    without an implementation behind it. */
 
 export type CompatLevel = "yes" | "partial" | "no";
@@ -29,7 +29,8 @@ export const COMPAT: Record<string, CompatEntry> = {
   "background scripts (MV2 & Firefox MV3)": { supported: "yes", reason: "executed in a function scope with the extension API object; no engine-global access" },
   "chrome.extension (MV2)": { supported: "yes", reason: "inIncognitoContext false (the engine has no incognito contexts), getURL shared with runtime, getBackgroundPage null and getViews []; MV3 records get no namespace, Chrome parity" },
   "chrome.i18n": { supported: "partial", reason: "getMessage answers from the package own _locales (navigator match, then default_locale) with Chrome $n substitution and $NAME$ placeholder semantics; a missing name answers the empty string. getUILanguage/getAcceptLanguages report the resolved locale - the engine has no locale host beyond the worker navigator; detectLanguage is absent" },
-  "runtime.onMessageExternal": { supported: "no", reason: "cross-extension messaging not implemented" },
+  "runtime.onMessageExternal": { supported: "partial", reason: "listeners register (Chrome-parity startup surface, #573) but never fire: cross-extension and web-page sends are refused" },
+  "runtime.onConnectExternal": { supported: "partial", reason: "listeners register (Chrome-parity startup surface, #573) but never fire: external connects are refused" },
   "storage.local": { supported: "yes", reason: "mounted only with the 'storage' permission, as in Firefox (#50)" },
   "storage.sync": { supported: "partial", reason: "real API, but sync is local persistence only; no account backend" },
   "storage.session": { supported: "partial", reason: "in-memory as in Firefox, but per-context isolation pending the background runtime" },
