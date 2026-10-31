@@ -571,6 +571,80 @@ export async function rewriteJsBody(js: string, base: string, pageBase?: string)
   } finally { rw.free?.(); }
 }
 
+/* #456: total candidate buffering bound for the serve seams. A JS or
+   worker body above the cap streams through byte-identical: the
+   specifier, URL-literal and location passes skip it, fail-open with
+   the same contract as the wasm raw pass's element cap. */
+export const JS_BODY_CAP = 2 * 1024 * 1024;
+
+export type BoundedBody =
+  | { over: false; bytes: Uint8Array }
+  | { over: true; head: Uint8Array[]; rest: ReadableStream<Uint8Array> };
+
+/** Read a body up to JS_BODY_CAP. Over the cap the accumulated head
+    and the remainder stream on verbatim (never buffered whole);
+    cancel reaches the upstream reader through both wrappers. */
+export async function boundedBody(body: ReadableStream<Uint8Array> | null): Promise<BoundedBody> {
+  if (!body) return { over: false, bytes: new Uint8Array(0) };
+  const reader = body.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      const bytes = new Uint8Array(total);
+      let at = 0;
+      for (const p of parts) {
+        bytes.set(p, at);
+        at += p.byteLength;
+      }
+      return { over: false, bytes };
+    }
+    if (value) {
+      parts.push(value);
+      total += value.byteLength;
+    }
+    if (total > JS_BODY_CAP) {
+      const rest = new ReadableStream<Uint8Array>({
+        async pull(c) {
+          const r = await reader.read();
+          if (r.done) c.close();
+          else c.enqueue(r.value);
+        },
+        cancel: (reason) => {
+          void reader.cancel(reason);
+        },
+      });
+      return { over: true, head: parts, rest };
+    }
+  }
+}
+
+/** The passthrough response body: an optional first chunk (the
+    worker prelude) ahead of the bounded head and the remainder. */
+export function passthroughStream(
+  first: Uint8Array | null,
+  head: Uint8Array[],
+  rest: ReadableStream<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  const rd = rest.getReader();
+  const queue = first ? [first, ...head] : head.slice();
+  return new ReadableStream<Uint8Array>({
+    async pull(c) {
+      if (queue.length) {
+        c.enqueue(queue.shift()!);
+        return;
+      }
+      const { done, value } = await rd.read();
+      if (done) c.close();
+      else c.enqueue(value);
+    },
+    async cancel(reason) {
+      await rd.cancel(reason);
+    },
+  });
+}
+
 /* #449: origin-pinning detection for the script-serve seams. A body
    whose generated URLs are validated against an anchored ^https?:
    regex keeps its literals verbatim; the caller records the

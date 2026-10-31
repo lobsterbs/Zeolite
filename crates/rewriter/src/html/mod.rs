@@ -27,6 +27,19 @@ use crate::encode::resolve;
 /// close tag cannot pin the whole rest of the response in memory.
 const DROP_RAW_CAP: usize = 256 * 1024;
 
+/// #456: total candidate buffering bound for the raw element passes.
+/// A raw element whose retained body crosses this cap stops being a
+/// rewrite candidate: it serves byte-identical (streaming candidate
+/// passthrough), fail-open exactly like the location pass's size cap.
+/// Matches the location pass's legacy AST ceiling.
+const RAW_PASS_CAP: usize = 2 * 1024 * 1024;
+
+/// #456 passthrough carry: bytes this close to the end of the buffer
+/// are re-scanned on the next chunk, so no close or escape token can
+/// be split across chunk boundaries. At least the longest token
+/// ("</script" plus terminator) so a straddling marker always lands.
+const RAW_PASS_CARRY: usize = 16;
+
 /// Tokenizer state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum St {
@@ -73,6 +86,18 @@ pub struct Rewriter {
     /// srcdoc nesting depth: recursive sub-document rewrites are
     /// depth-capped so pathological input cannot recurse unbounded.
     depth: u8,
+    /// #456: this raw element is past RAW_PASS_CAP and serves
+    /// verbatim; raw_pass_scan keeps locating the close tag without
+    /// retaining the body.
+    raw_pass: bool,
+    /// Escaped-state flags mirroring find_script_close, advanced only
+    /// over fully processable bytes so a re-scanned carry can never
+    /// double-apply a transition.
+    raw_pass_escaped: bool,
+    raw_pass_double: bool,
+    /// A terminated close marker was held; the buffer waits for its
+    /// closing '>'.
+    raw_pass_closing: bool,
 }
 
 impl Rewriter {
@@ -90,6 +115,10 @@ impl Rewriter {
             injected: false,
             base_seen: false,
             depth: 0,
+            raw_pass: false,
+            raw_pass_escaped: false,
+            raw_pass_double: false,
+            raw_pass_closing: false,
         }
     }
 
@@ -182,6 +211,112 @@ impl Rewriter {
             cut -= 1;
         }
         self.buf.drain(..cut);
+    }
+
+    /// #456: streaming candidate passthrough for a raw element past
+    /// RAW_PASS_CAP. The rewriter stops retaining: every processable
+    /// byte emits verbatim and only a bounded carry is kept, so no
+    /// close or escape token can be split across chunk boundaries.
+    /// The escaped-state semantics mirror find_script_close exactly
+    /// (a plain search would end the element early on a
+    /// double-escaped close marker, the #339 class). Transitions apply
+    /// only over fully processable bytes, so a re-scanned carry never
+    /// double-applies one. Returns true when the element's close tag
+    /// completed and the buffer is drained past it.
+    fn raw_pass_scan(&mut self, out: &mut String) -> bool {
+        let script = self.cur_tag == "script";
+        let needle: Vec<u8> = format!("</{}", self.cur_tag)
+            .bytes()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        let keep = RAW_PASS_CARRY.max(needle.len() + 1);
+        let b = self.buf.as_bytes();
+        if self.raw_pass_closing {
+            let Some(k) = b.iter().position(|&c| c == b'>') else {
+                return false;
+            };
+            let end = k + 1;
+            out.push_str(&self.buf[..end]);
+            self.buf.drain(..end);
+            return true;
+        }
+        let limit = b.len().saturating_sub(keep);
+        let mut i = 0usize;
+        let mut close_at: Option<usize> = None;
+        while i < limit {
+            if script {
+                if !self.raw_pass_escaped && i + 4 <= limit && starts_ci(&b[i..], b"<!--") {
+                    self.raw_pass_escaped = true;
+                    i += 4;
+                    continue;
+                }
+                if self.raw_pass_escaped
+                    && !self.raw_pass_double
+                    && i + 7 <= limit
+                    && starts_ci(&b[i..], b"<script")
+                    && b.get(i + 7).is_some_and(|c| {
+                        matches!(c, b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>')
+                    })
+                {
+                    self.raw_pass_double = true;
+                    i += 7;
+                    continue;
+                }
+                if self.raw_pass_escaped && i + 3 <= limit && starts_ci(&b[i..], b"-->") {
+                    self.raw_pass_double = false;
+                    self.raw_pass_escaped = false;
+                    i += 3;
+                    continue;
+                }
+                if starts_ci(&b[i..], b"</script")
+                    && b.get(i + 8).is_some_and(|c| {
+                        matches!(c, b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>')
+                    })
+                {
+                    if self.raw_pass_double {
+                        if i + 8 <= limit {
+                            self.raw_pass_double = false;
+                            i += 8;
+                        } else {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    close_at = Some(i);
+                    break;
+                }
+            } else if b.len() - i >= needle.len()
+                && b[i..i + needle.len()].eq_ignore_ascii_case(&needle)
+            {
+                close_at = Some(i);
+                break;
+            }
+            i += 1;
+        }
+        let Some(ci) = close_at else {
+            let mut emit = limit;
+            while emit > 0 && !self.buf.is_char_boundary(emit) {
+                emit -= 1;
+            }
+            out.push_str(&self.buf[..emit]);
+            self.buf.drain(..emit);
+            return false;
+        };
+        // Hold from the close marker: the '>' may arrive later.
+        match b[ci..].iter().position(|&c| c == b'>') {
+            Some(k) => {
+                let end = ci + k + 1;
+                out.push_str(&self.buf[..end]);
+                self.buf.drain(..end);
+                true
+            }
+            None => {
+                out.push_str(&self.buf[..ci]);
+                self.buf.drain(..ci);
+                self.raw_pass_closing = true;
+                false
+            }
+        }
     }
 
     /// Add a script path to inject after <head> opens (Phase 3 hooks).
@@ -623,6 +758,19 @@ impl Rewriter {
                     }
                 }
                 St::Raw => {
+                    if self.raw_pass {
+                        // #456: over-cap element, verbatim passthrough.
+                        // A completed close falls through so the
+                        // leftover bytes reparse as text in this call.
+                        if !self.raw_pass_scan(&mut out) {
+                            break;
+                        }
+                        self.st = St::Text;
+                        self.cur_tag.clear();
+                        self.raw_pass = false;
+                        self.raw_pass_closing = false;
+                        continue;
+                    }
                     let close = format!("</{}", self.cur_tag);
                     // #188: the match requires a TERMINATED close tag
                     // (whitespace, '/' or '>' after the name): the
@@ -645,11 +793,31 @@ impl Rewriter {
                             .and_then(|ci| self.buf[ci..].find('>').map(|k| (ci, ci + k + 1)))
                     };
                     let Some((ci, end)) = found else {
-                        self.trim_drop_raw();
+                        if !self.drop_raw && self.buf.len() > RAW_PASS_CAP {
+                            // #456: stop retaining an over-cap body
+                            // with no close yet: serve it verbatim and
+                            // keep scanning for the close in bounded
+                            // memory.
+                            self.raw_pass = true;
+                            self.raw_pass_escaped = false;
+                            self.raw_pass_double = false;
+                            self.raw_pass_closing = false;
+                            self.raw_pass_scan(&mut out);
+                        } else {
+                            self.trim_drop_raw();
+                        }
                         break;
                     };
                     if self.drop_raw {
                         // Blocked element: swallow content + close tag.
+                        self.buf.drain(..end);
+                    } else if self.buf.len() > RAW_PASS_CAP {
+                        // #456: an over-cap element serves verbatim even
+                        // with its close tag at hand: the single-shot
+                        // passes would rewrite a body the cap excludes.
+                        // The close search already located the exact
+                        // element end.
+                        out.push_str(&self.buf[..end]);
                         self.buf.drain(..end);
                     } else {
                         let raw = self.buf[..ci].to_string();
@@ -1705,6 +1873,77 @@ mod tests {
             r.rewrite_js_body("location.href");
         }
         assert!(r.take_location_events().split(',').count() <= 32);
+    }
+
+    #[test]
+    fn raw_pass_over_cap_serves_verbatim() {
+        // #456: an over-cap raw element serves byte-identical (the
+        // URL-literal and location passes skip it), the close tag
+        // still ends it and later elements still rewrite.
+        let mut r = Rewriter::new(cfg());
+        let big = "x".repeat(RAW_PASS_CAP + 1024);
+        let out = r.process(&format!(
+            "<script>var u = \"https://e.com/a.js\"; {big}</script><script>location.href</script>"
+        ));
+        assert!(out.contains(&big), "over-cap body must serve verbatim");
+        assert!(
+            out.contains("https://e.com/a.js"),
+            "no rewrite past the cap"
+        );
+        assert!(out.contains("__zl.href"), "later elements still rewrite");
+    }
+
+    #[test]
+    fn raw_pass_close_token_split_across_chunks() {
+        // #456: the passthrough carry re-scans a close marker split
+        // across chunk boundaries; the element still ends exactly at
+        // it and the leftover markup reparses.
+        let mut r = Rewriter::new(cfg());
+        let big = "y".repeat(RAW_PASS_CAP + 40);
+        let mut out = String::new();
+        out.push_str(&r.process(&format!("<script>{big}")));
+        out.push_str(&r.process("</scr"));
+        out.push_str(&r.process("ipt>tail<script>location.href</script>"));
+        out.push_str(&r.finish());
+        assert!(out.contains(&big));
+        assert!(out.contains("ipt>tail"), "split close found via the carry");
+        assert!(
+            out.contains("__zl.href"),
+            "markup after the close still rewrites"
+        );
+    }
+
+    #[test]
+    fn raw_pass_double_escaped_close_parity() {
+        // #339 parity in passthrough: a terminated close marker inside
+        // a double-escaped block never ends the element.
+        let mut r = Rewriter::new(cfg());
+        let big = "z".repeat(RAW_PASS_CAP + 10);
+        let esc = "<!-- <script> a </script> b -->";
+        let mut out = String::new();
+        out.push_str(&r.process(&format!("<script>{big}")));
+        out.push_str(&r.process(esc));
+        out.push_str(&r.process("</script>tail<script>location.href</script>"));
+        out.push_str(&r.finish());
+        assert!(out.contains(&big));
+        assert!(out.contains(esc));
+        assert!(out.contains("__zl.href"));
+    }
+
+    #[test]
+    fn raw_pass_generic_tag_close() {
+        // A non-script raw element past the cap also serves verbatim
+        // and still ends at its own close tag.
+        let mut r = Rewriter::new(cfg());
+        let big = "w".repeat(RAW_PASS_CAP + 10);
+        let mut out = String::new();
+        out.push_str(&r.process(&format!("<style>{big}")));
+        out.push_str(&r.process("</sty"));
+        out.push_str(&r.process("le>tail<script>location.href</script>"));
+        out.push_str(&r.finish());
+        assert!(out.contains(&big));
+        assert!(out.contains("le>tail"));
+        assert!(out.contains("__zl.href"));
     }
 
     #[test]

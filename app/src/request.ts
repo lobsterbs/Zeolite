@@ -31,7 +31,7 @@ import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, isChallengeMitigated, type TransitDecision } from "./transit";
 import { loadPolicy, behaviorMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
-import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
+import { boundedBody, cssRewriteStream, isCss, isHtml, isJs, passthroughStream, rawFrom, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, siteUaFor, type GhosteryRedirect, type ResourceType } from "./rules";
@@ -2007,13 +2007,21 @@ export function handleFetch(e: FetchEvent): void {
         } catch { /* honest fallback: an empty token still isolates */ }
         const resp = await fetch(e.request);
         const ct = resp.headers.get("content-type") ?? "";
-        const src = decodeBody(await resp.arrayBuffer(), ct);
+        const bb = await boundedBody(resp.body);
         const head =
           "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
           "self.__ZL_SITE__=" + JSON.stringify(site) + ";\n" +
           (await workerPrelude()) +
           "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(e.request.url) ?? "") + ");\n";
-        return new Response(head + src, {
+        /* #456: an over-cap worker body streams through; the prelude
+           still prepends (the runtime seams must hold). */
+        if (bb.over) {
+          return new Response(passthroughStream(new TextEncoder().encode(head), bb.head, bb.rest), {
+            status: resp.status,
+            headers: { "content-type": utf8ContentType(ct) },
+          });
+        }
+        return new Response(head + decodeBody(bb.bytes.buffer as ArrayBuffer, ct), {
           status: resp.status,
           headers: { "content-type": utf8ContentType(ct) },
         });
@@ -4536,11 +4544,33 @@ export function handleFetch(e: FetchEvent): void {
             traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
             const wrPk = pageKeyOf(e.request.referrer, self.location.origin);
             const wrBare = wrPk ? (spec: string) => resolveBareImport(MAPS, wrPk, spec) : undefined;
+            /* #456: total candidate buffering bound. An over-cap worker
+               body streams through byte-identical: the prelude still
+               prepends (the runtime seams must hold) but the specifier,
+               literal and location passes skip. ponytail: bare
+               specifiers inside a >2 MiB worker body go native; raise
+               or special-case when a real site needs it. */
+            const bbW = await boundedBody(resp.body);
+            if (bbW.over) {
+              netLogAnnotateRewrite(traceId, "js-body-cap");
+              DIAG.stage(traceId, "RAW_BODY_CAP", { url: target, message: "worker body over the buffering cap serves verbatim (#456)" });
+              const preW =
+                "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
+                "self.__ZL_SITE__=" + JSON.stringify(siteToken(target)) + ";\n" +
+                (await workerPrelude()) +
+                "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n";
+              WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
+              outHeaders.set("content-type", utf8ContentType(respCt));
+              return new Response(passthroughStream(new TextEncoder().encode(preW), bbW.head, bbW.rest), {
+                status: resp.status,
+                headers: outHeaders,
+              });
+            }
             const src = rewriteModuleWorkerImports(
               currentPrefix(),
               target,
               self.location.origin,
-              decodeBody(await resp.arrayBuffer(), respCt),
+              decodeBody(bbW.bytes.buffer as ArrayBuffer, respCt),
               wrBare,
             );
             const preludeW = getFpWorkerScript() ?? (await siteProfileFor(target))?.workerScript ?? "";
@@ -4585,7 +4615,20 @@ export function handleFetch(e: FetchEvent): void {
             recordServeFailure(target, classifyServeFailure(resp.status, null, isChallengeMitigated(resp.headers)));
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
-            const jsRaw = decodeBody(await resp.arrayBuffer(), respCt);
+            /* #456: total candidate buffering bound. An over-cap
+               script body streams through byte-identical; the
+               specifier, literal and location passes skip it. */
+            const bbS = await boundedBody(resp.body);
+            if (bbS.over) {
+              netLogAnnotateRewrite(traceId, "js-body-cap");
+              DIAG.stage(traceId, "RAW_BODY_CAP", { url: target, message: "script body over the buffering cap serves verbatim (#456)" });
+              WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
+              return new Response(passthroughStream(null, bbS.head, bbS.rest), {
+                status: resp.status,
+                headers: outHeaders,
+              });
+            }
+            const jsRaw = decodeBody(bbS.bytes.buffer as ArrayBuffer, respCt);
             let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, jsRaw);
             /* #449: an origin-pinning script body (anchored ^https?:
                regex, the gapi-class loader) keeps its URL literals
