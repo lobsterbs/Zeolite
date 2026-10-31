@@ -74,12 +74,17 @@ import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersi
    control plane are call sites. */
 import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
 import { newSriRegistry, SRI_VERIFY_BYTE_CAP, sriBlockedResponse, sriClearClient, sriExpectation, sriNote, sriVerifyBytes } from "./sri";
+import { newImportmapRegistry, importmapNote, resolveBareImport, pageKeyOf } from "./importmaps";
 
 /* #531 SRI: engine-side subresource integrity registry. Memory-only by
    design (like VCTX): expectations bind a document client to the
    integrity attributes its HTML carried, and a worker restart
    simply forgets them (page reload repopulates). */
 const SRI = newSriRegistry();
+/* #554: per-page import maps recorded from served documents (see
+   importmaps.ts); module-worker serve seams resolve bare specifiers
+   through the recorded map of the owning page. */
+const MAPS = newImportmapRegistry();
 import { literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome } from "./adaptive-evidence";
 import { spoolBody, SpoolHandle, SpoolUnavailableError } from "./bodyspool";
 
@@ -3019,6 +3024,18 @@ export function handleFetch(e: FetchEvent): void {
         const c = e.resultingClientId || e.clientId;
         if (c) sriNote(SRI, c, abs, integrity);
       };
+      /* #554 import maps: document rewrites feed this collector. The
+         registry is keyed by the page-space URL of the page
+         (e.request.url for a navigation - redirects resolve inside
+         the upstream fetch, so the committed key stays the request
+         URL); the module-worker serve seams recover that key from
+         the worker request referrer. */
+      const docMap = (body: string): void => {
+        if (e.request.mode !== "navigate") return;
+        const pk = pageKeyOf(e.request.url, self.location.origin);
+        if (pk) importmapNote(MAPS, pk, body);
+      };
+
       if (e.request.mode === "navigate" || isWorkerDestination(e.request.destination)) {
         const newClient = e.resultingClientId || e.clientId;
         if (newClient && establishContext(VCTX, newClient, target)) capContexts(VCTX, VCTX_CAP);
@@ -3399,7 +3416,7 @@ export function handleFetch(e: FetchEvent): void {
               return new Response(
                 rewriteStream(hit.body, cacheRewriteBase(hit, target), chRule, csInject, hitCt, () => {
                   if (e.request.mode === "navigate") WEBNAV.completed(target);
-                }, true, docSri),
+                }, true, docSri, docMap),
                 { status: hit.status, headers: hitHeaders },
               );
             }
@@ -3484,12 +3501,17 @@ export function handleFetch(e: FetchEvent): void {
                   jsVerdict === "verified" ? "verified" : "skipped:cache-transformed-body",
                 );
               }
+              /* #554: resolve bare specifiers through the owning page recorded
+                 import map (referrer recovery; same key space as docMap). */
+              const wrPk = pageKeyOf(e.request.referrer, self.location.origin);
+              const wrBare = wrPk ? (spec: string) => resolveBareImport(MAPS, wrPk, spec) : undefined;
               const raw0 = decodeBody(hitBuf, jsCt);
               let src = rewriteModuleWorkerImports(
                 currentPrefix(),
                 cacheRewriteBase(hit, target),
                 self.location.origin,
                 raw0,
+                wrBare,
               );
               /* #449: origin-pinning skip telemetry for the cached
                  copy (the fresh path's twin). */
@@ -4255,7 +4277,7 @@ export function handleFetch(e: FetchEvent): void {
               outHeaders.set("content-type", utf8ContentType(respCt));
               return new Response(
                 rewriteStream(
-                  resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone, true, docSri,
+                  resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone, true, docSri, docMap,
                 ),
                 {
                   status: resp.status,
@@ -4275,7 +4297,7 @@ export function handleFetch(e: FetchEvent): void {
               return new Response(
                 rewriteStream(
                   sniffReader, finalDest ?? target, rule, csInject, "text/html", rewriteDone,
-                  true, docSri,
+                  true, docSri, docMap,
                 ),
                 {
                   status: resp.status,
@@ -4309,55 +4331,35 @@ export function handleFetch(e: FetchEvent): void {
               },
             );
           }
-          /* Module worker scripts (module scripts fetch with mode "cors",
-             classic workers with same-origin): import specifiers cannot
-             be routed from the prelude - they resolve before any script
-             runs, and import() is host syntax - so the SW rewrites the
-             specifiers in the body itself (2.3 Selenide). A text pass
-             cannot run on a chunked stream, so the body is buffered;
-             worker scripts are not first-paint documents. */
-          if (isWorkerDestination(e.request.destination) && e.request.mode === "cors" && resp.body) {
-            curStage = "REWRITE_STARTED";
-            DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "module worker specifier pass" });
-            traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
-            const src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, decodeBody(await resp.arrayBuffer(), respCt));
-            /* Issue #32: no __ZL_WORKER_URL__ global (it handed the
-               upstream URL to any worker script); the worker's own
-               engine route is passed to the prelude init line and
-               decoded inside its closure. #55: the init route is
-               minted with the legacy codec on purpose - the prelude
-               realm holds no route key, so a keyed token could never
-               decode there (honest limit, issue text). */
-            const wFp = getFpWorkerScript() ?? (await siteProfileFor(target))?.workerScript ?? "";
-            const head =
-              "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
-              "self.__ZL_SITE__=" + JSON.stringify(siteToken(target)) + ";\n" +
-              (await workerPrelude()) +
-              "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n" +
-              (wFp ? "\n" + wFp : "");
-            WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
-            /* #35: the page cache holds the composed copy (specifiers
-               rewritten, prelude prepended); a stored raw body would
-               serve a second visit unrewritten. */
-            /* Issue B: decode with the upstream charset (the fetch
-               spec's text() is always UTF-8 and mangled legacy
-               script bodies); the composed copy is re-encoded UTF-8
-               and the served header says so. */
-            outHeaders.set("content-type", utf8ContentType(respCt));
-            const out = new Response(head + src, { status: resp.status, headers: outHeaders });
-            if (e.request.method === "GET")
-              void pageCacheStore(e.request, out.clone(), false, finalDest, cookieClientId);
-            return out;
-          }
           if (isWorkerDestination(e.request.destination) && resp.body) {
             /* 1.6 Hydride: classic/shared worker scripts get the prelude
                prepended (importScripts routing, worker WebSocket bridge).
                2.3 Selenide: an active fingerprint profile is compiled
                into a worker-context init script and prepended too
-               (WorkerNavigator + OffscreenCanvas surfaces). Streaming is
-               preserved: everything prepended is one extra first chunk. */
+               (WorkerNavigator + OffscreenCanvas surfaces).
+               #554: a module worker script fetch carries the same
+               destination and mode as a classic one (Chromium sends
+               "same-origin" for both, so a mode gate can never split
+               them), so both kinds take the specifier pass here:
+               import/export-from specifiers are routed in the body
+               (a classic worker body has none and the pass is a
+               no-op), and bare specifiers resolve through the owning
+               page's recorded import map, which a worker never
+               inherits natively. A text pass cannot run on a chunked
+               stream, so the body is buffered once; worker scripts
+               are not first-paint documents. */
             curStage = "REWRITE_STARTED";
-            DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude" });
+            DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude + specifier pass" });
+            traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
+            const wrPk = pageKeyOf(e.request.referrer, self.location.origin);
+            const wrBare = wrPk ? (spec: string) => resolveBareImport(MAPS, wrPk, spec) : undefined;
+            const src = rewriteModuleWorkerImports(
+              currentPrefix(),
+              target,
+              self.location.origin,
+              decodeBody(await resp.arrayBuffer(), respCt),
+              wrBare,
+            );
             const preludeW = getFpWorkerScript() ?? (await siteProfileFor(target))?.workerScript ?? "";
             const prelude =
               "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
@@ -4365,41 +4367,14 @@ export function handleFetch(e: FetchEvent): void {
               (await workerPrelude()) +
               "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n" +
               (preludeW ? "\n" + preludeW : "");
-            /* #201: a cancelled consumer must reach the upstream reader;
-               the reader locks the body, so hoist it and cancel
-               through it. */
-            const rd = resp.body!.getReader();
-            let wpCancelled = false;
-            const body = new ReadableStream<Uint8Array>({
-              async start(c) {
-                c.enqueue(new TextEncoder().encode(prelude));
-                try {
-                  for (;;) {
-                    const { done, value } = await rd.read();
-                    if (done) break;
-                    c.enqueue(value);
-                  }
-                  c.close();
-                } catch (e) {
-                  /* #201: enqueue/close on a cancelled controller is
-                     teardown, not failure. */
-                  if (!wpCancelled) throw e;
-                }
-              },
-              async cancel() {
-                wpCancelled = true;
-                try {
-                  await rd.cancel();
-                } catch {
-                  /* already gone */
-                }
-              },
-            });
             WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
-            /* #35: clone() tees the composed stream, so the browser
-               keeps its streaming path while the cache consumes the
-               other fork. */
-            const out = new Response(body, { status: resp.status, headers: outHeaders });
+            /* #35: the page cache holds the composed copy (prelude +
+               rewritten specifiers); a stored raw body would serve a
+               second visit unrewritten. Issue B: the body decodes with
+               the upstream charset and the composed copy serves as
+               UTF-8, which the served header says. */
+            outHeaders.set("content-type", utf8ContentType(respCt));
+            const out = new Response(prelude + src, { status: resp.status, headers: outHeaders });
             if (e.request.method === "GET")
               void pageCacheStore(e.request, out.clone(), false, finalDest, cookieClientId);
             return out;
