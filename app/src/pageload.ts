@@ -38,8 +38,10 @@ export function siteToken(dest: string): string {
     made the real path visible by design (NAVH handle URLs carry
     it), so the page realm seeing its OWN path is the same
     relaxation: the host stays opaque. Empty for opaque
-    destinations. */
-function vPath(dest: string): string {
+    destinations. #532 exports it: the effective-base delivery
+    seam sends the folded <base href> target through the same
+    hostless form. */
+export function vPath(dest: string): string {
   try {
     const u = new URL(dest);
     if (u.protocol !== "http:" && u.protocol !== "https:") return "";

@@ -7,7 +7,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
    orchestration contract: init splice placement, the lazy dep seam,
    onDone, passthrough and degradation reporting. */
 
-const mockState = vi.hoisted(() => ({ initFails: false }));
+const mockState = vi.hoisted(() => ({ initFails: false, base: undefined as string | undefined }));
 
 vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
   class JsRewriter {
@@ -16,6 +16,11 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
     }
     finish() {
       return "";
+    }
+    /* #532: the effective-base export seam; tests set the folded
+       base through mockState. */
+    take_base() {
+      return mockState.base;
     }
     add_injection(_p: string) {}
     set_blocked_hosts(_h: string[]) {}
@@ -45,7 +50,7 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
 import { cssRewriteStream, initTransform, isCss, isHtml, isJs, rawFrom, rewriteStream } from "../transform";
 import { activeStreams } from "../streams-alive";
 import type { TransformDeps } from "../transform";
-import { initScript } from "../pageload";
+import { initScript, vPath } from "../pageload";
 
 const BASE = "https://target.example/page";
 const enc = new TextEncoder();
@@ -99,6 +104,7 @@ async function freshTransform() {
 
 beforeEach(() => {
   mockState.initFails = false;
+  mockState.base = undefined;
   setDegraded.mockClear();
   siteScript.mockClear();
   (globalThis as unknown as { self: unknown }).self = {
@@ -340,5 +346,43 @@ describe("rewriteStream (#531 sri collector)", () => {
       ),
     );
     expect(none).toEqual([]);
+  });
+});
+
+describe("effective base delivery (#532)", () => {
+  const DOC = '<!DOCTYPE html><html><head><base href="x"></head><body>hi</body></html>';
+
+  it("vPath is the hostless destination path", () => {
+    expect(vPath("https://cdn.example/assets/dir/?q=1#f")).toBe("/assets/dir/?q=1#f");
+    expect(vPath("ftp://x.example/a")).toBe("");
+    expect(vPath("not a url")).toBe("");
+  });
+
+  it("drains the folded base once per distinct value through onVbase", async () => {
+    mockState.base = "https://cdn.example/assets/dir/";
+    const seen: string[] = [];
+    const out = await readAll(
+      rewriteStream(
+        streamOf([DOC.slice(0, 30), DOC.slice(30)]),
+        BASE, {}, [], "text/html",
+        undefined, true, undefined, undefined,
+        (vb) => seen.push(vb),
+      ),
+    );
+    expect(out).toContain("<base");
+    /* hostless form only: the engine origin and the real host never ride the message */
+    expect(seen).toEqual(["/assets/dir/"]);
+  });
+
+  it("never fires onVbase without a folded base", async () => {
+    const seen: string[] = [];
+    await readAll(
+      rewriteStream(
+        streamOf([DOC]), BASE, {}, [], "text/html",
+        undefined, true, undefined, undefined,
+        (vb) => seen.push(vb),
+      ),
+    );
+    expect(seen).toEqual([]);
   });
 });
