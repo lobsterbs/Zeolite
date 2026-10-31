@@ -589,6 +589,21 @@ jobs:
             grep -E "^\[FAIL\]|HARNESS-ERROR" vorigin.out | head -20 | while IFS= read -r l; do echo "::error::VORIGIN $l"; done
             exit 1
           fi
+      - name: Virtual context restart suite (#535)
+        # Real-Chromium restart acceptance: two tabs on two virtual
+        # sites lose the in-memory context map when the engine worker
+        # stops, and each tab's next relative subresource must
+        # rehydrate its own context from its own browser-committed
+        # client URL; the sites must never inherit each other's
+        # contexts, and the referrer compat control stays served.
+        # Ports 6034/7134/7135 never collide with the other suites.
+        run: |
+          node suite/e2e/vctx-restart.mjs 2>&1 | tee vctxr.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\[FAIL\]|HARNESS-ERROR" vctxr.out | head -20 | while IFS= read -r l; do echo "::error::VTXR $l"; done
+            exit 1
+          fi
       - name: Injector differential suite (queryRoutes off vs on)
         run: |
           node suite/e2e/differential.mjs 2>&1 | tee diff.out

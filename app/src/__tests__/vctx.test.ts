@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   capContexts,
+  establishFromClientUrl,
   contextOf,
   establishContext,
   resolveRelative,
@@ -89,5 +90,66 @@ describe("VirtualContext routing (issue #33)", () => {
     expect(m.size).toBe(VCTX_CAP);
     expect(m.has("c0")).toBe(false); /* oldest dropped */
     expect(m.has("c" + (VCTX_CAP + 9))).toBe(true); /* newest kept */
+  });
+});
+
+describe("Virtual context rehydration (issue #535)", () => {
+  /* Stand-in for the engine's decodeClientUrl: /j/<rest> routes decode,
+     everything else (blob: workers, landing pages) rejects. */
+  const dec = (u: URL) =>
+    u.pathname.startsWith("/j/")
+      ? "https://site.example/" + u.pathname.slice(3)
+      : null;
+
+  it("re-establishes a context from a decodable browser-committed client URL", () => {
+    const m = new Map<string, VirtualContext>();
+    const ctx = establishFromClientUrl(
+      m,
+      "c1",
+      "https://engine.example/j/dir/page.html",
+      dec,
+    );
+    expect(ctx).toEqual({
+      id: "c1",
+      clientId: "c1",
+      targetOrigin: "https://site.example",
+      currentUrl: "https://site.example/dir/page.html",
+    });
+    /* The recovered context resolves relative tails like a live one. */
+    expect(resolveRelative(m, "c1", "sub/pixel.png")).toBe(
+      "https://site.example/dir/sub/pixel.png",
+    );
+  });
+
+  it("installs nothing for a client URL the decoder rejects (blob worker fails closed)", () => {
+    const m = new Map<string, VirtualContext>();
+    expect(
+      establishFromClientUrl(m, "w1", "blob:https://engine.example/xyz", dec),
+    ).toBeNull();
+    expect(m.has("w1")).toBe(false);
+  });
+
+  it("installs nothing for an unparseable client URL", () => {
+    const m = new Map<string, VirtualContext>();
+    expect(establishFromClientUrl(m, "c2", "not a url", dec)).toBeNull();
+    expect(m.size).toBe(0);
+  });
+
+  it("keeps two clients' rehydrated contexts isolated", () => {
+    const m = new Map<string, VirtualContext>();
+    const decB = (u: URL) =>
+      u.pathname.startsWith("/j/")
+        ? "https://other.example/" + u.pathname.slice(3)
+        : null;
+    establishFromClientUrl(m, "a", "https://engine.example/j/a.html", dec);
+    establishFromClientUrl(m, "b", "https://engine.example/j/b.html", decB);
+    expect(resolveRelative(m, "a", "/x")).toBe("https://site.example/x");
+    expect(resolveRelative(m, "b", "/x")).toBe("https://other.example/x");
+    expect(resolveRelative(m, "a", "img/1.png")).toBe(
+      "https://site.example/img/1.png",
+    );
+    expect(resolveRelative(m, "b", "img/1.png")).toBe(
+      "https://other.example/img/1.png",
+    );
   });
 });
