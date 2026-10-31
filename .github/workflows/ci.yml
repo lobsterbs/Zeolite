@@ -637,12 +637,12 @@ jobs:
         # page site token and virtual base, ride engine routes,
         # and keep the site-scoped DB namespace. Ports 6034/7134
         # are shared with vctx-restart sequentially, never with the
+        # parallel suites.
         # 2026-10-31: run 1279 failed 8/16 here on an extensions-only push
         # (5aee1975, the page wrap absent for one proxied page); run 1278
         # was green on the parent commit and three local runs on the
         # identical tree passed 16/16, so this is recorded as the
         # suite first CI flake and this commit retriggered the run.
-        # parallel suites.
         run: |
           node suite/e2e/blob-workers.mjs 2>&1 | tee blobw.out
           code=${PIPESTATUS[0]}
