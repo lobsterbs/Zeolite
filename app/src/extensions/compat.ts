@@ -2,7 +2,7 @@
 
    Machine-readable, per API. "partial" means the surface exists with
    real behavior but known gaps; "no" entries carry the reason. This is
-   the honest compatibility contract Ã¢ÂÂ nothing is listed as supported
+   the honest compatibility contract — nothing is listed as supported
    without an implementation behind it. */
 
 export type CompatLevel = "yes" | "partial" | "no";
