@@ -368,9 +368,12 @@ function withPageCacheMutation<T>(work: () => Promise<T>): Promise<T> {
 
 async function pageCacheIndex(pageCache: Cache): Promise<Cache | null> {
   try {
+    /* Full CacheStorage has keys(). Minimal host/test shims sometimes
+       expose only open() and alias all names to one backing map. In that
+       degraded environment, retain size metadata on the page entry and
+       use its stored timestamp as FIFO fallback instead of polluting it. */
+    if (typeof caches.keys !== "function") return null;
     const index = await caches.open(ZL_PAGE_INDEX);
-    /* Some embedded/test CacheStorage shims alias every cache name to
-       one bucket. Keep the live page cache authoritative in that case. */
     return index === pageCache ? null : index;
   } catch {
     return null;
@@ -386,8 +389,8 @@ function validPageCacheUsage(value: unknown): value is PageCacheUsage {
 }
 
 async function writePageCacheUsage(req: Request, index: Cache | null, fields: string[], usage: PageCacheUsage): Promise<void> {
-  pageCacheUsage.set(pageCacheIdentity(req, fields), usage);
   if (!index) return;
+  pageCacheUsage.set(pageCacheIdentity(req, fields), usage);
   const headers = new Headers({ "content-type": "application/json" });
   if (fields.length) headers.set("vary", fields.join(", "));
   try {
@@ -404,7 +407,7 @@ async function pageCacheUsageFor(req: Request, cache: Cache, index: Cache | null
   }
   const fields = (entry?.headers.get(ZL_VARY) ?? "").split(",").map((field) => field.trim().toLowerCase()).filter(Boolean);
   const identity = pageCacheIdentity(req, fields);
-  const memory = pageCacheUsage.get(identity);
+  const memory = index ? pageCacheUsage.get(identity) : undefined;
   if (memory) return { identity, fields, usage: memory };
   if (index) {
     try {
