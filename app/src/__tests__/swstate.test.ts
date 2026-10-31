@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /* #87: the shared service-worker runtime state moved out of sw.ts;
    these tests pin the accessor surface the request engine and the
@@ -22,10 +22,13 @@ import {
   navHandlesEnabled,
   pushDocCookieView,
   registerDocCookiePort,
+  replayBodyCapBytes,
+  replayCapMbValue,
   setEngineDegraded,
   setFingerprint,
   setHttpsUpgrade,
   setNavHandles,
+  setReplayCapMb,
   setRouteKey,
   setSiteEnabled,
   siteDisabled,
@@ -272,5 +275,24 @@ describe("docCookie per-client port cap (#253)", () => {
       registerDocCookiePort("evict253", mk(), "https://example.com/");
     }
     expect(closed).toBe(4);
+  });
+});
+
+describe("replay cap knob (zl:config replayCapMb, #556)", () => {
+  afterEach(() => {
+    setReplayCapMb(32);
+  });
+
+  it("clamps into 1-32 MiB, rounds, and ignores non-finite values", () => {
+    setReplayCapMb(0);
+    expect(replayCapMbValue()).toBe(1);
+    setReplayCapMb(100);
+    expect(replayCapMbValue()).toBe(32);
+    setReplayCapMb(2.4);
+    expect(replayCapMbValue()).toBe(2);
+    const before = replayCapMbValue();
+    setReplayCapMb(Number.NaN);
+    expect(replayCapMbValue()).toBe(before);
+    expect(replayBodyCapBytes()).toBe(replayCapMbValue() * 1024 * 1024);
   });
 });

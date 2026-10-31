@@ -92,6 +92,41 @@ export function setHttpsUpgrade(on: boolean): void {
   httpsUpgrade = on;
 }
 
+/* #556: host authorization for the OPFS replay spool. Off by
+   default: upload bytes reach persistent storage only when the
+   embedder explicitly opted in (zl:config spoolUploads). Ephemeral
+   like the other toggles: a worker restart reverts it, the host
+   re-pushes on boot. */
+let spoolUploads = false;
+
+export function spoolUploadsEnabled(): boolean {
+  return spoolUploads;
+}
+
+export function setSpoolUploads(on: boolean): void {
+  spoolUploads = on;
+}
+
+/* #556: the replay buffering cap in mebibytes, configurable so a
+   memory-constrained embedder can tighten it and the e2e suite can
+   exercise the over-cap spool paths at transport-safe sizes. The
+   clamp keeps the cap inside the 32 MiB historical default; a
+   non-finite value is ignored. Ephemeral like the other toggles. */
+let replayCapMb = 32;
+
+export function replayBodyCapBytes(): number {
+  return replayCapMb * 1024 * 1024;
+}
+
+export function replayCapMbValue(): number {
+  return replayCapMb;
+}
+
+export function setReplayCapMb(mb: number): void {
+  if (!Number.isFinite(mb)) return;
+  replayCapMb = Math.min(32, Math.max(1, Math.round(mb)));
+}
+
 /* ---- HTTPS-only proceed-anyway (LB #76) ---------------------------- */
 
 /* Hosts the user explicitly allowed over cleartext through the

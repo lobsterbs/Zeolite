@@ -25,6 +25,7 @@
    uses). */
 
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 
 export const PORT_A = 7101;
@@ -112,7 +113,13 @@ export function startFixture(port) {
   const server = createServer((req, res) => {
     const path = (req.url ?? "/").split("?")[0];
     let body = "";
-    req.on("data", (c) => (body += c));
+    /* #556: the exact request bytes for the echohash endpoint; the
+       string copy above is lossy for binary bodies. */
+    const bufs = [];
+    req.on("data", (c) => {
+      body += c;
+      bufs.push(c);
+    });
     req.on("end", () => {
       if (path !== "/__hits") {
         hits.push({ path, method: req.method, referer: req.headers.referer ?? null, body });
@@ -202,6 +209,42 @@ export function startFixture(port) {
       } else if (path === "/api/data") {
         /* No CORS headers: the #34 canary. Browser-direct = unreadable. */
         send(res, "application/json", `{"zl":"api"}`);
+      } else if (path === "/api/echohash") {
+        /* #556: reads the whole request body and answers its SHA-256
+           plus the request facts, so a redirect-replayed upload is
+           verified by content hash, not just status. ACAO * so the
+           direct oracle can read a cross-origin hop's echo; no-store
+           so an echoed upload never enters the page cache. */
+        const bytes = Buffer.concat(bufs);
+        res.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          "access-control-allow-origin": "*",
+        });
+        res.end(JSON.stringify({
+          zl: "echohash",
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          bytes: bytes.length,
+          method: req.method,
+          contentType: req.headers["content-type"] ?? "",
+          authorization: req.headers["authorization"] ?? "",
+        }));
+      } else if (path.startsWith("/api/redirbody/")) {
+        /* #556: one endpoint per redirect kind, landing on the hash
+           echo. 307/308 replay the body; 301/302/303 convert to GET
+           (dropping POST bodies) exactly like the fetch spec, so the
+           direct oracle shows the expected method and the engine is
+           compared against it. ?to= points the hop at another fixture
+           origin for the cross-origin matrix. */
+        const code = Number(path.slice("/api/redirbody/".length));
+        if ([301, 302, 303, 307, 308].includes(code)) {
+          const to = new URL(req.url ?? "/", origin).searchParams.get("to");
+          res.writeHead(code, { location: (to ?? origin) + "/api/echohash" });
+          res.end();
+        } else {
+          res.writeHead(400, { "content-type": "text/plain" });
+          res.end("bad redirect code");
+        }
       } else if (path.startsWith("/api/echo")) {
         /* #38: echoes the request line the engine actually forwarded - a
            doubled or dropped query is visible in req.url. */
