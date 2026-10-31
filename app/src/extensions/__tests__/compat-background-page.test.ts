@@ -35,7 +35,7 @@ describe("background.page capability (#505)", () => {
     const entry = COMPAT["background.page (MV2)"];
     expect(entry).toBeDefined();
     expect(entry!.supported).toBe("partial");
-    expect(entry!.reason).toContain("no DOM is provided");
+    expect(entry!.reason).toContain("inert document stub");
     expect(
       compatReport().some((r) => r.api === "background.page (MV2)" && r.supported === "partial"),
     ).toBe(true);
@@ -114,15 +114,15 @@ describe("background.page capability (#505)", () => {
     expect(after.lastError).toContain("background page missing from package: gone.html");
   });
 
-  it("fails the boot with the recorded error when a page script touches the DOM", async () => {
+  it("boots a page script that touches the DOM on the document stub (#560)", async () => {
     await extensions.startup();
     const { id } = await extensions.installFiles(
       pagePkg("BgPageDom", '<script>document.title = "x";</script>'),
     );
     await bootExtension(extensions.get(id)!);
     const after = extensions.get(id)!;
-    expect(after.state).toBe("error");
-    expect(after.lastError).toContain("document is not defined");
+    expect(after.state).toBe("running");
+    expect(after.lastError).toBeNull();
   });
 
   it("fails the boot honestly when an external page script is missing", async () => {
