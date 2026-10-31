@@ -7,6 +7,29 @@
 
 import { swc } from "./siteid";
 
+/** #534: does a document.cookie write shape a deletion? RFC 6265
+    deletion attributes only: max-age <= 0, or an already-past Expires.
+    The bootstrap bundle stays independent of the RFC 6265 5.1.1
+    cookie-date parser (size gate), so Expires parsing uses Date.parse
+    and an unparsable date is honestly NOT a deletion: the
+    authoritative jar reply corrects the copy either way. */
+export function deletionShaped(v: string): boolean {
+  let maxAge: number | null = null;
+  let expires: number | null = null;
+  for (const part of v.split(";").slice(1)) {
+    const i = part.indexOf("=");
+    const key = (i < 0 ? part : part.slice(0, i)).trim().toLowerCase();
+    const val = i < 0 ? "" : part.slice(i + 1).trim();
+    if (key === "max-age" && /^-?[0-9]+$/.test(val)) maxAge = Number(val);
+    else if (key === "expires") {
+      const t = Date.parse(val);
+      if (!Number.isNaN(t)) expires = t;
+    }
+  }
+  if (maxAge !== null && maxAge <= 0) return true;
+  return expires !== null && expires <= Date.now();
+}
+
 export function applyCookie(site: string, doc: Document = document): void {
 /* ---- document.cookie (virtual, per-origin) ------------------------ */
 /* The getter must be synchronous, the authoritative jar lives in
@@ -14,8 +37,13 @@ export function applyCookie(site: string, doc: Document = document): void {
  read refreshes it asynchronously from the jar, every write applies
  locally first (read-after-write works) and is forwarded for RFC 6265
  admission. Eventually consistent across windows; exact at the jar.
- Deletion (max-age=0 or a past Expires) is not detected optimistically;
- the jar reply corrects the copy within milliseconds. */
+ #534 deletion consistency contract: a deletion-shaped write
+ (max-age <= 0 or an already-past Expires) removes the name from
+ the optimistic copy immediately, so a read right after the write
+ never observes the stale value; the authoritative jar reply then
+ corrects the copy (restoring identities the deletion did not
+ match, and confirming the deletion at the jar within
+ milliseconds). */
 
 {
  const ctl = swc();
@@ -49,7 +77,10 @@ export function applyCookie(site: string, doc: Document = document): void {
  const keep = (cur ? cur.split("; ") : []).filter(
  (p) => p.slice(0, p.indexOf("=")) !== name,
  );
- keep.push(name + "=" + val);
+ /* #534: a deletion-shaped write removes the name from the
+    optimistic copy immediately (the consistency contract above);
+    the jar reply confirms or corrects. */
+ if (!deletionShaped(v)) keep.push(name + "=" + val);
  cur = keep.join("; ");
  sy(v);
  },
