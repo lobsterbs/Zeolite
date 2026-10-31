@@ -16,6 +16,7 @@
 //! the bootstrap).
 
 pub mod css;
+pub mod importmap;
 pub mod url_attrs;
 
 use crate::config::RewriteConfig;
@@ -59,6 +60,8 @@ pub struct Rewriter {
     cur_tag: String,
     /// #369: the current <script> is executable JavaScript by its type.
     cur_script_js: bool,
+    /// #554: the current <script> is an import map document by its type.
+    cur_script_importmap: bool,
     /// The element being entered was dropped (blocked host): its raw
     /// content and close tag must be swallowed, not emitted.
     drop_raw: bool,
@@ -82,6 +85,7 @@ impl Rewriter {
             buf: String::new(),
             cur_tag: String::new(),
             cur_script_js: false,
+            cur_script_importmap: false,
             drop_raw: false,
             injected: false,
             base_seen: false,
@@ -360,6 +364,45 @@ impl Rewriter {
         Some(format!("{}{}{}{}", self.cfg.origin, prefix, token, rest))
     }
 
+    /// #554: route a URL-like PREFIX key (an import map key or scope
+    /// key ending in "/") into the path-preserving split shape the
+    /// keyed codec can decode: the token carries ONLY the origin and
+    /// the real path rides verbatim after it, so the prefix stays
+    /// visible for the browser prefix matching against page-space
+    /// module URLs (script srcs use the same split form). None when
+    /// the codec has no split form (a plain Base64Url route hides the
+    /// path inside the token, so no route string can prefix-match),
+    /// or the key is opaque, carries a query/fragment, or is too
+    /// long: the caller keeps the entry verbatim, which never matched
+    /// through the engine before either.
+    fn enc_split_route(&self, url: &str) -> Option<String> {
+        let mut abs = crate::encode::resolve(url, &self.base);
+        if let Some(innermost) = self.cfg.unwrap_engine_route(&abs) {
+            if innermost.starts_with("http://") || innermost.starts_with("https://") {
+                abs = innermost;
+            }
+        }
+        if !abs.starts_with("http://") && !abs.starts_with("https://") {
+            return None;
+        }
+        if abs.contains('#') || abs.contains('?') {
+            return None;
+        }
+        let (prefix, key) = match &self.cfg.codec {
+            crate::encode::Codec::Keyed { prefix, key } => (prefix, key),
+            _ => return None,
+        };
+        let scheme_end = abs.find("://")? + 3;
+        let host_end = abs[scheme_end..].find('/').map(|i| i + scheme_end)?;
+        let origin = &abs[..host_end];
+        let rest = &abs[host_end..];
+        if rest.len() > 2000 {
+            return None; // recoverPath cap is 2048; keep headroom
+        }
+        let token = crate::encode::b64u_encode(&crate::encode::keyed_token(key, origin.as_bytes()));
+        Some(format!("{}{}{}{}", self.cfg.origin, prefix, token, rest))
+    }
+
     /// Split a directory-shaped destination (path ending in "/") into
     /// (parent, last visible path segment): "https://e.com/a/b/" ->
     /// ("https://e.com/a", "b"). None when there is no segment to
@@ -534,6 +577,7 @@ impl Rewriter {
                             if open {
                                 self.cur_tag = elem_name(&buf[..end]);
                                 self.cur_script_js = script_type_is_js(&buf[..end]);
+                                self.cur_script_importmap = script_type_is_importmap(&buf[..end]);
                             } else {
                                 self.cur_tag.clear();
                             }
@@ -594,7 +638,21 @@ impl Rewriter {
                         self.buf.drain(..end);
                     } else {
                         let raw = self.buf[..ci].to_string();
-                        if self.cur_tag == "style" && self.cfg.rewrite_css {
+                        if self.cur_tag == "script" && self.cur_script_importmap {
+                            /* #554: an import map body is JSON data, not
+                            JavaScript; its target URLs route exactly the
+                            way a script src would (values and URL-like
+                            keys), so mapped modules stay engine-routed
+                            instead of escaping browser-direct. Invalid
+                            JSON passes through unchanged and fails the
+                            map with the native error. */
+                            out.push_str(&importmap::rewrite_importmap(
+                                &raw,
+                                &|u| self.enc(u),
+                                &|u| self.enc_split_route(u),
+                                &|u| self.enc_split_route(u),
+                            ));
+                        } else if self.cur_tag == "style" && self.cfg.rewrite_css {
                             out.push_str(&css::rewrite_stylesheet(&raw, &|u| self.enc(u)));
                         } else if self.cur_tag == "script"
                             && self.cfg.rewrite_js_literals
@@ -950,11 +1008,12 @@ fn classify_open(buf: &str) -> Option<(St, String)> {
 /// leading '/' of close tags. #187: cur_tag must be derived from
 /// the COMPLETED tag, not the partial text classify_open saw when
 /// the tag split across chunks ("<scr" + "ipt>").
-/// #369: whether a <script> open tag carries executable JavaScript.
-/// No `type`, an empty one, or a JavaScript MIME type (parameters like
-/// `;charset=` ignored) is executable; anything else (application/json,
-/// application/ld+json, text/template, importmap, ...) is data.
-fn script_type_is_js(tag: &str) -> bool {
+/// The decoded, lowercased, parameter-stripped type attribute of a
+/// <script> open tag, or None when the tag carries no type attribute.
+/// #554 factored the shared classification out of script_type_is_js so
+/// the import map pass answers "is this an import map" from the same
+/// tokenizer instead of a second, drifting one.
+fn script_type_value(tag: &str) -> Option<String> {
     // #448: use the same attribute tokenizer as the markup rewrite.
     // Searching for " type" also matches text inside a quoted value.
     let tag = tag.strip_prefix('<').unwrap_or(tag);
@@ -966,22 +1025,37 @@ fn script_type_is_js(tag: &str) -> bool {
         if attr.name.eq_ignore_ascii_case("type") {
             let decoded = decode_entities(attr.value.as_deref().unwrap_or(""));
             let lower = decoded.to_ascii_lowercase();
-            let value = lower.split(';').next().unwrap_or("").trim();
-            return matches!(
-                value,
-                "" | "module"
-                    | "text/javascript"
-                    | "application/javascript"
-                    | "application/x-javascript"
-                    | "text/ecmascript"
-                    | "application/ecmascript"
-                    | "text/jscript"
-                    | "text/livescript"
-            );
+            return Some(lower.split(';').next().unwrap_or("").trim().to_string());
         }
         rest = &rest[attr.consumed..];
     }
-    true
+    None
+}
+
+/// #369: whether a <script> open tag carries executable JavaScript.
+/// No `type`, an empty one, or a JavaScript MIME type (parameters like
+/// `;charset=` ignored) is executable; anything else (application/json,
+/// application/ld+json, text/template, importmap, ...) is data.
+fn script_type_is_js(tag: &str) -> bool {
+    match script_type_value(tag) {
+        None => true,
+        Some(value) => matches!(
+            value.as_str(),
+            "" | "module"
+                | "text/javascript"
+                | "application/javascript"
+                | "application/x-javascript"
+                | "text/ecmascript"
+                | "application/ecmascript"
+                | "text/jscript"
+                | "text/livescript"
+        ),
+    }
+}
+
+/// #554: the current <script> is an import map document by its type.
+fn script_type_is_importmap(tag: &str) -> bool {
+    matches!(script_type_value(tag), Some(v) if v == "importmap")
 }
 
 fn elem_name(tag: &str) -> String {
@@ -3161,6 +3235,59 @@ document.write('<script src=x></script>');
             "img src gains no fragment: {}",
             out
         );
+    }
+
+    /// #554: an inline import map routes its target URLs through the
+    /// engine so mapped modules stop escaping browser-direct. The
+    /// bare key keeps its specifier text; the value becomes the same
+    /// opaque keyed route a rewritten module specifier carries; a
+    /// scope prefix key takes the path-preserving split form so
+    /// prefix matching still sees the path; invalid JSON stays
+    /// verbatim for the native error.
+    #[test]
+    fn importmap_script_routes_through_the_engine() {
+        let c = keyed_cfg();
+        let mut r = Rewriter::new(c.clone());
+        r.set_base("https://site.example/dir/page.html");
+        let html = "<script type=\"importmap\">{\"imports\":{\"lodash\":\"https://cdn.example/l.js\"},\"scopes\":{\"https://site.example/app/\":{\"widget\":\"https://cdn.example/w.js\"}}}</script>";
+        let out = format!("{}{}", r.process(html), r.finish());
+        assert!(
+            out.contains(&format!(
+                "\"lodash\":\"{}\"",
+                c.encode_url("https://cdn.example/l.js")
+            )),
+            "bare key intact, value routed: {}",
+            out
+        );
+        let token = crate::encode::b64u_encode(&crate::encode::keyed_token(
+            &core::array::from_fn(|i| i as u8),
+            b"https://site.example",
+        ));
+        let split_scope = format!("/zl/{}/app/", token);
+        assert!(
+            out.contains(&split_scope),
+            "scope prefix key rides the split form: {}",
+            out
+        );
+        assert!(
+            out.contains(&format!(
+                "\"widget\":\"{}\"",
+                c.encode_url("https://cdn.example/w.js")
+            )),
+            "scope value routed: {}",
+            out
+        );
+    }
+
+    /// #554: an unparseable map passes through unchanged: the
+    /// browser raises exactly its native error.
+    #[test]
+    fn importmap_invalid_json_stays_verbatim() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://site.example/");
+        let html = "<script type=\"importmap\">{not json at all</script>";
+        let out = format!("{}{}", r.process(html), r.finish());
+        assert!(out.contains("{not json at all"), "verbatim: {}", out);
     }
 
     /// #172: values that entity-decode to tag-shaping characters
