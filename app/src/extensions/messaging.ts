@@ -13,6 +13,10 @@ export type MessageContext = "background" | "popup" | "options" | "content" | "e
 
 export interface MessageSender {
   extensionId: ExtensionId;
+  /* #560: Chrome parity. TM-class background dispatchers gate every
+     action on sender.id === runtime.id and refuse a sender that
+     carries neither an internal-scheme url nor the extension id. */
+  id?: ExtensionId;
   context: MessageContext;
   url: string | null;
 }
@@ -189,7 +193,7 @@ export class ExtensionMessenger {
     );
     receiver = new ExtensionPort(
       name,
-      { extensionId: id, context: "background", url: null },
+      { extensionId: id, id, context: "background", url: null },
       (m) => caller?.receive(m),
       () => caller?.notifyDisconnect()
     );

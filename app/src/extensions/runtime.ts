@@ -263,6 +263,40 @@ function makeDownloadsEvent(extId: ExtensionId): EventNamespace<(delta: unknown)
   };
 }
 
+/* #560: host platform facts in the PlatformInfo vocabulary Chrome
+   and Firefox share, derived from the navigator this worker actually
+   runs under. Unknown stays the honest "unknown". */
+function hostOs(ua: string): string {
+  if (/Android/i.test(ua)) return "android";
+  if (/CrOS/i.test(ua)) return "cros";
+  if (/OpenBSD|FreeBSD/i.test(ua)) return "openbsd";
+  if (/Macintosh|Mac OS X/i.test(ua)) return "mac";
+  if (/Windows/i.test(ua)) return "win";
+  if (/Linux|X11/i.test(ua)) return "linux";
+  return "unknown";
+}
+
+function hostPlatformInfo(): { os: string; arch: string } {
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  const arch = /arm|aarch/i.test(ua) ? "arm" : /x86_64|x64|WOW64/i.test(ua) ? "x86-64" : "x86-32";
+  return { os: hostOs(ua), arch };
+}
+
+function hostBrowserInfo(): { name: string; version: string } {
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  const brand = ua.includes("Firefox")
+    ? "Firefox"
+    : ua.includes("Edg/")
+      ? "Edge"
+      : ua.includes("OPR/")
+        ? "Opera"
+        : ua.includes("Chrome/")
+          ? "Chrome"
+          : "unknown";
+  const m = /(Firefox|Edg|OPR|Chrome)[/]([0-9.]+)/.exec(ua);
+  return { name: brand, version: m ? m[1] : "" };
+}
+
 export function buildApi(
   ext: ExtensionRecord,
   sender: MessageSender,
@@ -290,6 +324,15 @@ export function buildApi(
     getManifest: (): Record<string, unknown> =>
       JSON.parse(JSON.stringify(ext.manifest)) as Record<string, unknown>,
     getURL: (path: string): string => extensionUrl(ext.id, path),
+    /* #560: platform identity. TM-class background init awaits both
+       methods through callback-only Promises; when one is missing the
+       TypeError aborts that await, the init never completes, and every
+       later page message queues forever. The values are the host
+       navigator's honest facts, no guesses. */
+    getPlatformInfo: (): Promise<{ os: string; arch: string }> =>
+      Promise.resolve(hostPlatformInfo()),
+    getBrowserInfo: (): Promise<{ name: string; version: string }> =>
+      Promise.resolve(hostBrowserInfo()),
     sendMessage: (msg: unknown): Promise<unknown> =>
       deps.messenger.sendMessage(ext.id, sender, msg),
     onMessage: bridged<MessageListener>((l) => deps.messenger.onMessage(ext.id, l)),

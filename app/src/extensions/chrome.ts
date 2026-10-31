@@ -2,6 +2,8 @@
    synchronous methods also accept functions and must pass unchanged. */
 const CALLBACK_METHODS = new Set([
   "runtime.sendMessage",
+  "runtime.getPlatformInfo",
+  "runtime.getBrowserInfo",
   "tabs.get", "tabs.getCurrent", "tabs.query", "tabs.create", "tabs.update", "tabs.remove", "tabs.sendMessage",
   "windows.get", "windows.getCurrent", "windows.getLastFocused", "windows.getAll",
   "scripting.executeScript", "scripting.insertCSS",
