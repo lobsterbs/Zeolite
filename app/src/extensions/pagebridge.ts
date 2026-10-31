@@ -11,8 +11,9 @@
    getURL stays client-side: an extension page's package resources
    live on this origin under /zl-ext/<id>/.
 
-   No events, no ports: the page cannot receive pushes, and the SW
-   refuses those paths (documented in ./compat). */
+   Events stay undelivered to the page, but runtime.connect opens a
+   real duplex port to the background (#560); the SW refuses event
+   and RPC port paths (documented in ./compat). */
 
 export const PAGE_BRIDGE_SOURCE = `(function () {
   "use strict";
@@ -119,6 +120,50 @@ export const PAGE_BRIDGE_SOURCE = `(function () {
       );
     };
   }
+  /* #560: runtime.connect from the page world. The stub transfers
+     one end of a MessageChannel to the SW, which pairs it with the
+     extension's real port: background onConnect listeners receive
+     the far end, so TM-class options pages that drive their
+     background over a port boot instead of dying. */
+  browser.runtime.connect = function (a, b) {
+    var info = typeof a === "string" ? { name: a } : a && typeof a === "object" ? a : {};
+    if (typeof b === "string") info.name = b;
+    var nm = typeof info.name === "string" ? info.name : "";
+    var c = ctl();
+    if (!c) throw new Error("zeolite: page not controlled by the engine service worker");
+    var mc = new MessageChannel();
+    var ml = [];
+    var dl = [];
+    function evt(ls) {
+      return {
+        addListener: function (l) { ls.push(l); },
+        removeListener: function (l) { var i = ls.indexOf(l); if (i >= 0) ls.splice(i, 1); },
+        hasListener: function (l) { return ls.indexOf(l) >= 0; },
+      };
+    }
+    c.postMessage({ type: "zl:extPage", extId: cfg.ext, msg: { port: "connect", name: nm } }, [mc.port2]);
+    mc.port1.onmessage = function (ev2) {
+      var d = ev2.data || {};
+      var i;
+      if (d.t === "m") {
+        for (i = 0; i < ml.length; i++) {
+          try { ml[i](d.msg); } catch (e2) {}
+        }
+      } else if (d.t === "d" || d.t === "err") {
+        for (i = 0; i < dl.length; i++) {
+          try { dl[i](); } catch (e3) {}
+        }
+        mc.port1.close();
+      }
+    };
+    return {
+      name: nm,
+      postMessage: function (m) { mc.port1.postMessage({ t: "p", msg: m }); },
+      disconnect: function () { mc.port1.postMessage({ t: "d" }); mc.port1.close(); },
+      onMessage: evt(ml),
+      onDisconnect: evt(dl),
+    };
+  };
   window.browser = browser;
   window.chrome = browser;
 })();
