@@ -90,11 +90,12 @@ describe("pre-deadline awaits are bounded (wave-32 wedge class)", () => {
     async () => {
       const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy(DEST));
       handleFetch(ev);
-      /* 1.5s jar recovery + 1.5s legacy cache discard, then the upstream
-         fetch resolves on a microtask. Before the fix this NEVER
-         settled; the 20s default timeout fails the regression honestly. */
+      /* Jar-root recovery and legacy-cache cleanup now share their
+         bounded 1.5s window instead of serially paying both deadlines. */
+      const started = Date.now();
       const served = await armed[0]!;
 
+      expect(Date.now() - started).toBeLessThan(2800);
       expect(served.status).toBe(200);
       expect(transportMock.calls).toBe(1);
       expect(transportMock.urls[0]).toBe(DEST);
