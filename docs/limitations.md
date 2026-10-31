@@ -228,3 +228,34 @@ Every cap trip is counted (replayCapTrips in app/src/request.ts) and
 logged, and every script-body mask (the #158/#159 honesty layer) is
 counted and logged with the requested path, referrer and resolved
 route.
+
+## Blob workers are wrapped, not intercepted
+
+Chromium serves blob: worker scripts straight from the blob store
+with no fetch event (issue #537), so the SW-side prelude injection
+cannot reach them. The page bootstrap therefore wraps the
+constructor: the original blob source is read synchronously, and
+the real constructor receives a fresh wrapper blob whose first line
+imports the engine's /zl-bw/ prelude route. Classic, module and
+nested (worker-in-worker) blob workers boot with the page's site
+token and virtual base this way; suite/e2e/blob-workers.mjs is the
+real-Chromium gate. Honest bounds remain:
+
+- The wrap fails closed to the native constructor whenever any
+  precondition is missing (no service-worker controller, unreadable
+  blob, no URL.createObjectURL). An unwrapped blob worker runs with
+  raw engine-origin storage visibility and native fetch semantics;
+  the fallback is the same posture as before #537, never worse.
+- Nested workers ride the legacy codec routes as the documented
+  fallback when their own wrap fails; the #34 interception still
+  covers their fetch inputs.
+- Relative XHR in a blob worker keeps native parity: the worker
+  realm's XHR hook resolves against the virtual base only for
+  fetch/importScripts inputs.
+- Cached SharedWorker wrapper blobs are never revoked (a later tab
+  of the same virtual site must still load the same URL); they leak
+  until the page unloads.
+- The wrap reads the blob text with a synchronous XHR before app
+code can revoke the URL; after construction the wrapper URL is
+revoked immediately, pinned by the worker's own pending load.
+

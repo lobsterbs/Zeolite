@@ -258,14 +258,16 @@ jobs:
         # baseline 40570.
         # Raised 41216 -> 41408 for #538: the swshim page base
         # Raised 41408 -> 41600 for #533: virtual-origin child-proxy realm cache
-        # Raised 41600 -> 41792 for #533: origin-keyed child-slot cache
+        # Raised 41600 -> 41792 for #533: origin-keyed child-slot cache;
+        # 41792 -> 43520 for #537: blob-worker /zl-bw/ route head and the
+        # page-side wrap helpers ride bootstrap.js (measured 42768).
         # resolves lazily (virtual-origin marker + injected vpath
         # at call time) so a page's relative register() lands on the
         # page's virtual URL; measured 41310, baseline 41025.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 41792 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 41792)"; exit 1; fi
+          if [ "$SIZE" -ge 43520 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 43520)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
@@ -602,6 +604,23 @@ jobs:
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
             grep -E "^\[FAIL\]|HARNESS-ERROR" vctxr.out | head -20 | while IFS= read -r l; do echo "::error::VTXR $l"; done
+            exit 1
+          fi
+      - name: Blob worker suite (#537)
+        # Real-Chromium acceptance for page-created blob workers:
+        # Chromium serves blob: worker scripts from the blob store
+        # with no fetch event, so the SW prelude cannot reach them;
+        # the page wrap serves them the /zl-bw/ prelude instead.
+        # Classic, module and nested workers must boot with the
+        # page site token and virtual base, ride engine routes,
+        # and keep the site-scoped DB namespace. Ports 6034/7134
+        # are shared with vctx-restart sequentially, never with the
+        # parallel suites.
+        run: |
+          node suite/e2e/blob-workers.mjs 2>&1 | tee blobw.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\[FAIL\]|HARNESS-ERROR" blobw.out | head -20 | while IFS= read -r l; do echo "::error::BLOBW $l"; done
             exit 1
           fi
       - name: Injector differential suite (queryRoutes off vs on)

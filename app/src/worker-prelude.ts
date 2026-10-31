@@ -51,7 +51,12 @@ export function routeWorkerUrl(
      re-asserted here: without it a rotated deployment encodes routes
      the SW decodes under a different shape (issue #20). */
   setScheme(prefix);
-  return encodeDest(abs.href);
+  const r = encodeDest(abs.href);
+  /* #537: a blob worker's location is opaque (blob:), so a
+     root-relative engine route is unparseable there. Serve absolute
+     engine URLs to every caller: engine-served workers resolve them
+     the same way, blob workers only work with the absolute form. */
+  return engineOrigin && r.startsWith("/") ? engineOrigin + r : r;
 }
 
 /* ---- worker mint (#54 residual 5) ----------------------------------
@@ -146,6 +151,11 @@ const G = globalThis as unknown as {
   location?: { href: string; origin: string };
   addEventListener?: (t: string, l: (ev: MessageEvent) => void) => void;
   onconnect?: unknown;
+  Worker?: new (u: string, o?: WorkerOptions) => Worker;
+  XMLHttpRequest?: new () => XMLHttpRequest;
+  URL?: { createObjectURL: (b: unknown) => string; revokeObjectURL: (u: string) => void };
+  Blob?: new (p: unknown[], o?: { type: string }) => unknown;
+  __ZL_WORKER_BASE__?: string;
 };
 
 let installed = false;
@@ -160,7 +170,12 @@ export function installWorkerPrelude(route: string): void {
   if (!prefix || installed) return; /* not a prelude context, or already wired */
   installed = true;
   setScheme(prefix);
-  const workerUrl = decodePath(route) ?? G.location?.href ?? "";
+  /* #537: blob workers get the creating page's virtual URL baked as
+     __ZL_WORKER_BASE__; it wins over the decoded route (the /zl-bw/
+     engine route under them is not a usable base for their relative
+     fetch/importScripts resolution). */
+  const base = typeof G.__ZL_WORKER_BASE__ === "string" ? G.__ZL_WORKER_BASE__ : "";
+  const workerUrl = base || (decodePath(route) ?? G.location?.href ?? "");
   const engineOrigin = G.location?.origin ?? "";
 
   /* #171: worker realms get the same per-site storage scoping the
@@ -176,6 +191,65 @@ export function installWorkerPrelude(route: string): void {
     const IS = G.importScripts.bind(globalThis);
     (globalThis as { importScripts?: unknown }).importScripts = (...args: string[]) =>
       IS(...args.map((a) => routeWorkerUrl(prefix, workerUrl, engineOrigin, a)));
+  }
+  /* #537: workers created INSIDE a worker (nested blob workers) get
+     the same treatment the page bootstrap gives page-created blob
+     workers: the original blob source is read synchronously (a sync
+     XHR of a blob: URL completes before app code can revoke it),
+     inlined behind an import of the engine's /zl-bw/ prelude route,
+     and the nested realm inherits this realm's site token and base.
+     Any failure falls back to the native constructor (documented
+     residual), which still leaves fetches engine-routed through
+     the #34 interception path. */
+  if (typeof G.Worker === "function" && typeof G.XMLHttpRequest === "function") {
+    const OW = G.Worker;
+    const XHR = G.XMLHttpRequest;
+    const readBlob = (u: string): string | null => {
+      try {
+        const x = new XHR();
+        x.open("GET", u, false);
+        x.send(null);
+        return x.status === 200 && typeof x.responseText === "string" ? x.responseText : null;
+      } catch {
+        return null;
+      }
+    };
+    const NW = function (u: string, o?: WorkerOptions): Worker {
+      if (typeof u === "string" && u.startsWith("blob:")) {
+        const text = readBlob(u);
+        if (text !== null) {
+          try {
+            const mod = !!(o && o.type === "module");
+            const bw = engineOrigin + "/zl-bw/?c=" + encodeURIComponent(JSON.stringify({ s: site, b: workerUrl }));
+            const src = mod
+              ? "await import(" + JSON.stringify(bw) + ");\n" + text
+              : "importScripts(" + JSON.stringify(bw) + ");\n" + text;
+            const wu = G.URL!.createObjectURL(new G.Blob!([src], { type: "text/javascript" }));
+            const wk = new OW(wu, o);
+            try { G.URL!.revokeObjectURL(wu); } catch { /* best effort */ }
+            return wk;
+          } catch { /* fall through to native */ }
+        }
+      }
+      return new OW(u, o);
+    } as unknown as new (u: string, o?: WorkerOptions) => Worker;
+    Object.defineProperty(NW, "name", { value: "Worker", configurable: true });
+    try { G.Worker = NW; } catch { /* read-only: nested workers stay native */ }
+  }
+
+  /* #537: a nested dedicated worker's mint/WebSocket relays arrive
+     here (its G.postMessage posts to THIS realm, not the page).
+     Forward wrapper shapes up the chain so they reach the page tap
+     and the engine; app messages stay untouched, and anything that
+     is not a wrapper shape never moves. Without this arm a nested
+     worker rides the legacy codec route (its documented fallback). */
+  if (typeof G.addEventListener === "function" && typeof G.postMessage === "function") {
+    G.addEventListener("message", (ev: MessageEvent) => {
+      const d = ev.data as { zl?: unknown } | null;
+      if (d && typeof d === "object" && (d.zl === "ws" || d.zl === "mint")) {
+        try { G.postMessage!(d, (ev.ports ?? []) as MessagePort[]); } catch { /* dropped */ }
+      }
+    });
   }
 
   /* Shared-worker connect ports, collected before the fetch hook so
@@ -234,8 +308,14 @@ export function installWorkerPrelude(route: string): void {
       }
       if (abs.origin === engineOrigin) return OF(input, init);
       if (abs.protocol !== "http:" && abs.protocol !== "https:") return OF(input, init);
+      /* #537: minted routes arrive root-relative; a blob worker's
+         base cannot resolve them, so anchor engine routes to the
+         worker's real origin (the blob inner origin for blob
+         workers, the engine origin for engine-served ones). */
+      const absRoute = (r: string | null): string | null =>
+        r && r.startsWith("/") ? engineOrigin + r : r;
       return mintUrlViaRelay(post, abs.href).then((route) =>
-        OF(route ?? routeWorkerUrl(prefix, workerUrl, engineOrigin, url), init),
+        OF(absRoute(route) ?? routeWorkerUrl(prefix, workerUrl, engineOrigin, url), init),
       );
     };
   }

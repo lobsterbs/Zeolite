@@ -383,9 +383,14 @@ Residuals, stated honestly:
 - location.href navigations are the #28 class: navigations never
   reach the fetch handler (SW interception is scope-bound), so the
   nav guard is the only defense and its residuals stand.
-- Workers a page created from blob: URLs have neither a decodable
-  client URL nor a #33 context; their foreign fetches passthrough.
-  Opaque (data:, blob:) request URLs passthrough by construction.
+- Workers a page created from blob: URLs get a virtual context via
+  the page-side wrapper (issue #537): the worker loads a wrapper
+  blob that imports the /zl-bw/ prelude route first, so it boots
+  with the site token and virtual base. The wrap fails closed to
+  the native constructor when a precondition is missing, and an
+  unwrapped blob worker passthrough is the documented fallback
+  (limitations.md). Opaque (data:, blob:) request URLs still
+  passthrough by construction.
 - WebSocket is already bridged and never browser-direct; unchanged.
 
 ## Capture-dated leak inventory (issue #62)
@@ -488,5 +493,7 @@ divergence while cross-site storage and cookies stay partitioned.
   are reversible by anyone who holds them (the keyed site token is a
   MAC and is not); see the destination leakage section.
 - Browser-direct escape residuals (issue #34): blob-worker fetches
-  and opaque request URLs passthrough; navigations are the #28
-  class. See the browser-direct HTTP(S) escape section.
+  ride engine routes after the #537 wrapper; an unwrapped blob
+  worker (wrap fallback) and opaque request URLs still passthrough;
+  navigations are the #28 class. See the browser-direct HTTP(S)
+  escape section.
