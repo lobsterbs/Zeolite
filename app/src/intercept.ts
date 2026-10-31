@@ -8,7 +8,9 @@
      outgoing headers.
    - "response": every proxied response after hostile-header surgery.
      Header replacement, plus an OPT-IN body transform behind a hard
-     size gate (BODY_LIMIT): huge responses are never buffered.
+     size gate (BODY_LIMIT): huge responses are never buffered, and
+     (#552) an opt-in STREAMING transform for unknown-size or large
+     bodies behind bounds the handler must declare.
    - "navigation" | "worker" | "websocket" | "fetch": filtered views
      over the same request stream (document-mode, worker-dest,
      websocket-dest, subresource fetch/XHR); observe and block.
@@ -52,10 +54,38 @@ export interface InterceptResponseCtx {
 export interface InterceptResponseResult {
   /** Merge these into the response headers the page sees. */
   headers?: Record<string, string>;
-  /** OPT-IN body transform (text -> text). The SW applies it only
-      when content-length is known and <= BODY_LIMIT, and never for
-      documents/stylesheets (the streaming rewriter owns those). */
+  /** OPT-IN buffered body transform (text -> text). The SW applies it
+      only when content-length is known and <= BODY_LIMIT, and never
+      for documents/stylesheets (the streaming rewriter owns those).
+      Ignored when the same result also declares a stream (#552). */
   body?: (text: string) => string;
+  /** OPT-IN streaming transform (#552): the raw body pipes through
+      the declared TransformStream with native backpressure, no size
+      gate. The declared bounds are enforced by engine-owned guards.
+      Ignored for documents and stylesheets. */
+  stream?: InterceptStreamTransform;
+}
+
+/** #552: a streaming response transform with declared bounds. The
+    engine pipes the raw body through the stream; it retains nothing
+    beyond the pipe queues (native backpressure bounds those) and
+    enforces both declared bounds itself. */
+export interface InterceptStreamTransform {
+  /** The pipe the raw body streams through. The engine wraps it in
+      its own guards (byte count before, first-output deadline after),
+      so backpressure reaches upstream unchanged and a page-side
+      cancel propagates back natively. */
+  stream: TransformStream<Uint8Array, Uint8Array>;
+  /** Required bound on the input. A known content-length above it
+      never enters the pipe (the engine serves the raw body
+      untouched, fail open); an unknown-length body that crosses it
+      mid-flight errors the pipe (the page sees an aborted body,
+      never a raw-and-transformed mixture). */
+  maxInputBytes: number;
+  /** Optional deadline (ms) for the first output chunk after the
+      first raw byte entered the pipe. A missed deadline errors the
+      pipe instead of hanging the page. */
+  firstOutputMs?: number;
 }
 
 export type RequestHandler = (ctx: InterceptRequestCtx) => InterceptRequestResult | void;
@@ -121,12 +151,20 @@ export function runRequestInterception(
   return out;
 }
 
-/** Run the response handlers (sw internal). The first declared body
-    transform wins; header maps merge. */
+/** Run the response handlers (sw internal). The first declared
+    transform of either kind wins; header maps merge. */
 export function runResponseInterception(
   ctx: InterceptResponseCtx,
-): { headers?: Record<string, string>; body?: (text: string) => string } {
-  const out: { headers?: Record<string, string>; body?: (text: string) => string } = {};
+): {
+  headers?: Record<string, string>;
+  body?: (text: string) => string;
+  stream?: InterceptStreamTransform;
+} {
+  const out: {
+    headers?: Record<string, string>;
+    body?: (text: string) => string;
+    stream?: InterceptStreamTransform;
+  } = {};
   for (const h of resHandlers) {
     let r: InterceptResponseResult | void;
     try {
@@ -136,7 +174,12 @@ export function runResponseInterception(
     }
     if (!r) continue;
     if (r.headers) out.headers = { ...(out.headers ?? {}), ...r.headers };
-    if (r.body && !out.body) out.body = r.body;
+    /* #552: the first declared transform of either kind wins; within
+       one result a streaming transform outranks the buffered one. */
+    if (!out.stream && !out.body) {
+      if (r.stream) out.stream = r.stream;
+      else if (r.body) out.body = r.body;
+    }
   }
   return out;
 }
