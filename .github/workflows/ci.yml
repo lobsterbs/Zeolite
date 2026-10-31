@@ -117,7 +117,7 @@ jobs:
       - name: Vendor libcurl transport
         run: |
           {
-            npm install --prefix .vendor @mercuryworkshop/libcurl-transport@2.0.5 &&
+            npm install --prefix .vendor @mercuryworkshop/libcurl-transport@2.0.6 &&
             mkdir -p app/public/libcurl &&
             cp -r .vendor/node_modules/@mercuryworkshop/libcurl-transport/dist/. app/public/libcurl/
           } 2>&1 | tee vendor.out
@@ -472,7 +472,7 @@ jobs:
           node-version: 22
       - name: Vendor libcurl transport (same pin as the app job)
         run: |
-          npm install --prefix .vendor @mercuryworkshop/libcurl-transport@2.0.5
+          npm install --prefix .vendor @mercuryworkshop/libcurl-transport@2.0.6
           mkdir -p app/public/libcurl
           cp -r .vendor/node_modules/@mercuryworkshop/libcurl-transport/dist/. app/public/libcurl/
           npm install --prefix .vendor @mercuryworkshop/epoxy-tls@2.1.20-1
