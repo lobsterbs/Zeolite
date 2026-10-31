@@ -495,6 +495,8 @@ jobs:
         run: node suite/e2e/ws-buffered.mjs
       - name: Location policy Chromium + WASM fixture (#456)
         run: node suite/e2e/location-policy.mjs
+      - name: Location targeting corroborated mark + scoreboard (#456 gate 4)
+        run: node suite/e2e/location-targeting.mjs
       - name: Browser E2E suite (issue #35)
         run: |
           node suite/e2e/e2e.mjs 2>&1 | tee browser.out
