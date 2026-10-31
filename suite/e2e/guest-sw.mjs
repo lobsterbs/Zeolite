@@ -149,6 +149,20 @@ function startFixture(port) {
     if (path === "/dir/page.html") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end('<!doctype html><p id="zl-guest">guest-page</p>');
+    } else if (path === "/dir/early.html") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      /* #576: the EARLIEST registration, from an inline head script,
+         with an ABSOLUTE URL literal the JS rewriter mints into an
+         engine token route: proves the decode path end to end in a
+         real browser. */
+      res.end(
+        '<!doctype html><head><script>' +
+        'window.__zlEarly = { state: "pending" };' +
+        'navigator.serviceWorker.register("' + FX + '/dir/sw.js")' +
+        '.then(function (r) { window.__zlEarly = { state: "ok", scope: r.scope }; })' +
+        '.catch(function (e) { window.__zlEarly = { state: "error", error: String(e && e.message || e) }; });' +
+        '</script></head><body><p id="zl-early">early-page</p></body>'
+      );
     } else if (path === "/dir/sw.js") {
       res.writeHead(200, { "content-type": "text/javascript" });
       res.end(fx.script);
@@ -274,6 +288,65 @@ async function main() {
   let page = null;
   let frame = null;
   let reg = null;
+
+  /* #576: honest registration end to end. The early page registers
+     from an inline head script with an ABSOLUTE URL literal (minted
+     into an engine token by the JS rewriter) while NO guest host
+     page exists: the promise must reject with the kernel's real
+     reason, leave no registration behind, and a re-register after
+     the host lands must succeed. */
+  let early = null;
+  await check("early absolute-URL registration with no guest host rejects honestly", async () => {
+    const opened = await openProxied(FX + "/dir/early.html", "#zl-early");
+    early = opened.frame;
+    const st = await waitFor("honest early rejection", 20000, () =>
+      evalIn(
+        early,
+        "early register state",
+        'function(){var s = window.__zlEarly && window.__zlEarly.state; return (s === "error" || s === "ok") ? window.__zlEarly : null;}',
+      ),
+    );
+    if (st.state !== "error" || String(st.error).indexOf("no guest host page connected") === -1) {
+      throw new Error("unexpected early result: " + JSON.stringify(st));
+    }
+    const gone = await evalIn(
+      early,
+      "getRegistration after rejection",
+      'function(){return navigator.serviceWorker.getRegistration().then(function(r){return r ? {present:true, scope:r.scope} : {present:false};});}',
+    );
+    if (gone.present) {
+      throw new Error("rejected registration left a record: " + JSON.stringify(gone));
+    }
+    return "rejected with: " + st.error;
+  });
+
+  await check("re-register succeeds once the guest host page lands", async () => {
+    const host = await context.newPage();
+    await host.goto(ENGINE + "/guest-host.html");
+    const status = await waitFor("guest host ready", 20000, () =>
+      host.evaluate(() => document.getElementById("status")?.textContent ?? ""),
+    );
+    if (status !== "guest host ready") throw new Error("guest host status: " + status);
+    const reg2 = await evalIn(
+      early,
+      "re-register guest",
+      'function(){return navigator.serviceWorker.register("' + FX + '/dir/sw.js").then(function(r){return {scope:r.scope, state:r.active ? r.active.state : (r.installing ? r.installing.state : "none")};});}',
+    );
+    if (!reg2 || typeof reg2.scope !== "string" || reg2.scope.indexOf("/dir/") === -1) {
+      throw new Error("unexpected re-registration: " + JSON.stringify(reg2));
+    }
+    const st = await waitFor("early page guest answers", 30000, () =>
+      evalIn(
+        early,
+        "early page state fetch",
+        'function(){return fetch("/dir/state").then(function(r){return r.text().then(function(t){return {body:t, guest:r.headers.get("x-zl-guest")};});});}',
+      ).then((s) => (s && s.guest === "guest-v1" ? s : null)),
+    );
+    if (String(st.body).indexOf("activated-guest-v1") === -1) {
+      throw new Error("guest state unexpected: " + JSON.stringify(st));
+    }
+    return "scope " + reg2.scope;
+  });
 
   await check("proxied page + guest host page come up", async () => {
     const opened = await openProxied(FX + "/dir/page.html", "#zl-guest");

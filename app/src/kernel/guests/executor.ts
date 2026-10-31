@@ -152,6 +152,11 @@ export interface GuestSpawnMessage {
   scriptURL: string;
   scope?: string;
   script: string;
+  /* #576: when true, the spawn reply is deferred until the guest
+     realm confirms it is running (zl:guestSpawned), a spawn failure
+     is passed through, and a dead handshake reaps as a timeout. The
+     page register() promise then settles on real kernel truth. */
+  confirm?: boolean;
 }
 
 export interface GuestReply {
@@ -171,6 +176,10 @@ interface GuestRecord {
   host: GuestPortLike;
   guest: GuestPortLike | null;
   deadlineAt: number;
+  /* #576: deferred spawn replies for confirmed registrations; fired
+     exactly once by the guestSpawned, guestSpawnFailed or reap arm.
+     Same-identity callers that arrive mid-spawn piggyback here. */
+  pendingReply: GuestReplyFn[];
 }
 
 export type GuestListener = (origin: string, data: unknown) => void;
@@ -325,6 +334,8 @@ export class GuestKernel {
     for (const [origin, g] of this.guests) {
       if (t > g.deadlineAt && g.state !== "running") {
         this.guests.delete(origin);
+        /* #576: confirmed callers do not hang on a dead handshake. */
+        for (const pr of g.pendingReply.splice(0)) pr({ ok: false, error: "guest spawn handshake timed out" });
         DIAG.emit({
           category: "SERVICE_WORKER",
           severity: "warning",
@@ -351,7 +362,19 @@ export class GuestKernel {
     }
     const existing = this.guests.get(identity.origin);
     if (existing && existing.state !== "terminating") {
-      reply({ ok: false, error: "guest already active for origin; terminate it first" });
+      /* #576: a live realm for the SAME registration identity is a
+         native-style success (real sites re-register on every load);
+         a DIFFERENT script for the live origin is a real error. */
+      if (existing.scriptURL === identity.scriptURL && existing.scope === identity.scope) {
+        if (existing.state === "running") {
+          reply({ ok: true, origin: identity.origin });
+        } else {
+          /* Still spawning: settle with the pending handshake. */
+          existing.pendingReply.push(reply);
+        }
+        return;
+      }
+      reply({ ok: false, error: "a different guest script is already active for this origin" });
       return;
     }
     const host = this.hosts[this.hosts.length - 1];
@@ -368,6 +391,9 @@ export class GuestKernel {
       host,
       guest: null,
       deadlineAt: this.now() + GUEST_HANDSHAKE_MS,
+      /* #576: with confirm, only the zl:guestSpawned arm settles the
+         caller; otherwise the wave-1 immediate reply is preserved. */
+      pendingReply: msg.confirm === true ? [reply] : [],
     });
     host.postMessage({
       op: "spawn",
@@ -381,7 +407,7 @@ export class GuestKernel {
       message: "guest spawn requested",
       technicalReason: identity.origin,
     });
-    reply({ ok: true, origin: identity.origin });
+    if (msg.confirm !== true) reply({ ok: true, origin: identity.origin });
   }
 
   terminate(origin: string, reply?: GuestReplyFn): void {
@@ -443,6 +469,8 @@ export class GuestKernel {
       g.guest = gp;
       g.state = "running";
       g.deadlineAt = Infinity;
+      /* #576: confirmed spawns settle their callers here, once each. */
+      for (const pr of g.pendingReply.splice(0)) pr({ ok: true, origin });
       gp.onmessage = (ev) => this.guestMessage(origin, ev.data);
       /* Real install/activate ordering, minus the waiting period the
          virtual registration facade never modeled. */
@@ -459,6 +487,9 @@ export class GuestKernel {
       const g = this.guests.get(origin);
       if (!g || g.state !== "spawning") return;
       this.guests.delete(origin);
+      /* #576: confirmed callers hear the real failure reason. */
+      const failed = "guest spawn failed: " + String(m.error ?? "unknown").slice(0, 120);
+      for (const pr of g.pendingReply.splice(0)) pr({ ok: false, error: failed });
       DIAG.emit({
         category: "SERVICE_WORKER",
         severity: "warning",

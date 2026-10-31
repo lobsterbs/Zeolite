@@ -5,6 +5,8 @@
    real destination. */
 
 import { swShimApply } from "../swshim";
+import { NativeURL } from "./anchorshim";
+import { controlQuery } from "./controlquery";
 import { swc } from "./siteid";
 
 /* The wrapper shapes the prelude posts (zl:"ws" / zl:"mint") must
@@ -353,6 +355,22 @@ addEventListener("message", windowRelay);
      lazy base: the marker plus the injected vpath once both are
      known, else the captured raw URL (the old wave-3 shape, which
      the kernel safely refuses). */
+  /* #576: wire the shim dependencies so registration is truthful:
+     the engine origin (to recognize rewriter-minted token arguments),
+     the bounded zl:decodeRoutes oracle, and a reply-port forward - the
+     register() promise settles only on the kernel guest confirmation,
+     and a rejection carries the kernel failure reason. */
+  const swEngOrigin = (() => {
+    try {
+      return new NativeURL(pageUrl).origin;
+    } catch {
+      return "";
+    }
+  })();
+  const swQuery = (message: unknown, timeout: number): Promise<{ ok?: boolean; error?: string } | null> =>
+    new Promise((res) => {
+      controlQuery(message, res, timeout);
+    });
   swShimApply(
     NS as object,
     { get: () => LS.getItem(K), set: (v: string) => LS.setItem(K, v), clear: () => LS.removeItem(K) },
@@ -360,6 +378,16 @@ addEventListener("message", windowRelay);
       const vo = w.__zlVO;
       const vp = (w.__ZL as { vpath?: unknown } | undefined)?.vpath;
       return typeof vo === "string" && vo && typeof vp === "string" && vp[0] === "/" ? vo + vp : pageUrl;
+    },
+    {
+      engineOrigin: swEngOrigin,
+      baseWaitMs: 2000,
+      decodeRoutes: (routes) =>
+        swQuery({ type: "zl:decodeRoutes", routes }, 5000).then((r) => {
+          const d = (r as { dests?: unknown } | null)?.dests;
+          return Array.isArray(d) ? (d as (string | null)[]) : null;
+        }),
+      forwardRegister: (payload) => swQuery(payload, 30000),
     },
   );
  }
