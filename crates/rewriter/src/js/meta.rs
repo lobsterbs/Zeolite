@@ -1,1 +1,302 @@
-[{"type":"resource","resource":{"uri":"sprite://mcp-zeolite-2/file?path=%2Fhome%2Fsprite%2Fz525%2Fcrates%2Frewriter%2Fsrc%2Fjs%2Fmeta.rs&workingDir=%2Fhome%2Fsprite%2Fz525","mimeType":"text/plain","text":"//! #525: import.meta.url string-value virtualization for module\n//! bodies. Through the engine a module's import.meta.url is the\n//! opaque engine route (token path), so pages doing string surgery\n//! on it (startsWith checks, splitting off the file name, comparing\n//! against a known URL) break while relative RESOLUTION still\n//! works. This AST pass replaces import.meta.url READS with a string\n//! literal of the module's virtual URL: the engine origin carrying\n//! the real path/query/fragment, the same host-opaque shape the\n//! virtual location view serves (#32/#144 contract). Direct control\n//! value parity holds for the path; the host stays opaque by\n//! design, exactly like __zl.href.\n//!\n//! Bounded v1 limits (honest, same style as the globals pass):\n//! - import.meta.resolve stays native: bare-specifier resolution is\n//!   the import-map question (#554), never a URL fold.\n//! - Aliasing (const m = import.meta; m.url) and destructuring\n//!   (const {url} = import.meta) stay native: the read happens\n//!   through a binding this pass does not track.\n//! - Writes/deletes/update targets stay native (the literal is not\n//!   assignable, and import.meta.url is frozen anyway).\n//! - Spaced token forms (import . meta) miss the fast path and stay\n//!   native; broken JS and oversized bodies return unchanged.\n\nuse std::collections::HashSet;\n\nuse oxc_allocator::Allocator;\nuse oxc_ast::ast::Expression;\nuse oxc_ast::ast_kind::AstKind;\nuse oxc_ast_visit::{walk, Visit};\nuse oxc_parser::Parser;\nuse oxc_span::{GetSpan, SourceType, Span};\n\n/// Same parse bound as the globals pass: huge bodies skip the AST.\npub const MAX_BYTES: usize = crate::js::globals::MAX_BYTES;\n\n/// Replace import.meta.url reads with a string literal of the\n/// module's virtual URL. Parse failures return the input unchanged.\npub fn rewrite_import_meta_url(js: &str, virtual_url: &str) -> String {\n    if js.len() > MAX_BYTES || !js.contains(\"import.meta\") {\n        return js.to_string();\n    }\n    if !is_absolute_http(virtual_url) {\n        return js.to_string();\n    }\n    let Some(edits) = collect(js) else {\n        return js.to_string();\n    };\n    if edits.is_empty() {\n        return js.to_string();\n    }\n    let lit = string_literal(virtual_url);\n    let mut out = String::with_capacity(js.len() + lit.len());\n    let mut pos = 0usize;\n    for (start, end) in &edits {\n        out.push_str(&js[pos..*start]);\n        out.push_str(&lit);\n        pos = *end;\n    }\n    out.push_str(&js[pos..]);\n    out\n}\n\nfn is_absolute_http(u: &str) -> bool {\n    (u.starts_with(\"https://\") || u.starts_with(\"http://\"))\n        && u.find(\"://\").is_some_and(|i| u[i + 3..].contains('/'))\n}\n\n/// Parse and collect the (start, end) byte spans of import.meta.url\n/// reads, or None when the body parses as neither module nor script.\nfn collect(js: &str) -> Option<Vec<(usize, usize)>> {\n    let allocator = Allocator::default();\n    let module = SourceType::default().with_module(true);\n    let ret = Parser::new(&allocator, js, module).parse();\n    let program = if ret.diagnostics.is_empty() {\n        ret.program\n    } else {\n        let script = Parser::new(&allocator, js, SourceType::default()).parse();\n        if script.diagnostics.is_empty() {\n            script.program\n        } else {\n            return None;\n        }\n    };\n    let mut w = Walker {\n        native_targets: HashSet::new(),\n        edits: Vec::new(),\n    };\n    w.visit_program(&program);\n    w.edits.sort_by_key(|(s, _)| *s);\n    Some(w.edits)\n}\n\nstruct Walker {\n    /// Assignment/update/delete targets keep their native receiver.\n    native_targets: HashSet<Span>,\n    edits: Vec<(usize, usize)>,\n}\n\nimpl<'a> Visit<'a> for Walker {\n    fn visit_simple_assignment_target(&mut self, it: &oxc_ast::ast::SimpleAssignmentTarget<'a>) {\n        self.native_targets.insert(it.span());\n        walk::walk_simple_assignment_target(self, it);\n    }\n\n    fn visit_unary_expression(&mut self, it: &oxc_ast::ast::UnaryExpression<'a>) {\n        if it.operator.as_str() == \"delete\" {\n            self.native_targets\n                .insert(it.argument.get_inner_expression().span());\n        }\n        walk::walk_unary_expression(self, it);\n    }\n\n    fn enter_node(&mut self, kind: AstKind<'a>) {\n        match kind {\n            // import.meta.url: oxc's ImportMeta node IS import.meta by\n            // construction (no meta/property fields to verify).\n            AstKind::StaticMemberExpression(m) if m.property.name.as_str() == \"url\" => {\n                if let Expression::ImportMeta(_) = &m.object {\n                    if !self.native_targets.contains(&m.span) {\n                        self.edits\n                            .push((m.span.start as usize, m.span.end as usize));\n                    }\n                }\n            }\n            // Minified/obfuscated bundles reach for brackets; only a\n            // string-literal key carries the static meaning.\n            AstKind::ComputedMemberExpression(m) => {\n                if let Expression::StringLiteral(lit) = &m.expression {\n                    if lit.value.as_str() == \"url\" {\n                        if let Expression::ImportMeta(_) = &m.object {\n                            if !self.native_targets.contains(&m.span) {\n                                self.edits\n                                    .push((m.span.start as usize, m.span.end as usize));\n                            }\n                        }\n                    }\n                }\n            }\n            _ => {}\n        }\n    }\n}\n\n/// A double-quoted JS string literal. Built with from_u32 chars so\n/// no escaped-literal source bytes can drift from the emitted bytes\n/// (a literal quote or backslash in a module URL must never break\n/// the rewritten body).\nfn string_literal(url: &str) -> String {\n    let bs = char::from_u32(92).unwrap();\n    let q = char::from_u32(34).unwrap();\n    let mut out = String::with_capacity(url.len() + 2);\n    out.push(q);\n    for c in url.chars() {\n        let cp = c as u32;\n        if c == q {\n            out.push(bs);\n            out.push(q);\n        } else if c == bs {\n            out.push(bs);\n            out.push(bs);\n        } else if cp == 10 {\n            out.push(bs);\n            out.push('n');\n        } else if cp == 13 {\n            out.push(bs);\n            out.push('r');\n        } else if cp == 9 {\n            out.push(bs);\n            out.push('t');\n        } else if cp < 0x20 {\n            out.push(bs);\n            out.push('u');\n            out.push_str(&format!(\"{:04x}\", cp));\n        } else {\n            out.push(c);\n        }\n    }\n    out.push(q);\n    out\n}\n\n#[cfg(test)]\nmod tests {\n    use super::rewrite_import_meta_url as rw;\n\n    const V: &str = \"https://engine.host/dir/mods/rel.js?x=1\";\n\n    fn vl() -> String {\n        let q = char::from_u32(34).unwrap();\n        format!(\"{}{}{}\", q, V, q)\n    }\n\n    #[test]\n    fn dot_read_replaced() {\n        assert_eq!(\n            rw(\"String(import.meta.url)\", V),\n            format!(\"String({})\", vl())\n        );\n    }\n\n    #[test]\n    fn bracket_literal_replaced() {\n        assert_eq!(rw(\"import.meta['url']\", V), vl());\n    }\n\n    #[test]\n    fn computed_nonliteral_key_stays_native() {\n        assert_eq!(rw(\"import.meta[k]\", V), \"import.meta[k]\");\n    }\n\n    #[test]\n    fn assignment_target_stays_native() {\n        assert_eq!(rw(\"import.meta.url = '/x';\", V), \"import.meta.url = '/x';\");\n    }\n\n    #[test]\n    fn update_target_stays_native() {\n        assert_eq!(rw(\"import.meta.url++;\", V), \"import.meta.url++;\");\n    }\n\n    #[test]\n    fn delete_stays_native() {\n        assert_eq!(rw(\"delete import.meta.url;\", V), \"delete import.meta.url;\");\n    }\n\n    #[test]\n    fn aliasing_and_destructuring_stay_native() {\n        let js = \"const m = import.meta; const { url } = import.meta;\";\n        assert_eq!(rw(js, V), js);\n    }\n\n    #[test]\n    fn resolve_stays_native() {\n        assert_eq!(\n            rw(\"import.meta.resolve('./x')\", V),\n            \"import.meta.resolve('./x')\"\n        );\n    }\n\n    #[test]\n    fn nested_read_in_call_replaced() {\n        let out = rw(\"fetch(new URL('./x', import.meta.url).href)\", V);\n        assert_eq!(out, format!(\"fetch(new URL('./x', {}).href)\", vl()));\n    }\n\n    #[test]\n    fn read_inside_computed_key_replaced() {\n        let out = rw(\"({ [import.meta.url]: 1 })\", V);\n        assert_eq!(out, format!(\"({{ [{}]: 1 }})\", vl()));\n    }\n\n    #[test]\n    fn string_text_untouched() {\n        assert_eq!(\n            rw(\"const s = 'import.meta.url';\", V),\n            \"const s = 'import.meta.url';\"\n        );\n    }\n\n    #[test]\n    fn no_token_no_change() {\n        assert_eq!(rw(\"const a = 1;\", V), \"const a = 1;\");\n    }\n\n    #[test]\n    fn parse_failure_unchanged() {\n        assert_eq!(rw(\"import.meta.url~~~\", V), \"import.meta.url~~~\");\n    }\n\n    #[test]\n    fn backslash_and_control_escaped() {\n        let bs = char::from_u32(92).unwrap();\n        let q = char::from_u32(34).unwrap();\n        let mut url = String::from(\"https://e/p#'q\");\n        url.push(bs);\n        url.push_str(\"u0001\");\n        url.push(char::from_u32(1).unwrap());\n        let out = rw(\"import.meta.url\", &url);\n        let mut expect = String::new();\n        expect.push(q);\n        expect.push_str(\"https://e/p#'q\");\n        expect.push(bs);\n        expect.push(bs);\n        expect.push_str(\"u0001\");\n        expect.push(bs);\n        expect.push_str(\"u0001\");\n        expect.push(q);\n        assert_eq!(out, expect);\n    }\n\n    #[test]\n    fn bad_virtual_url_unchanged() {\n        assert_eq!(rw(\"import.meta.url\", \"not-a-url\"), \"import.meta.url\");\n        assert_eq!(rw(\"import.meta.url\", \"https://nohost\"), \"import.meta.url\");\n    }\n\n    #[test]\n    fn minified_chain_replaced() {\n        let out = rw(\"export const u=import.meta.url.split('/').pop();\", V);\n        assert_eq!(out, format!(\"export const u={}.split('/').pop();\", vl()));\n    }\n}\n"}}]
+//! #525: import.meta.url string-value virtualization for module
+//! bodies. Through the engine a module's import.meta.url is the
+//! opaque engine route (token path), so pages doing string surgery
+//! on it (startsWith checks, splitting off the file name, comparing
+//! against a known URL) break while relative RESOLUTION still
+//! works. This AST pass replaces import.meta.url READS with a string
+//! literal of the module's virtual URL: the engine origin carrying
+//! the real path/query/fragment, the same host-opaque shape the
+//! virtual location view serves (#32/#144 contract). Direct control
+//! value parity holds for the path; the host stays opaque by
+//! design, exactly like __zl.href.
+//!
+//! Bounded v1 limits (honest, same style as the globals pass):
+//! - import.meta.resolve stays native: bare-specifier resolution is
+//!   the import-map question (#554), never a URL fold.
+//! - Aliasing (const m = import.meta; m.url) and destructuring
+//!   (const {url} = import.meta) stay native: the read happens
+//!   through a binding this pass does not track.
+//! - Writes/deletes/update targets stay native (the literal is not
+//!   assignable, and import.meta.url is frozen anyway).
+//! - Spaced token forms (import . meta) miss the fast path and stay
+//!   native; broken JS and oversized bodies return unchanged.
+
+use std::collections::HashSet;
+
+use oxc_allocator::Allocator;
+use oxc_ast::ast::Expression;
+use oxc_ast::ast_kind::AstKind;
+use oxc_ast_visit::{walk, Visit};
+use oxc_parser::Parser;
+use oxc_span::{GetSpan, SourceType, Span};
+
+/// Same parse bound as the globals pass: huge bodies skip the AST.
+pub const MAX_BYTES: usize = crate::js::globals::MAX_BYTES;
+
+/// Replace import.meta.url reads with a string literal of the
+/// module's virtual URL. Parse failures return the input unchanged.
+pub fn rewrite_import_meta_url(js: &str, virtual_url: &str) -> String {
+    if js.len() > MAX_BYTES || !js.contains("import.meta") {
+        return js.to_string();
+    }
+    if !is_absolute_http(virtual_url) {
+        return js.to_string();
+    }
+    let Some(edits) = collect(js) else {
+        return js.to_string();
+    };
+    if edits.is_empty() {
+        return js.to_string();
+    }
+    let lit = string_literal(virtual_url);
+    let mut out = String::with_capacity(js.len() + lit.len());
+    let mut pos = 0usize;
+    for (start, end) in &edits {
+        out.push_str(&js[pos..*start]);
+        out.push_str(&lit);
+        pos = *end;
+    }
+    out.push_str(&js[pos..]);
+    out
+}
+
+fn is_absolute_http(u: &str) -> bool {
+    (u.starts_with("https://") || u.starts_with("http://"))
+        && u.find("://").is_some_and(|i| u[i + 3..].contains('/'))
+}
+
+/// Parse and collect the (start, end) byte spans of import.meta.url
+/// reads, or None when the body parses as neither module nor script.
+fn collect(js: &str) -> Option<Vec<(usize, usize)>> {
+    let allocator = Allocator::default();
+    let module = SourceType::default().with_module(true);
+    let ret = Parser::new(&allocator, js, module).parse();
+    let program = if ret.diagnostics.is_empty() {
+        ret.program
+    } else {
+        let script = Parser::new(&allocator, js, SourceType::default()).parse();
+        if script.diagnostics.is_empty() {
+            script.program
+        } else {
+            return None;
+        }
+    };
+    let mut w = Walker {
+        native_targets: HashSet::new(),
+        edits: Vec::new(),
+    };
+    w.visit_program(&program);
+    w.edits.sort_by_key(|(s, _)| *s);
+    Some(w.edits)
+}
+
+struct Walker {
+    /// Assignment/update/delete targets keep their native receiver.
+    native_targets: HashSet<Span>,
+    edits: Vec<(usize, usize)>,
+}
+
+impl<'a> Visit<'a> for Walker {
+    fn visit_simple_assignment_target(&mut self, it: &oxc_ast::ast::SimpleAssignmentTarget<'a>) {
+        self.native_targets.insert(it.span());
+        walk::walk_simple_assignment_target(self, it);
+    }
+
+    fn visit_unary_expression(&mut self, it: &oxc_ast::ast::UnaryExpression<'a>) {
+        if it.operator.as_str() == "delete" {
+            self.native_targets
+                .insert(it.argument.get_inner_expression().span());
+        }
+        walk::walk_unary_expression(self, it);
+    }
+
+    fn enter_node(&mut self, kind: AstKind<'a>) {
+        match kind {
+            // import.meta.url: oxc's ImportMeta node IS import.meta by
+            // construction (no meta/property fields to verify).
+            AstKind::StaticMemberExpression(m) if m.property.name.as_str() == "url" => {
+                if let Expression::ImportMeta(_) = &m.object {
+                    if !self.native_targets.contains(&m.span) {
+                        self.edits
+                            .push((m.span.start as usize, m.span.end as usize));
+                    }
+                }
+            }
+            // Minified/obfuscated bundles reach for brackets; only a
+            // string-literal key carries the static meaning.
+            AstKind::ComputedMemberExpression(m) => {
+                if let Expression::StringLiteral(lit) = &m.expression {
+                    if lit.value.as_str() == "url" {
+                        if let Expression::ImportMeta(_) = &m.object {
+                            if !self.native_targets.contains(&m.span) {
+                                self.edits
+                                    .push((m.span.start as usize, m.span.end as usize));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A double-quoted JS string literal. Built with from_u32 chars so
+/// no escaped-literal source bytes can drift from the emitted bytes
+/// (a literal quote or backslash in a module URL must never break
+/// the rewritten body).
+fn string_literal(url: &str) -> String {
+    let bs = char::from_u32(92).unwrap();
+    let q = char::from_u32(34).unwrap();
+    let mut out = String::with_capacity(url.len() + 2);
+    out.push(q);
+    for c in url.chars() {
+        let cp = c as u32;
+        if c == q {
+            out.push(bs);
+            out.push(q);
+        } else if c == bs {
+            out.push(bs);
+            out.push(bs);
+        } else if cp == 10 {
+            out.push(bs);
+            out.push('n');
+        } else if cp == 13 {
+            out.push(bs);
+            out.push('r');
+        } else if cp == 9 {
+            out.push(bs);
+            out.push('t');
+        } else if cp < 0x20 {
+            out.push(bs);
+            out.push('u');
+            out.push_str(&format!("{:04x}", cp));
+        } else {
+            out.push(c);
+        }
+    }
+    out.push(q);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_import_meta_url as rw;
+
+    const V: &str = "https://engine.host/dir/mods/rel.js?x=1";
+
+    fn vl() -> String {
+        let q = char::from_u32(34).unwrap();
+        format!("{}{}{}", q, V, q)
+    }
+
+    #[test]
+    fn dot_read_replaced() {
+        assert_eq!(
+            rw("String(import.meta.url)", V),
+            format!("String({})", vl())
+        );
+    }
+
+    #[test]
+    fn bracket_literal_replaced() {
+        assert_eq!(rw("import.meta['url']", V), vl());
+    }
+
+    #[test]
+    fn computed_nonliteral_key_stays_native() {
+        assert_eq!(rw("import.meta[k]", V), "import.meta[k]");
+    }
+
+    #[test]
+    fn assignment_target_stays_native() {
+        assert_eq!(rw("import.meta.url = '/x';", V), "import.meta.url = '/x';");
+    }
+
+    #[test]
+    fn update_target_stays_native() {
+        assert_eq!(rw("import.meta.url++;", V), "import.meta.url++;");
+    }
+
+    #[test]
+    fn delete_stays_native() {
+        assert_eq!(rw("delete import.meta.url;", V), "delete import.meta.url;");
+    }
+
+    #[test]
+    fn aliasing_and_destructuring_stay_native() {
+        let js = "const m = import.meta; const { url } = import.meta;";
+        assert_eq!(rw(js, V), js);
+    }
+
+    #[test]
+    fn resolve_stays_native() {
+        assert_eq!(
+            rw("import.meta.resolve('./x')", V),
+            "import.meta.resolve('./x')"
+        );
+    }
+
+    #[test]
+    fn nested_read_in_call_replaced() {
+        let out = rw("fetch(new URL('./x', import.meta.url).href)", V);
+        assert_eq!(out, format!("fetch(new URL('./x', {}).href)", vl()));
+    }
+
+    #[test]
+    fn read_inside_computed_key_replaced() {
+        let out = rw("({ [import.meta.url]: 1 })", V);
+        assert_eq!(out, format!("({{ [{}]: 1 }})", vl()));
+    }
+
+    #[test]
+    fn string_text_untouched() {
+        assert_eq!(
+            rw("const s = 'import.meta.url';", V),
+            "const s = 'import.meta.url';"
+        );
+    }
+
+    #[test]
+    fn no_token_no_change() {
+        assert_eq!(rw("const a = 1;", V), "const a = 1;");
+    }
+
+    #[test]
+    fn parse_failure_unchanged() {
+        assert_eq!(rw("import.meta.url~~~", V), "import.meta.url~~~");
+    }
+
+    #[test]
+    fn backslash_and_control_escaped() {
+        let bs = char::from_u32(92).unwrap();
+        let q = char::from_u32(34).unwrap();
+        let mut url = String::from("https://e/p#'q");
+        url.push(bs);
+        url.push_str("u0001");
+        url.push(char::from_u32(1).unwrap());
+        let out = rw("import.meta.url", &url);
+        let mut expect = String::new();
+        expect.push(q);
+        expect.push_str("https://e/p#'q");
+        expect.push(bs);
+        expect.push(bs);
+        expect.push_str("u0001");
+        expect.push(bs);
+        expect.push_str("u0001");
+        expect.push(q);
+        assert_eq!(out, expect);
+    }
+
+    #[test]
+    fn bad_virtual_url_unchanged() {
+        assert_eq!(rw("import.meta.url", "not-a-url"), "import.meta.url");
+        assert_eq!(rw("import.meta.url", "https://nohost"), "import.meta.url");
+    }
+
+    #[test]
+    fn minified_chain_replaced() {
+        let out = rw("export const u=import.meta.url.split('/').pop();", V);
+        assert_eq!(out, format!("export const u={}.split('/').pop();", vl()));
+    }
+}
