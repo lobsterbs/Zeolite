@@ -159,7 +159,6 @@ export function startFixture(port) {
         send(res, "text/javascript", `fetch("/api/initiator-probe?kind=worker").then(r => r.text()).then(value => postMessage(value)).catch(e => postMessage("worker-error:" + e));`);
       } else if (path === "/dir/initiator-nav.html") {
         send(res, "text/html; charset=utf-8", `<!doctype html><html><body><p id="initiator-nav-marker">navigation initiator</p></body></html>`);
-      }
       } else if (path === "/dir/refresh.html") {
         /* #36: the meta refresh target must be rewritten to an engine
            route, otherwise the refresh navigates the proxied frame
@@ -252,7 +251,7 @@ export function startFixture(port) {
       } else if (path === "/api/initiator-probe") {
         if ((req.headers.accept ?? "").toLowerCase().includes("text/event-stream")) {
           res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
-          res.end("data: eventsource-ok\\n\\n");
+          res.end("data: eventsource-ok\n\n");
         } else if (req.method === "POST") {
           res.writeHead(204, { "cache-control": "no-store" });
           res.end();
