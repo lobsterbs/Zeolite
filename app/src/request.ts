@@ -19,6 +19,7 @@ import { b64uDecode, b64uEncode, buildNavHandleUrl, buildQueryHandleUrl, decodeC
 import { decodeBody, mapLocationHeader, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
 import { applyExperimentalCsp } from "./csp-translation";
+import { cspClearClient, cspGate, cspSetClient, engineCspMarker, newCspRegistry, planEngineCsp } from "./csp-enforce";
 import { experimentalEnabled } from "./experimental-flags";
 import { loadRouteHistory, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
@@ -70,7 +71,7 @@ import {
   VCTX_CAP,
   type VirtualContext,
 } from "./vctx";
-import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
+import { assetBaseCount, isFlagSurgeryPath, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
 import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfilesReady, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
@@ -85,6 +86,10 @@ import { newImportmapRegistry, importmapNote, resolveBareImport, pageKeyOf } fro
    integrity attributes its HTML carried, and a worker restart
    simply forgets them (page reload repopulates). */
 const SRI = newSriRegistry();
+/* #527: per-client engine-side CSP plans. The same memory-only
+   lifecycle as SRI: plans exist solely in the live worker and are
+   rebuilt from the upstream CSP header on every navigation. */
+const CSPREG = newCspRegistry();
 /* #554: per-page import maps recorded from served documents (see
    importmaps.ts); module-worker serve seams resolve bare specifiers
    through the recorded map of the owning page. */
@@ -1281,6 +1286,38 @@ async function revalidateBeforeUse(req: Request, hit: Response, context: CookieR
 
 /* ---- Fetch interception -------------------------------------------- */
 
+/** Fixed-vocabulary page/worker instrumentation header. It is diagnostic
+    metadata only, never an authorization or routing signal. The request
+    engine strips it before the upstream hop. */
+export const REQUEST_INITIATOR_HEADER = "x-zl-i";
+
+/** Classify browser evidence or the diagnostic marker inserted by our
+    wrappers. A page can forge that header, so it is never a trust
+    boundary and only changes the inspector label. Empty/unproven
+    requests stay UNKNOWN. */
+export function requestInitiator(req: Request): string {
+  const marked = req.headers.get(REQUEST_INITIATOR_HEADER);
+  if (marked === "fetch") return "FETCH";
+  if (marked === "xhr") return "XHR";
+  if (marked === "beacon") return "SEND_BEACON";
+  if (marked === "worker") return "WORKER_FETCH";
+  if (req.mode === "navigate") return "NAVIGATION";
+  if ((req.headers.get("accept") ?? "").toLowerCase().includes("text/event-stream")) return "EVENTSOURCE";
+  if (req.destination) return "RESOURCE";
+  return "UNKNOWN";
+}
+
+/** Request headers shared with extension interception APIs.
+    Internal attribution metadata is never part of the extension-facing
+    WebRequest surface. */
+export function extensionRequestHeaders(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    if (name.toLowerCase() !== REQUEST_INITIATOR_HEADER) out[name] = value;
+  });
+  return out;
+}
+
 /** The request destination from the spec source of truth first:
     sec-fetch-* are forbidden headers the browser's network layer
     adds, and SW-visible requests can lack them entirely (Firefox;
@@ -1820,6 +1857,30 @@ let jarPruneInFlight = false;
    virtual base baked into the head. The token carries page-known
    data only (the opaque site token and the page's own virtual
    URL), never an engine secret; a malformed token fails closed. */
+/* #580: Google-class error-beacon endpoints. A page's own error
+   pipeline reports through fetch/XHR beacons (httpservice/retry/jserror,
+   gen_204 with an err= parameter) - invisible to the console hook, so
+   a session whose error pipeline is firing still exports "0 errors".
+   The classifier is deliberately narrow (the two observed shapes
+   only); the fetch seam emits one diagnostic per beacon hit so an
+   export shows the page's own error signal next to the console
+   hook's silence. */
+export function isErrorBeaconUrl(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.pathname === "/jserror" || u.pathname.endsWith("/jserror")) return true;
+  if (u.pathname === "/gen_204" || u.pathname.endsWith("/gen_204")) {
+    for (const [k, v] of u.searchParams) {
+      if (k === "err" && v !== "") return true;
+    }
+  }
+  return false;
+}
+
 export function zlBwTokenParse(search: string): { s: string; b: string } | null {
   let raw: string | null = null;
   try {
@@ -3227,7 +3288,13 @@ export function handleFetch(e: FetchEvent): void {
         if (newClient && establishContext(VCTX, newClient, target)) capContexts(VCTX, VCTX_CAP);
         /* #531: the stale page's expectations must not gate the next
            document's subresources. */
-        if (e.request.mode === "navigate") sriClearClient(SRI, newClient);
+        if (e.request.mode === "navigate") {
+          sriClearClient(SRI, newClient);
+          /* #527: the new document never inherits the previous page's
+             CSP plan. Until the served document installs a fresh
+             plan, its client is honestly unenforced. */
+          cspClearClient(CSPREG, newClient);
+        }
       }
 
       /* #477 P3: fetch bridging into the guest realm. The request has
@@ -3292,11 +3359,13 @@ export function handleFetch(e: FetchEvent): void {
         /* Issue #34: a foreign-origin request has no engine-local path;
            the full URL is its internal identity (and the netLog path). */
         const internalUrl = foreign ? url.href : url.pathname + url.search;
+        const initiatorType = requestInitiator(e.request);
         const mkDetail = (resp?: Response): NetDetail => {
           const d: NetDetail = {
             internalUrl,
             ttfb: Date.now() - t0,
             initiator,
+            initiatorType,
             reqHeaders: flatRed(e.request.headers),
           };
           if (foreign) d.crossOrigin = true;
@@ -3401,8 +3470,7 @@ export function handleFetch(e: FetchEvent): void {
         if (rtype === "worker") kinds.push("worker");
         if (rtype === "websocket") kinds.push("websocket");
         if (rtype === "fetch") kinds.push("fetch");
-        const flatReq: Record<string, string> = {};
-        e.request.headers.forEach((v, k) => (flatReq[k] = v));
+        const flatReq = extensionRequestHeaders(e.request.headers);
         const ic = runRequestInterception(kinds, {
           url: ruleDec.url ?? target,
           method: e.request.method,
@@ -3484,6 +3552,49 @@ export function handleFetch(e: FetchEvent): void {
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
         }
         if (ruleDec.url || ic.url) target = destUpgraded(ic.url ?? ruleDec.url ?? target);
+
+        /* #527: engine-side CSP enforcement at the fetch seam. The
+           requesting client's document carried an upstream
+           source-list policy the browser cannot be handed safely
+           (shared engine origin), so the engine enforces it against
+           the decoded upstream URL - the same truth a direct browser
+           matches its policy against. Blocked loads answer a network
+           error, the exact shape a direct CSP violation produces.
+           Pre-cache and pre-transport: a blocked load never reaches
+           upstream or the page cache. Directives whose lists carry
+           nonce/hash/strict-dynamic tokens stay unenforced (the
+           engine cannot verify an element nonce at this seam); the
+           degrade is a false allow, never a false block. */
+        if (e.request.mode !== "navigate" && !isWorkerDestination(e.request.destination)) {
+          const cspDec = cspGate(CSPREG, e.clientId, dest, target);
+          if (cspDec.blocked) {
+            DIAG.emit({
+              category: "BLOCKED",
+              cause: "blocked",
+              severity: "info",
+              stage: "REQUEST_INTERCEPTED",
+              message: "request blocked by upstream CSP (" + cspDec.directive + ")",
+              url: target,
+              traceId,
+              requestId: traceId,
+            });
+            const cspDecision: TransitDecision = { mode: "Blocked", reason: "BLOCKED_CSP" };
+            netLogPush({
+              method: e.request.method,
+              traceId,
+              path: internalUrl,
+              dest: target,
+              status: 0,
+              rtype: rtype.toUpperCase(),
+              ms: Date.now() - t0,
+              bytes: -1,
+              verdict: "blocked:csp",
+              transport: cspDecision.mode,
+              fallbackReason: reasonOf(cspDecision),
+            });
+            return Response.error();
+          }
+        }
 
         /* Cache-first for proxied GETs. #179: a credential-bearing
            request (Authorization or a jar cookie for the target)
@@ -3609,7 +3720,9 @@ export function handleFetch(e: FetchEvent): void {
                 }, true, docSri, docMap,
                 /* #532: the cache-hit rewrite folds the same first
                    base; the message rides the served stream. */
-                (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
+                /* #529: join the rewriter's aggregated decisions
+                   to the request trace. */
+                (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb), traceId,
                 cosmeticStyle),
                 { status: hit.status, headers: hitHeaders },
               );
@@ -4128,7 +4241,17 @@ export function handleFetch(e: FetchEvent): void {
             /* #296 first: a flag-shaped script miss is the src-surgery class,
              whose recovery owns the flag path shape; the flat-asset gate would
              reject it and log a miss without ever trying the script bases. */
-            let rec = dest === "script" ? await recoverFlagSurgeryScript(initiator ?? "", target, e.request.headers, recoveryUpstream(policy, rtype, traceId), traceId) : null;
+            let flagPath = false;
+            if (dest === "script") {
+              try {
+                flagPath = isFlagSurgeryPath(new URL(target).pathname);
+              } catch {
+                flagPath = false;
+              }
+            }
+            let rec = flagPath
+              ? await recoverFlagSurgeryScript(initiator ?? "", target, e.request.headers, recoveryUpstream(policy, rtype, traceId), traceId)
+              : null;
             if (rec) {
               DIAG.emit({
                 traceId,
@@ -4139,7 +4262,7 @@ export function handleFetch(e: FetchEvent): void {
                 message: "flag-surgery script path recovered against an observed script base (#296)",
                 url: target,
               });
-            } else {
+            } else if (!flagPath) {
               rec = await recoverFlatAsset(initiator ?? "", target, dest, e.request.headers,
                 recoveryUpstream(policy, rtype, traceId));
             }
@@ -4155,11 +4278,10 @@ export function handleFetch(e: FetchEvent): void {
               });
               hopUrl = rec.url;
               resp = rec.resp;
-            } else if (assetBaseCount(initiator ?? "") > 0) {
-              /* #143: the miss is now visible in diagnostics either way -
-                 all observed bases answered badly, or the path shape
-                 was rejected - so a silent no-retry never hides a
-                 recoverable asset again. */
+            } else if (!flagPath && assetBaseCount(initiator ?? "") > 0) {
+              /* #143: retain the generic flat-asset gate and diagnostics
+                 for ordinary asset names. Google flag paths have their own
+                 narrower recovery class and should not be double-reported. */
               let shapeOk = false;
               try {
                 shapeOk = isRecoverableAssetPath(new URL(target).pathname);
@@ -4186,6 +4308,22 @@ export function handleFetch(e: FetchEvent): void {
           }
 
           DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
+          /* #580: the page's own error beacon pipeline is firing even
+             when the console hook reports zero - make the export show
+             it. Deliberately narrow classifier (jserror / gen_204?err=);
+             the diagnostic ring's own bound keeps repeated beacons
+             from flooding an export. */
+          if (isErrorBeaconUrl(hopUrl)) {
+            DIAG.emit({
+              traceId,
+              requestId: traceId,
+              category: "SERVICE_WORKER",
+              severity: "warning",
+              stage: "UPSTREAM_RESPONSE",
+              message: "page error beacon delivered (fetch-borne; invisible to the console hook) (#580)",
+              url: hopUrl,
+            });
+          }
           /* A 3xx that escaped the hop loop - cap reached, a hop whose
              one-shot body cannot replay, or no resolvable Location - is
              surfaced to the page with a mapped Location. For
@@ -4244,7 +4382,11 @@ export function handleFetch(e: FetchEvent): void {
               const navClient = e.resultingClientId || e.clientId;
               if (navClient && establishContext(VCTX, navClient, finalDest))
                 capContexts(VCTX, VCTX_CAP);
-              if (e.request.mode === "navigate") sriClearClient(SRI, navClient);
+              if (e.request.mode === "navigate") {
+                sriClearClient(SRI, navClient);
+                /* #527: same lifecycle note as the pre-transport clear. */
+                cspClearClient(CSPREG, navClient);
+              }
             }
           }
           /* 1.4 Boride: capture Set-Cookie into the per-origin jar before
@@ -4296,9 +4438,37 @@ export function handleFetch(e: FetchEvent): void {
           /* #452: opt-in, strictly deny-only CSP on HTML documents.
              The live response carries original headers; every
              unsupported policy is left stripped (not passed through). */
-          if (experimentalEnabled("cspTranslation"))
+          if (experimentalEnabled("cspTranslation")) {
+            const cspDoc = DOC_DESTS.has(dest.toLowerCase());
+            const docClient = e.resultingClientId || e.clientId;
             applyExperimentalCsp(outHeaders, resp.headers,
-              resp.headers.get("content-type") ?? "", DOC_DESTS.has(dest.toLowerCase()));
+              resp.headers.get("content-type") ?? "", cspDoc);
+            /* #527: source-list directives have no safe browser-side
+               translation onto the shared engine origin, so the
+               engine enforces them itself at the fetch seam. The
+               plan belongs to the navigating client (its subresource
+               fetches carry that clientId) and installs from the
+               same HTML document shape the browser-side seam
+               accepts. Every navigation rebuilds the plan from the
+               upstream header; nothing persists across pages. */
+            if (
+              cspDoc &&
+              docClient &&
+              /^(?:text\/html|application\/xhtml\+xml)(?:\s*;|\s*$)/i.test(
+                (resp.headers.get("content-type") ?? "").trim())
+            ) {
+              const rawCsp = resp.headers.get("content-security-policy");
+              if (rawCsp && (finalDest ?? target)) {
+                const eng = planEngineCsp(rawCsp, finalDest ?? target);
+                cspSetClient(CSPREG, docClient, eng);
+                const seg = engineCspMarker(eng);
+                if (seg) {
+                  const cur = outHeaders.get("x-zl-csp");
+                  outHeaders.set("x-zl-csp", cur ? cur + "; " + seg : seg);
+                }
+              }
+            }
+          }
           outHeaders.set("x-zl-proxy", "1");
           /* Finding 1: a 3xx that reached the page (hop cap reached, no
              Location, or a hop whose one-shot body cannot replay) must not
@@ -4563,6 +4733,7 @@ export function handleFetch(e: FetchEvent): void {
                   resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone, true, docSri, docMap,
                   /* #532: the effective-base delivery seam. */
                   (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
+                  traceId,
                   /* #551: the cosmetic <style> rides the init splice. */
                   cosmeticStyle,
                 ),
@@ -4587,6 +4758,7 @@ export function handleFetch(e: FetchEvent): void {
                   true, docSri, docMap,
                   /* #532: the sniffed document folds the same. */
                   (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
+                  traceId,
                   /* #551: same splice for the sniffed document. */
                   cosmeticStyle,
                 ),
@@ -4680,6 +4852,11 @@ export function handleFetch(e: FetchEvent): void {
               (await workerPrelude()) +
               "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n" +
               (preludeW ? "\n" + preludeW : "");
+            /* #580: the rewrite is done the moment the composed body
+               exists - emit the completion stage here like the HTML
+               and CSS stream paths do at stream end, so a worker
+               serve can never sit REWRITE_STARTED in an export. */
+            DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
             WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             /* #35: the page cache holds the composed copy (prelude +
                rewritten specifiers); a stored raw body would serve a
@@ -4791,6 +4968,13 @@ export function handleFetch(e: FetchEvent): void {
             if (jsOutcome.provenUnchanged) netLogAnnotateRewrite(traceId, "js-proven-unchanged");
             else if (jsOutcome.literalChanged) netLogAnnotateRewrite(traceId, "js-literal-rewritten");
             else if (jsOutcome.specifierChanged) netLogAnnotateRewrite(traceId, "js-specifier-rewritten");
+            /* #580: same completion contract as HTML/CSS - the page
+               script's transformation class is fully decided above, so
+               the stage emits here instead of leaving the trace stuck
+               at REWRITE_STARTED (the Google AI Mode / Twitch exports
+               showed 0 completions for large JS bodies and made a
+               telemetry gap look like a hung stream). */
+            DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
             WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             /* Issue B: the decoded-with-upstream-charset body is
                re-encoded UTF-8 by the string Response constructor;
@@ -5683,6 +5867,8 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     "referer",
     "origin",
     "cookie",
+    /* Internal API attribution is consumed here and never reaches origin servers. */
+    "x-zl-i",
     "sec-fetch-site",
     "sec-fetch-mode",
     "sec-fetch-dest",
@@ -5817,5 +6003,6 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
   }
   return out;
 }
+
 
 
