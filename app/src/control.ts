@@ -7,7 +7,7 @@ import type { JarConflictRule } from "./cookies";
 import { cookieStoreOp, documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
 import type { FacadeCookie } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
-import { GUEST_SCRIPT_MAX, guestRegisterHost, guestSpawn, guestTerminate, guestUnregister, type GuestPortLike } from "./kernel/guests/executor";
+import { GUEST_SCRIPT_MAX, guestRegisterHost, guestSpawn, guestTerminate, guestTerminateAll, guestUnregister, type GuestPortLike } from "./kernel/guests/executor";
 /* #477: canonical registration identity; inputs from untrusted pages
    pass the verified-client gates first (dispatch, below). */
 import { canonicalGuestRegistration } from "./kernel/guests/registration";
@@ -27,11 +27,21 @@ import { buildCompatibilityReport, compatibilityKdl } from "./compat-debugger";
    control plane lists and cancels entries through the subsystem. */
 import { DL } from "./downloads";
 import { EXT_CONTROL_TYPES, dispatchExtControl } from "./extensions/control";
-import { setBrowsingDataCacheDropper } from "./extensions/browsingdata";
+import { ALARMS } from "./extensions/alarms";
+import { setBrowsingDataCacheDropper, setBrowsingDataDownloadClear, setBrowsingDataGuestTerminator } from "./extensions/browsingdata";
 /* #520/#179: the extension browsingData cookie clear drops the page
    cache exactly like zl:clearJar; the dropper is wired here because
    the extensions subsystem must not import the request pipeline. */
 setBrowsingDataCacheDropper(pageCacheClear);
+/* #593: the attachment download ring and the guest kernel live
+   outside the extensions leaf; their clears mount here too, the
+   cacheDropper pattern. */
+setBrowsingDataDownloadClear((filter) => DL.clearHistory(filter));
+setBrowsingDataGuestTerminator(() => guestTerminateAll());
+/* #594: re-arm the persisted alarm table at worker boot; a broken
+   store degrades honestly to in-memory alarms (hydrate never
+   throws). */
+void ALARMS.hydrate();
 import { pageClientOf } from "./extensions/serve";
 import type { UiTab } from "./extensions/tabs";
 import { TABS } from "./extensions/tabs";
