@@ -35,11 +35,12 @@
    call; no infrastructure redesign.
 
    Honest gaps (documented, not faked): WebSocket targets need a TLS
-   fixture (the engine upgrades ws to wss by design; loopback is plain
-   HTTP), IDN hostnames need a real domain (the fixtures are loopback
-   IPs), and downloads need a UI-observable harness (the #90 registry
-   is unit-tested; a fetch-shaped attachment is just another body
-   probe). None are covered here; all are listed in README.md.
+   fixture (plaintext ws:// passes through since #525, but the
+   loopback fixtures are plain HTTP and a wss:// terminator is out of
+   scope here), IDN hostnames need a real domain (the fixtures are
+   loopback IPs), and downloads need a UI-observable harness (the #90
+   registry is unit-tested; a fetch-shaped attachment is just another
+   body probe). None are covered here; all are listed in README.md.
 
    Run: node suite/e2e/torture.mjs   (same prerequisites as e2e.mjs) */
 

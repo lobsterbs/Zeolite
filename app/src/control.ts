@@ -590,6 +590,22 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         experimental: experimentalSnapshot(),
         profile: jarProfileState((e.source as { id?: string } | null)?.id),
         wispAuth: wispAuthStatus(),
+        /* #544: a compact, factual capability report so a host or page
+           can tell "unavailable by design" from "broken". It names
+           what IS, never what could be: websocket is the transport a
+           page socket would ride right now (the relay arm when an
+           embedder channel is registered, the native wisp bridge
+           otherwise); websocketPlaintext is the unconditional #525
+           pass-through (no scheme upgrade exists anymore); webrtc is
+           constant "unavailable" (RTCPeerConnection is deleted by the
+           navguard, no silent fallback exists); replaySpool echoes the
+           live zl:config authorization for over-cap upload replay. */
+        capabilities: {
+          websocket: relayAvailable() ? "relay" : "native-bridge",
+          websocketPlaintext: true,
+          webrtc: "unavailable",
+          replaySpool: spoolUploadsEnabled(),
+        },
       });
       break;
     case "zl:config": {

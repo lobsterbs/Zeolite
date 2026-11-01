@@ -192,14 +192,24 @@ upstream bytes.
 
 ## WebSocket
 
-- ws:// targets are upgraded to wss:// before the transport sees
-  them; plaintext WS is never dialed (traced as subsystem websocket,
-  rule upgrade).
+- ws:// targets pass through as plaintext since #525: no scheme
+  upgrade exists anymore. The old force-upgrade dialed a TLS
+  ClientHello at every plaintext-ws origin (an http-only origin cannot
+  answer it, so the handshake never settled and the page socket
+  stalled), while cleartext http already rides the same wisp tunnel.
+  Passthrough is traced (subsystem websocket, rule "plaintext"), and
+  the wire path is the same single audited transport every other
+  request uses - there is no second, unguarded WebSocket egress.
 - The bridge registry holds only live connections; zl:teardown closes
   all of them.
 - Re-audited at 3.0: the SharedWorker bridge (2.3) rides the same
   relay rule (the engine is the relay parent, a page never becomes
-  one) and the same ws->wss upgrade.
+  one) and the same plaintext passthrough.
+- WebRTC is unavailable by design (#544): RTCPeerConnection is
+  deleted (see Runtime navigation escapes below) because ICE egress
+  bypasses the engine; the zl:ping capability report states this as
+  webrtc: "unavailable" so a host can distinguish designed absence
+  from breakage.
 
 ## Runtime navigation escapes (issue #28)
 

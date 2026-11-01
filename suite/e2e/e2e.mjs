@@ -22,9 +22,10 @@
       escape. The gate fails only on positive evidence.
 
    Honest gaps (documented, not faked): WebSocket targets are skipped
-      (the engine upgrades ws to wss by design; the local fixture is
-      plain HTTP, so the bridge cannot be exercised against loopback
-      without a TLS fixture) and the SW-restart group is not covered -
+      (plaintext ws:// passes through since #525, but the local
+      fixture is plain HTTP and neither suite ships a ws endpoint, so
+      the bridge cannot be exercised here without a socket fixture)
+      and the SW-restart group is not covered -
       see suite/e2e/README.md. The #36 rewriter constructs have
       real-Chromium checks below (meta refresh, iframe srcdoc, base
       href, srcset data URL candidates); SVG paint url() attributes
