@@ -6,9 +6,13 @@
    zl:getTracing using the same cursor protocol as the network log.
    Secrets are redacted before anything is stored.
 
-   Known limit: token-level decisions inside the wasm rewriter are not
-   surfaced; the traced seams are rules, intercept handlers, transport
-   and the html/css rewrite boundaries. */
+   #529: token-level decisions inside the wasm rewriter surface
+   through the same opt-in: rewriteStream enables the per-instance
+   wasm trace (set_trace) and drains the aggregated fixed-vocabulary
+   (pass, decision, count) pairs into this ring at stream end - no
+   source text, URL or host ever enters a trace entry. Standalone CSS
+   streams and one-shot JS bodies stay untraced (documented residual
+   in docs/tracing.md). */
 
 import { redactSecrets } from "./diag";
 

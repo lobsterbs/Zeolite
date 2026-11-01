@@ -620,6 +620,44 @@ jobs:
             grep -E "^\[FAIL\]|HARNESS-ERROR" vorigin.out | head -20 | while IFS= read -r l; do echo "::error::VORIGIN $l"; done
             exit 1
           fi
+      - name: srcdoc client classes suite (#528)
+        # Direct-vs-proxied acceptance for the srcdoc client
+        # classes: current Chromium makes about:srcdoc documents
+        # service-worker clients (the crbug.com/41411856
+        # limitation no longer reproduces; verified at 156), so a
+        # plain recording SW must see every srcdoc parser class
+        # (script, module, stylesheet, image, css url(), nested
+        # srcdoc) plus the child runtime fetch, and the engine must
+        # serve the same classes end to end through its SW decode
+        # pipeline. The about:blank parent-written document.write
+        # child stays the remaining uncontrolled class (never
+        # SW-bound) and 404s on the engine static server. Ports
+        # 6031/7131 never collide with the other suites.
+        run: |
+          node suite/e2e/srcdoc-clients.mjs 2>&1 | tee srcdocc.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\\[FAIL\\]|HARNESS-ERROR" srcdocc.out | head -20 | while IFS= read -r l; do echo "::error::SRCDCC $l"; done
+            exit 1
+          fi
+      - name: Raw-block buffering suite (#526)
+        # Real-Chromium acceptance for the bounded raw-block
+        # buffering contract: normal inline styles are rewritten
+        # (engine routes, no fixture-origin leak) and apply, an
+        # over-cap (RAW_PASS_CAP + 64 KiB) inline style and script
+        # are served verbatim, complete and fail-open (tail rule
+        # applies, tail line executes, exact served lengths), and
+        # the measurable TTFB gate proves a marker before an
+        # unterminated 6 MiB raw block becomes visible while the
+        # bulk still streams, with bounded completion. Ports
+        # 6043/7143 never collide with the other suites.
+        run: |
+          node suite/e2e/raw-caps.mjs 2>&1 | tee rawcaps.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\\[FAIL\\]|HARNESS-ERROR" rawcaps.out | head -20 | while IFS= read -r l; do echo "::error::RAWCAPS $l"; done
+            exit 1
+          fi
       - name: Virtual context restart suite (#535)
         # Real-Chromium restart acceptance: two tabs on two virtual
         # sites lose the in-memory context map when the engine worker
