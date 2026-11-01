@@ -24,6 +24,7 @@ import { globToRegExp } from "./content-scripts";
 import { hostPatternsMatch } from "./permissions";
 import { ALARMS } from "./alarms";
 import { ACTION } from "./action";
+import { dropSessionAccess } from "./storage";
 import type { ExtensionId, ExtensionRecord } from "./types";
 
 export type LifecycleListener = (rec: ExtensionRecord) => void;
@@ -208,6 +209,9 @@ export class ExtensionManager {
     ALARMS.drop(id);
     /* #519: the toolbar action registry is per-extension state. */
     ACTION.drop(id);
+    /* #520: a fresh install of the same identity starts from the
+       Firefox default session access level (trusted contexts only). */
+    dropSessionAccess(id);
   }
 
   async setEnabled(id: ExtensionId, enabled: boolean): Promise<void> {

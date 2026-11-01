@@ -18,6 +18,7 @@ import { handleExtPageCall } from "./pageapi";
 import { EXT_ROUTE, extPageOpenUrl, mintPageToken, pageClientOf } from "./serve";
 import type { ExtensionRecord } from "./types";
 import type { ExtensionStorageArea } from "./storage";
+import { contentScriptMayUseSession } from "./storage";
 import { TABS, tabView } from "./tabs";
 import { WEBNAV } from "./webnavigation";
 
@@ -527,6 +528,14 @@ async function handleExtMessage(
   if (msg && typeof msg === "object" && typeof msg.__zlStorage === "string") {
     if (!rec.permissions.includes("storage")) {
       return { ok: false, error: "storage permission not granted" };
+    }
+    /* #520: storage.session is trusted-contexts-only until
+       setAccessLevel opens it, exactly as in Firefox. The check is
+       engine-side, so a stale bridge config or a hand-rolled message
+       cannot route around it, and a level change takes effect for
+       every already-open page. */
+    if (String(msg.__zlStorage) === "session" && !contentScriptMayUseSession(rec.id)) {
+      return { ok: false, error: "zeolite: storage.session is not available to content scripts" };
     }
     const ctx = await getExtensionContext(rec);
     const area = (ctx.storage as unknown as Record<string, ExtensionStorageArea>)[
