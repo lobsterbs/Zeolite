@@ -69,6 +69,7 @@ describe("flatRed", () => {
       cookie: "sid=super-secret-session-id",
       authorization: "Bearer eyJ.abc.def",
       "x-plain": "harmless",
+      "x-zl-i": "xhr",
     });
     const out = flatRed(h);
     expect(out["cookie"]).toBe("[redacted]");
@@ -76,6 +77,7 @@ describe("flatRed", () => {
     expect(JSON.stringify(out)).not.toContain("super-secret-session-id");
     expect(JSON.stringify(out)).not.toContain("eyJ.abc.def");
     expect(out["x-plain"]).toBe("harmless");
+    expect(out["x-zl-i"]).toBeUndefined();
   });
 
   it("redacts secrets that appear inside otherwise plain values", () => {

@@ -1,9 +1,8 @@
-/* #538 regression tests: per-(virtual site, scope) guest CacheStorage.
-   All storage is kernel-side, origin-scoped and quota-bounded; entries
-   key on the canonical URL, eviction is oldest-first, teardown clears
-   the origin's namespace, and one site's entries are never visible to
-   another. No engine page-cache entry is reachable: the namespace is
-   private to the guest program by construction. */
+/* #538 regression tests: origin-scoped guest CacheStorage.
+   All storage is kernel-side and quota-bounded; entries key on canonical
+   URLs, eviction is oldest-first, storage survives worker termination or
+   unregister like native CacheStorage, and origins remain isolated. No
+   engine page-cache entry is reachable: the namespace is private to guests. */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -190,24 +189,26 @@ describe("guest CacheStorage kernel ops (#538)", () => {
     expect(lastCa(guest)?.error).toContain("size cap");
   });
 
-  it("tears the namespace down on terminate and keeps sites isolated", () => {
+  it("keeps origin CacheStorage across worker termination while isolating other origins", () => {
     const { kernel, host, guest } = kernelUp();
     ca(guest, { id: 1, op: "open", payload: { name: "v1" } });
     put(guest, 2, "v1", ORIGIN + "/a", "alpha");
     const other = spawnSecond(kernel, host, OTHER);
     ca(other, { id: 3, op: "storeMatch", payload: { url: ORIGIN + "/a" } });
     expect(lastCa(other)?.result).toBeNull();
-    /* Terminating one site never touches the other's namespace. */
+
+    /* CacheStorage belongs to the virtual origin, not one worker scope.
+       Stopping a worker does not delete the site's CacheStorage. */
     kernel.terminate(OTHER);
     ca(guest, { id: 4, op: "match", payload: { name: "v1", url: ORIGIN + "/a" } });
     expect((lastCa(guest)?.result as { body: string } | null)?.body).toBe("alpha");
-    /* A terminated site's caches are gone, also across a respawn. */
+
     kernel.terminate(ORIGIN);
     const reborn = spawnSecond(kernel, host, ORIGIN);
     ca(reborn, { id: 5, op: "keys", payload: {} });
-    expect(lastCa(reborn)?.result).toEqual([]);
+    expect(lastCa(reborn)?.result).toEqual(["v1"]);
     ca(reborn, { id: 6, op: "storeMatch", payload: { url: ORIGIN + "/a" } });
-    expect(lastCa(reborn)?.result).toBeNull();
+    expect((lastCa(reborn)?.result as { body: string } | null)?.body).toBe("alpha");
   });
 
   it("storeMatch finds entries across the site's caches", () => {
