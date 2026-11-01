@@ -147,6 +147,12 @@ export class ExtensionManager {
       return undefined;
     };
     resolveManifestI18n(raw as Record<string, unknown>, parsed, readPkg, diags);
+    /* #523: the i18n pass can raise Firefox-grade errors of its own
+       (a __MSG_*__ manifest without default_locale); those fail the
+       install exactly like parse errors. */
+    if (diags.errors.length > 0) {
+      throw new Error("zeolite: manifest invalid: " + diags.errors.join("; "));
+    }
     const relOf = (p: string) =>
       loc.root !== "" && p.startsWith(loc.root) ? p.slice(loc.root.length) : p;
     const id = await this.deriveId(files, relOf);
@@ -243,6 +249,12 @@ export class ExtensionManager {
     /* #504: stored file keys are root-relative, so both the bare and
        leading-slash forms resolve. */
     resolveManifestI18n(mraw, parsed, (p) => files.get(p) ?? files.get(p.slice(1)), diags);
+    if (diags.errors.length > 0) {
+      rec.state = "error";
+      rec.lastError = "reload failed: " + diags.errors.join("; ");
+      this.changed(id);
+      throw new Error("zeolite: reload failed: " + diags.errors.join("; "));
+    }
     Object.assign(rec, parsed);
     rec.state = "installed";
     rec.lastError = null;
