@@ -592,11 +592,19 @@ export function buildApi(
     onCompleted: makeWebNavEvent(ext, "completed"),
     onDOMContentLoaded: makeWebNavEvent(ext, "domcontentloaded"),
   };
-  /* contextMenus + Firefox's menus alias over one registry. */
+  /* contextMenus + Firefox's menus alias over one registry. #519:
+     update/remove follow Firefox's Promise semantics - an unknown id
+     or bad property rejects instead of a silent no-op, update merges
+     properties (parent checks included), and clicks carry Firefox's
+     checkbox/radio state transitions. */
   const contextMenusNs = {
     create: (props: Record<string, unknown> = {}) => MENUS.create(ext, props),
-    update: () => undefined,
-    remove: (id: string | number) => MENUS.remove(ext.id, String(id)),
+    update: async (id: string | number, props: Record<string, unknown> = {}) => {
+      MENUS.update(ext.id, String(id), props);
+    },
+    remove: async (id: string | number) => {
+      MENUS.remove(ext.id, String(id));
+    },
     removeAll: () => MENUS.removeAll(ext.id),
     onClicked: makeMenusEvent(ext.id),
   };
