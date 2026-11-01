@@ -26,20 +26,22 @@ export function experimentalEnabled(key: ExperimentalFlag): boolean {
 
 /** Effective describes shipped behavior, not a promised complete
     feature: CSP is limited to deny-only policies; adaptive routing
-    has an observational shadow gate only. Full guest execution and
-    hybrid pre-execution rewriting remain inactive. */
+    has an observational shadow gate only; hybridLocation wires the
+    #456 hybrid pre-execution pass for otherwise-legacy origins
+    (explicit siteconfig rules still win). Full guest execution
+    remains inactive. */
 export function experimentalSnapshot() {
   return {
     requested: { ...requested },
     effective: {
       adaptiveTransit: false,
-      hybridLocation: false,
+      hybridLocation: requested.hybridLocation,
       cspTranslation: requested.cspTranslation,
       virtualSW: false,
     },
     status: {
       adaptiveTransit: requested.adaptiveTransit ? "shadow-only" : "disabled",
-      hybridLocation: "not-wired",
+      hybridLocation: requested.hybridLocation ? "enabled" : "disabled",
       cspTranslation: requested.cspTranslation ? "deny-only" : "disabled",
       virtualSW: "not-implemented",
     } as const,
