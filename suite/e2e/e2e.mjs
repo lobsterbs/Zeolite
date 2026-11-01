@@ -458,6 +458,93 @@ async function main() {
     return landing.url().slice(0, 44);
   });
 
+  await check("navigation: direct and proxied fragments match across initial load, redirect, meta, form, anchors and history (#543)", async () => {
+    const direct = await context.newPage();
+    let directInitial;
+    try {
+      await direct.goto(ORIGIN_A + "/dir/fragment.html#initial-target");
+      await direct.locator("#initial-target").waitFor();
+      directInitial = await direct.evaluate(() => ({
+        hash: location.hash,
+        top: document.getElementById("initial-target").getBoundingClientRect().top,
+      }));
+    } finally { await direct.close(); }
+    const initial = await openProxied(ORIGIN_A + "/dir/fragment.html#initial-target", "#initial-target");
+    const proxiedInitial = await initial.frame.evaluate(() => ({
+      hash: location.hash,
+      top: document.getElementById("initial-target").getBoundingClientRect().top,
+    }));
+    eq(proxiedInitial.hash, directInitial.hash, "initial fragment");
+    assert(Math.abs(proxiedInitial.top - directInitial.top) < 4, "initial anchor scroll differs from direct Chromium");
+
+    const directRedirect = await context.newPage();
+    let directRedirectResult;
+    try {
+      await directRedirect.goto(ORIGIN_A + "/dir/fragment-redirect");
+      await directRedirect.locator("#redirect-target").waitFor();
+      directRedirectResult = await directRedirect.evaluate(() => ({
+        hash: location.hash,
+        top: document.getElementById("redirect-target").getBoundingClientRect().top,
+      }));
+    } finally { await directRedirect.close(); }
+    const redirect = await openProxied(ORIGIN_A + "/dir/fragment-redirect", "#redirect-target");
+    const proxiedRedirectResult = await redirect.frame.evaluate(() => ({
+      hash: location.hash,
+      top: document.getElementById("redirect-target").getBoundingClientRect().top,
+    }));
+    eq(proxiedRedirectResult.hash, directRedirectResult.hash, "redirect fragment");
+    assert(Math.abs(proxiedRedirectResult.top - directRedirectResult.top) < 4, "redirect fragment scroll differs from direct Chromium");
+    assert(redirect.frame.url().startsWith(ENGINE) && !redirect.frame.url().includes(ORIGIN_A), "redirect route exposed the target origin");
+
+    const directMeta = await context.newPage();
+    try {
+      await directMeta.goto(ORIGIN_A + "/dir/fragment-meta.html");
+      await directMeta.locator("#meta-target").waitFor({ timeout: 12000 });
+      const directHash = await directMeta.evaluate(() => location.hash);
+      const meta = await openProxied(ORIGIN_A + "/dir/fragment-meta.html", "#meta-target");
+      eq(await meta.frame.evaluate(() => location.hash), directHash, "meta refresh fragment");
+    } finally { await directMeta.close(); }
+
+    const directForm = await context.newPage();
+    try {
+      await directForm.goto(ORIGIN_A + "/dir/fragment-form.html");
+      await directForm.locator("#fragment-form button").click();
+      await directForm.locator("#form-target").waitFor();
+      const directHash = await directForm.evaluate(() => location.hash);
+      const form = await openProxied(ORIGIN_A + "/dir/fragment-form.html", "#form-ready");
+      await form.frame.locator("#fragment-form button").click();
+      const target = await waitFor("proxied form fragment target", 20000, () => frameWith(form.page, "#form-target"));
+      eq(await target.evaluate(() => location.hash), directHash, "form navigation fragment");
+    } finally { await directForm.close(); }
+
+    const directHistory = await context.newPage();
+    let directHistoryHash;
+    try {
+      await directHistory.goto(ORIGIN_A + "/dir/fragment.html#history-start");
+      await directHistory.locator("#fragment-anchor").click();
+      await directHistory.waitForFunction(() => location.hash === "#anchor-target");
+      await directHistory.evaluate(() => history.back());
+      await directHistory.waitForFunction(() => location.hash === "#history-start");
+      await directHistory.evaluate(() => history.forward());
+      await directHistory.waitForFunction(() => location.hash === "#anchor-target");
+      directHistoryHash = await directHistory.evaluate(() => location.hash);
+    } finally { await directHistory.close(); }
+    const history = await openProxied(ORIGIN_A + "/dir/fragment.html#history-start", "#history-start");
+    await history.frame.locator("#fragment-anchor").click();
+    await history.frame.waitForFunction(() => location.hash === "#anchor-target");
+    await history.frame.evaluate(() => history.back());
+    await history.frame.waitForFunction(() => location.hash === "#history-start");
+    await history.frame.evaluate(() => history.forward());
+    await history.frame.waitForFunction(() => location.hash === "#anchor-target");
+    eq(await history.frame.evaluate(() => location.hash), directHistoryHash, "anchor history back/forward");
+
+    const hits = await fixtureHits(fixtureA);
+    const fragmentHits = hits.filter((h) => h.path.startsWith("/dir/fragment"));
+    assert(fragmentHits.length > 0, "fragment fixture produced no upstream requests");
+    assert(fragmentHits.every((h) => !h.path.includes("#")), "a fragment reached the upstream HTTP request line");
+    return fragmentHits.length + " upstream fragment routes; direct/proxied fragment navigation agrees";
+  });
+
   await check("routing: SPA pushState re-anchors engine-side and the router reads the virtual path (#236)", async () => {
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "pushState", `async () => {
@@ -757,6 +844,183 @@ async function main() {
     })`, 25000);
     eq(out, "wlib-ok,api", "worker messages");
     return out;
+  });
+
+  await check("api: SharedWorker real-Chromium sharing, site isolation, worker storage and port teardown (#547)", async () => {
+    async function requestContext(frame, label) {
+      return await evalIn(frame, label, `() => new Promise((resolve, reject) => {
+        const w = window.__zlSharedWorker547 || new SharedWorker("/dir/shared-identity.js", { name: "zl-sharedworker-547-context", type: "classic" });
+        window.__zlSharedWorker547 = w;
+        const nonce = String(Date.now()) + Math.random();
+        const timer = setTimeout(() => reject(new Error("shared worker context timeout")), 12000);
+        w.port.onmessage = (e) => {
+          const d = e.data || {};
+          if (d.nonce !== nonce) return;
+          clearTimeout(timer);
+          if (d.error) reject(new Error(d.error));
+          else resolve(d.value);
+        };
+        w.port.start();
+        w.port.postMessage({ op: "context", nonce });
+      })`);
+    }
+    async function pingContext(frame) {
+      return await evalIn(frame, "shared worker surviving-port ping", `() => new Promise((resolve, reject) => {
+        const w = window.__zlSharedWorker547;
+        if (!w) return reject(new Error("shared worker handle missing"));
+        const nonce = String(Date.now()) + Math.random();
+        const timer = setTimeout(() => reject(new Error("shared worker ping timeout")), 8000);
+        w.port.onmessage = (e) => {
+          const d = e.data || {};
+          if (d.nonce !== nonce) return;
+          clearTimeout(timer);
+          if (d.error) reject(new Error(d.error));
+          else resolve(d.value);
+        };
+        w.port.postMessage({ op: "ping", nonce });
+      })`);
+    }
+    async function closeSharedPort(frame) {
+      await frame.evaluate(() => {
+        try { window.__zlSharedWorker547?.port.close(); } catch {}
+      });
+    }
+
+    const direct = await browser.newContext();
+    let directA1, directA2, directB;
+    try {
+      const d1 = await direct.newPage();
+      const d2 = await direct.newPage();
+      const db = await direct.newPage();
+      await Promise.all([
+        d1.goto(ORIGIN_A + "/dir/page.html"),
+        d2.goto(ORIGIN_A + "/dir/page.html"),
+        db.goto(ORIGIN_B + "/dir/page.html"),
+      ]);
+      await d1.evaluate(() => { document.cookie = "shared547=direct-a; path=/"; });
+      await db.evaluate(() => { document.cookie = "shared547=direct-b; path=/"; });
+      async function nativeContext(pg) {
+        return await pg.evaluate(() => new Promise((resolve, reject) => {
+          const w = new SharedWorker("/dir/shared-identity.js", { name: "zl-sharedworker-547-context", type: "classic" });
+          const nonce = String(Date.now()) + Math.random();
+          const timer = setTimeout(() => reject(new Error("direct SharedWorker timeout")), 10000);
+          w.port.onmessage = (e) => {
+            if (e.data?.nonce !== nonce) return;
+            clearTimeout(timer);
+            if (e.data.error) reject(new Error(e.data.error));
+            else resolve(e.data.value);
+          };
+          w.port.start();
+          w.port.postMessage({ op: "context", nonce });
+        }));
+      }
+      [directA1, directA2, directB] = await Promise.all([nativeContext(d1), nativeContext(d2), nativeContext(db)]);
+      assert(directA1.id === directA2.id, "direct Chromium failed to share a same-origin, same-name worker");
+      assert(directA1.namespace === directA2.namespace, "direct same-origin worker IDB namespace diverged");
+      assert(directA1.id !== directB.id, "direct Chromium shared worker globals across origins");
+      assert(directA1.namespace !== directB.namespace, "direct Chromium storage namespaces unexpectedly crossed origins");
+    } finally {
+      await direct.close();
+    }
+
+    const a1 = await openProxied(ORIGIN_A + "/dir/page.html");
+    await a1.frame.evaluate(() => { document.cookie = "shared547=proxy-a; path=/"; });
+    await sleep(400);
+    const a1Info = await requestContext(a1.frame, "proxied shared worker A1");
+    const a2 = await openProxied(ORIGIN_A + "/dir/page.html");
+    const a2Info = await requestContext(a2.frame, "proxied shared worker A2");
+    assert(a1Info.id === a2Info.id, "same virtual site across tabs did not share the worker global");
+    assert(a1Info.namespace === a2Info.namespace, "same virtual site worker storage namespace diverged");
+    assert(a2Info.connections >= 2, "the worker did not observe connections from both tabs: " + JSON.stringify(a2Info));
+    assert(String(a1Info.cookie).includes("shared547=proxy-a"), "worker did not inherit the virtual site's cookie profile: " + JSON.stringify(a1Info.cookie));
+    const a2Alive = await pingContext(a2.frame);
+    assert(a2Alive.id === a1Info.id, "second tab's worker port did not remain live");
+
+    const b = await openProxied(ORIGIN_B + "/dir/page.html");
+    await b.frame.evaluate(() => { document.cookie = "shared547=proxy-b; path=/"; });
+    await sleep(400);
+    const bInfo = await requestContext(b.frame, "proxied shared worker B");
+    assert(a1Info.id !== bInfo.id, "different virtual sites shared a SharedWorker global");
+    assert(a1Info.namespace !== bInfo.namespace, "worker IndexedDB namespace crossed virtual sites");
+    assert(String(bInfo.cookie).includes("shared547=proxy-b"), "second virtual site worker cookie profile missing: " + JSON.stringify(bInfo.cookie));
+    assert(!String(bInfo.cookie).includes("shared547=proxy-a"), "first virtual site's cookie crossed into second worker");
+
+    await closeSharedPort(a1.frame);
+    await a1.page.close();
+    const stillAlive = await pingContext(a2.frame);
+    assert(stillAlive.id === a2Info.id, "closing one client disconnected the other tab's SharedWorker port");
+    await closeSharedPort(a2.frame);
+    await a2.page.close();
+
+    /* Browsers may terminate a now-unreferenced SharedWorker at their
+       discretion. The invariant is that a fresh connection still works
+       and the per-site worker database survives that lifecycle edge. */
+    await sleep(500);
+    const a3 = await openProxied(ORIGIN_A + "/dir/page.html");
+    const a3Info = await requestContext(a3.frame, "proxied SharedWorker after all prior ports closed");
+    assert(a3Info.namespace === a1Info.namespace, "worker storage namespace was lost after port teardown");
+    assert(String(a3Info.cookie).includes("shared547=proxy-a"), "cookie profile did not survive worker reconnect");
+    return "direct Chromium baseline; same-site reuse; cross-site separation; site-scoped worker IDB/cookies; one-port close isolation; reconnect";
+  });
+
+  await check("api: network inspector distinguishes fetch, XHR, EventSource, beacon, worker, parser and navigation initiators (#545)", async () => {
+    const { page, frame } = await openProxied(ORIGIN_A + "/dir/initiator-page.html", "#init-marker");
+    await frame.locator("#initiator-img").evaluate((img) => img.decode());
+    const fetchValue = await evalIn(frame, "fetch initiator", `() => fetch("${ORIGIN_B}/api/initiator-probe?kind=fetch", { cache: "no-store" }).then(r => r.text())`);
+    eq(fetchValue, "initiator-ok", "fetch initiator fixture");
+    const xhrValue = await evalIn(frame, "XHR initiator", `() => new Promise((resolve, reject) => {
+      const x = new XMLHttpRequest();
+      x.open("GET", "${ORIGIN_B}/api/initiator-probe?kind=xhr");
+      x.onload = () => resolve(x.responseText);
+      x.onerror = () => reject(new Error("XHR initiator probe failed"));
+      x.send();
+    })`);
+    eq(xhrValue, "initiator-ok", "XHR initiator fixture");
+    const eventValue = await evalIn(frame, "EventSource initiator", `() => new Promise((resolve, reject) => {
+      const es = new EventSource("${ORIGIN_B}/api/initiator-probe?kind=eventsource");
+      const timer = setTimeout(() => { es.close(); reject(new Error("EventSource initiator timeout")); }, 10000);
+      es.onmessage = (e) => { clearTimeout(timer); es.close(); resolve(e.data); };
+      es.onerror = () => { clearTimeout(timer); es.close(); reject(new Error("EventSource initiator failed")); };
+    })`);
+    eq(eventValue, "eventsource-ok", "EventSource initiator fixture");
+    const beacon = await evalIn(frame, "sendBeacon initiator", `() => navigator.sendBeacon("${ORIGIN_B}/api/initiator-probe?kind=beacon", "body-never-record-this-547")`);
+    eq(beacon, true, "sendBeacon accepted");
+    const workerValue = await evalIn(frame, "worker fetch initiator", `() => new Promise((resolve, reject) => {
+      const w = new Worker("/dir/initiator-worker.js");
+      const timer = setTimeout(() => { w.terminate(); reject(new Error("worker fetch initiator timeout")); }, 12000);
+      w.onmessage = (e) => { clearTimeout(timer); w.terminate(); resolve(e.data); };
+      w.onerror = () => { clearTimeout(timer); w.terminate(); reject(new Error("worker fetch initiator failed")); };
+    })`);
+    eq(workerValue, "initiator-ok", "worker fetch initiator fixture");
+    await openProxied(ORIGIN_A + "/dir/initiator-nav.html?kind=navigation", "#initiator-nav-marker");
+    await sleep(700);
+    const logs = await hostControl(page, { type: "zl:getNetLog", since: 0 });
+    assert(Array.isArray(logs?.entries), "network inspector snapshot unavailable");
+    const expected = [
+      ["fetch", "FETCH"],
+      ["xhr", "XHR"],
+      ["eventsource", "EVENTSOURCE"],
+      ["beacon", "SEND_BEACON"],
+      ["worker", "WORKER_FETCH"],
+      ["parser", "RESOURCE"],
+      ["navigation", "NAVIGATION"],
+    ];
+    const missing = [];
+    for (const [kind, want] of expected) {
+      const row = logs.entries.find((e) => String(e.dest).includes("kind=" + kind));
+      if (!row) { missing.push(kind + ": no log row"); continue; }
+      if (row.detail?.initiatorType !== want) missing.push(kind + ": got " + String(row.detail?.initiatorType));
+      if (row.detail?.reqHeaders && Object.keys(row.detail.reqHeaders).some((k) => k.toLowerCase() === "x-zl-i"))
+        missing.push(kind + ": internal attribution header was stored");
+    }
+    assert(missing.length === 0, "initiator attribution mismatch: " + missing.join("; "));
+    const serialized = JSON.stringify(logs.entries);
+    assert(!serialized.includes("body-never-record-this-547"), "network inspector stored a request body");
+    const hits = (await fixtureHits(fixtureA)).concat(await fixtureHits(fixtureB));
+    const probeHits = hits.filter((h) => h.path.startsWith("/api/initiator-probe"));
+    assert(probeHits.every((h) => h.initiatorHeader == null), "internal initiator metadata reached the origin: " + JSON.stringify(probeHits));
+    assert(probeHits.length >= 5, "not all instrumented requests reached the fixture origin");
+    return expected.map(([kind, type]) => kind + "=" + type).join(", ");
   });
 
   await check("api: a shared worker relays through the page-side relay", async () => {
