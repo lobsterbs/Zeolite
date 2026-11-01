@@ -1010,7 +1010,7 @@ async function main() {
       const row = logs.entries.find((e) => String(e.dest).includes("kind=" + kind));
       if (!row) { missing.push(kind + ": no log row"); continue; }
       if (row.detail?.initiatorType !== want) missing.push(kind + ": got " + String(row.detail?.initiatorType));
-      if (row.detail?.reqHeaders && Object.keys(row.detail.reqHeaders).some((k) => k.toLowerCase() === "x-zl-initiator"))
+      if (row.detail?.reqHeaders && Object.keys(row.detail.reqHeaders).some((k) => k.toLowerCase() === "x-zl-init"))
         missing.push(kind + ": internal attribution header was stored");
     }
     assert(missing.length === 0, "initiator attribution mismatch: " + missing.join("; "));
