@@ -1,0 +1,21 @@
+name: branch cleanup
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: delete merged branches
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for b in fix/issues-577-573-543-477-545 fix/virtual-sw-compat-google-ai-mode fix/virtual-sw-compat-google-ai-mode-stack perf/cold-start-wisp-cache perf/cold-start-wisp-cache-v2 zl-532-baseuri zl-534-cookiestore zl-534-flake zl-536-nav-interception zl-537-module-revoke zl-539-wave-a zl-539-wave-b-docs zl-552-stream-transform zl-554-wave-b zl-blobworker-acceptance zl-diagnostics-transport-wave-a zl-e2e-live-probe-resilience zl-ext-firefox-wave-a zl-ext-firefox-wave-b zl-ext-firefox-wave-c zl-ext-halfwork-closure zl-importmap-scopes-merge zl-popup-facade zl-test-wasm-stub-fallback; do
+            git push origin --delete "$b" && echo "DELETED $b" || echo "SKIP $b (already gone)"
+          done
