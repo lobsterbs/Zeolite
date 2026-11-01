@@ -194,6 +194,38 @@ unfixable: unforgeable location reads inside frames (#32 class)
 and the datacenter IP failing Google's risk engine even on a
 direct headless load. The no-bypass rule stands; hCaptcha and
 Cloudflare Turnstile frames take the same engine-routed path.
+
+### Per-attempt tracing (#451)
+
+`app/src/captcha-trace.ts` keeps a bounded per-attempt record of WHICH
+observable stage a CAPTCHA flow reached, so a failed flow can be told
+apart from a refused one. Stages, fixed vocabulary: `BOOTSTRAP_SEEN`
+(the challenge URL itself was fetched), `ASSET_LOAD` (a widget asset
+response was observed), `FRAME_HANDSHAKE` (a challenge iframe/frame
+navigation was observed), `SUBMISSION` (an upstream verify-family
+request was observed), `VERIFY_OUTCOME` (HTTP outcome class: `200` |
+`403` | `429` | `other-status` | `transport-failure`, plus the
+transport route and timing when the caller observed them). The provider
+class (`recaptcha` | `hcaptcha` | `turnstile` | `unknown`) is derived
+only from URL classification. Records carry no bodies, no POST data,
+no cookies, no tokens; URLs and notes pass the same `redactSecrets`
+gate as every diagnostic, and the trace stores exactly what that gate
+leaves. A stage the engine could not observe is either absent or
+explicitly marked `unknown` - never guessed.
+
+Bounds: 64 attempts, 16 stage records per attempt, overwrite-oldest,
+with honest drop counters. An engine that never sees a challenge holds
+no trace state at all. The host reads the snapshot with the new
+host-only `zl:captchaTrace` control message; per-session records are
+keyed by the browser client id so two concurrent sessions never mix
+attempts. Honest limits: the engine hooks only its existing CHALLENGE
+diagnostic emit points, so `SUBMISSION`/`VERIFY_OUTCOME` are recorded
+for the flows those points observe (today the pass-challenge class);
+a widget-internal verify call the engine never intercepts stays
+unrecorded, which is not a pass. This is observability for a human
+solving the challenge inside the session - not a solver, and it never
+feeds one.
+
 ## 5. Lazy images (opt-in rewrite pass)
 
 A zl:config imageLazy true push (boolean, absent keeps the live

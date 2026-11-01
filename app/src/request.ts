@@ -38,6 +38,9 @@ import { applyRules, loadRules, siteUaFor, type GhosteryRedirect, type ResourceT
 import { ghosteryLoadInProgress } from "./ghostery";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
 import { DIAG, classifyStageFailure, type DiagStage } from "./diag";
+/* #451: per-attempt CAPTCHA tracing rides the existing CHALLENGE emit
+   points below; no new interception logic. */
+import { CAPTCHA_TRACE, outcomeOf } from "./captcha-trace";
 /* #90: the adoptResponse seam lives in ./downloads; the downloads
    subsystem owns its own state and the request engine stays unaware
    of download tracking internals. */
@@ -2919,6 +2922,8 @@ export function handleFetch(e: FetchEvent): void {
             message: "pass-challenge redir rewritten to the upstream page URL",
             url: target,
           });
+          /* #451: the challenge URL itself was fetched; feed the trace. */
+          CAPTCHA_TRACE.observe({ attemptId: ctid, clientId: e.resultingClientId || e.clientId, stage: "BOOTSTRAP_SEEN", url: target, note: "pass-challenge redir rewritten" });
           target = fixed;
           /* #492-class re-anchor: a GET navigation must not park on
              the challenge URL once the handoff is repaired. The
@@ -2994,6 +2999,8 @@ export function handleFetch(e: FetchEvent): void {
           message: "recaptcha co= virtualized to the page origin",
           url: target,
         });
+        /* #451: frame navigations are the handshake, other shapes are assets. */
+        CAPTCHA_TRACE.observe({ attemptId: ctid, clientId: e.resultingClientId || e.clientId, stage: e.request.destination === "iframe" || e.request.destination === "frame" ? "FRAME_HANDSHAKE" : "ASSET_LOAD", url: target, note: "recaptcha co= virtualized" });
         target = coFixed;
       }
 
@@ -3055,6 +3062,8 @@ export function handleFetch(e: FetchEvent): void {
           message: "hcaptcha host= virtualized to the page origin",
           url: target,
         });
+        /* #451: frame navigations are the handshake, other shapes are assets. */
+        CAPTCHA_TRACE.observe({ attemptId: htid, clientId: e.resultingClientId || e.clientId, stage: e.request.destination === "iframe" || e.request.destination === "frame" ? "FRAME_HANDSHAKE" : "ASSET_LOAD", url: target, note: "hcaptcha host= virtualized" });
         target = hcFixed;
       }
 
@@ -3177,6 +3186,8 @@ export function handleFetch(e: FetchEvent): void {
           message: "challenge widget frame engine-routed (#129)",
           url: target,
         });
+        /* #451: the challenge iframe/frame navigation was observed. */
+        CAPTCHA_TRACE.observe({ attemptId: rtid, clientId: e.resultingClientId || e.clientId, stage: "FRAME_HANDSHAKE", url: target, note: "challenge widget frame engine-routed" });
       }
 
       if (siteDisabled(target)) {
@@ -4261,6 +4272,9 @@ export function handleFetch(e: FetchEvent): void {
               message: "challenge pass-through: cookies captured for " + target,
               url: target,
             });
+          if (isPassChallenge(target) || (hopUrl !== target && isPassChallenge(hopUrl)))
+            /* #451: the pass-challenge response outcome, status class only. */
+            CAPTCHA_TRACE.observe({ attemptId: traceId, stage: "VERIFY_OUTCOME", outcome: outcomeOf(resp.status), url: target, note: "challenge pass-through response" });
           const headers = stripHostile(resp.headers);
           /* Issue #2: engine routes serve their own origin. The preserved
              target ACAO (e.g. "https://excalidraw.com") fails the CORS
@@ -4508,6 +4522,8 @@ export function handleFetch(e: FetchEvent): void {
               message: "pass-challenge navigation re-anchored to the page handle",
               url: challengeReanchor,
             });
+            /* #451: the re-anchored pass-challenge response outcome. */
+            CAPTCHA_TRACE.observe({ attemptId: ratid, stage: "VERIFY_OUTCOME", outcome: outcomeOf(resp.status), url: target, note: "pass-challenge re-anchored" });
             return new Response(null, { status: 302, headers: { location: challengeReanchor } });
           }
           if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body && !cdnCgiNative) {

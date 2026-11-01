@@ -20,6 +20,8 @@ import { policyDoctorState } from "./policy";
 import { rulesDoctorState } from "./rules";
 import { siteconfigDoctorState } from "./siteconfig";
 import { DIAG, traceClient } from "./diag";
+/* #451: the bounded per-attempt captcha trace snapshot (zl:captchaTrace). */
+import { CAPTCHA_TRACE } from "./captcha-trace";
 import { buildCompatibilityReport, compatibilityKdl } from "./compat-debugger";
 /* #90: the download registry instance lives in ./downloads; the
    control plane lists and cancels entries through the subsystem. */
@@ -85,6 +87,7 @@ export interface ControlMessage {
     | "zl:listExt"
     | "zl:getDiag"
     | "zl:exportDiagnostics"
+    | "zl:captchaTrace"
     | "zl:doctor"
     | "zl:installExt"
     | "zl:installExtFiles"
@@ -347,6 +350,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
        handleControlEvent. This case is a fail-closed registry guard. */
     case "zl:doctor":
     case "zl:exportDiagnostics":
+    case "zl:captchaTrace":
       reply({ ok: false, error: "host-only diagnostic preflight required" });
       break;
     case "zl:relayRegister": {
@@ -1501,6 +1505,17 @@ export async function handleControlEvent(
     reply({ ok: true, ...report, kdl: compatibilityKdl(report) });
     return;
   }
+  /* #451: per-attempt captcha trace snapshot. Host-only like the two
+     exports above (a proxied page must not read other sessions'
+     challenge activity); read-only, so no boot gating either. */
+  if (msg?.type === "zl:captchaTrace") {
+    if (senderIsProxiedPage(e)) {
+      reply({ ok: false, error: "host-only control message" });
+      return;
+    }
+    reply({ ok: true, ...CAPTCHA_TRACE.snapshot() });
+    return;
+  }
   await deps.ready;
 
   /* Bug-scout (#41): a proxied page must not drive the control plane
@@ -1536,7 +1551,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:captchaTrace", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
 ]);
 
 
@@ -1566,7 +1581,8 @@ export function messageListener(deps: ControlDeps) {
         /* #254: keep jar persistence alive for the whole message
            event; flushJarPersist never throws. */
         .then(() => (e.data as ControlMessage)?.type === "zl:doctor" ||
-          (e.data as ControlMessage)?.type === "zl:exportDiagnostics" ? undefined : flushJarPersist()),
+          (e.data as ControlMessage)?.type === "zl:exportDiagnostics" ||
+          (e.data as ControlMessage)?.type === "zl:captchaTrace" ? undefined : flushJarPersist()),
     );
   };
 }
