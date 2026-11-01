@@ -335,13 +335,42 @@ export function buildApi(
       Promise.resolve(hostPlatformInfo()),
     getBrowserInfo: (): Promise<{ name: string; version: string }> =>
       Promise.resolve(hostBrowserInfo()),
-    sendMessage: (msg: unknown): Promise<unknown> =>
-      deps.messenger.sendMessage(ext.id, sender, msg),
+    /* #518: Firefox-shaped overloads. runtime.sendMessage(message)
+     sends internally; runtime.sendMessage(targetId, message) sends
+     cross-extension (delivered to the target's onMessageExternal when
+     its externally_connectable.ids admit this extension). A single
+     string argument stays a message payload - the id overload needs
+     the second argument, exactly as in Firefox. The same overloads
+     exist on connect: connect(name) keeps the legacy name form, and
+     connect(otherId, { name }) opens an external port. */
+    sendMessage: (...args: unknown[]): Promise<unknown> => {
+      const [a, b] = args;
+      if (typeof a === "string" && a.length > 0 && args.length > 1) {
+        if (a === ext.id) return deps.messenger.sendMessage(ext.id, sender, b);
+        return deps.messenger.sendMessageExternal(a, sender, b);
+      }
+      return deps.messenger.sendMessage(ext.id, sender, a);
+    },
     onMessage: bridged<MessageListener>((l) => deps.messenger.onMessage(ext.id, l)),
     /* #560: both port surfaces are Chrome-shaped: onMessage and
        onDisconnect are event objects, matching how TM-class
        extension code drives a connected port. */
-    connect: (name: string) => chromePortShape(deps.messenger.connect(ext.id, name, sender)) as unknown as ExtensionPort,
+    connect: (...args: unknown[]): ExtensionPort => {
+      const [a, b] = args;
+      const nameOf = (v: unknown): string =>
+        v && typeof v === "object" && typeof (v as { name?: unknown }).name === "string"
+          ? (v as { name: string }).name
+          : "";
+      /* Two string-ish args name a target extension id (Chrome/Firefox
+         external form); a single string stays the legacy port name. */
+      if (typeof a === "string" && args.length > 1) {
+        const name = nameOf(b);
+        if (a === ext.id) return chromePortShape(deps.messenger.connect(ext.id, name, sender)) as unknown as ExtensionPort;
+        return chromePortShape(deps.messenger.connectExternal(a, name, sender)) as unknown as ExtensionPort;
+      }
+      const name = typeof a === "string" ? a : nameOf(a);
+      return chromePortShape(deps.messenger.connect(ext.id, name, sender)) as unknown as ExtensionPort;
+    },
     onConnect: bridged<ConnectListener>((l) =>
       deps.messenger.onConnect(ext.id, (raw) => l(chromePortShape(raw) as unknown as ExtensionPort)),
     ),
@@ -357,13 +386,16 @@ export function buildApi(
        startup; an undefined namespace aborts the whole bootstrap
        with a TypeError inside the init chain, leaving the
        extension deaf: options pages ping forever and never render.
-       There is no external sender in this model (the messenger
-       refuses cross-extension sends), so these register listeners
-       but never fire (compat matrix records them honestly). */
-    onMessageExternal: makeEvent<
-      (msg: unknown, sender: unknown, sendResponse: unknown) => void
-    >(),
-    onConnectExternal: makeEvent<(port: unknown) => void>(),
+       #518: the surfaces are now live for extension-to-extension
+       traffic - a cross-extension send reaches onMessageExternal
+       when the target's externally_connectable.ids admit the sender,
+       with the real sender id/origin. Web-page sends (the matches
+       key) stay refused: a page-world sender carries no trusted
+       cross-extension identity (compat matrix records it). */
+    onMessageExternal: bridged<MessageListener>((l) => deps.messenger.onMessageExternal(ext.id, l)),
+    onConnectExternal: bridged<ConnectListener>((l) =>
+      deps.messenger.onConnectExternal(ext.id, (raw) => l(chromePortShape(raw) as unknown as ExtensionPort)),
+    ),
   };
   /* MV2 chrome.extension: Chrome keeps this namespace on every MV2
      context and removed it in MV3, so it mounts for MV2 records only.
