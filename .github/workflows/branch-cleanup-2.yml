@@ -16,4 +16,4 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git push origin --delete fix/issues-577-573-543-477-545 && echo DELETED || echo SKIP
+          git push origin --delete fix/issues-577-573-543-547-545 && echo DELETED || echo SKIP
