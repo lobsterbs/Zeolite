@@ -68,6 +68,11 @@ export interface FingerprintProfile {
   /** Deterministic seed for canvas perturbation; fixed strings, never
       randomized per session. */
   canvasSeed: string;
+  /** #540: set by resolveProfile when an explicit Etc/GMT
+      timezoneName contradicts utcOffsetMin under the IANA sign
+      mapping. The explicit name still wins for Intl (user input is
+      never silently rewritten); the conflict is recorded, not hidden. */
+  timezoneInconsistent?: boolean;
   /** Engine binding (#71): the transport engines this profile is
       valid for. The TLS fingerprint (JA3/H2) is a property of the
       transport engine, never of the profile, so a profile bound away
@@ -110,6 +115,61 @@ function platformForUa(ua: string): string {
 }
 
 const ALLOWED_PLATFORMS = new Set(["Win32", "MacIntel", "iPhone", "Linux x86_64", "Linux armv8l"]);
+
+/* #540: the engine will NOT carry a timezone database. The profile's
+   timezone contract is narrowed to a self-consistent fixed offset
+   expressed through the real IANA Etc/GMT zones, which are fixed
+   offsets with NO DST. IANA's Etc/GMT-N convention inverts the sign
+   on purpose: Etc/GMT-5 is UTC+5. Non-whole-hour offsets (and west
+   offsets beyond Etc/GMT+12, which IANA does not define) use an
+   Intl offset string like "+05:30" instead - Intl accepts those, so
+   Date and Intl still agree everywhere. */
+
+/** The Intl timeZone string for a profile offset: a real IANA zone
+    when one exists, else an offset string. */
+export function canonicalZoneForOffset(min: number): { zone: string; kind: "iana" | "offset" } {
+  if (min === 0) return { zone: "Etc/GMT", kind: "iana" };
+  if (min % 60 === 0) {
+    const h = min / 60;
+    if (h > 0 && h <= 14) return { zone: "Etc/GMT-" + h, kind: "iana" };
+    if (h < 0 && h >= -12) return { zone: "Etc/GMT+" + -h, kind: "iana" };
+  }
+  return { zone: offsetZoneString(min), kind: "offset" };
+}
+
+/** "+05:30" / "-13:00" form, always with sign and both digits. */
+export function offsetZoneString(min: number): string {
+  const sign = min < 0 ? "-" : "+";
+  const a = Math.abs(min);
+  return sign + String(Math.floor(a / 60)).padStart(2, "0") + ":" + String(a % 60).padStart(2, "0");
+}
+
+/** The UTC offset an Etc/GMT zone NAME denotes (sign-mapped), or null
+    when the name is not an Etc/GMT zone. Only Etc names can be
+    verified without a tz database; anything else is not checked. */
+export function etcNameOffsetMin(name: string): number | null {
+  if (/^Etc\/GMT$/i.test(name)) return 0;
+  const m = /^Etc\/GMT([+-])([0-9]{1,2})$/i.exec(name);
+  if (!m || Number(m[2]) > 14) return null;
+  return m[1] === "-" ? Number(m[2]) * 60 : -Number(m[2]) * 60;
+}
+
+export interface TimezoneIdentity {
+  /** The Intl timeZone: an explicit profile name wins over the
+      offset-derived canonical zone. */
+  zone: string;
+  /** True when the zone was derived from utcOffsetMin (no explicit
+      profile name). */
+  derived: boolean;
+}
+
+/** The timezone identity a profile presents to Intl, or null when the
+    profile sets neither field (both surfaces stay native, #223). */
+export function timezoneIdentityFor(p: Pick<FingerprintProfile, "utcOffsetMin" | "timezoneName">): TimezoneIdentity | null {
+  if (p.timezoneName) return { zone: p.timezoneName, derived: false };
+  if (p.utcOffsetMin !== null) return { zone: canonicalZoneForOffset(p.utcOffsetMin).zone, derived: true };
+  return null;
+}
 
 function isPosInt(v: unknown): v is number {
   return typeof v === "number" && Number.isInteger(v) && v > 0;
@@ -160,6 +220,17 @@ export function resolveProfile(input: unknown): FingerprintProfile {
   else if (typeof p.timezoneName !== "string" || !/^[A-Za-z0-9_+\-/]+$/.test(p.timezoneName)) {
     throw new Error("timezoneName must be an IANA-style zone name");
   } else timezoneName = p.timezoneName;
+
+  /* #540: an explicit Etc/GMT name can be checked against utcOffsetMin
+     with the IANA sign mapping alone. On contradiction the explicit
+     name still wins (never silently rewritten); the conflict is
+     recorded. Non-Etc names cannot be verified without a tz database
+     and are deliberately not checked. */
+  let timezoneInconsistent = false;
+  if (utcOffsetMin !== null && timezoneName !== null) {
+    const etc = etcNameOffsetMin(timezoneName);
+    if (etc !== null && etc !== utcOffsetMin) timezoneInconsistent = true;
+  }
 
   let hardwareConcurrency: number | null;
   if (p.hardwareConcurrency === undefined || p.hardwareConcurrency === null) hardwareConcurrency = null;
@@ -231,6 +302,7 @@ export function resolveProfile(input: unknown): FingerprintProfile {
     languages,
     utcOffsetMin,
     timezoneName,
+    ...(timezoneInconsistent ? { timezoneInconsistent: true } : {}),
     hardwareConcurrency,
     deviceMemoryGB,
     screen,
@@ -264,6 +336,71 @@ export function canvasSeedHash(seed: string): number {
     h = Math.imul(h, 0x01000193) >>> 0;
   }
   return h >>> 0;
+}
+
+/* #540: shared Date/Intl patch sources so the document and worker
+   scripts stay identical for the same profile. The Date surface stays
+   a fixed offset (getTimezoneOffset = -zlOff; local getters are an
+   offset shift) and the zone ANNOTATION is formatted from the offset
+   so toString/toTimeString agree with the patched local getters.
+   Chromium prints Etc/GMT zones as "GMT+0200 (GMT+02:00)"; the text is
+   derived from the offset directly, without a tz database. toJSON
+   stays the UTC ISO form (toISOString): real Chromium prints it
+   identically in every zone, so "Z" IS the consistent annotation. */
+function dateOffsetScript(off: number): string {
+  return `
+try {
+  var zlOff = ${off};
+  Date.prototype.getTimezoneOffset = function () { return -zlOff; };
+  var pairs = [["getFullYear", "getUTCFullYear"], ["getMonth", "getUTCMonth"], ["getDate", "getUTCDate"], ["getDay", "getUTCDay"], ["getHours", "getUTCHours"], ["getMinutes", "getUTCMinutes"], ["getSeconds", "getUTCSeconds"], ["getMilliseconds", "getUTCMilliseconds"]];
+  for (var i = 0; i < pairs.length; i++) {
+    (function (local, utc) {
+      var orig = Date.prototype[utc];
+      Date.prototype[local] = function () { return orig.call(new Date(this.getTime() + zlOff * 60000)); };
+    })(pairs[i][0], pairs[i][1]);
+  }
+  var origYear = Date.prototype.getUTCFullYear;
+  Date.prototype.getYear = function () { return origYear.call(new Date(this.getTime() + zlOff * 60000)) - 1900; };
+  var zlDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  var zlMonths = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function zlPad2(n) { return (n < 10 ? "0" : "") + n; }
+  function zlZoneText() {
+    var sign = zlOff < 0 ? "-" : "+";
+    var a = zlOff < 0 ? -zlOff : zlOff;
+    return "GMT" + sign + zlPad2(Math.floor(a / 60)) + zlPad2(a % 60) + " (GMT" + sign + zlPad2(Math.floor(a / 60)) + ":" + zlPad2(a % 60) + ")";
+  }
+  Date.prototype.toString = function () {
+    if (isNaN(this.getTime())) return "Invalid Date";
+    var d = new Date(this.getTime() + zlOff * 60000);
+    return zlDays[d.getUTCDay()] + " " + zlMonths[d.getUTCMonth()] + " " + zlPad2(d.getUTCDate()) + " " + d.getUTCFullYear() + " " + zlPad2(d.getUTCHours()) + ":" + zlPad2(d.getUTCMinutes()) + ":" + zlPad2(d.getUTCSeconds()) + " " + zlZoneText();
+  };
+  Date.prototype.toTimeString = function () {
+    if (isNaN(this.getTime())) return "Invalid Date";
+    var d = new Date(this.getTime() + zlOff * 60000);
+    return zlPad2(d.getUTCHours()) + ":" + zlPad2(d.getUTCMinutes()) + ":" + zlPad2(d.getUTCSeconds()) + " " + zlZoneText();
+  };
+} catch (e) {}`;
+}
+
+/* #540: the Intl default timeZone becomes the profile's timezone
+   identity (explicit name, or the canonical Etc/GMT zone / offset
+   string derived from utcOffsetMin), so Intl.DateTimeFormat output
+   agrees with the Date surface across the same instant. */
+function intlZoneScript(zone: string): string {
+  return `
+try {
+  var zlZone = ${JSON.stringify(zone)};
+  var ZlDTF = Intl.DateTimeFormat;
+  var Patched = class extends ZlDTF {
+    constructor(locales, options) {
+      if (options && typeof options === "object" && !("timeZone" in options)) options = Object.assign({}, options, { timeZone: zlZone });
+      else if (!options) options = { timeZone: zlZone };
+      super(locales, options);
+    }
+  };
+  Patched.supportedLocalesOf = ZlDTF.supportedLocalesOf;
+  Intl.DateTimeFormat = Patched;
+} catch (e) {}`;
 }
 
 /** Compile the profile into the document init script. Pure and
@@ -302,38 +439,17 @@ prop(Navigator.prototype, "languages", function () { return ${JSON.stringify(p.l
      the Date surface native; the old "?? 0" forced UTC and
      contradicted the zone, violating the no-contradictory-values
      rule. */
+  /* #540: Date and Intl must agree. When the profile names no zone,
+     the canonical Etc/GMT identity derived from utcOffsetMin becomes
+     the Intl default; an explicit timezoneName still wins (even one
+     resolveProfile flagged timezoneInconsistent - the conflict is
+     recorded, user input is never rewritten). */
   if (p.utcOffsetMin !== null) {
-    const off = p.utcOffsetMin;
-    parts.push(`
-try {
-  var zlOff = ${off};
-  Date.prototype.getTimezoneOffset = function () { return -zlOff; };
-  var pairs = [["getFullYear", "getUTCFullYear"], ["getMonth", "getUTCMonth"], ["getDate", "getUTCDate"], ["getDay", "getUTCDay"], ["getHours", "getUTCHours"], ["getMinutes", "getUTCMinutes"], ["getSeconds", "getUTCSeconds"], ["getMilliseconds", "getUTCMilliseconds"]];
-  for (var i = 0; i < pairs.length; i++) {
-    (function (local, utc) {
-      var orig = Date.prototype[utc];
-      Date.prototype[local] = function () { return orig.call(new Date(this.getTime() + zlOff * 60000)); };
-    })(pairs[i][0], pairs[i][1]);
+    parts.push(dateOffsetScript(p.utcOffsetMin));
   }
-  var origYear = Date.prototype.getUTCFullYear;
-  Date.prototype.getYear = function () { return origYear.call(new Date(this.getTime() + zlOff * 60000)) - 1900; };
-} catch (e) {}`);
-  }
-  if (p.timezoneName) {
-    parts.push(`
-try {
-  var zlZone = ${JSON.stringify(p.timezoneName)};
-  var ZlDTF = Intl.DateTimeFormat;
-  var Patched = class extends ZlDTF {
-    constructor(locales, options) {
-      if (options && typeof options === "object" && !("timeZone" in options)) options = Object.assign({}, options, { timeZone: zlZone });
-      else if (!options) options = { timeZone: zlZone };
-      super(locales, options);
-    }
-  };
-  Patched.supportedLocalesOf = ZlDTF.supportedLocalesOf;
-  Intl.DateTimeFormat = Patched;
-} catch (e) {}`);
+  const tzIdentity = timezoneIdentityFor(p);
+  if (tzIdentity) {
+    parts.push(intlZoneScript(tzIdentity.zone));
   }
 
   if (p.webglVendor && p.webglRenderer) {
@@ -465,37 +581,14 @@ prop(zlNav, "languages", function () { return ${JSON.stringify(p.languages)}; })
   }
 
   /* #223: utcOffsetMin owns the Date patch; timezoneName alone
-     must not force a UTC offset onto the Date surface. */
+     must not force a UTC offset onto the Date surface. #540: the
+     document and worker Date/Intl patches are the same sources. */
   if (p.utcOffsetMin !== null) {
-    const off = p.utcOffsetMin;
-    parts.push(`\ntry {
-  var zlOff = ${off};
-  Date.prototype.getTimezoneOffset = function () { return -zlOff; };
-  var pairs = [["getFullYear", "getUTCFullYear"], ["getMonth", "getUTCMonth"], ["getDate", "getUTCDate"], ["getDay", "getUTCDay"], ["getHours", "getUTCHours"], ["getMinutes", "getUTCMinutes"], ["getSeconds", "getUTCSeconds"], ["getMilliseconds", "getUTCMilliseconds"]];
-  for (var i = 0; i < pairs.length; i++) {
-    (function (local, utc) {
-      var orig = Date.prototype[utc];
-      Date.prototype[local] = function () { return orig.call(new Date(this.getTime() + zlOff * 60000)); };
-    })(pairs[i][0], pairs[i][1]);
+    parts.push(dateOffsetScript(p.utcOffsetMin));
   }
-  var origYear = Date.prototype.getUTCFullYear;
-  Date.prototype.getYear = function () { return origYear.call(new Date(this.getTime() + zlOff * 60000)) - 1900; };
-} catch (e) {}`);
-  }
-  if (p.timezoneName) {
-    parts.push(`\ntry {
-  var zlZone = ${JSON.stringify(p.timezoneName)};
-  var ZlDTF = Intl.DateTimeFormat;
-  var Patched = class extends ZlDTF {
-    constructor(locales, options) {
-      if (options && typeof options === "object" && !("timeZone" in options)) options = Object.assign({}, options, { timeZone: zlZone });
-      else if (!options) options = { timeZone: zlZone };
-      super(locales, options);
-    }
-  };
-  Patched.supportedLocalesOf = ZlDTF.supportedLocalesOf;
-  Intl.DateTimeFormat = Patched;
-} catch (e) {}`);
+  const tzIdentity = timezoneIdentityFor(p);
+  if (tzIdentity) {
+    parts.push(intlZoneScript(tzIdentity.zone));
   }
 
   if (p.webglVendor && p.webglRenderer) {

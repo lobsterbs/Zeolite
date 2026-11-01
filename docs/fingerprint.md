@@ -40,8 +40,22 @@ native except what can be derived from the UA (`platform`).
 - `languages` - array shown as `navigator.language` / `languages` and
   sent upstream as `Accept-Language`.
 - `utcOffsetMin` - minutes ahead of UTC (Oslo summer: 120). Patches
-  `Date.prototype.getTimezoneOffset` and the local Date getters.
+  `Date.prototype.getTimezoneOffset` and the local Date getters as a
+  fixed offset, and since #540 also formats the `Date.toString` /
+  `toTimeString` zone text from that offset (Chromium's Etc/GMT shape,
+  e.g. `GMT+0200 (GMT+02:00)`); `toJSON` stays the UTC ISO form, exactly
+  like real Chromium in every zone. When `timezoneName` is not set, the
+  Intl default zone becomes the canonical identity derived from this
+  offset: a real IANA `Etc/GMT` zone (note IANA's inverted sign:
+  UTC+5 is `Etc/GMT-5`), or an offset string like `+05:30` for
+  non-whole-hour offsets.
 - `timezoneName` - IANA zone name patched into `Intl.DateTimeFormat`.
+  #540: when the name is an `Etc/GMT` zone it is checked against
+  `utcOffsetMin` (sign-mapped); a contradiction keeps the explicit
+  name (user input is never silently rewritten) and records it on the
+  resolved profile as `timezoneInconsistent: true`. Non-Etc names
+  cannot be verified without a tz database and are deliberately not
+  checked; an explicit name always wins over the derived one.
 - `hardwareConcurrency`, `deviceMemoryGB` - navigator surfaces.
 - `screen` - `{ width, height, availWidth, availHeight, colorDepth,
   pixelDepth }` for `window.screen`.
@@ -93,10 +107,16 @@ a worker matches the document's.
   the physical browser engine. Unsupported high-entropy fields stay absent.
 - No per-session randomization by design: the default profile is a
   fixed fingerprint shared by every default-configured session.
-- The timezone is a fixed offset, not a zone database: DST transitions
-  inside a faked zone are not simulated, and
-  `Date.prototype.toString` / `toTimeString` zone text still comes from
-  the host's real locale setting.
+- The timezone contract is deliberately NARROW (#540): a
+  self-consistent fixed offset expressed through real IANA `Etc/GMT`
+  zones (or Intl offset strings for half-hour offsets), so Date and
+  Intl agree everywhere without a timezone database. Etc/GMT zones
+  never observe DST: a profile cannot claim `America/New_York`-style
+  DST behavior, and the fixed offset deliberately does not shift
+  across real DST boundaries. An explicit non-Etc `timezoneName` is
+  applied to Intl as given but cannot be verified against the offset;
+  if it contradicts an Etc name/offset pair that CAN be checked, the
+  conflict is recorded (`timezoneInconsistent`), never silently fixed.
 - The worker/OffscreenCanvas pass (2.3) covers WorkerNavigator,
   Date/Intl timezone, WebGL UNMASKED_* and OffscreenCanvas 2D output;
   worker-side surfaces with no document counterpart (for example a
@@ -110,8 +130,13 @@ a worker matches the document's.
   the rest of the GL parameter surface stays native, and GPU-side
   fingerprinting (shader timing, driver quirks) is out of scope.
 - The engine does not carry a timezone database, so it cannot verify
-  that `timezoneName` matches `utcOffsetMin`; the host is responsible
-  for that pair being consistent.
+  that a non-Etc `timezoneName` matches `utcOffsetMin`; the host is
+  responsible for that pair being consistent. What the engine CAN
+  verify without a database - the `Etc/GMT` sign mapping - it does
+  check since #540, recording (not fixing) contradictions.
+- The complete list of what the profile controls - and what stays
+  native or transport-owned - is the versioned inventory in
+  `docs/fingerprint-surfaces.md` (schemaVersion 1).
 
 ## Transport engine binding
 

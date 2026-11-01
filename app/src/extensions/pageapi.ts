@@ -20,6 +20,9 @@ export const PAGE_APIS = new Set([
   "notifications",
   "contextMenus",
   "menus",
+  "action",
+  "browserAction",
+  "pageAction",
 ]);
 
 export interface ExtPageCall {
@@ -52,6 +55,30 @@ export function pageCallList(rec: ExtensionRecord): string[] {
   }
   for (const ns of ["contextMenus", "menus"]) {
     for (const op of ["create", "update", "remove", "removeAll"]) calls.push(ns + "." + op);
+  }
+  /* #519: the manifest's action kind picks which toolbar namespace the
+     pages see; the same method list buildApi mounts. */
+  const actionKindOf = rec.action?.kind;
+  if (actionKindOf === "page_action") {
+    for (const op of ["isShown", "show", "hide", "getTitle", "setTitle", "getPopup", "setPopup", "setIcon"]) {
+      calls.push("pageAction." + op);
+    }
+  } else if (actionKindOf === "browser_action") {
+    for (const op of [
+      "isEnabled", "enable", "disable", "getTitle", "setTitle", "getBadgeText", "setBadgeText",
+      "getBadgeBackgroundColor", "setBadgeBackgroundColor", "getBadgeTextColor", "setBadgeTextColor",
+      "getPopup", "setPopup", "setIcon",
+    ]) {
+      calls.push("browserAction." + op);
+    }
+  } else if (actionKindOf === "action") {
+    for (const op of [
+      "isEnabled", "enable", "disable", "getTitle", "setTitle", "getBadgeText", "setBadgeText",
+      "getBadgeBackgroundColor", "setBadgeBackgroundColor", "getBadgeTextColor", "setBadgeTextColor",
+      "getPopup", "setPopup", "setIcon",
+    ]) {
+      calls.push("action." + op);
+    }
   }
   return calls;
 }

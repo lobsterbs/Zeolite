@@ -155,8 +155,10 @@ describe("URL parse seam (#510 Brave infobox website row)", () => {
     };
     const reg = swShimRegister(store, pageRoute, swRoute);
     expect(reg.installing).not.toBeNull();
-    const stored = JSON.parse(String(rec.v)) as { scriptURL: string; scope: string };
-    expect(stored.scriptURL).toBe(swRoute);
-    expect(stored.scope.startsWith("https://engine.host/")).toBe(true);
+    /* Registrations persist as an array of per-scope records. */
+    const stored = JSON.parse(String(rec.v)) as Array<{ scriptURL: string; scope: string }>;
+    const rec0 = stored[stored.length - 1];
+    expect(rec0.scriptURL).toBe(swRoute);
+    expect(rec0.scope.startsWith("https://engine.host/")).toBe(true);
   });
 });

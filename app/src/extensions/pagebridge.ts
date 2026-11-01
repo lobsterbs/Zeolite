@@ -29,16 +29,29 @@ export const PAGE_BRIDGE_SOURCE = `(function () {
         return;
       }
       var mc = new MessageChannel();
+      var done = false;
       var t = setTimeout(function () {
-        reject(new Error("zeolite: extension page call timed out"));
+        finish(new Error("zeolite: extension page call timed out"));
       }, 30000);
-      mc.port1.onmessage = function (ev) {
+      function finish(err, data) {
+        if (done) return;
+        done = true;
         clearTimeout(t);
-        var d = ev.data || {};
-        if (d.ok) resolve(d.response);
-        else reject(new Error(d.error || "zeolite: extension page call failed"));
+        mc.port1.onmessage = null;
+        try { mc.port1.close(); } catch (ignored) {}
+        if (err) reject(err);
+        else if (data && data.ok) resolve(data.response);
+        else reject(new Error((data && data.error) || "zeolite: extension page call failed"));
+      }
+      mc.port1.onmessage = function (ev) {
+        finish(null, ev.data || {});
       };
-      c.postMessage({ type: "zl:extPage", extId: cfg.ext, msg: { path: path, args: args } }, [mc.port2]);
+      try {
+        c.postMessage({ type: "zl:extPage", extId: cfg.ext, msg: { path: path, args: args } }, [mc.port2]);
+      } catch (err) {
+        finish(err);
+        try { mc.port2.close(); } catch (ignored) {}
+      }
     });
   }
   var browser = {};

@@ -193,7 +193,9 @@ describe("re-emission seams (#54 residual 2)", () => {
     await settle();
     expect(e.calls.length).toBe(1);
     expect(e.calls[0].input).toBe("/j/b1");
-    expect(e.calls[0].init).toEqual({ method: "POST", body: "hi", keepalive: true });
+    const init = e.calls[0].init as RequestInit;
+    expect(init).toMatchObject({ method: "POST", body: "hi", keepalive: true });
+    expect(new Headers(init.headers).get("x-zl-i")).toBe("beacon");
   });
 
   it("sendBeacon falls back to the native beacon when the mint is refused", async () => {
@@ -225,7 +227,7 @@ describe("re-emission seams (#54 residual 2)", () => {
     expect(e.xhrLog).toEqual([]); /* nothing native yet */
     x.send();
     await settle();
-    expect(e.xhrLog).toEqual(["open:GET|/j/x1|true|null|null", "hdr:X-A:1", "send"]);
+    expect(e.xhrLog).toEqual(["open:GET|/j/x1|true|null|null", "hdr:x-zl-i:xhr", "hdr:X-A:1", "send"]);
   });
 
   it("abort() cancels a pending re-emit: nothing native ever opens", async () => {
@@ -396,7 +398,9 @@ describe("fetch init SRI (#77 runtime half)", () => {
     const e = fakeWindow();
     applyReemit(e.w);
     await e.w.fetch("https://sri.example/chunk?t=9", { integrity: "sha384-abc", mode: "cors" });
-    expect(e.calls[0].init).toEqual({ integrity: undefined, mode: "cors" });
+    const init = e.calls[0].init as RequestInit;
+    expect(init).toMatchObject({ integrity: undefined, mode: "cors" });
+    expect(new Headers(init.headers).get("x-zl-i")).toBe("fetch");
   });
 
   it("leaves init untouched for native (engine-local) fetches", async () => {
