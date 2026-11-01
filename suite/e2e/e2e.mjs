@@ -458,6 +458,93 @@ async function main() {
     return landing.url().slice(0, 44);
   });
 
+  await check("navigation: direct and proxied fragments match across initial load, redirect, meta, form, anchors and history (#543)", async () => {
+    const direct = await context.newPage();
+    let directInitial;
+    try {
+      await direct.goto(ORIGIN_A + "/dir/fragment.html#initial-target");
+      await direct.locator("#initial-target").waitFor();
+      directInitial = await direct.evaluate(() => ({
+        hash: location.hash,
+        top: document.getElementById("initial-target").getBoundingClientRect().top,
+      }));
+    } finally { await direct.close(); }
+    const initial = await openProxied(ORIGIN_A + "/dir/fragment.html#initial-target", "#initial-target");
+    const proxiedInitial = await initial.frame.evaluate(() => ({
+      hash: location.hash,
+      top: document.getElementById("initial-target").getBoundingClientRect().top,
+    }));
+    eq(proxiedInitial.hash, directInitial.hash, "initial fragment");
+    assert(Math.abs(proxiedInitial.top - directInitial.top) < 4, "initial anchor scroll differs from direct Chromium");
+
+    const directRedirect = await context.newPage();
+    let directRedirectResult;
+    try {
+      await directRedirect.goto(ORIGIN_A + "/dir/fragment-redirect");
+      await directRedirect.locator("#redirect-target").waitFor();
+      directRedirectResult = await directRedirect.evaluate(() => ({
+        hash: location.hash,
+        top: document.getElementById("redirect-target").getBoundingClientRect().top,
+      }));
+    } finally { await directRedirect.close(); }
+    const redirect = await openProxied(ORIGIN_A + "/dir/fragment-redirect", "#redirect-target");
+    const proxiedRedirectResult = await redirect.frame.evaluate(() => ({
+      hash: location.hash,
+      top: document.getElementById("redirect-target").getBoundingClientRect().top,
+    }));
+    eq(proxiedRedirectResult.hash, directRedirectResult.hash, "redirect fragment");
+    assert(Math.abs(proxiedRedirectResult.top - directRedirectResult.top) < 4, "redirect fragment scroll differs from direct Chromium");
+    assert(redirect.frame.url().startsWith(ENGINE) && !redirect.frame.url().includes(ORIGIN_A), "redirect route exposed the target origin");
+
+    const directMeta = await context.newPage();
+    try {
+      await directMeta.goto(ORIGIN_A + "/dir/fragment-meta.html");
+      await directMeta.locator("#meta-target").waitFor({ timeout: 12000 });
+      const directHash = await directMeta.evaluate(() => location.hash);
+      const meta = await openProxied(ORIGIN_A + "/dir/fragment-meta.html", "#meta-target");
+      eq(await meta.frame.evaluate(() => location.hash), directHash, "meta refresh fragment");
+    } finally { await directMeta.close(); }
+
+    const directForm = await context.newPage();
+    try {
+      await directForm.goto(ORIGIN_A + "/dir/fragment-form.html");
+      await directForm.locator("#fragment-form button").click();
+      await directForm.locator("#form-target").waitFor();
+      const directHash = await directForm.evaluate(() => location.hash);
+      const form = await openProxied(ORIGIN_A + "/dir/fragment-form.html", "#form-ready");
+      await form.frame.locator("#fragment-form button").click();
+      const target = await waitFor("proxied form fragment target", 20000, () => frameWith(form.page, "#form-target"));
+      eq(await target.evaluate(() => location.hash), directHash, "form navigation fragment");
+    } finally { await directForm.close(); }
+
+    const directHistory = await context.newPage();
+    let directHistoryHash;
+    try {
+      await directHistory.goto(ORIGIN_A + "/dir/fragment.html#history-start");
+      await directHistory.locator("#fragment-anchor").click();
+      await directHistory.waitForFunction(() => location.hash === "#anchor-target");
+      await directHistory.evaluate(() => history.back());
+      await directHistory.waitForFunction(() => location.hash === "#history-start");
+      await directHistory.evaluate(() => history.forward());
+      await directHistory.waitForFunction(() => location.hash === "#anchor-target");
+      directHistoryHash = await directHistory.evaluate(() => location.hash);
+    } finally { await directHistory.close(); }
+    const history = await openProxied(ORIGIN_A + "/dir/fragment.html#history-start", "#history-start");
+    await history.frame.locator("#fragment-anchor").click();
+    await history.frame.waitForFunction(() => location.hash === "#anchor-target");
+    await history.frame.evaluate(() => history.back());
+    await history.frame.waitForFunction(() => location.hash === "#history-start");
+    await history.frame.evaluate(() => history.forward());
+    await history.frame.waitForFunction(() => location.hash === "#anchor-target");
+    eq(await history.frame.evaluate(() => location.hash), directHistoryHash, "anchor history back/forward");
+
+    const hits = await fixtureHits(fixtureA);
+    const fragmentHits = hits.filter((h) => h.path.startsWith("/dir/fragment"));
+    assert(fragmentHits.length > 0, "fragment fixture produced no upstream requests");
+    assert(fragmentHits.every((h) => !h.path.includes("#")), "a fragment reached the upstream HTTP request line");
+    return fragmentHits.length + " upstream fragment routes; direct/proxied fragment navigation agrees";
+  });
+
   await check("routing: SPA pushState re-anchors engine-side and the router reads the virtual path (#236)", async () => {
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "pushState", `async () => {
