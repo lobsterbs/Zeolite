@@ -350,7 +350,7 @@ describe("swshim guest forwarding (#477 wave 3)", () => {
     expect(await reg.unregister()).toBe(true);
     expect(posted).toEqual([
       { type: "zl:guestRegister", scriptURL: "https://a.example/sw.js", scope: "https://a.example/" },
-      { type: "zl:guestUnregister" },
+      { type: "zl:guestUnregister", scriptURL: "https://a.example/sw.js", scope: "https://a.example/" },
     ]);
   });
 
