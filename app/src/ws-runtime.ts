@@ -101,6 +101,13 @@ export const wsBridge = new WsBridge(
         },
         headers,
       ),
+    /* #546: the vendored transports expose no write-acceptance surface
+       (send() is fire-and-forget; see the #61 note at the vendored open
+       seam), so the wisp arm leaves WsHandle.drainAt() unset and the
+       bridge keeps the send-returned drain acknowledgment. If a
+       transport build grows an accepted-bytes counter, add drainAt()
+       at the vendored seam and the bridge arms the delta accounting
+       itself. */
   },
   bridgeHooks("NativeTransit", "(wisp stream)"),
 );

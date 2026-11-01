@@ -96,9 +96,23 @@ const GUEST_V1 = [
   "    }));",
   "  } else if (p === \"/dir/state\") {",
   "    e.respondWith(Promise.resolve({ status: 200, headers: { \"content-type\": \"text/plain\", \"x-zl-guest\": M }, body: M + \"|\" + self.__zlAct + \"|\" + self.__zlClients }));",
+  "  } else if (p === \"/dir/app/state\") {",
+  "    e.respondWith(Promise.resolve({ status: 200, headers: { \"content-type\": \"text/plain\", \"x-zl-guest\": M + \"-parent\" }, body: M + \"-parent-fallback\" }));",
   "  } else if (p === \"/dir/update-me\") {",
   "    e.respondWith(Promise.resolve({ status: 200, headers: { \"content-type\": \"text/plain\", \"x-zl-guest\": M }, body: \"updating\" }));",
   "    self.registration.update();",
+  "  }",
+  "});",
+  "",
+].join("\n");
+
+/* A more-specific same-origin scope must win over GUEST_V1's
+   /dir/ scope. Unregistering it must reveal the parent guest again. */
+const GUEST_NESTED = [
+  'var M = "guest-nested";',
+  "self.addEventListener(\"fetch\", function (e) {",
+  "  if (new URL(e.request.url).pathname === \"/dir/app/state\") {",
+  "    e.respondWith(Promise.resolve({ status: 200, headers: { \"content-type\": \"text/plain\", \"x-zl-guest\": M }, body: M }));",
   "  }",
   "});",
   "",
@@ -149,9 +163,26 @@ function startFixture(port) {
     if (path === "/dir/page.html") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end('<!doctype html><p id="zl-guest">guest-page</p>');
+    } else if (path === "/dir/early.html") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      /* #576: the EARLIEST registration, from an inline head script,
+         with an ABSOLUTE URL literal the JS rewriter mints into an
+         engine token route: proves the decode path end to end in a
+         real browser. */
+      res.end(
+        '<!doctype html><head><script>' +
+        'window.__zlEarly = { state: "pending" };' +
+        'navigator.serviceWorker.register("' + FX + '/dir/sw.js")' +
+        '.then(function (r) { window.__zlEarly = { state: "ok", scope: r.scope }; })' +
+        '.catch(function (e) { window.__zlEarly = { state: "error", error: String(e && e.message || e) }; });' +
+        '</script></head><body><p id="zl-early">early-page</p></body>'
+      );
     } else if (path === "/dir/sw.js") {
       res.writeHead(200, { "content-type": "text/javascript" });
       res.end(fx.script);
+    } else if (path === "/dir/app/sw.js") {
+      res.writeHead(200, { "content-type": "text/javascript" });
+      res.end(GUEST_NESTED);
     } else if (path === "/dir/api/data") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end('{"zl":"api"}');
@@ -275,6 +306,65 @@ async function main() {
   let frame = null;
   let reg = null;
 
+  /* #576: honest registration end to end. The early page registers
+     from an inline head script with an ABSOLUTE URL literal (minted
+     into an engine token by the JS rewriter) while NO guest host
+     page exists: the promise must reject with the kernel's real
+     reason, leave no registration behind, and a re-register after
+     the host lands must succeed. */
+  let early = null;
+  await check("early absolute-URL registration with no guest host rejects honestly", async () => {
+    const opened = await openProxied(FX + "/dir/early.html", "#zl-early");
+    early = opened.frame;
+    const st = await waitFor("honest early rejection", 20000, () =>
+      evalIn(
+        early,
+        "early register state",
+        'function(){var s = window.__zlEarly && window.__zlEarly.state; return (s === "error" || s === "ok") ? window.__zlEarly : null;}',
+      ),
+    );
+    if (st.state !== "error" || String(st.error).indexOf("no guest host page connected") === -1) {
+      throw new Error("unexpected early result: " + JSON.stringify(st));
+    }
+    const gone = await evalIn(
+      early,
+      "getRegistration after rejection",
+      'function(){return navigator.serviceWorker.getRegistration().then(function(r){return r ? {present:true, scope:r.scope} : {present:false};});}',
+    );
+    if (gone.present) {
+      throw new Error("rejected registration left a record: " + JSON.stringify(gone));
+    }
+    return "rejected with: " + st.error;
+  });
+
+  await check("re-register succeeds once the guest host page lands", async () => {
+    const host = await context.newPage();
+    await host.goto(ENGINE + "/guest-host.html");
+    const status = await waitFor("guest host ready", 20000, () =>
+      host.evaluate(() => document.getElementById("status")?.textContent ?? ""),
+    );
+    if (status !== "guest host ready") throw new Error("guest host status: " + status);
+    const reg2 = await evalIn(
+      early,
+      "re-register guest",
+      'function(){return navigator.serviceWorker.register("' + FX + '/dir/sw.js").then(function(r){return {scope:r.scope, state:r.active ? r.active.state : (r.installing ? r.installing.state : "none")};});}',
+    );
+    if (!reg2 || typeof reg2.scope !== "string" || reg2.scope.indexOf("/dir/") === -1) {
+      throw new Error("unexpected re-registration: " + JSON.stringify(reg2));
+    }
+    const st = await waitFor("early page guest answers", 30000, () =>
+      evalIn(
+        early,
+        "early page state fetch",
+        'function(){return fetch("/dir/state").then(function(r){return r.text().then(function(t){return {body:t, guest:r.headers.get("x-zl-guest")};});});}',
+      ).then((s) => (s && s.guest === "guest-v1" ? s : null)),
+    );
+    if (String(st.body).indexOf("activated-guest-v1") === -1) {
+      throw new Error("guest state unexpected: " + JSON.stringify(st));
+    }
+    return "scope " + reg2.scope;
+  });
+
   await check("proxied page + guest host page come up", async () => {
     const opened = await openProxied(FX + "/dir/page.html", "#zl-guest");
     page = opened.page;
@@ -343,6 +433,62 @@ async function main() {
       throw new Error("unexpected guest state: " + JSON.stringify(r.body));
     }
     return r.body;
+  });
+
+  await check("multiple same-origin scopes route to the longest scope and unregister independently", async () => {
+    const nested = await evalIn(
+      frame,
+      "register nested guest",
+      'function(){return navigator.serviceWorker.register("/dir/app/sw.js", {scope:"/dir/app/"}).then(function(r){return {scope:r.scope};});}',
+    );
+    if (!nested.scope.endsWith("/dir/app/")) {
+      throw new Error("nested registration scope mismatch: " + JSON.stringify(nested));
+    }
+    const registrations = await evalIn(
+      frame,
+      "list guest registrations",
+      'function(){return navigator.serviceWorker.getRegistrations().then(function(rs){return rs.map(function(r){return r.scope;}).sort();});}',
+    );
+    if (registrations.length !== 2 || !registrations.some((s) => s.endsWith("/dir/")) ||
+        !registrations.some((s) => s.endsWith("/dir/app/"))) {
+      throw new Error("expected both scopes, got " + JSON.stringify(registrations));
+    }
+    const selected = await evalIn(
+      frame,
+      "select matching nested registration",
+      'function(){return navigator.serviceWorker.getRegistration("/dir/app/page.html").then(function(r){return r && r.scope;});}',
+    );
+    if (!String(selected).endsWith("/dir/app/")) {
+      throw new Error("getRegistration did not choose the longest scope: " + selected);
+    }
+    const before = await waitFor("nested guest fetch", 20000, async () => {
+      const r = await guestFetch(frame, "/dir/app/state");
+      return r.guest === "guest-nested" ? r : null;
+    });
+    if (before.body !== "guest-nested") throw new Error("nested guest did not intercept: " + JSON.stringify(before));
+
+    const unregistered = await evalIn(
+      frame,
+      "unregister nested registration",
+      'function(){return navigator.serviceWorker.getRegistration("/dir/app/page.html").then(function(r){return r.unregister();});}',
+    );
+    if (unregistered !== true) throw new Error("nested unregister failed: " + unregistered);
+    const remaining = await evalIn(
+      frame,
+      "list remaining registration",
+      'function(){return navigator.serviceWorker.getRegistrations().then(function(rs){return rs.map(function(r){return r.scope;});});}',
+    );
+    if (remaining.length !== 1 || !remaining[0].endsWith("/dir/")) {
+      throw new Error("unregister removed the wrong scope: " + JSON.stringify(remaining));
+    }
+    const parentFallback = await waitFor("parent guest fallback", 20000, async () => {
+      const r = await guestFetch(frame, "/dir/app/state");
+      return r.guest === "guest-v1-parent" ? r : null;
+    });
+    if (parentFallback.body !== "guest-v1-parent-fallback") {
+      throw new Error("parent guest did not resume: " + JSON.stringify(parentFallback));
+    }
+    return "nested scope won, then parent guest resumed after exact unregister";
   });
 
   await check("registration.update() swaps the realm on changed bytes; caches survive", async () => {

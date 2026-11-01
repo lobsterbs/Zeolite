@@ -27,6 +27,19 @@ use crate::encode::resolve;
 /// close tag cannot pin the whole rest of the response in memory.
 const DROP_RAW_CAP: usize = 256 * 1024;
 
+/// #456: total candidate buffering bound for the raw element passes.
+/// A raw element whose retained body crosses this cap stops being a
+/// rewrite candidate: it serves byte-identical (streaming candidate
+/// passthrough), fail-open exactly like the location pass's size cap.
+/// Matches the location pass's legacy AST ceiling.
+const RAW_PASS_CAP: usize = 2 * 1024 * 1024;
+
+/// #456 passthrough carry: bytes this close to the end of the buffer
+/// are re-scanned on the next chunk, so no close or escape token can
+/// be split across chunk boundaries. At least the longest token
+/// ("</script" plus terminator) so a straddling marker always lands.
+const RAW_PASS_CARRY: usize = 16;
+
 /// Tokenizer state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum St {
@@ -54,6 +67,9 @@ pub struct Rewriter {
     cfg: RewriteConfig,
     /// Real destination URL of the page being rewritten (page base).
     base: String,
+    /// #525: the base exactly as first set, before any <base href>
+    /// folds it: the document URL for inline module meta reads.
+    doc_base: String,
     st: St,
     buf: String,
     /// Lowercase name of the current tag while in Tag/Raw state.
@@ -73,6 +89,22 @@ pub struct Rewriter {
     /// srcdoc nesting depth: recursive sub-document rewrites are
     /// depth-capped so pathological input cannot recurse unbounded.
     depth: u8,
+    /// #456: this raw element is past RAW_PASS_CAP and serves
+    /// verbatim; raw_pass_scan keeps locating the close tag without
+    /// retaining the body.
+    raw_pass: bool,
+    /// Escaped-state flags mirroring find_script_close, advanced only
+    /// over fully processable bytes so a re-scanned carry can never
+    /// double-apply a transition.
+    raw_pass_escaped: bool,
+    raw_pass_double: bool,
+    /// A terminated close marker was held; the buffer waits for its
+    /// closing '>'.
+    raw_pass_closing: bool,
+    /// #529: opt-in token-level decision tracing. None = tracing off
+    /// (the default): record() checks this first and allocates
+    /// nothing. RefCell because the encode helpers take &self.
+    trace: std::cell::RefCell<Option<crate::trace::TraceAgg>>,
 }
 
 impl Rewriter {
@@ -81,6 +113,7 @@ impl Rewriter {
             location_events: std::cell::RefCell::new(Vec::new()),
             cfg,
             base: String::new(),
+            doc_base: String::new(),
             st: St::Text,
             buf: String::new(),
             cur_tag: String::new(),
@@ -90,6 +123,11 @@ impl Rewriter {
             injected: false,
             base_seen: false,
             depth: 0,
+            raw_pass: false,
+            raw_pass_escaped: false,
+            raw_pass_double: false,
+            raw_pass_closing: false,
+            trace: std::cell::RefCell::new(None),
         }
     }
 
@@ -101,6 +139,50 @@ impl Rewriter {
         self.cfg.rewrite_globals = mode != "off";
         self.cfg.location_event_attributes = mode == "legacy";
         self.cfg.location_max_bytes = max_bytes.clamp(1, crate::js::globals::MAX_BYTES);
+    }
+
+    /// #529: opt-in token-level decision tracing for this instance.
+    /// Off by default; see trace.rs.
+    pub fn set_trace(&mut self, on: bool) {
+        *self.trace.borrow_mut() = if on {
+            Some(crate::trace::TraceAgg::default())
+        } else {
+            None
+        };
+    }
+
+    /// #529: drain the aggregated decisions as deterministic JSON.
+    /// "[]" while tracing is off or nothing was recorded.
+    pub fn take_trace(&self) -> String {
+        match self.trace.borrow_mut().as_mut() {
+            Some(t) => t.take_json(),
+            None => "[]".to_string(),
+        }
+    }
+
+    fn tracing(&self) -> bool {
+        self.trace.borrow().is_some()
+    }
+
+    fn trace_rec(&self, pass: &'static str, decision: &'static str) {
+        if let Some(t) = self.trace.borrow_mut().as_mut() {
+            t.record(pass, decision);
+        }
+    }
+
+    /// #532: the effective document base once the first <base href>
+    /// folded (issue #36 first-base-wins): the ABSOLUTE upstream base
+    /// URL later relative URLs fold against, or None when no base
+    /// element was seen. The serve seam drains it per chunk and
+    /// delivers the hostless form to the page (the virtual
+    /// document.baseURI view); the host itself never crosses into
+    /// the page realm.
+    pub fn effective_base(&self) -> Option<String> {
+        if self.base_seen {
+            Some(self.base.clone())
+        } else {
+            None
+        }
     }
 
     pub fn take_location_events(&self) -> String {
@@ -127,6 +209,11 @@ impl Rewriter {
     /// Set the page's real destination URL (call before the first chunk).
     pub fn set_base(&mut self, base: &str) {
         self.base = base.to_string();
+        // First call wins: construction sets the document URL, and a
+        // re-set must not move the #525 module base.
+        if self.doc_base.is_empty() {
+            self.doc_base = base.to_string();
+        }
     }
 
     /// Replace the block_hosts list (Phase 3 ad/tracker stripping).
@@ -167,6 +254,112 @@ impl Rewriter {
             cut -= 1;
         }
         self.buf.drain(..cut);
+    }
+
+    /// #456: streaming candidate passthrough for a raw element past
+    /// RAW_PASS_CAP. The rewriter stops retaining: every processable
+    /// byte emits verbatim and only a bounded carry is kept, so no
+    /// close or escape token can be split across chunk boundaries.
+    /// The escaped-state semantics mirror find_script_close exactly
+    /// (a plain search would end the element early on a
+    /// double-escaped close marker, the #339 class). Transitions apply
+    /// only over fully processable bytes, so a re-scanned carry never
+    /// double-applies one. Returns true when the element's close tag
+    /// completed and the buffer is drained past it.
+    fn raw_pass_scan(&mut self, out: &mut String) -> bool {
+        let script = self.cur_tag == "script";
+        let needle: Vec<u8> = format!("</{}", self.cur_tag)
+            .bytes()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        let keep = RAW_PASS_CARRY.max(needle.len() + 1);
+        let b = self.buf.as_bytes();
+        if self.raw_pass_closing {
+            let Some(k) = b.iter().position(|&c| c == b'>') else {
+                return false;
+            };
+            let end = k + 1;
+            out.push_str(&self.buf[..end]);
+            self.buf.drain(..end);
+            return true;
+        }
+        let limit = b.len().saturating_sub(keep);
+        let mut i = 0usize;
+        let mut close_at: Option<usize> = None;
+        while i < limit {
+            if script {
+                if !self.raw_pass_escaped && i + 4 <= limit && starts_ci(&b[i..], b"<!--") {
+                    self.raw_pass_escaped = true;
+                    i += 4;
+                    continue;
+                }
+                if self.raw_pass_escaped
+                    && !self.raw_pass_double
+                    && i + 7 <= limit
+                    && starts_ci(&b[i..], b"<script")
+                    && b.get(i + 7).is_some_and(|c| {
+                        matches!(c, b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>')
+                    })
+                {
+                    self.raw_pass_double = true;
+                    i += 7;
+                    continue;
+                }
+                if self.raw_pass_escaped && i + 3 <= limit && starts_ci(&b[i..], b"-->") {
+                    self.raw_pass_double = false;
+                    self.raw_pass_escaped = false;
+                    i += 3;
+                    continue;
+                }
+                if starts_ci(&b[i..], b"</script")
+                    && b.get(i + 8).is_some_and(|c| {
+                        matches!(c, b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>')
+                    })
+                {
+                    if self.raw_pass_double {
+                        if i + 8 <= limit {
+                            self.raw_pass_double = false;
+                            i += 8;
+                        } else {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    close_at = Some(i);
+                    break;
+                }
+            } else if b.len() - i >= needle.len()
+                && b[i..i + needle.len()].eq_ignore_ascii_case(&needle)
+            {
+                close_at = Some(i);
+                break;
+            }
+            i += 1;
+        }
+        let Some(ci) = close_at else {
+            let mut emit = limit;
+            while emit > 0 && !self.buf.is_char_boundary(emit) {
+                emit -= 1;
+            }
+            out.push_str(&self.buf[..emit]);
+            self.buf.drain(..emit);
+            return false;
+        };
+        // Hold from the close marker: the '>' may arrive later.
+        match b[ci..].iter().position(|&c| c == b'>') {
+            Some(k) => {
+                let end = ci + k + 1;
+                out.push_str(&self.buf[..end]);
+                self.buf.drain(..end);
+                true
+            }
+            None => {
+                out.push_str(&self.buf[..ci]);
+                self.buf.drain(..ci);
+                self.raw_pass_closing = true;
+                false
+            }
+        }
     }
 
     /// Add a script path to inject after <head> opens (Phase 3 hooks).
@@ -217,6 +410,16 @@ impl Rewriter {
     }
 
     fn enc_route(&self, url: &str, literal: bool, script: bool) -> String {
+        // #529: pass label derived from the caller shape so every
+        // funnel (attrs, srcset, ping, style, JS literals, script
+        // srcs) records under its own pass with no new parameter.
+        let pass: &'static str = if script {
+            "script-src"
+        } else if literal {
+            "js-literal"
+        } else {
+            "html-url"
+        };
         // Already engine-local (nested rewriting): keep as-is. An empty
         // origin matches every URL, so it must not take this branch.
         if !self.cfg.origin.is_empty() && url.starts_with(&self.cfg.origin) {
@@ -231,6 +434,7 @@ impl Rewriter {
                 || rest.starts_with('?')
                 || rest.starts_with('#')
             {
+                self.trace_rec(pass, "engine-local");
                 return url.to_string();
             }
         }
@@ -244,6 +448,7 @@ impl Rewriter {
         // rewrites normally.
         if let Some(innermost) = self.cfg.unwrap_engine_route(url) {
             if innermost.starts_with("http://") || innermost.starts_with("https://") {
+                self.trace_rec(pass, "already-routed");
                 let (bare, frag) = match innermost.split_once('#') {
                     Some((b, f)) => (b.to_string(), format!("#{}", f)),
                     None => (innermost, String::new()),
@@ -260,6 +465,7 @@ impl Rewriter {
         // destination at all (issue #12: every same-page anchor link
         // navigated to 404 "zeolite: bad route").
         if abs.is_empty() || abs.starts_with('#') {
+            self.trace_rec(pass, "fragment-only");
             return abs;
         }
         // #499: a userinfo-carrying absolute URL (scheme://key@host)
@@ -274,6 +480,7 @@ impl Rewriter {
         // HTML attributes and script srcs are browser-owned sinks
         // and keep routing (the literal gate below).
         if literal && Self::userinfo_in_authority(&abs) {
+            self.trace_rec(pass, "userinfo-literal");
             return abs;
         }
         // Opaque absolute URLs (data:, blob:, about:, javascript:,
@@ -289,6 +496,7 @@ impl Rewriter {
                 && !sch.eq_ignore_ascii_case("http")
                 && !sch.eq_ignore_ascii_case("https")
             {
+                self.trace_rec(pass, "opaque-scheme");
                 return abs;
             }
         }
@@ -312,6 +520,7 @@ impl Rewriter {
     fn enc_final(&self, bare: &str, literal: bool, script: bool) -> String {
         if script {
             if let Some(split) = self.enc_script_final(bare) {
+                self.trace_rec("script-src", "script-split-routed");
                 return split;
             }
             // Legacy codec, bare origin, or a path past the
@@ -324,9 +533,20 @@ impl Rewriter {
                 o.push('/');
                 o.push_str(seg);
                 o.push('/');
+                self.trace_rec("js-literal", "literal-split-routed");
                 return o;
             }
         }
+        self.trace_rec(
+            if script {
+                "script-src"
+            } else if literal {
+                "js-literal"
+            } else {
+                "html-url"
+            },
+            "routed",
+        );
         self.cfg.encode_url(bare)
     }
 
@@ -429,10 +649,36 @@ impl Rewriter {
         }
         let rewritten = crate::js::rewrite_script(js, &|u| self.enc_literal(u));
         let neutral = crate::js::antiframe(&rewritten);
+        // #525: import.meta.url reads see the module's virtual URL.
+        let with_meta = self.meta_body(&neutral);
         // #235: location reads rename to the virtual location global
         // (#236) after the literal and frame-buster passes, so the
         // parse gate sees the final body.
-        self.location_body(&neutral)
+        self.location_body(&with_meta)
+    }
+
+    /// #525: the page-realm module URL for import.meta.url reads:
+    /// the engine origin carrying the real path/query/fragment;
+    /// the host stays opaque (#32/#144 contract).
+    fn virtual_module_url(&self, abs: &str) -> Option<String> {
+        let scheme_end = abs.find("://")? + 3;
+        let host_end = abs[scheme_end..].find('/').map(|i| i + scheme_end)?;
+        Some(format!("{}{}", self.cfg.origin, &abs[host_end..]))
+    }
+
+    /// #525: replace import.meta.url reads with the module's virtual
+    /// URL literal. External bodies carry the script's own URL as the
+    /// base; inline modules use the document URL (doc_base, captured
+    /// before any <base href> folds it — import.meta is the module
+    /// URL, never the folded base).
+    fn meta_body(&self, js: &str) -> String {
+        if !self.cfg.rewrite_js_literals || !js.contains("import.meta") {
+            return js.to_string();
+        }
+        let Some(v) = self.virtual_module_url(&self.doc_base) else {
+            return js.to_string();
+        };
+        crate::js::meta::rewrite_import_meta_url(js, &v)
     }
 
     /// Rewrite an iframe srcdoc document (issue #36). The attribute
@@ -608,6 +854,19 @@ impl Rewriter {
                     }
                 }
                 St::Raw => {
+                    if self.raw_pass {
+                        // #456: over-cap element, verbatim passthrough.
+                        // A completed close falls through so the
+                        // leftover bytes reparse as text in this call.
+                        if !self.raw_pass_scan(&mut out) {
+                            break;
+                        }
+                        self.st = St::Text;
+                        self.cur_tag.clear();
+                        self.raw_pass = false;
+                        self.raw_pass_closing = false;
+                        continue;
+                    }
                     let close = format!("</{}", self.cur_tag);
                     // #188: the match requires a TERMINATED close tag
                     // (whitespace, '/' or '>' after the name): the
@@ -630,12 +889,35 @@ impl Rewriter {
                             .and_then(|ci| self.buf[ci..].find('>').map(|k| (ci, ci + k + 1)))
                     };
                     let Some((ci, end)) = found else {
-                        self.trim_drop_raw();
+                        if !self.drop_raw && self.buf.len() > RAW_PASS_CAP {
+                            // #456: stop retaining an over-cap body
+                            // with no close yet: serve it verbatim and
+                            // keep scanning for the close in bounded
+                            // memory.
+                            self.raw_pass = true;
+                            self.raw_pass_escaped = false;
+                            self.raw_pass_double = false;
+                            self.raw_pass_closing = false;
+                            self.trace_rec("raw-block", "over-cap-verbatim");
+                            self.raw_pass_scan(&mut out);
+                        } else {
+                            self.trim_drop_raw();
+                        }
                         break;
                     };
                     if self.drop_raw {
                         // Blocked element: swallow content + close tag.
+                        self.trace_rec("raw-block", "blocked-dropped");
                         self.buf.drain(..end);
+                    } else if self.buf.len() > RAW_PASS_CAP {
+                        // #456: an over-cap element serves verbatim even
+                        // with its close tag at hand: the single-shot
+                        // passes would rewrite a body the cap excludes.
+                        // The close search already located the exact
+                        // element end.
+                        out.push_str(&self.buf[..end]);
+                        self.buf.drain(..end);
+                        self.trace_rec("raw-block", "over-cap-verbatim");
                     } else {
                         let raw = self.buf[..ci].to_string();
                         if self.cur_tag == "script" && self.cur_script_importmap {
@@ -646,14 +928,36 @@ impl Rewriter {
                             instead of escaping browser-direct. Invalid
                             JSON passes through unchanged and fails the
                             map with the native error. */
-                            out.push_str(&importmap::rewrite_importmap(
+                            let im = importmap::rewrite_importmap(
                                 &raw,
                                 &|u| self.enc(u),
                                 &|u| self.enc_split_route(u),
                                 &|u| self.enc_split_route(u),
-                            ));
+                            );
+                            /* #529: invalid JSON passes through and fails
+                            the map natively - recorded as unchanged. */
+                            if self.tracing() {
+                                self.trace_rec(
+                                    "importmap",
+                                    if im != raw { "rewritten" } else { "unchanged" },
+                                );
+                            }
+                            out.push_str(&im);
                         } else if self.cur_tag == "style" && self.cfg.rewrite_css {
-                            out.push_str(&css::rewrite_stylesheet(&raw, &|u| self.enc(u)));
+                            let css_out = css::rewrite_stylesheet(&raw, &|u| self.enc(u));
+                            /* #529: block-level decision; per-URL
+                            decisions ride the enc seam. */
+                            if self.tracing() {
+                                self.trace_rec(
+                                    "css-block",
+                                    if css_out != raw {
+                                        "rewritten"
+                                    } else {
+                                        "unchanged"
+                                    },
+                                );
+                            }
+                            out.push_str(&css_out);
                         } else if self.cur_tag == "script"
                             && self.cfg.rewrite_js_literals
                             && self.cur_script_js
@@ -664,10 +968,30 @@ impl Rewriter {
                             // navigation sinks apply to the final body.
                             let rewritten =
                                 crate::js::rewrite_script(&raw, &|u| self.enc_literal(u));
+                            /* #529: fixed-vocabulary decisions; the
+                            origin-pin recheck is gated on tracing. */
+                            if self.tracing() {
+                                if rewritten != raw {
+                                    self.trace_rec("js-literal", "rewritten");
+                                } else if crate::js::has_origin_pinning_regex(&raw) {
+                                    self.trace_rec("js-literal", "origin-pin-skip");
+                                } else {
+                                    self.trace_rec("js-literal", "unchanged");
+                                }
+                            }
                             let neutral = crate::js::antiframe(&rewritten);
+                            if self.tracing() && neutral != rewritten {
+                                self.trace_rec("antiframe", "neutralized");
+                            }
+                            // #525: inline module bodies get the same
+                            // import.meta.url virtualization.
+                            let with_meta = self.meta_body(&neutral);
                             // #235: the same globals pass the external
                             // body path runs, on the final body.
-                            let with_globals = self.location_body(&neutral);
+                            let with_globals = self.location_body(&with_meta);
+                            if self.tracing() && with_globals != with_meta {
+                                self.trace_rec("globals", "rewritten");
+                            }
                             out.push_str(&with_globals);
                         } else {
                             out.push_str(&raw);
@@ -783,6 +1107,8 @@ impl Rewriter {
             }
         }
         if is_csp_meta {
+            /* #529: the strip is a rewrite decision. */
+            self.trace_rec("csp-meta", "stripped");
             return String::new();
         }
         let mut first_url: Option<String> = None;
@@ -826,7 +1152,16 @@ impl Rewriter {
                     let newv = if lower == "srcset" || lower == "imagesrcset" {
                         Some(url_attrs::rewrite_srcset(&v, &|u| self.enc(u)))
                     } else if lower == "srcdoc" && name == "iframe" {
-                        Some(self.rewrite_srcdoc(&v))
+                        /* #529: a depth-capped sub-document keeps its
+                        value verbatim and records as unchanged. */
+                        let s = self.rewrite_srcdoc(&v);
+                        if self.tracing() {
+                            self.trace_rec(
+                                "srcdoc",
+                                if s != v { "rewritten" } else { "unchanged" },
+                            );
+                        }
+                        Some(s)
                     } else if name == "meta" && lower == "content" && is_refresh {
                         Some(self.rewrite_refresh_content(&v))
                     } else if lower == "ping" && (name == "a" || name == "area") {
@@ -1665,6 +2000,73 @@ mod tests {
     }
 
     #[test]
+    fn trace_off_by_default_and_take_drains() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = r.process("<a href=\"https://example.com/x\">y</a>");
+        assert!(!out.is_empty());
+        /* #529: tracing off by default records nothing. */
+        assert_eq!(r.take_trace(), "[]");
+    }
+
+    #[test]
+    fn trace_records_fixed_vocabulary_decisions() {
+        let mut c = cfg();
+        c.origin = "https://engine.example".to_string();
+        let mut r = Rewriter::new(c);
+        r.set_base("https://example.com/");
+        r.set_trace(true);
+        let route = format!(
+            "https://engine.example/j/{}",
+            crate::encode::b64u_encode(b"https://example.com/routed")
+        );
+        let doc = format!(
+            "<a href=\"https://example.com/a\">1</a>\
+             <a href=\"data:text/html,x\">2</a>\
+             <a href=\"#frag\">3</a>\
+             <a href=\"{route}\">4</a>\
+             <a href=\"https://engine.example/path\">5</a>\
+             <script>var u = \"https://example.com/s.js\"; if (window.top != self) top.location = u;</script>\
+             <style>body {{ background: url(https://example.com/i.png) }}</style>\
+             <script type=\"importmap\">{{\"imports\":{{\"x\":\"https://example.com/m.js\"}}}}</script>"
+        );
+        r.process(&doc);
+        let json = r.take_trace();
+        assert!(json.contains("\"pass\":\"html-url\""), "{json}");
+        assert!(json.contains("\"decision\":\"routed\""), "{json}");
+        assert!(json.contains("\"decision\":\"opaque-scheme\""), "{json}");
+        assert!(json.contains("\"decision\":\"fragment-only\""), "{json}");
+        assert!(json.contains("\"decision\":\"already-routed\""), "{json}");
+        assert!(json.contains("\"decision\":\"engine-local\""), "{json}");
+        assert!(json.contains("\"pass\":\"js-literal\""), "{json}");
+        assert!(json.contains("\"decision\":\"rewritten\""), "{json}");
+        assert!(json.contains("\"pass\":\"antiframe\""), "{json}");
+        assert!(json.contains("\"decision\":\"neutralized\""), "{json}");
+        assert!(json.contains("\"pass\":\"css-block\""), "{json}");
+        assert!(json.contains("\"pass\":\"importmap\""), "{json}");
+        /* no page data ever reaches the trace */
+        assert!(!json.contains("example.com"), "{json}");
+        /* take drains */
+        assert_eq!(r.take_trace(), "[]");
+    }
+
+    #[test]
+    fn trace_records_over_cap_raw_verbatim() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        r.set_trace(true);
+        let big = "x".repeat(RAW_PASS_CAP + 1024);
+        r.process(&format!("<script>{big}</script>"));
+        let json = r.take_trace();
+        assert!(json.contains("\"pass\":\"raw-block\""), "{json}");
+        assert!(
+            json.contains("\"decision\":\"over-cap-verbatim\""),
+            "{json}"
+        );
+        assert!(!json.contains("xxxx"), "{json}");
+    }
+
+    #[test]
     fn location_policy_modes_caps_and_events() {
         let mut r = Rewriter::new(cfg());
         r.set_location_policy("off", 512 * 1024);
@@ -1690,6 +2092,77 @@ mod tests {
             r.rewrite_js_body("location.href");
         }
         assert!(r.take_location_events().split(',').count() <= 32);
+    }
+
+    #[test]
+    fn raw_pass_over_cap_serves_verbatim() {
+        // #456: an over-cap raw element serves byte-identical (the
+        // URL-literal and location passes skip it), the close tag
+        // still ends it and later elements still rewrite.
+        let mut r = Rewriter::new(cfg());
+        let big = "x".repeat(RAW_PASS_CAP + 1024);
+        let out = r.process(&format!(
+            "<script>var u = \"https://e.com/a.js\"; {big}</script><script>location.href</script>"
+        ));
+        assert!(out.contains(&big), "over-cap body must serve verbatim");
+        assert!(
+            out.contains("https://e.com/a.js"),
+            "no rewrite past the cap"
+        );
+        assert!(out.contains("__zl.href"), "later elements still rewrite");
+    }
+
+    #[test]
+    fn raw_pass_close_token_split_across_chunks() {
+        // #456: the passthrough carry re-scans a close marker split
+        // across chunk boundaries; the element still ends exactly at
+        // it and the leftover markup reparses.
+        let mut r = Rewriter::new(cfg());
+        let big = "y".repeat(RAW_PASS_CAP + 40);
+        let mut out = String::new();
+        out.push_str(&r.process(&format!("<script>{big}")));
+        out.push_str(&r.process("</scr"));
+        out.push_str(&r.process("ipt>tail<script>location.href</script>"));
+        out.push_str(&r.finish());
+        assert!(out.contains(&big));
+        assert!(out.contains("ipt>tail"), "split close found via the carry");
+        assert!(
+            out.contains("__zl.href"),
+            "markup after the close still rewrites"
+        );
+    }
+
+    #[test]
+    fn raw_pass_double_escaped_close_parity() {
+        // #339 parity in passthrough: a terminated close marker inside
+        // a double-escaped block never ends the element.
+        let mut r = Rewriter::new(cfg());
+        let big = "z".repeat(RAW_PASS_CAP + 10);
+        let esc = "<!-- <script> a </script> b -->";
+        let mut out = String::new();
+        out.push_str(&r.process(&format!("<script>{big}")));
+        out.push_str(&r.process(esc));
+        out.push_str(&r.process("</script>tail<script>location.href</script>"));
+        out.push_str(&r.finish());
+        assert!(out.contains(&big));
+        assert!(out.contains(esc));
+        assert!(out.contains("__zl.href"));
+    }
+
+    #[test]
+    fn raw_pass_generic_tag_close() {
+        // A non-script raw element past the cap also serves verbatim
+        // and still ends at its own close tag.
+        let mut r = Rewriter::new(cfg());
+        let big = "w".repeat(RAW_PASS_CAP + 10);
+        let mut out = String::new();
+        out.push_str(&r.process(&format!("<style>{big}")));
+        out.push_str(&r.process("</sty"));
+        out.push_str(&r.process("le>tail<script>location.href</script>"));
+        out.push_str(&r.finish());
+        assert!(out.contains(&big));
+        assert!(out.contains("le>tail"));
+        assert!(out.contains("__zl.href"));
     }
 
     #[test]
@@ -2643,6 +3116,27 @@ document.write('<script src=x></script>');
             out
         );
         assert_eq!(decode_entities(srcdoc_val), "<p>hi & bye</p>");
+    }
+
+    #[test]
+    fn effective_base_tracks_the_first_base_only() {
+        // #532: effective_base reports the folded absolute upstream
+        // base once the first <base href> folded, None before any
+        // base element appeared, and only the FIRST base counts.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/dir/page.html");
+        assert_eq!(r.effective_base(), None);
+        let mut r2 = Rewriter::new(cfg());
+        r2.set_base("https://example.com/dir/page.html");
+        let out = r2.process(
+            "<head><base href=\"assets/\"><base href=\"https://ignored.example.com/\"></head>",
+        );
+        assert!(out.contains("base href="));
+        assert_eq!(
+            r2.effective_base().as_deref(),
+            Some("https://example.com/dir/assets/")
+        );
+        assert!(!r2.effective_base().unwrap().contains("ignored"));
     }
 
     #[test]

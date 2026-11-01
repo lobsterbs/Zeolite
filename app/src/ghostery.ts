@@ -5,10 +5,12 @@
    transport decision (wired by sw.ts through ghosteryListFetch,
    #381), never browser fetch.
 
-   This adapter currently applies network block and resource-redirect
-   decisions. Cosmetic selectors and scriptlets need a separate,
-   CSP-aware document-rewrite integration and are deliberately not
-   injected here. */
+   This adapter applies network block and resource-redirect
+   decisions. #551 first slice: cosmetic CSS selectors for the
+   document URL are computed from this engine by ./cosmetics and
+   spliced into the document rewrite as a <style data-zl-cosmetic>
+   (transform.ts init splice). Scriptlets and extended/HTML filters
+   are counted and refused, never executed. */
 
 import {
   FiltersEngine,
@@ -17,6 +19,8 @@ import {
 } from "@ghostery/adblocker";
 import type { ResourceType } from "./rules";
 import { DIAG } from "./diag";
+import { loadInflight } from "./loadstate";
+import { activeStreams, firstStreamSettled } from "./streams-alive";
 
 const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 /* #500: sanity floor for a parsed ads+tracking engine. Any single
@@ -25,6 +29,12 @@ const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
    counts as empty or partial and is never installed. */
 const MIN_NETWORK_FILTERS = 1000;
 const RETRY_AFTER_MS = 60 * 1000;
+/* #577: an unreachable or hanging list origin must not burst its
+   ~10 vendored fetches through the transport every minute. The
+   cooldown grows 60s -> 4min -> 15min (cap) and resets on the first
+   successful load. */
+const RETRY_CAP_MS = 15 * 60 * 1000;
+let retryDelay = RETRY_AFTER_MS;
 const LISTS_ORIGIN = "https://raw.githubusercontent.com";
 const LISTS_PATH = "/ghostery/adblocker/master/packages/adblocker/assets/";
 
@@ -44,7 +54,10 @@ export interface GhosteryDecision {
   redirect?: GhosteryRedirect;
 }
 
-function requestType(type: ResourceType, destination?: string): RequestType {
+/** Engine resource type mapping (#551 exports it so the cosmetic
+    seam labels documents with the same vocabulary; getCosmeticsFilters
+    itself is hostname-scoped and takes no request type). */
+export function requestType(type: ResourceType, destination?: string): RequestType {
   if (destination === "iframe" || destination === "frame") return "sub_frame";
   if (destination === "document") return "document";
   if (destination === "object") return "object";
@@ -97,8 +110,9 @@ async function loadEngine(force = false): Promise<void> {
          good matcher survives, otherwise the matcher stays null. */
       const network = fresh.getFilters().networkFilters.length;
       if (network < MIN_NETWORK_FILTERS) {
-        retryAt = Date.now() + RETRY_AFTER_MS;
+        retryAt = Date.now() + retryDelay;
         refreshAt = retryAt;
+        retryDelay = Math.min(retryDelay * 4, RETRY_CAP_MS);
         DIAG.emit({
           requestId: DIAG.trace(),
           category: "TRANSPORT",
@@ -114,6 +128,7 @@ async function loadEngine(force = false): Promise<void> {
       }
       engine = fresh;
       retryAt = 0;
+      retryDelay = RETRY_AFTER_MS;
       refreshAt = Date.now() + REFRESH_AFTER_MS;
     } catch (err) {
       /* A temporarily unavailable list host must not break page
@@ -121,8 +136,9 @@ async function loadEngine(force = false): Promise<void> {
          this worker retries after a short cooldown. #381: the
          failure is no longer silent - a TRANSPORT row names the
          load failure so relay-only transport gaps are visible. */
-      retryAt = Date.now() + RETRY_AFTER_MS;
+      retryAt = Date.now() + retryDelay;
       refreshAt = retryAt;
+      retryDelay = Math.min(retryDelay * 4, RETRY_CAP_MS);
       DIAG.emit({
         requestId: DIAG.trace(),
         category: "TRANSPORT",
@@ -139,6 +155,47 @@ async function loadEngine(force = false): Promise<void> {
     }
   })();
   return loading;
+}
+
+/* #577: the lazy list load shares the wisp transport singleton with
+   page traffic, and the list origins are the one fetch class that
+   can wedge for a whole first-byte deadline on filtered networks
+   (the list host connects, then never answers). Started inline from
+   the matching request, that wedge cost the triggering navigation
+   its own deadline: the boot wedged through the reset/retry churn,
+   the #477 ttfb seam turned it into a deterministic torture red, and
+   CI flaked whenever the list origin was slow. The kick now defers
+   to the first transport-idle gap: the loadstate counter reads zero once no upstream request is between its enter and its headers, and activeStreams (streams-alive) reads zero once no rewritten body is still pumping past its headers, so the download starts between page requests instead of racing the first one. Before any proxied body settles, every counter reads
+   zero vacuously, so the gate also requires firstStreamSettled
+   (streams-alive): the kick cannot fire in the boot window. The
+   gate needs two consecutive quiet samples a poll apart, and a failed load backs off 60s -> 4min -> 15min so an unreachable list origin cannot keep churning the transport. ghosteryBlock keeps answering from the local rules
+   (null) until the matcher exists, so no request ever waits on the
+   download. */
+const KICK_IDLE_POLL_MS = 250;
+let kickTimer: ReturnType<typeof setTimeout> | null = null;
+
+function kickListLoad(force = false): void {
+  if (kickTimer !== null) return;
+  let quiet = 0;
+  const poll = () => {
+    kickTimer = null;
+    if (loading || !fetchLists || (engine && !force) || Date.now() < retryAt) return;
+    if (!firstStreamSettled() || loadInflight() > 0 || activeStreams() > 0) {
+      quiet = 0;
+      kickTimer = setTimeout(poll, KICK_IDLE_POLL_MS);
+      return;
+    }
+    /* #577: one quiet sample can land in the sub-millisecond gap
+       between a rule match and its transport enter; two samples a
+       poll interval apart cannot. */
+    quiet += 1;
+    if (quiet < 2) {
+      kickTimer = setTimeout(poll, KICK_IDLE_POLL_MS);
+      return;
+    }
+    void loadEngine(force);
+  };
+  kickTimer = setTimeout(poll, 0);
 }
 
 /** Set the list-fetch transport; matching starts lazily on first use.
@@ -173,6 +230,14 @@ export function configureGhostery(fetcher: typeof fetch): void {
   };
 }
 
+/** The loaded matcher, or null while the list load is pending/failed.
+    #551: the cosmetic injection seam reads the same engine instance
+    the network matcher answers from, so both arms agree on what is
+    loaded; never a second parse. */
+export function ghosteryEngine(): FiltersEngine | null {
+  return engine;
+}
+
 /** The request event uses this to keep a lazy filter-list load alive. */
 export function ghosteryLoadInProgress(): Promise<void> | null {
   return loading;
@@ -186,10 +251,10 @@ export function ghosteryBlock(
   destination?: string,
 ): GhosteryDecision | null {
   if (!engine) {
-    void loadEngine();
+    kickListLoad();
     return null;
   }
-  if (Date.now() >= refreshAt) void loadEngine(true);
+  if (Date.now() >= refreshAt) kickListLoad(true);
   try {
     const result = engine.match(
       GhosteryRequest.fromRawDetails({

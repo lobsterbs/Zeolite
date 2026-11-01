@@ -24,7 +24,9 @@ import { contentScriptMatches } from "./content-scripts";
 import { BRIDGE_SOURCE } from "./bridge";
 import { LISTENER_SOURCE } from "./scripting";
 import { PAGE_BRIDGE_SOURCE } from "./pagebridge";
+import { ACTION } from "./action";
 import { pageCallList, pageNamespaceList } from "./pageapi";
+import { resolvePackageI18n } from "./i18n";
 import type { ExtensionRecord } from "./types";
 
 export const EXT_ROUTE = "/zl-ext/";
@@ -109,7 +111,14 @@ function isHtmlPath(path: string): boolean {
 
 function htmlWithPageScript(bytes: Uint8Array, id: string): Response {
   const html = new TextDecoder().decode(bytes);
-  const tag = '<script src="' + EXT_ROUTE + id + '/__page.js"></script>';
+  /* #560: rooted pages (see serveRootedExtPage) are served at the
+     origin root, so package-relative subresources would resolve
+     against the site path; the base tag re-roots every relative URL
+     onto the /zl-ext/<id>/ package route. For /zl-ext/ pages the
+     base resolves exactly as the page URL already did. */
+  const tag =
+    '<base href="' + EXT_ROUTE + id + '/">' +
+    '<script src="' + EXT_ROUTE + id + '/__page.js"></script>';
   const m = /<head[^>]*>/i.exec(html);
   const body = m
     ? html.slice(0, m.index + m[0].length) + tag + html.slice(m.index + m[0].length)
@@ -178,6 +187,31 @@ export function checkPageToken(extId: string, path: string, token: string): bool
   return true;
 }
 
+/** Rooted, tokened URL for an extension's options or popup page —
+    the host's zl:openExtPage flow (#40) and runtime.openOptionsPage
+    (#518) share it, so both open through the same granted navigation.
+    For popups the action registry's per-tab/per-default state wins
+    over the manifest default. Null when the extension is disabled or
+    declares no such page. */
+export function extPageOpenUrl(
+  rec: ExtensionRecord,
+  which: "options" | "popup",
+  tabId?: number | null,
+): string | null {
+  if (!rec.enabled) return null;
+  let raw: string | null | undefined = null;
+  if (which === "options") {
+    raw = rec.options?.page;
+  } else {
+    const kind = rec.action?.kind;
+    raw = kind ? (ACTION.popupFor(rec, kind, tabId) ?? rec.action?.defaultPopup) : rec.action?.defaultPopup;
+  }
+  if (!raw) return null;
+  const norm = normalizeExtensionPath(raw.startsWith("/") ? raw : "/" + raw);
+  if (!norm) return null;
+  return norm + "?zlExt=" + rec.id + "&zlPageTok=" + mintPageToken(rec.id, norm);
+}
+
 /* Registered extension-page clients, keyed by the SW-observed client
    id of a granted navigation. Subresource fetches and zl:extPage
    messages from these clients authenticate as the extension's page.
@@ -194,8 +228,71 @@ export function pageClientOf(clientId: string | undefined): string | null {
   return clientId ? (pageClients.get(clientId) ?? null) : null;
 }
 
+/** Every live registered page client of one extension (#518:
+    runtime.getContexts). Order is insertion order; the caller shapes
+    the result. */
+export function pageClientsOf(extId: string): string[] {
+  const out: string[] = [];
+  for (const [clientId, id] of pageClients) {
+    if (id === extId) out.push(clientId);
+  }
+  return out;
+}
+
 /* #40: serving context for extension-page access. Client ids come
    from the FetchEvent (SW-observed), never from the page. */
+/* #560: rooted extension pages. Extension page worlds that dispatch
+   their boot on location.pathname (Tampermonkey options/action)
+   never match /zl-ext/<id>/... under the engine, so those pages boot
+   to a blank body. The engine therefore also serves the same granted
+   page at the origin root with the extension id in the query:
+   /options.html?zlExt=<id>[&zlPageTok=...]. Grant rules match the
+   /zl-ext/ page route: a zl:openExtPage-minted page token, or a
+   registered page client of this extension (self-navigation via
+   runtime.getURL / window.open from an already-served page).
+
+   rootedPageGrant is the synchronous decision step so the request
+   handler can fall through to virtual handling when the engine will
+   not serve this request. null ALWAYS means "not mine", including
+   invalid tokens and unregistered clients: those must look exactly
+   like an unknown extension so the route leaks no extension-id
+   oracle. */
+export interface RootedPageGrant {
+  extId: string;
+  path: string;
+}
+
+export function rootedPageGrant(
+  req: Request,
+  url: URL,
+  clientId: string | undefined,
+): RootedPageGrant | null {
+  if (req.method !== "GET" && req.method !== "HEAD") return null;
+  const extId = url.searchParams.get("zlExt") ?? "";
+  if (!EXT_ID_RE.test(extId)) return null;
+  const path = normalizeExtensionPath(url.pathname);
+  if (path === null || !isHtmlPath(path)) return null;
+  const rec = extensions.get(extId);
+  if (!rec || !rec.enabled) return null;
+  const token = url.searchParams.get("zlPageTok") ?? "";
+  if (!(checkPageToken(extId, path, token) || pageClientOf(clientId) === extId)) {
+    return null;
+  }
+  return { extId, path };
+}
+
+export async function serveRootedExtPage(
+  grant: RootedPageGrant,
+  resultingClientId: string | undefined,
+): Promise<Response> {
+  /* The granted navigation's new client becomes a registered page
+     client, exactly like the /zl-ext/ navigation path. */
+  registerPageClient(resultingClientId, grant.extId);
+  const own = await extensions.getResource(grant.extId, grant.path, { fromWeb: false });
+  if (!own) return notFound();
+  return htmlWithPageScript(own, grant.extId);
+}
+
 export interface ServeCtx {
   nav: boolean;
   clientId?: string;
@@ -286,9 +383,25 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
        the live permissions. Any same-origin page may load this file;
        it is inert without a registered page client (the SW refuses
        its zl:extPage messages). */
+    /* #560: embed the resolved _locales so the page world can answer
+       chrome.i18n synchronously (see pagebridge). */
+    const i18n = await resolvePackageI18n(
+      typeof rec.manifest.default_locale === "string" ? rec.manifest.default_locale : "",
+      (p) => extensions.getResource(sr.id, p, { fromWeb: false }),
+    );
     const body =
       "var ZL_PAGE_CFG = " +
-      JSON.stringify({ ext: sr.id, base: EXT_ROUTE + sr.id, calls: pageCallList(rec), ns: pageNamespaceList(rec) }) +
+      JSON.stringify({
+        ext: sr.id,
+        base: EXT_ROUTE + sr.id,
+        /* #560: the manifest is embedded so the page bridge can
+           answer runtime.getManifest synchronously (Chrome parity;
+           extension pages read it during boot). */
+        manifest: rec.manifest,
+        calls: pageCallList(rec),
+        ns: pageNamespaceList(rec),
+        i18n: { locale: i18n.locale, messages: i18n.messages },
+      }) +
       ";\n" +
       PAGE_BRIDGE_SOURCE;
     return new Response(body, {
@@ -331,13 +444,17 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
     }
   }
 
-  /* web_accessible_resources: WAR globs and MV3 "matches" scopes are
-     checked inside getResource against the SW-observed page
-     destination (#51; the old `from` query param was page-supplied
-     and dead). */
+  /* web_accessible_resources: WAR globs, MV3 "matches" scopes and
+     #524 extension_ids are checked inside getResource against the
+     SW-observed page destination and the registered page-client
+     identity of the requester (#51; the old `from` query param was
+     page-supplied and dead). A page client of another extension
+     carries its identity here; unregistered pages carry none, and
+     the gate then stays page-match-only. */
   const bytes = await extensions.getResource(sr.id, sr.path, {
     fromWeb: true,
     pageUrl: ctx?.pageUrl ?? null,
+    fromExtensionId: pageClientOf(ctx?.clientId),
   });
   return bytes ? assetResponse(bytes, sr.path) : notFound();
 }

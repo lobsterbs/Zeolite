@@ -6,3 +6,6 @@ app/src/wisp_wasm/
 app/public/libcurl/
 .vendor/
 suite/scoreboard.*
+
+# Generated live measurement artifact (location-targeting-live.mjs)
+suite/location-targeting.json

@@ -1,9 +1,11 @@
 # Hybrid location rewriting (#456)
 
-Status: **Partial**. Per-site policy, bounded AST work, per-instance reason
-telemetry and gate 4 (corroborated automatic targeting) are implemented.
-Legacy behavior remains the deployment default; this is not a default-off
-migration or complete location virtualization.
+Status: **Partial**. Per-site policy, bounded AST work, the shared streaming cap, per-instance
+reason telemetry and gate 4 (corroborated automatic targeting) are
+implemented.
+Hybrid location rewriting is the engine default for otherwise-legacy
+origins (operator flip 2026-11-01); this is not complete location
+virtualization.
 
 ## Configuration
 
@@ -23,6 +25,19 @@ attributes. `off` disables only location rewriting; URL literal rewriting and
 frame-buster handling continue. An explicit positive integer cap up to 2 MiB
 is supported; invalid modes/caps leave the legacy configuration unchanged.
 An explicit rule always wins over the learned mark below, including `off`.
+
+### Host-side global opt-in (experimental flag)
+
+`zl:config { experimental: { hybridLocation: false } }` (host-only, memory-only)
+deselects the bounded hybrid pass for every origin without an explicit
+siteconfig rule; explicit rules still win, including `off`. The selection
+reverts on worker restart and the host re-pushes it. Operator decision
+2026-11-01 (flip): hybrid location rewriting is the engine default ON for
+otherwise-legacy origins; per-origin siteconfig rules, corroborated
+auto-targeting, and this opt-out remain the control seams. LobsterBrowse
+exposes the flag in its beta debug menu, default on since the flip. The flag
+is wired end to end as of commit 6f6caa5: a requested selection becomes
+effective policy, not an observation-only setting.
 
 ## Automatic targeting (gate 4)
 
@@ -61,11 +76,16 @@ rollout.
 A token pre-scan avoids parsing irrelevant bodies. The AST pass skips bodies
 over the configured UTF-8 byte cap and returns its input unchanged on parse
 failure. Assignment/update/delete target spans remain native; shadowed locals
-remain untouched. This cap bounds AST work, **not total response buffering**:
-the pre-existing URL-literal/HTML raw-script paths can still retain larger
-bodies. Streaming candidate passthrough needs a separate pipeline change.
+remain untouched. This cap bounds AST work. Total candidate buffering is bounded across
+all passes by one shared streaming cap: a script or worker body whose
+candidate content exceeds 2 MiB is served verbatim, fail-open (the wasm
+HTML pass emits an over-cap raw script unchanged; the worker-prelude,
+worker-body and script serve seams stream the remainder through without
+rewriting, annotate netlog as `js-body-cap` and emit a `RAW_BODY_CAP`
+diagnostic stage). Under the cap every pass rewrites as before.
 
-Each rewriter retains at most 32 pending reason records; the service worker
+Each rewriter retains at most 32 pending reason records (newer events past
+the bound are dropped, not queued); the service worker
 drains those into the existing bounded diagnostic ring. Reasons distinguish
 `disabled`, `no-candidate`, `size-cap`, `parse-failure`, `no-reads` and
 `rewritten`. Messages contain only fixed reason names and counts, never source
@@ -78,17 +98,37 @@ apply these controls.
 
 ## Remaining rollout gates
 
-- Decide the default-off migration without regressing existing deployments.
-- Bound total candidate buffering across the other rewrite passes.
-- Scoreboard (nightly compat run) evidence for the auto-marked origins and
-  the shipped play2048.co rule; the heuristic has not been measured against
-  a live corpus yet.
-- Keep dynamic eval, worker source, computed properties, shorthand bindings,
-  and browser-owned location surfaces explicitly unsupported where applicable.
+- The default-off migration question is decided: automatic targeting stays
+  on by default (operator decision). No default-off migration is planned for
+  existing deployments.
+- Total candidate buffering is bounded (the shared streaming cap above); no
+  rewrite pass retains an unbounded body.
+- Scoreboard evidence exists at engine level (real Chromium probe in
+  `suite/e2e/location-targeting.mjs`: corroborated mark, scoreboard stats,
+  hybrid flip, hostname scoping and the kill switch) and at live-corpus
+  level: the report-only probe `suite/e2e/location-targeting-live.mjs`
+  (browser CI job) loads the shipped play2048.co rule site plus deep routes
+  and writes `suite/location-targeting.json`, uploaded as a run artifact.
+  The first live run corroborated the heuristic: a GitHub Pages own-404
+  deep route auto-marked from two distinct clients with recorded location
+  reads, while a reads-only embedded origin stayed unmarked. Continuous
+  runs accumulate the migration evidence.
+- Keep dynamic eval, computed properties, shorthand bindings, and
+  browser-owned location surfaces explicitly unsupported where applicable.
+  Worker bodies are not in this loss class: under the cap they pass the
+  same rewrite seam at serve time with the owner page policy; over the cap
+  they are served native. Eval and blob workers stay unsupported per the
+  issue's accepted losses: regex rewriting is banned and no page-realm
+  seam exists for eval.
 
 A real Chromium fixture (`suite/e2e/location-policy.mjs`) checks the generated
-WASM and execution of direct versus rewritten location reads. The existing
-browser CI job gates it. Full proxied live-site rollout remains unverified.
+WASM and execution of direct versus rewritten location reads; a second
+engine-level probe (`suite/e2e/location-targeting.mjs`) drives the corroborated
+auto-mark end to end, and a report-only live-corpus probe
+(`suite/e2e/location-targeting-live.mjs`) measures the heuristic on external
+sites; it never gates CI and writes `suite/location-targeting.json`.
+The existing browser CI job runs all three. Full proxied
+live-site rollout remains unverified.
 
 Tests cover policy validation, CDN/page ownership, inline/external wiring,
 read/write AST safety, cap skips, parser failure and bounded telemetry. These

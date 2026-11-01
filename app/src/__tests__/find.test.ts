@@ -67,7 +67,7 @@ describe("stepOrdinal", () => {
 });
 
 describe("applyFindLoad", () => {
-  function makeEnv() {
+  function makeEnv(guard = "__zlFind") {
     const listeners: Array<(ev: Record<string, unknown>) => void> = [];
     const ctl = { tag: "controller" };
     const sw = {
@@ -82,7 +82,7 @@ describe("applyFindLoad", () => {
       navigator: { serviceWorker: sw },
       eval: (code: string) => {
         evals.push(code);
-        w.__zlFind = (ev: unknown) => forwarded.push(ev);
+        w[guard] = (ev: unknown) => forwarded.push(ev);
       },
     };
     applyFindLoad(w);
@@ -115,6 +115,30 @@ describe("applyFindLoad", () => {
     const e = makeEnv();
     e.fire(e.ctl, { type: "zl:tabsOp", code: "..." });
     expect(e.evals.length).toBe(0);
+  });
+
+  it("#550: activates the domInspect bundle on the carrying ctl event only", () => {
+    const e = makeEnv("__zlDomInspect");
+    const ctlMsg = { type: "zl:domInspectCtl", on: true, code: "..." };
+    e.fire(e.ctl, ctlMsg);
+    expect(e.evals).toEqual(["..."]);
+    expect(e.forwarded.length).toBe(1);
+    /* A later ctl (re-authorize): already installed, the module's own
+       listener owns the wire - no re-eval, no second handover. */
+    e.fire(e.ctl, { ...ctlMsg });
+    expect(e.evals.length).toBe(1);
+    expect(e.forwarded.length).toBe(1);
+    /* Revoke carries no code: nothing to evaluate, nothing to hand over. */
+    e.fire(e.ctl, { type: "zl:domInspectCtl", on: false });
+    expect(e.evals.length).toBe(1);
+    expect(e.forwarded.length).toBe(1);
+  });
+
+  it("#550: ignores domInspect ctl messages without code", () => {
+    const e = makeEnv("__zlDomInspect");
+    e.fire(e.ctl, { type: "zl:domInspectCtl", on: true });
+    expect(e.evals.length).toBe(0);
+    expect(e.forwarded.length).toBe(0);
   });
 
   it("registers nothing without a controller", () => {

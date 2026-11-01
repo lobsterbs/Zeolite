@@ -62,6 +62,8 @@ pub const VLOC: &str = "__zl";
 /// not the virtual location object: they are string reflections
 /// of the page URL (#238).
 const DOC_URL: &str = "__zl.href";
+/// #532: document.baseURI renames read the virtual base view.
+const DOC_BASE: &str = "__zl.baseURI";
 
 /// Receivers whose .location read is the page location.
 const RECEIVERS: [&str; 6] = ["window", "self", "globalThis", "document", "top", "parent"];
@@ -105,6 +107,7 @@ pub fn rewrite_with_reason(js: &str, cap: usize) -> (String, &'static str) {
     }
     if !(js.contains("location")
         || js.contains("documentURI")
+        || js.contains("baseURI")
         || (js.contains("document") && js.contains("URL")))
     {
         return (js.to_string(), "no-candidate");
@@ -250,6 +253,27 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                     }
                 }
             }
+            // #532: document.baseURI is the frozen base URL
+            // reflection (HTML standard, first <base href> with a
+            // non-empty href wins). Same read-only rename class as
+            // document.URL: writes, deletes and update targets stay
+            // native via native_targets, and a shadowed local
+            // document binding never renames.
+            AstKind::StaticMemberExpression(m)
+                if m.property.name.as_str() == "baseURI"
+                    && !self.native_targets.contains(&m.span) =>
+            {
+                if let Expression::Identifier(obj) = &m.object {
+                    if obj.name.as_str() == "document"
+                        && obj.reference_id.get().is_some_and(|rid| {
+                            self.sem.scoping().get_reference(rid).symbol_id().is_none()
+                        })
+                    {
+                        self.edits
+                            .push((m.span.start as usize, m.span.end as usize, DOC_BASE));
+                    }
+                }
+            }
             // #331: a computed property read with a STRING LITERAL
             // key carries the same meaning as the static form;
             // minified and obfuscated bundles reach for brackets.
@@ -288,6 +312,22 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
                                         m.span.start as usize,
                                         m.span.end as usize,
                                         DOC_URL,
+                                    ));
+                                }
+                            }
+                        }
+                        "baseURI" => {
+                            if let Expression::Identifier(obj) = &m.object {
+                                if obj.name.as_str() == "document"
+                                    && obj.reference_id.get().is_some_and(|rid| {
+                                        self.sem.scoping().get_reference(rid).symbol_id().is_none()
+                                    })
+                                    && !self.native_targets.contains(&m.span)
+                                {
+                                    self.edits.push((
+                                        m.span.start as usize,
+                                        m.span.end as usize,
+                                        DOC_BASE,
                                     ));
                                 }
                             }
@@ -425,6 +465,16 @@ mod tests {
         );
         assert_eq!(rw("var u = document.URL;"), "var u = __zl.href;");
         assert_eq!(rw("var u = document.documentURI;"), "var u = __zl.href;");
+        // #532: document.baseURI renames to the virtual base view.
+        assert_eq!(rw("var b = document.baseURI;"), "var b = __zl.baseURI;");
+        assert_eq!(rw("var b = document['baseURI'];"), "var b = __zl.baseURI;");
+        // writes, deletes and update targets stay native
+        assert_eq!(rw("document.baseURI = '/x';"), "document.baseURI = '/x';");
+        assert_eq!(rw("delete document.baseURI;"), "delete document.baseURI;");
+        assert_eq!(rw("document.baseURI++;"), "document.baseURI++;");
+        // a shadowed local document binding never renames
+        let js = "function f(document) { return document.baseURI; }";
+        assert_eq!(rw(js), js);
         // a deeper chain keeps the tail.
         assert_eq!(
             rw("document.URL.startsWith('x');"),

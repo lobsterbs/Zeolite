@@ -2,11 +2,18 @@
    synchronous methods also accept functions and must pass unchanged. */
 const CALLBACK_METHODS = new Set([
   "runtime.sendMessage",
+  "runtime.getPlatformInfo",
+  "runtime.getBrowserInfo",
   "tabs.get", "tabs.getCurrent", "tabs.query", "tabs.create", "tabs.update", "tabs.remove", "tabs.sendMessage",
   "windows.get", "windows.getCurrent", "windows.getLastFocused", "windows.getAll",
   "scripting.executeScript", "scripting.insertCSS",
   "contextMenus.remove", "contextMenus.removeAll", "menus.remove", "menus.removeAll",
+  "action.isEnabled", "action.getTitle", "action.getBadgeText", "action.getBadgeBackgroundColor", "action.getBadgeTextColor", "action.getPopup",
+  "browserAction.isEnabled", "browserAction.getTitle", "browserAction.getBadgeText", "browserAction.getBadgeBackgroundColor", "browserAction.getBadgeTextColor", "browserAction.getPopup",
+  "pageAction.isShown", "pageAction.getTitle", "pageAction.getPopup",
+  "runtime.openOptionsPage",
   "downloads.download", "downloads.search",
+  "i18n.getAcceptLanguages",
   "permissions.contains", "permissions.getAll", "permissions.request", "permissions.remove",
   "notifications.create", "notifications.update", "notifications.clear", "notifications.getAll",
   "cookies.get", "cookies.getAll", "cookies.set", "cookies.remove",

@@ -72,7 +72,8 @@ describe("blob worker wrapper helpers (#537)", () => {
       'importScripts("' + prelude + '");\nSRC',
     );
     expect(zlBlobWrapSource("module", prelude, "SRC")).toBe(
-      'import "' + prelude + '";\nSRC',
+      'import "' + prelude + '";\nSRC' +
+        '\n;try{URL.revokeObjectURL(self.location.href)}catch{}',
     );
   });
 });
@@ -214,6 +215,11 @@ describe("applyRelay blob worker wrapping (#537)", () => {
       new W("blob:https://engine.host/mod", { type: "module" });
       const src = String((log.blobs[0].parts as string[])[0]);
       expect(src.startsWith('import "https://engine.host/zl-bw/?c=')).toBe(true);
+      /* #537 regression: the module wrapper self-revokes at the end of
+         its body (Chromium 131 loads the module blob asynchronously,
+         past the constructor), so the constructor must NOT revoke it */
+      expect(src.endsWith('\n;try{URL.revokeObjectURL(self.location.href)}catch{}')).toBe(true);
+      expect(log.revoked).toEqual([]);
     });
   });
 
@@ -395,6 +401,16 @@ describe("nested blob workers in a worker realm (#537)", () => {
       /* non-blob nested URLs pass to the native ctor untouched */
       new W("https://up.example/w.js");
       expect(built[1].u).toBe("https://up.example/w.js");
+
+      /* #537 regression: a nested MODULE worker keeps its wrapper entry
+         alive (async blob load on Chromium 131) and the wrapper source
+         self-revokes at the end of its body */
+      new W("blob:https://engine.host/orig-mod", { type: "module" });
+      expect(built[2].u).toBe("blob:child-2");
+      const msrc = String((blobParts[1].parts as string[])[0]);
+      expect(msrc.startsWith('import "https://engine.host/zl-bw/?c=')).toBe(true);
+      expect(msrc.endsWith('\n;try{URL.revokeObjectURL(self.location.href)}catch{}')).toBe(true);
+      expect(revoked).toEqual(["blob:child-1"]);
 
       /* the nested relay forwarder moves only wrapper shapes */
       const fwd = listeners.find((x) => x.t === "message")?.l as

@@ -12,8 +12,11 @@
      surfaced with a mapped Location, cookies captured first.
    - SameSite enforced only via the opt-in knob (off by default):
      every proxied request is engine-initiated, so the site
-     context is approximated from the referrer. SameSite=None
-     without Secure is always rejected.
+     context is the verified requesting-client context when the
+     engine holds one (the decoded referrer is only the compat
+     fallback), and the site key is schemeful: scheme plus
+     registrable domain (#534). SameSite=None without Secure is
+     always rejected.
    - document.cookie is virtualized by the bootstrap
      (zl:docCookie); this jar stays authoritative for
      engine-initiated requests, even though the transport
@@ -31,12 +34,15 @@ import { getDomain, getPublicSuffix } from "tldts";
 
 export type SameSite = "strict" | "lax" | "none";
 
-/* 2.2 Arsenide: opt-in SameSite enforcement. "off" (default) keeps the
-   1.4 behavior. "approx" enforces the attribute with a site context the
-   caller supplies: the SW passes the decoded referrer (the page that
-   initiated the request) and whether the request is a top-level
-   navigation. Requests without a decodable initiator are treated as
-   same-site; that is the honest limit of an engine-initiated fetch. */
+/* 2.2 Arsenide, #534: opt-in SameSite enforcement. "off" (default)
+   keeps the 1.4 behavior. "approx" enforces the attribute with a site
+   context the caller supplies: the SW passes the requesting client
+   context when it holds one (the decoded referrer is the compat
+   fallback) and whether the request is a top-level navigation. The
+   site comparison is schemeful: the key is scheme plus registrable
+   domain, so an http initiator and an https request are cross-site.
+   Requests without a decodable initiator are treated as same-site;
+   that is the honest limit of an engine-initiated fetch. */
 export type SameSitePolicy = "off" | "approx";
 
 /* Session import merge rules for jarMerge (2.2 Arsenide). */
@@ -91,12 +97,51 @@ export interface VirtualOrigin {
   pathBase: string;
 }
 
-/** One admission decision, for tests and diagnostics. */
+/** One admission decision, for tests and diagnostics.
+    #520: successful admissions also carry the cookie view the jar now
+    holds (stored) or held before the deletion (deleted), whether an
+    existing identity was replaced, and the jar namespace — the seam
+    cookies.onChanged observes. */
 export interface SetCookieResult {
   name: string;
   stored: boolean;
   deleted: boolean;
   rejected?: string;
+  cookie?: Cookie;
+  replaced?: boolean;
+  namespace?: string;
+}
+
+/* ---- #520: jar merge observation ------------------------------------
+
+   One hook, fired from admitCookie after every real admission (an
+   upstream Set-Cookie capture, a document.cookie write, or an
+   extension cookies.set): the extensions bridge maps these onto
+   cookies.onChanged with Firefox causes. Nothing fires for rejected
+   or no-op admissions. */
+
+export interface JarCookieChange {
+  result: SetCookieResult;
+  responseUrl: string;
+  fromScript: boolean;
+}
+
+const jarChangeListeners = new Set<(c: JarCookieChange) => void>();
+
+export function onCookieJarChange(l: (c: JarCookieChange) => void): () => void {
+  jarChangeListeners.add(l);
+  return () => jarChangeListeners.delete(l);
+}
+
+function noteJarChange(result: SetCookieResult, responseUrl: string, fromScript: boolean): void {
+  if (!result.cookie) return;
+  for (const l of [...jarChangeListeners]) {
+    try {
+      l({ result, responseUrl, fromScript });
+    } catch {
+      /* a listener must never break the admission path */
+    }
+  }
 }
 
 /* ---- virtual-origin registry --------------------------------------- */
@@ -142,6 +187,12 @@ const jars = new Map<string, Cookie[]>();
    jar with lb_inc. */
 
 const PROFILE_DEFAULT = "default";
+/** #520: cookies.onChanged surfaces only admissions into this durable
+    namespace — extension reads see jarDefaultEnumeration, so events
+    from session-profile jars must not leak. */
+export function isDefaultJarNamespace(ns: string | undefined): boolean {
+  return ns === PROFILE_DEFAULT;
+}
 /* A frame recovered from an authenticated handle may beat its host
    window's profile re-push after a worker restart. Keep that request
    cookie-free until the host re-establishes its profile. */
@@ -508,7 +559,10 @@ function siteOfHost(host: string): string {
 /* SameSite gate (2.2 Arsenide, opt-in). Off = attach as before. Under
    "approx": None always passes (admission already required Secure);
    the cookie's effective policy is its attribute, null meaning lax
-   (the browser default). Same-site or unknown initiator passes;
+   (the browser default). #534: the site comparison is schemeful, the
+   same key browsers use: scheme plus registrable domain, so an http
+   initiator and an https request are cross-site even on the same
+   registrable domain. Same-site or unknown initiator passes;
    cross-site passes only lax on a top-level navigation. */
 function sameSiteAllows(c: Cookie, u: ParsedUrl, ctx?: CookieRequestContext): boolean {
   if (sameSitePolicy !== "approx") return true;
@@ -516,7 +570,8 @@ function sameSiteAllows(c: Cookie, u: ParsedUrl, ctx?: CookieRequestContext): bo
   if (effective === "none") return true;
   const init = ctx?.initiator ? parseUrl(ctx.initiator) : null;
   if (!init) return true; /* unknown initiator: honest approximation */
-  if (siteOfHost(u.host) === siteOfHost(init.host)) return true;
+  const siteKey = (x: ParsedUrl): string => (x.secure ? "https" : "http") + " " + siteOfHost(x.host);
+  if (siteKey(u) === siteKey(init)) return true;
   return effective === "lax" && ctx?.navigation === true;
 }
 
@@ -742,13 +797,29 @@ function admitCookie(
     const before = jar.length;
     /* #337: a document.cookie write never deletes an HttpOnly
        cookie; only a server response retires one. */
-    const kept = jar.filter((c) => !sameCookie(c) || (fromScript && c.httpOnly));
+    let removedCookie: Cookie | null = null;
+    const kept = jar.filter((c) => {
+      if (sameCookie(c) && !(fromScript && c.httpOnly)) {
+        removedCookie = c;
+        return false;
+      }
+      return true;
+    });
     if (kept.length !== before) {
       if (kept.length) jars.set(key, kept);
       else jars.delete(key);
       schedulePersist();
       traceDecision({ subsystem: "cookies", original: responseUrl, result: "deleted " + name });
-      return { name, stored: false, deleted: true };
+      const result: SetCookieResult = {
+        name,
+        stored: false,
+        deleted: true,
+        cookie: removedCookie ?? undefined,
+        replaced: true,
+        namespace,
+      };
+      noteJarChange(result, responseUrl, fromScript);
+      return result;
     }
     return { name, stored: false, deleted: false };
   }
@@ -780,7 +851,9 @@ function admitCookie(
   jars.set(key, jar);
   schedulePersist();
   traceDecision({ subsystem: "cookies", original: responseUrl, result: "stored " + name });
-  return { name, stored: true, deleted: false };
+  const result: SetCookieResult = { name, stored: true, deleted: false, cookie: fresh, replaced: idx >= 0, namespace };
+  noteJarChange(result, responseUrl, fromScript);
+  return result;
 }
 
 /** Jar header view of a transport Response. Response construction
@@ -857,12 +930,23 @@ export function cookieHeaderFor(requestUrl: string, ctx?: CookieRequestContext):
     The page keeps an eventually-consistent cache because the getter
     is synchronous while this jar lives in the SW. */
 export function documentCookieRead(pageUrl: string, clientId?: string): string {
+  /* #534: the 5.4 document-scope matcher is shared with the
+     cookieStore facade records. */
+  return matchDocumentCookies(pageUrl, clientId).map((c) => c.name + "=" + c.value).join("; ");
+}
+
+/* #534: RFC 6265 5.4 document-scope matching shared by document.cookie
+   reads and the cookieStore facade records: every cookie whose domain
+   and path scope match the document URL, never the HttpOnly ones,
+   expired cookies filtered out, serialized in the same order the
+   Cookie header uses (longer paths first, then creation order). */
+function matchDocumentCookies(pageUrl: string, clientId?: string): Cookie[] {
   const u = parseUrl(pageUrl);
-  if (!u) return "";
+  if (!u) return [];
   const now = Date.now();
   const namespace = namespaceForClient(clientId);
   /* #366: the shared unbound namespace admits nothing on any seam. */
-  if (namespace === UNBOUND_GLOBAL_NAMESPACE) return "";
+  if (namespace === UNBOUND_GLOBAL_NAMESPACE) return [];
   const matched: Cookie[] = [];
   for (const [key, list] of jars) {
     if (!inProfile(key, namespace)) continue;
@@ -874,11 +958,69 @@ export function documentCookieRead(pageUrl: string, clientId?: string): string {
       if (domainOk && (!c.secure || u.secure) && pathMatch(u.path, c.path)) matched.push(c);
     }
   }
-  /* RFC 6265 5.4: same ordering the Cookie header uses, longer
-     paths first then creation order, so document.cookie serializes
-     identically to an engine request for the same URL. */
   matched.sort((a, b) => b.path.length - a.path.length || a.created - b.created);
-  return matched.map((c) => c.name + "=" + c.value).join("; ");
+  return matched;
+}
+
+/** #534: one cookieStore facade record. The record NEVER carries the
+    upstream Domain string: the page host is opaque by design, so the
+    domain member is omitted (a documented residual), while the path
+    scope, secure, sameSite and expiry semantics stay real. */
+export interface FacadeCookie {
+  name: string;
+  value: string;
+  /** Real document path scope (the #144 path-visible relaxation). */
+  path: string;
+  secure: boolean;
+  sameSite: SameSite | null;
+  /** Expiry epoch ms, 0 for a session cookie. */
+  expires: number;
+}
+
+/** #534: the cookieStore facade records for the page's own document
+    URL: the 5.4 document-scope match as structured records. */
+export function documentCookieItems(pageUrl: string, clientId?: string): FacadeCookie[] {
+  return matchDocumentCookies(pageUrl, clientId).map((c) => ({
+    name: c.name,
+    value: c.value,
+    path: c.path,
+    secure: c.secure,
+    sameSite: c.sameSite,
+    expires: c.expires,
+  }));
+}
+
+/** #534: one cookieStore facade operation (the SW-side pure seam the
+    control plane calls). set serializes an init dict to a
+    document.cookie write: HttpOnly is never representable, and a
+    page-supplied Domain is IGNORED (host-only admission) because the
+    page cannot know its real upstream host and must not probe it by
+    oracle. delete writes a Max-Age=0 deletion. Both ride the
+    script-write admission, so an HttpOnly cookie can never be
+    replaced or deleted by a facade call (the #337 rule). */
+export function cookieStoreOp(
+  op: string | undefined,
+  init: Record<string, unknown> | undefined,
+  pageUrl: string,
+  clientId?: string,
+): { items: FacadeCookie[]; view: string } {
+  if (init) {
+    if (op === "set") {
+      const parts: string[] = [String(init.name ?? "") + "=" + String(init.value ?? "")];
+      if (typeof init.path === "string" && init.path.startsWith("/")) parts.push("Path=" + init.path);
+      if (typeof init.expires === "number" && init.expires > 0) parts.push("Expires=" + new Date(init.expires).toUTCString());
+      const ss = init.sameSite;
+      if (ss === "strict" || ss === "lax" || ss === "none") parts.push("SameSite=" + ss);
+      if (init.secure === true) parts.push("Secure");
+      documentCookieWrite(pageUrl, parts.join("; "), clientId);
+    } else if (op === "delete") {
+      const parts: string[] = [String(init.name ?? "") + "="];
+      if (typeof init.path === "string" && init.path.startsWith("/")) parts.push("Path=" + init.path);
+      parts.push("Max-Age=0");
+      documentCookieWrite(pageUrl, parts.join("; "), clientId);
+    }
+  }
+  return { items: documentCookieItems(pageUrl, clientId), view: documentCookieRead(pageUrl, clientId) };
 }
 
 /** document.cookie write (RFC 6265 5.6): admission against the page

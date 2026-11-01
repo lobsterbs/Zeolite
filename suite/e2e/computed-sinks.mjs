@@ -39,7 +39,12 @@ const PNG_1x1 = Buffer.from(
 );
 
 const MOD = (name) => "export default '" + name + "-ok';";
-const PAGE_CASES = 17;
+/* #525 raw import.meta.url value: the external module reports its
+   own URL and the pathname derived from it. Direct the value is
+   the fixture origin URL; proxied it must be the VIRTUAL module URL
+   (engine origin, real path, never a token route). */
+const MOD_META = "export const raw = import.meta.url; export const pathname = new URL(import.meta.url).pathname;";
+const PAGE_CASES = 21;
 
 const PAGE = [
   "<!doctype html><html><body><p id='pm'>cs-marker</p>",
@@ -59,6 +64,8 @@ const PAGE = [
   "rec('classicWorker', new Promise(function(res, rej){ var w = new Worker('./w.js' + ''); w.onmessage = function(e){ res(e.data && e.data.dep); }; w.onerror = function(e){ rej(new Error('worker err ' + (e.message || ''))); }; }));",
   "rec('moduleWorker', new Promise(function(res, rej){ var w = new Worker('/mw.js' + '', {type: 'module'}); w.onmessage = function(e){ res(e.data && e.data.dep2); }; w.onerror = function(e){ rej(new Error('worker err ' + (e.message || ''))); }; }));",
   "rec('wsEcho', new Promise(function(res, rej){ try { var s = new WebSocket('ws://127.0.0.1:" + FX_PORT + "/ws' + ''); var done = false; s.onopen = function(){ s.send('hi'); }; s.onmessage = function(ev){ if (done) return; done = true; try { res(String(ev.data)); } catch (e) { res('opaque'); } }; s.onerror = function(){ rej(new Error('ws error')); }; setTimeout(function(){ if (!done) rej(new Error('ws timeout')); }, 12000); } catch (e) { rej(e); } }));",
+  "rec('metaExtPathname', import('/dir/mods/meta.js' + '').then(function(m){ return m.pathname; }));",
+  "rec('metaExtRaw', import('/dir/mods/meta.js' + '').then(function(m){ return m.raw; }));",
   "window.addEventListener('message', function(ev){ if (ev.data === 'cs-ping') { window.__r.postMsgTarget = { ok: true, val: 'delivered' }; } });",
   "try { window.postMessage('cs-ping', new URL('.', location.href).origin + ''); window.__r.postMsgSent = { ok: true, val: 'sent' }; } catch (e) { window.__r.postMsgSent = { ok: false, err: String(e) }; }",
   "var cfg = '/api/notafetch' + '';",
@@ -69,6 +76,8 @@ const PAGE = [
   "(async function(){ try {",
   "  const u = new URL('./res.json?m=3' + '', import.meta.url);",
   "  const t = await (await fetch(u)).text();",
+  "  window.__r.metaInlinePathname = { ok: true, val: new URL(import.meta.url).pathname };",
+  "  window.__r.metaInlineRaw = { ok: true, val: String(import.meta.url) };",
   "  window.__r.metaUrlInline = { ok: true, val: JSON.parse(t).path };",
   "} catch (e) { window.__r.metaUrlInline = { ok: false, err: String(e) }; } })();",
   "<" + "/script>",
@@ -95,6 +104,7 @@ function fixtureRoute(p, u) {
   if (p === "/dep2.js") return { ct: "application/javascript", body: MOD("dep2") };
   if (p === "/dir/mods/rel.js") return { ct: "application/javascript", body: MOD("rel") };
   if (p === "/dir/mods/tpl.js") return { ct: "application/javascript", body: MOD("tpl") };
+  if (p === "/dir/mods/meta.js") return { ct: "application/javascript", body: MOD_META };
   if (p === "/mods/root.js" || p === "/mods/q.js") return { ct: "application/javascript", body: MOD(p === "/mods/root.js" ? "root" : "q") };
   if (p === "/dir/img/pic.png") return { ct: "image/png", body: PNG_1x1 };
   return { ct: "application/json", body: echo(u) };
@@ -169,7 +179,8 @@ async function check(name, fn) {
 const CASE_KEYS = [
   "fetchRelConcat", "fetchTplQuery", "fetchCond", "newUrlBaseUri", "dynImportRoot",
   "dynImportRel", "dynImportTpl", "dynImportQuery", "imgPropComputed", "classicWorker",
-  "moduleWorker", "wsEcho", "cfgUnchanged", "metaUrlInline",
+  "moduleWorker", "wsEcho", "cfgUnchanged", "metaUrlInline", "metaExtPathname",
+  "metaInlinePathname",
 ];
 
 let engineProc = null;
@@ -270,6 +281,34 @@ async function main() {
   await check("postMsgTarget delivered in proxied mode", () => {
     const p = proxied.postMsgTarget;
     if (!p || !p.ok) throw new Error("postMessage with computed targetOrigin not delivered: " + JSON.stringify(p));
+    return p.val;
+  });
+  /* #525 raw-value checks: the full import.meta.url/baseURI string can
+   never be byte-equal across modes (the host is opaque by design, the
+   #32/#144 contract), so parity here is: same real path, engine
+   origin, and never a token-shaped route. */
+  await check("import.meta.url external module raw value is the virtual module URL", () => {
+    const d = direct.metaExtRaw, p = proxied.metaExtRaw;
+    if (!d || !d.ok || !p || !p.ok) throw new Error("metaExtRaw missing: " + JSON.stringify({ d, p }));
+    const du = new URL(d.val), pu = new URL(p.val);
+    if (pu.pathname !== du.pathname) throw new Error("path mismatch: " + pu.pathname + " vs " + du.pathname);
+    if (pu.origin !== ENGINE) throw new Error("virtual module URL not on the engine origin: " + p.val);
+    return p.val;
+  });
+  await check("import.meta.url inline module raw value is the virtual document URL", () => {
+    const d = direct.metaInlineRaw, p = proxied.metaInlineRaw;
+    if (!d || !d.ok || !p || !p.ok) throw new Error("metaInlineRaw missing: " + JSON.stringify({ d, p }));
+    const du = new URL(d.val), pu = new URL(p.val);
+    if (pu.pathname !== du.pathname) throw new Error("path mismatch: " + pu.pathname + " vs " + du.pathname);
+    if (pu.origin !== ENGINE) throw new Error("virtual document URL not on the engine origin: " + p.val);
+    return p.val;
+  });
+  await check("document.baseURI exposes the virtual path, never a route", () => {
+    const d = direct.baseUriShape, p = proxied.baseUriShape;
+    if (!d || !d.ok || !p || !p.ok) throw new Error("baseUriShape missing: " + JSON.stringify({ d, p }));
+    const du = new URL(d.val), pu = new URL(p.val);
+    if (pu.pathname !== du.pathname) throw new Error("baseURI path mismatch: " + pu.pathname + " vs " + du.pathname);
+    if (pu.pathname.split("/").some((s) => s.length > 40)) throw new Error("baseURI path looks token-shaped: " + p.val);
     return p.val;
   });
   await check("upstream hit sets identical across modes", () => {

@@ -83,6 +83,11 @@ via the public suffix list (tldts, private-section suffixes included),
 the same site key browsers use. Requests the SW follows across
 redirect hops keep the original initiator context.
 
+Since #534 the key is schemeful: scheme plus registrable domain, so a
+secure origin and a plain-HTTP origin sharing a registrable domain are
+cross-site for SameSite decisions, matching the modern browsers'
+schemeful same-site definition.
+
 ## Redirect hops (2.2 Arsenide)
 
 The transport's fetch adapter surfaces 3xx responses instead of

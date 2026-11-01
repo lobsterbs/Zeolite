@@ -15,6 +15,8 @@ import {
   jarSnapshot,
   registerOrigin,
   setSameSitePolicy,
+  cookieStoreOp,
+  documentCookieItems,
 } from "../cookies";
 
 beforeEach(() => cookiesResetForTests());
@@ -216,8 +218,63 @@ describe("samesite policy knob (2.2)", () => {
     expect(cookieHeaderFor("https://a.example/")).toBe("s=1");
   });
 
+  it("approx: a cross-scheme initiator is cross-site (schemeful #534)", () => {
+    setSameSitePolicy("approx");
+    applySetCookie("https://a.example/", resp(["s=1; SameSite=Strict", "l=2; SameSite=Lax"]));
+    /* http vs https on the same registrable domain: cross-site. */
+    expect(cookieHeaderFor("https://a.example/", { initiator: "http://a.example/x" })).toBeNull();
+    expect(cookieHeaderFor("https://a.example/", { initiator: "http://a.example/x", navigation: true })).toBe("l=2");
+  });
+
+  it("approx: https subdomains stay same-site (schemeful #534)", () => {
+    setSameSitePolicy("approx");
+    applySetCookie("https://a.example/", resp(["s=1; SameSite=Strict"]));
+    expect(cookieHeaderFor("https://a.example/", { initiator: "https://sub.a.example/p" })).toBe("s=1");
+  });
+
   it("unknown knob values fall back to off and report it", () => {
     expect(setSameSitePolicy("bogus")).toBe("off");
+  });
+});
+
+describe("cookieStore facade records (#534)", () => {
+  it("exposes scoped records without a domain member and without HttpOnly", () => {
+    applySetCookie("https://a.example/dir/", resp(["v=1; Path=/dir", "h=2; HttpOnly", "s=3; Secure; SameSite=None"]));
+    const items = documentCookieItems("https://a.example/dir/x");
+    expect(items.map((i) => i.name)).toEqual(["v", "s"]);
+    const v = items.find((i) => i.name === "v")!;
+    expect(v.value).toBe("1");
+    expect(v.path).toBe("/dir");
+    expect(v).not.toHaveProperty("domain");
+    expect(items.find((i) => i.name === "s")!.secure).toBe(true);
+    expect(items.find((i) => i.name === "s")!.sameSite).toBe("none");
+  });
+
+  it("cookieStoreOp set stores through the script-write admission and the reply carries the fresh view", () => {
+    const r = cookieStoreOp("set", { name: "n", value: "7", path: "/" }, "https://a.example/dir/");
+    expect(r.view).toContain("n=7");
+    expect(r.items.map((i) => i.name)).toContain("n");
+  });
+
+  it("cookieStoreOp ignores a page-supplied domain (host-only admission, no host oracle)", () => {
+    cookieStoreOp("set", { name: "n", value: "7", domain: "b.example" }, "https://a.example/dir/");
+    expect(documentCookieItems("https://a.example/dir/").map((i) => i.name)).toContain("n");
+    expect(documentCookieItems("https://sub.a.example/dir/").map((i) => i.name)).not.toContain("n");
+  });
+
+  it("cookieStoreOp delete removes the cookie", () => {
+    applySetCookie("https://a.example/", resp(["n=7"]));
+    const r = cookieStoreOp("delete", { name: "n" }, "https://a.example/");
+    expect(r.view).toBe("");
+    expect(r.items).toEqual([]);
+  });
+
+  it("cookieStoreOp set with an expiry keeps the epoch in the record", () => {
+    const exp = Date.now() + 60000;
+    const r = cookieStoreOp("set", { name: "e", value: "1", expires: exp }, "https://a.example/");
+    const rec = r.items.find((i) => i.name === "e")!;
+    expect(rec.expires).toBeGreaterThan(Date.now() - 1000);
+    expect(rec.expires).toBeLessThanOrEqual(exp);
   });
 });
 

@@ -5,6 +5,8 @@
    real destination. */
 
 import { swShimApply } from "../swshim";
+import { NativeURL } from "./anchorshim";
+import { controlQuery } from "./controlquery";
 import { swc } from "./siteid";
 
 /* The wrapper shapes the prelude posts (zl:"ws" / zl:"mint") must
@@ -116,8 +118,17 @@ export const zlBlobWrapSource = (kind: "classic" | "module", preludeUrl: string,
      dynamic-import shape (the CI SWIMPORT gate), and a static import
      evaluates the prelude before the module body either way. The
      /zl-bw/ response is a plain script with no exports, a valid ES
-     module, and blob-worker fetches reach the SW like any other. */
-  ? "import " + JSON.stringify(preludeUrl) + ";\n" + text
+     module, and blob-worker fetches reach the SW like any other.
+     The module wrapper also revokes its OWN blob URL at the end of
+     the module body: Chromium 131 resolves a module worker's blob
+     script asynchronously, after the constructor returns, so the
+     page-side immediate revoke that is safe for the synchronous
+     classic load would kill the module load instead (an empty
+     worker error event; the prelude import never reaches the SW).
+     The module body only runs once the load succeeded, so the
+     self-revoke is both late enough and bounded. */
+  ? "import " + JSON.stringify(preludeUrl) + ";\n" + text +
+    "\n;try{URL.revokeObjectURL(self.location.href)}catch{}"
   : "importScripts(" + JSON.stringify(preludeUrl) + ");\n" + text;
 
 export const zlSyncBlobText = (u: string): string | null => {
@@ -303,10 +314,16 @@ addEventListener("message", windowRelay);
    super(wrapped ?? u, o);
    this.addEventListener("message", relay);
    tapChannel(this);
-   /* #537: the wrapper blob is pinned by the worker's own pending
-      load (the same guarantee native code relies on when it revokes
-      a URL right after construction), so the entry can go now. */
-   if (wrapped) {
+   /* #537: the CLASSIC wrapper blob is pinned by the worker's own
+      synchronous pending load (the same guarantee native code relies
+      on when it revokes a URL right after construction), so the entry
+      can go now. A MODULE wrapper must NOT be revoked here: Chromium
+      131 resolves the module worker's blob script asynchronously,
+      after the constructor returns, so revoking now kills the load
+      (an empty worker error event; the prelude import never reaches
+      the SW). The module wrapper source self-revokes at the end of
+      its body instead (see zlBlobWrapSource). */
+   if (wrapped && (!o || o.type !== "module")) {
     try {
      URL.revokeObjectURL(wrapped);
     } catch { /* best effort */ }
@@ -338,6 +355,22 @@ addEventListener("message", windowRelay);
      lazy base: the marker plus the injected vpath once both are
      known, else the captured raw URL (the old wave-3 shape, which
      the kernel safely refuses). */
+  /* #576: wire the shim dependencies so registration is truthful:
+     the engine origin (to recognize rewriter-minted token arguments),
+     the bounded zl:decodeRoutes oracle, and a reply-port forward - the
+     register() promise settles only on the kernel guest confirmation,
+     and a rejection carries the kernel failure reason. */
+  const swEngOrigin = (() => {
+    try {
+      return new NativeURL(pageUrl).origin;
+    } catch {
+      return "";
+    }
+  })();
+  const swQuery = (message: unknown, timeout: number): Promise<{ ok?: boolean; error?: string } | null> =>
+    new Promise((res) => {
+      controlQuery(message, res, timeout);
+    });
   swShimApply(
     NS as object,
     { get: () => LS.getItem(K), set: (v: string) => LS.setItem(K, v), clear: () => LS.removeItem(K) },
@@ -345,6 +378,17 @@ addEventListener("message", windowRelay);
       const vo = w.__zlVO;
       const vp = (w.__ZL as { vpath?: unknown } | undefined)?.vpath;
       return typeof vo === "string" && vo && typeof vp === "string" && vp[0] === "/" ? vo + vp : pageUrl;
+    },
+    {
+      engineOrigin: swEngOrigin,
+      baseWaitMs: 2000,
+      decodeRoutes: (routes) =>
+        swQuery({ type: "zl:decodeRoutes", routes }, 5000).then((r) => {
+          const d = (r as { dests?: unknown } | null)?.dests;
+          return Array.isArray(d) ? (d as (string | null)[]) : null;
+        }),
+      forwardRegister: (payload) => swQuery(payload, 30000),
+      forwardUnregister: (payload) => swQuery(payload, 5000),
     },
   );
  }

@@ -65,6 +65,15 @@ impl JsRewriter {
         self.inner.take_location_events()
     }
 
+    /// #532: the folded absolute upstream base once the first
+    /// <base href> was seen (None when no base element appeared).
+    /// The serve seam drains it per chunk and posts the hostless
+    /// form to the page so the virtual location view can serve
+    /// document.baseURI reads.
+    pub fn take_base(&self) -> Option<String> {
+        self.inner.effective_base()
+    }
+
     /// Feed one body chunk, get back everything that can be emitted now.
     pub fn process(&mut self, chunk: String) -> String {
         self.inner.process(&chunk)
@@ -94,6 +103,22 @@ impl JsRewriter {
     #[wasm_bindgen(js_name = "set_lazy_images")]
     pub fn set_lazy_images(&mut self) {
         self.inner.set_lazy_images();
+    }
+
+    /// #529: opt-in token-level decision tracing for this instance
+    /// (see trace.rs). Off by default: nothing is recorded and
+    /// nothing allocated.
+    #[wasm_bindgen(js_name = "set_trace")]
+    pub fn set_trace(&mut self, on: bool) {
+        self.inner.set_trace(on);
+    }
+
+    /// #529: drain this instance's aggregated (pass, decision)
+    /// counters as a deterministic JSON array and reset them. Fixed
+    /// vocabulary only - no source text or URL ever appears.
+    #[wasm_bindgen(js_name = "take_trace")]
+    pub fn take_trace(&self) -> String {
+        self.inner.take_trace()
     }
 }
 
