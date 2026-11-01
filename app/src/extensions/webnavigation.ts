@@ -35,18 +35,107 @@ export type NavigationInfo = NavigationCommitted;
 
 export type NavigationListener = (info: NavigationInfo) => void;
 
+/** #560 residual: Firefox's webNavigation UrlFilter. The engine now
+    accepts the full documented object (alongside the legacy webRequest
+    pattern-array form); every key present must match, as in Firefox. */
+export interface NavigationUrlFilter {
+  urlMatches?: string;
+  originAndPathMatches?: string;
+  urlPrefix?: string;
+  urlSuffix?: string;
+  urlContains?: string;
+  hostEquals?: string;
+  queryEquals?: string;
+  /** Ports of the URL: numbers or [min, max] pairs. An empty port
+      means the scheme default (80 http/ws, 443 https/wss). */
+  ports?: Array<number | [number, number]>;
+}
+
+type NavFilter = string[] | NavigationUrlFilter;
+
+function defaultPortFor(scheme: string): number | null {
+  if (scheme === "http:" || scheme === "ws:") return 80;
+  if (scheme === "https:" || scheme === "wss:") return 443;
+  if (scheme === "ftp:") return 21;
+  return null;
+}
+
+function portMatches(filter: NonNullable<NavigationUrlFilter["ports"]>, u: URL): boolean {
+  const explicit = u.port !== "" ? Number(u.port) : defaultPortFor(u.protocol);
+  if (explicit === null) return false;
+  return filter.some((p) => (Array.isArray(p) ? explicit >= p[0] && explicit <= p[1] : explicit === p));
+}
+
+/** Compile a Firefox UrlFilter into a predicate. Invalid regexes
+    throw here, at addListener time, like Firefox throws at the call. */
+export function navigationFilterPredicate(f: NavigationUrlFilter): (url: string) => boolean {
+  const urlRe = f.urlMatches !== undefined ? new RegExp(f.urlMatches) : null;
+  const opRe = f.originAndPathMatches !== undefined ? new RegExp(f.originAndPathMatches) : null;
+  return (url: string): boolean => {
+    let u: URL;
+    try {
+      u = new URL(url);
+    } catch {
+      return false;
+    }
+    if (f.hostEquals !== undefined && u.hostname !== f.hostEquals) return false;
+    if (f.urlContains !== undefined && !url.includes(f.urlContains)) return false;
+    if (f.urlPrefix !== undefined && !url.startsWith(f.urlPrefix)) return false;
+    if (f.urlSuffix !== undefined && !url.endsWith(f.urlSuffix)) return false;
+    if (f.queryEquals !== undefined && u.search.replace(/^\?/, "") !== f.queryEquals) return false;
+    if (f.ports !== undefined && !portMatches(f.ports, u)) return false;
+    if (urlRe !== null && !urlRe.test(url)) return false;
+    if (opRe !== null && !opRe.test(u.origin + u.pathname)) return false;
+    return true;
+  };
+}
+
+interface StoredFilter {
+  urls: string[] | null;
+  pred: ((url: string) => boolean) | null;
+}
+
+function storedFilterOf(filter: NavFilter | undefined): StoredFilter | null {
+  if (filter === undefined) return null;
+  if (Array.isArray(filter)) {
+    return { urls: filter.length > 0 ? filter : null, pred: null };
+  }
+  if (Object.keys(filter).length === 0) return null;
+  return { urls: null, pred: navigationFilterPredicate(filter) };
+}
+
 export class NavigationRegistry {
-  private readonly listeners = new Map<NavigationKind, Map<NavigationListener, string[] | null>>();
+  private readonly listeners = new Map<NavigationKind, Map<NavigationListener, StoredFilter | null>>();
 
   /** Subscribe to one navigation lifecycle kind, optionally with a
-      url filter (webRequest-style host patterns). */
-  subscribeKind(kind: NavigationKind, l: NavigationListener, urls?: string[]): () => void {
+      url filter: webRequest-style host patterns (string[]) or a
+      Firefox UrlFilter object (#560 residual). */
+  subscribeKind(kind: NavigationKind, l: NavigationListener, filter?: NavFilter): () => void {
     let set = this.listeners.get(kind);
     if (!set) {
       set = new Map();
       this.listeners.set(kind, set);
     }
-    set.set(l, urls && urls.length > 0 ? urls : null);
+    set.set(l, storedFilterOf(filter));
+    return () => {
+      set?.delete(l);
+    };
+  }
+
+  /** Subscribe with BOTH filter shapes at once: every pattern and the
+      compiled UrlFilter predicate must pass (AND). */
+  subscribeKindAnd(
+    kind: NavigationKind,
+    l: NavigationListener,
+    urls: string[],
+    pred: (url: string) => boolean,
+  ): () => void {
+    let set = this.listeners.get(kind);
+    if (!set) {
+      set = new Map();
+      this.listeners.set(kind, set);
+    }
+    set.set(l, { urls: urls.length > 0 ? urls : null, pred });
     return () => {
       set?.delete(l);
     };
@@ -71,8 +160,11 @@ export class NavigationRegistry {
       frameId: 0,
       timeStamp: Date.now(),
     };
-    for (const [l, urls] of [...set]) {
-      if (urls && !hostPatternsMatch(urls, url)) continue;
+    for (const [l, filter] of [...set]) {
+      if (filter) {
+        if (filter.urls && !hostPatternsMatch(filter.urls, url)) continue;
+        if (filter.pred && !filter.pred(url)) continue;
+      }
       try {
         l(info);
       } catch {

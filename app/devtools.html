@@ -33,6 +33,15 @@
       .doctor-fail { color: #c33; }
       .doctor-warn { color: #c80; }
       .doctor-unknown, .doctor-skipped { color: #888; }
+      #domPanel { margin: 12px; }
+      #domPanel button { margin-right: 6px; margin-bottom: 6px; padding: 5px 10px; cursor: pointer; }
+      #domHelp { color: #888; margin: 0 0 8px; max-width: 80ch; }
+      #domStatus { color: #888; font-weight: normal; }
+      #domStyles, #domConsoleList { white-space: pre-wrap; word-break: break-all; font: 12px/1.5 ui-monospace, monospace; max-height: 14em; overflow: auto; }
+      #domTree { font: 12px/1.5 ui-monospace, monospace; max-height: 18em; overflow: auto; }
+      #domTree .dn { cursor: pointer; padding-left: 1em; }
+      #domTree .dn:hover { background: #8881; }
+      #domTree .dn.sel { background: #88f3; }
     </style>
   </head>
   <body>
@@ -65,6 +74,17 @@
         <thead><tr><th>check</th><th>status</th><th>observation / next step</th></tr></thead>
         <tbody id="doctorRows"></tbody>
       </table>
+    </section>
+    <section id="domPanel" aria-label="DOM inspection">
+      <h2>DOM inspection <span id="domStatus" role="status">off (select a request row, then authorize)</span></h2>
+      <p id="domHelp">Inspection is per document and off by default: authorize a session for a selected request's client, then snapshot. The page bridge answers with serialized data only; revoked sessions and navigations end it.</p>
+      <button id="domAuthorize" type="button" disabled>Authorize</button>
+      <button id="domRevoke" type="button" disabled>Revoke</button>
+      <button id="domSnapshot" type="button" disabled>Snapshot</button>
+      <button id="domConsoleBtn" type="button" disabled>Console</button>
+      <pre id="domStyles">no node selected</pre>
+      <div id="domTree"></div>
+      <pre id="domConsoleList"></pre>
     </section>
     <h2>transport engine <select id="transportSelect"><option value="libcurl">libcurl (mbedTLS)</option><option value="epoxy">epoxy (rustls)</option></select></h2>
     <h2>rewrite tracing <label><input type="checkbox" id="traceToggle" /> enabled</label></h2>

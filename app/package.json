@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "vite build && esbuild src/bootstrap.ts --bundle --minify --format=iife --outfile=dist/bootstrap.js && esbuild src/worker-prelude.ts --bundle --minify --format=iife --outfile=dist/worker-prelude.js && esbuild src/finder.ts --bundle --minify --format=iife --outfile=dist/finder.js",
+    "build": "vite build && esbuild src/bootstrap.ts --bundle --minify --format=iife --outfile=dist/bootstrap.js && esbuild src/worker-prelude.ts --bundle --minify --format=iife --outfile=dist/worker-prelude.js && esbuild src/finder.ts --bundle --minify --format=iife --outfile=dist/finder.js && esbuild src/dominspect.ts --bundle --minify --format=iife --outfile=dist/dominspect.js",
     "check": "tsc --noEmit",
     "test": "vitest run"
   },

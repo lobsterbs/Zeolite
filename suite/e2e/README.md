@@ -16,7 +16,10 @@ fixture pages through `/?url=<target>` and asserts:
 
 - Routing: absolute and relative links, 302 redirects, SPA pushState
   with rerouted API fetches, reload, query-bearing fetches keep their
-  query exactly once (#38).
+  query exactly once (#38). Initial fragments, engine-followed redirect
+  fragments, meta refresh, form navigation, same-document anchors and
+  history back/forward are compared with direct Chromium (#543); fixture
+  wire paths are checked to ensure fragments never reach the server.
 - Recovery (#31): a malformed engine route and an unroutable unlisted
   target answer navigations with the engine-owned error page, never a
   bare text strand; the SPA and recovery checks all run against
@@ -25,11 +28,22 @@ fixture pages through `/?url=<target>` and asserts:
   routing), EventSource, sendBeacon, classic and shared workers
   (prelude, importScripts), localStorage/sessionStorage, document.cookie
   (jar round-trip and upstream Set-Cookie capture), IndexedDB, Cache
-  API, the navigator.serviceWorker shim.
+  API, the navigator.serviceWorker shim. SharedWorker tests compare a
+  direct Chromium oracle with proxied same-site multi-tab reuse and
+  cross-site isolation, classic/module/credentials keys, worker IDB and
+  cookie scope, and client-port close/reconnect behavior (#547).
 - Rewriter: img/src/srcset (including a data URL candidate), CSS url()
   in a linked stylesheet and an inline style block, iframe src, iframe
   srcdoc, base href folding, meta refresh navigation, module-script
   import specifiers.
+- Network inspector (#545): minted cross-origin fetch/XHR, sendBeacon,
+  EventSource, worker fetch, resource destination and navigation
+  fixtures are classified by observed request evidence.
+  Request.destination does not prove parser versus script creation;
+  same-origin requests that bypass the page re-emitter remain UNKNOWN.
+  Internal marker headers are absent upstream and from inspector and
+  extension-visible headers; request bodies and cookie values are not
+  recorded.
 - Privacy (#32/#34): window.__ZL carries no plaintext destination, page
   surfaces show only engine routes, two virtual contexts stay isolated
   (storage, cookie jar, Cache API names).
@@ -66,9 +80,10 @@ fixture pages through `/?url=<target>` and asserts:
 
 ## Honest gaps (not faked)
 
-- WebSocket bridge: skipped. The engine upgrades ws to wss by design
-  and the fixture origins are plain HTTP, so the bridge cannot be
-  exercised against loopback without a TLS fixture.
+- WebSocket bridge: skipped. Plaintext ws:// passes through since
+  #525, but the fixture origins are plain HTTP and a wss:// (or
+  plaintext ws://) terminator is not part of the fixture set, so the
+  bridge cannot be exercised here without a socket fixture.
 - SW restart: not covered yet.
 - SVG paint url() attributes (fill/stroke/filter/...): covered by the
   rewriter's Rust unit tests (#36), not here - a browser-side
@@ -167,8 +182,9 @@ infrastructure redesign (issue acceptance).
 
 ## Honest gaps (not faked)
 
-- WebSocket: needs a TLS fixture (the engine upgrades ws to wss by
-  design); same gap as the #35 suite.
+- WebSocket: needs a socket fixture (plaintext ws:// passes through
+  since #525, but neither suite ships a ws endpoint); same gap as the
+  #35 suite.
 - IDN hostnames: need a real domain; the fixtures are loopback IPs.
 - Downloads: the #90 registry is unit-tested; a fetch-shaped
   attachment is just another body probe, and a UI-observable download

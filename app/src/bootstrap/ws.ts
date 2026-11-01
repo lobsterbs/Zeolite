@@ -154,6 +154,13 @@ const disp = (e: Event) => {
             fire(new MessageEvent("message", { data, origin: u.origin }));
           });
         } else if (m.ev === "drain") {
+          /* #462/#546: the bridge acknowledges accepted bytes. Without a
+             transport write-acceptance surface (the vendored transports
+             today) the ack is the send-returned bridge acceptance, so
+             bufferedAmount is a transport-accepted-bytes ESTIMATE, not
+             native network backpressure; with the optional drainAt()
+             seam wired transport-side, the acks carry real acceptance
+             deltas. Either way the page counter never underflows. */
           if (typeof m.bytes === "number" && Number.isSafeInteger(m.bytes) && m.bytes >= 0)
             bufferedBytes = Math.max(0, bufferedBytes - m.bytes);
         } else if (m.ev === "error") {
@@ -185,6 +192,15 @@ const disp = (e: Event) => {
 
       Object.defineProperties(es, {
         readyState: { get: () => wsState },
+        /* #546: the URL the constructor resolved, serialized per the
+           native rules: base resolution, the scheme-less http(s)->ws(s)
+           switch, explicit ws/wss kept as written, fragments refused
+           (WHATWG throws on a non-null fragment, so the serialized
+           value can never carry one). The page constructed this
+           string, so nothing new leaks page-side; the SW decodes its
+           destination from its own virtual context, and engine-side
+           logs keep engine-side identity - the property is never
+           re-minted into a route and never the retargeted destination. */
         url: { value: u.href },
         protocol: { get: () => proto },
         binaryType: {
@@ -210,8 +226,12 @@ const disp = (e: Event) => {
             bufferedBytes += payload.bytes;
           },
         },
-        /* Counts queued bytes until the SW bridge accepts each frame.
-           The transport's remote/network backlog is not observable. */
+        /* Counts queued bytes until the transport accepts each frame.
+           #546: with no transport write-acceptance surface (the vendored
+           transports today) the drain acks are bridge-queue accounting;
+           with the optional WsHandle.drainAt() seam wired, they carry
+           the transport's accepted-byte deltas. The transport's remote
+           network backlog is not observable in either case. */
         bufferedAmount: { get: () => bufferedBytes },
       });
       return es;

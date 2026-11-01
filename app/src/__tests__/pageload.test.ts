@@ -105,6 +105,21 @@ describe("siteToken (keyed mode)", () => {
    mode and the doctype is then ignored. Doctype-less documents keep
    the stream-start placement (index 0) so they stay in quirks mode,
    no accidental upgrade. */
+describe("initScript fragment restore (#543)", () => {
+  it("restores a redirect fragment in the current engine URL without a route or destination host", () => {
+    const s = initScript("https://real.site/deep/page?q=1#target-id", null);
+    expect(s).toContain('history.replaceState(history.state,"",location.pathname+location.search+h)');
+    expect(s).toContain('document.getElementById(id)');
+    expect(s).toContain('"#target-id"');
+    expect(s).not.toContain("real.site");
+    expect(s).not.toContain("https://");
+  });
+  it("does not add fragment work when the destination has no fragment", () => {
+    const s = initScript(DEST, null);
+    expect(s).not.toContain("history.replaceState");
+  });
+});
+
 describe("initScript vpath (#236)", () => {
   it("carries the real hostless path, search and hash", () => {
     const s = initScript("https://real.site/a/b?x=1#h", null);
