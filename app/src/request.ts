@@ -1272,6 +1272,25 @@ async function revalidateBeforeUse(req: Request, hit: Response, context: CookieR
 
 /* ---- Fetch interception -------------------------------------------- */
 
+/** Fixed-vocabulary page/worker instrumentation header. It is diagnostic
+    metadata only, never an authorization or routing signal. The request
+    engine strips it before the upstream hop. */
+export const REQUEST_INITIATOR_HEADER = "x-zl-initiator";
+
+/** Classify only request evidence or labels inserted by our runtime
+    wrappers. An empty destination without a marker stays UNKNOWN. */
+export function requestInitiator(req: Request): string {
+  const marked = req.headers.get(REQUEST_INITIATOR_HEADER);
+  if (marked === "fetch") return "FETCH";
+  if (marked === "xhr") return "XHR";
+  if (marked === "send-beacon") return "SEND_BEACON";
+  if (marked === "worker-fetch") return "WORKER_FETCH";
+  if (req.mode === "navigate") return "NAVIGATION";
+  if ((req.headers.get("accept") ?? "").toLowerCase().includes("text/event-stream")) return "EVENTSOURCE";
+  if (req.destination) return "PARSER_RESOURCE";
+  return "UNKNOWN";
+}
+
 /** The request destination from the spec source of truth first:
     sec-fetch-* are forbidden headers the browser's network layer
     adds, and SW-visible requests can lack them entirely (Firefox;
@@ -3275,11 +3294,13 @@ export function handleFetch(e: FetchEvent): void {
         /* Issue #34: a foreign-origin request has no engine-local path;
            the full URL is its internal identity (and the netLog path). */
         const internalUrl = foreign ? url.href : url.pathname + url.search;
+        const initiatorType = requestInitiator(e.request);
         const mkDetail = (resp?: Response): NetDetail => {
           const d: NetDetail = {
             internalUrl,
             ttfb: Date.now() - t0,
             initiator,
+            initiatorType,
             reqHeaders: flatRed(e.request.headers),
           };
           if (foreign) d.crossOrigin = true;
@@ -3385,7 +3406,11 @@ export function handleFetch(e: FetchEvent): void {
         if (rtype === "websocket") kinds.push("websocket");
         if (rtype === "fetch") kinds.push("fetch");
         const flatReq: Record<string, string> = {};
-        e.request.headers.forEach((v, k) => (flatReq[k] = v));
+        e.request.headers.forEach((v, k) => {
+          /* Internal initiator evidence is inspector-only. Do not expose
+             this engine marker to extension request hooks or webRequest. */
+          if (k.toLowerCase() !== REQUEST_INITIATOR_HEADER) flatReq[k] = v;
+        });
         const ic = runRequestInterception(kinds, {
           url: ruleDec.url ?? target,
           method: e.request.method,
@@ -5608,6 +5633,8 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     "referer",
     "origin",
     "cookie",
+    /* Internal API attribution is consumed here and never reaches origin servers. */
+    "x-zl-initiator",
     "sec-fetch-site",
     "sec-fetch-mode",
     "sec-fetch-dest",

@@ -65,6 +65,8 @@ export interface NetDetail {
   ttfb: number;
   /** Destination of the controlling page, when the SW can resolve it. */
   initiator?: string;
+  /** Fixed-vocabulary API initiator, only when request evidence proves it. */
+  initiatorType?: string;
   /** Redacted request headers. */
   reqHeaders?: Record<string, string>;
   /** Redacted response headers, when a response was produced. */
@@ -121,6 +123,7 @@ export function flatRed(headers: Headers): Record<string, string> {
   const out: Record<string, string> = {};
   headers.forEach((v, k) => {
     const name = k.toLowerCase();
+    if (name === "x-zl-initiator") return;
     if (name === "cookie" || name === "authorization" || name === "proxy-authorization" || name === "set-cookie") {
       out[k] = "[redacted]";
       return;
