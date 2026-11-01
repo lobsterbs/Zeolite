@@ -18,6 +18,7 @@ const hopMock = vi.hoisted(() => ({
   urls: [] as string[],
   inits: [] as Array<{ method?: string; headers?: Headers; body?: unknown } | undefined>,
   queue: [] as Response[],
+  failCall: null as number | null,
 }));
 
 vi.mock("../transport", () => ({
@@ -28,6 +29,9 @@ vi.mock("../transport", () => ({
       hopMock.urls.push(url);
       /* snapshot: the hop loop mutates one shared Headers object */
       hopMock.inits.push(init ? { method: init.method, headers: new Headers(init.headers), body: init.body } : undefined);
+      if (hopMock.failCall !== null && hopMock.urls.length === hopMock.failCall) {
+        throw new Error("Could not connect to server");
+      }
       const queued = hopMock.queue.shift();
       if (queued) return queued;
       return new Response("mock", { headers: { "content-type": "text/html" } });
@@ -400,6 +404,7 @@ describe("hop loop replays over-cap spooled bodies (#556 follow-up)", () => {
     hopMock.urls = [];
     hopMock.inits = [];
     hopMock.queue = [];
+    hopMock.failCall = null;
     vi.stubGlobal("self", {
       location: { origin: ORIGIN },
       registration: { scope: ORIGIN + "/" },
@@ -464,5 +469,78 @@ describe("hop loop replays over-cap spooled bodies (#556 follow-up)", () => {
 
   it("the spool authorization is on by default (the opt-out is the zl:config false)", () => {
     expect(spoolUploadsEnabled()).toBe(true);
+  });
+
+  /* #514 regression: the re-issue path replays the SAME buffered copy
+     across the full hop cap - byte equality on every re-issue, and the
+     original request stream is never handed to the transport again
+     (every hop body is the one ArrayBuffer, by reference). */
+  it("replays a 307 POST across the 10-hop cap byte-identically without re-consuming the original stream", async () => {
+    setSpoolUploads(false); /* pure memory replay, no OPFS in the loop */
+    setSpoolRootForTests(null);
+    const expected = await sha256(pattern(N));
+    hopMock.queue = [];
+    for (let i = 0; i < 10; i++) {
+      hopMock.queue.push(
+        new Response(null, {
+          status: 307,
+          headers: { location: "https://site.example/hop" + (i + 1) },
+        }),
+      );
+    }
+    hopMock.queue.push(new Response("ok", { headers: { "content-type": "text/plain" } }));
+    const { ev, armed } = mkPostEvent(
+      "https://site.example/upload",
+      streamOf([pattern(HALF), pattern(HALF), pattern(HALF)]),
+      new Headers({ "content-type": "application/octet-stream" }),
+    );
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    /* initial request + MAX_REDIRECT_HOPS re-issues */
+    expect(hopMock.urls).toHaveLength(11);
+    expect(hopMock.urls[0]).toBe("https://site.example/upload");
+    expect(hopMock.urls[10]).toBe("https://site.example/hop10");
+    const bodies = hopMock.inits.map((i) => i?.body);
+    for (const b of bodies) {
+      expect(b).toBeInstanceOf(ArrayBuffer); /* never a (consumed) stream */
+      expect(await sha256(b)).toBe(expected);
+      expect((b as ArrayBuffer).byteLength).toBe(N);
+    }
+    /* one shared buffered copy: the loop re-issues the identical
+       instance instead of re-reading the original stream */
+    for (const b of bodies) expect(b).toBe(bodies[0]);
+  });
+
+  /* #514: an upstream failure on a RE-ISSUE hop is a bounded,
+     attributable diagnostic (hop index + the status that redirected),
+     never a body and never a URL. */
+  it("records a bounded UPSTREAM warning when a re-issue hop fails, then serves the honest error", async () => {
+    setSpoolUploads(false);
+    setSpoolRootForTests(null);
+    hopMock.queue = [
+      new Response(null, { status: 307, headers: { location: "https://site.example/next" } }),
+    ];
+    hopMock.failCall = 2; /* the first RE-ISSUE, not the initial fetch */
+    const before = DIAG.snapshot(0).events.length;
+    const { ev, armed } = mkPostEvent(
+      "https://site.example/upload",
+      streamOf([pattern(HALF)]),
+      new Headers({ "content-type": "application/octet-stream" }),
+    );
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(502); /* the honest error strand */
+    const events = DIAG.snapshot(0).events.slice(before);
+    const hopFailure = events.find(
+      (e) =>
+        e.category === "UPSTREAM" &&
+        e.stage === "REDIRECT_HOP" &&
+        e.cause === "upstream" &&
+        /re-issue hop 1 failed upstream \(redirected by 307\)/.test(e.message),
+    );
+    expect(hopFailure).toBeDefined();
+    /* no bodies, no URLs in the bounded message */
+    expect(hopFailure!.message).not.toMatch(/site\.example|upload|zl-redir/);
   });
 });
