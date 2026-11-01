@@ -35,7 +35,7 @@ import { applyIsolation } from "./isolation";
 import { applyStorage } from "./storage";
 import { applySenderShim } from "./postmsg";
 import { anchorVirtual, NativeURL } from "./anchorshim";
-import { embedPopup } from "./embedsync";
+import { embedPopup, popupFacade } from "./embedsync";
 
 export const NAV = "/__zl_nav__";
 /* #101: parent-relative marker. A same-origin child realm (an
@@ -475,7 +475,8 @@ export function applyNavGuard(
       w.open = function (this: AnyRecord, u?: string | URL, t?: string, f?: string) {
         const s = u == null ? undefined : typeof u === "string" ? u : u.href;
         if (!/^_(self|top|parent)$/i.test(t ?? "") &&
-            embedPopup(w, s ?? "", () => (OW as AnyRecord).call(this, s == null ? u : rewire(s), t, f))) return null;
+            embedPopup(w, s ?? "", () => (OW as AnyRecord).call(this, s == null ? u : rewire(s), t, f)))
+            return popupFacade(w, t);
         if (s == null) return (OW as AnyRecord).call(this, u, t, f);
         const d = destAbs(s);
         if (!d) return (OW as AnyRecord).call(this, rewire(s), t, f);
