@@ -69,6 +69,7 @@ export interface SwShimDeps {
   baseWaitMs?: number;
   decodeRoutes?: (routes: string[]) => Promise<(string | null)[] | null>;
   forwardRegister?: (payload: Record<string, unknown>) => Promise<{ ok?: boolean; error?: string } | null>;
+  forwardUnregister?: (payload: Record<string, unknown>) => Promise<{ ok?: boolean; error?: string } | null>;
 }
 
 /* #474: exact-origin compare - the old startsWith(origin) prefix test
@@ -97,16 +98,76 @@ function scopeFor(pageUrl: string, scope: string | undefined, scriptHref: string
   return s.href;
 }
 
-function registration(scriptURL: string, scope: string, store: SwShimStore, settled: boolean): VirtualRegistration {
+type StoredRegistration = { scriptURL: string; scope: string };
+
+function storedRecords(store: SwShimStore): StoredRegistration[] {
+  const raw = store.get();
+  if (raw === null) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    const entries = Array.isArray(parsed) ? parsed : [parsed];
+    return entries.filter((r): r is StoredRegistration =>
+      !!r && typeof r === "object" &&
+      typeof r.scriptURL === "string" && typeof r.scope === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredRecords(store: SwShimStore, records: StoredRegistration[]): void {
+  if (records.length) store.set(JSON.stringify(records));
+  else store.clear();
+}
+
+function putStoredRecord(store: SwShimStore, record: StoredRegistration): void {
+  const records = storedRecords(store).filter((r) => r.scope !== record.scope);
+  records.push(record);
+  writeStoredRecords(store, records);
+}
+
+function removeStoredRecord(store: SwShimStore, scope: string, scriptURL: string): void {
+  const records = storedRecords(store).filter((r) => r.scope !== scope || r.scriptURL !== scriptURL);
+  writeStoredRecords(store, records);
+}
+
+function recordsForOrigin(store: SwShimStore, pageUrl: string): StoredRegistration[] {
+  const origin = new NativeURL(pageUrl).origin;
+  return storedRecords(store).filter((record) => {
+    try {
+      return new NativeURL(record.scope).origin === origin &&
+        new NativeURL(record.scriptURL).origin === origin;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function registration(
+  scriptURL: string,
+  scope: string,
+  store: SwShimStore,
+  settled: boolean,
+  deps?: SwShimDeps,
+): VirtualRegistration {
   const worker: VirtualWorker = { scriptURL, state: settled ? "activated" : "installing" };
   const reg: VirtualRegistration = {
     scope,
     installing: settled ? null : worker,
     active: settled ? worker : null,
-    unregister: () => {
-      store.clear();
-      guestForward({ type: "zl:guestUnregister" });
-      return Promise.resolve(true);
+    unregister: async () => {
+      if (deps?.forwardUnregister) {
+        const result = await deps.forwardUnregister({
+          type: "zl:guestUnregister",
+          scriptURL,
+          scope,
+        }).catch(() => null);
+        if (!result || result.ok !== true) return false;
+      } else {
+        guestForward({ type: "zl:guestUnregister", scriptURL, scope });
+      }
+      removeStoredRecord(store, scope, scriptURL);
+      return true;
     },
   };
   if (!settled) {
@@ -153,44 +214,47 @@ export function swShimRegister(
   options?: { scope?: string },
 ): VirtualRegistration {
   const rec = swShimRecord(pageUrl, scriptURL, options);
-  store.set(JSON.stringify(rec));
+  putStoredRecord(store, rec);
   return registration(rec.scriptURL, rec.scope, store, false);
 }
 
-/** getRegistration(): the recorded registration in its settled shape.
-    Undefined when this origin never registered, the record scopes a
-    foreign origin, or the requested scope does not match. */
+/** Native getRegistration takes a client URL, not a scope URL. The
+    longest same-origin scope containing that client wins. */
 export function swShimGet(
   store: SwShimStore,
   pageUrl: string,
-  scope?: string,
+  clientUrl?: string,
+  deps?: SwShimDeps,
 ): VirtualRegistration | undefined {
-  const raw = store.get();
-  if (raw === null) return undefined;
-  let rec: { scriptURL: string; scope: string };
+  let target: URL;
   try {
-    rec = JSON.parse(raw) as { scriptURL: string; scope: string };
+    target = new NativeURL(clientUrl ?? pageUrl, pageUrl);
   } catch {
     return undefined;
   }
-  /* Defense in depth: a record that scopes a foreign origin is not
-     this page's registration, even if it landed in this store.
-     #474: exact-origin compare - a prefix test admitted lookalikes. */
-  let scopeUrl: URL | null = null;
-  try {
-    scopeUrl = new NativeURL(rec.scope);
-  } catch {
-    return undefined;
-  }
-  if (scopeUrl.origin !== new NativeURL(pageUrl).origin) return undefined;
-  if (scope != null) {
-    try {
-      if (rec.scope !== scopeFor(pageUrl, scope, rec.scriptURL)) return undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  return registration(rec.scriptURL, rec.scope, store, true);
+  const origin = new NativeURL(pageUrl).origin;
+  if (target.origin !== origin) return undefined;
+  const rec = recordsForOrigin(store, pageUrl)
+    .filter((candidate) => {
+      try {
+        const scope = new NativeURL(candidate.scope);
+        return scope.origin === origin && target.pathname.startsWith(scope.pathname);
+      } catch {
+        return false;
+      }
+    })
+    .sort((a, b) => b.scope.length - a.scope.length)[0];
+  return rec ? registration(rec.scriptURL, rec.scope, store, true, deps) : undefined;
+}
+
+function swShimGetAll(
+  store: SwShimStore,
+  pageUrl: string,
+  deps?: SwShimDeps,
+): VirtualRegistration[] {
+  return recordsForOrigin(store, pageUrl)
+    .sort((a, b) => a.scope.localeCompare(b.scope))
+    .map((r) => registration(r.scriptURL, r.scope, store, true, deps));
 }
 
 /** #538: the page-URL basis for the shim. Wave 3 captured the raw
@@ -290,27 +354,26 @@ export function swShimApply(
             : "service worker registration failed";
           throw new TypeError(reason);
         }
-        store.set(JSON.stringify(rec));
+        putStoredRecord(store, rec);
       } else {
         /* Wave-3 best-effort forward for callers without deps. */
-        store.set(JSON.stringify(rec));
+        putStoredRecord(store, rec);
         guestForward({ type: "zl:guestRegister", scriptURL: rec.scriptURL, scope: rec.scope });
       }
-      return registration(rec.scriptURL, rec.scope, store, false);
+      return registration(rec.scriptURL, rec.scope, store, false, deps);
     })();
   }) as unknown;
   c.getRegistration = ((s?: string) => {
     return (async () => {
       const scope = s != null ? await decodeEngineArg(deps, s) : undefined;
       const b = await readyVirtualBase(pageUrl, deps);
-      return b ? swShimGet(store, b, scope) : undefined;
+      return b ? swShimGet(store, b, scope, deps) : undefined;
     })();
   }) as unknown;
   c.getRegistrations = (() => {
     return (async () => {
       const b = await readyVirtualBase(pageUrl, deps);
-      const r = b ? swShimGet(store, b) : undefined;
-      return r ? [r] : [];
+      return b ? swShimGetAll(store, b, deps) : [];
     })();
   }) as unknown;
   try {
