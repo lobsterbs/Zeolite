@@ -42,8 +42,9 @@ import type { Alarm, AlarmCreateInfo } from "./alarms";
 import { MGMT, infoOf } from "./management";
 import type { MgmtListener } from "./management";
 import type { ExtensionManager } from "./manager";
-import { bootEnabled } from "./background";
+import { bootEnabled, bootExtension, idleTerminate, backgroundIsServiceWorker } from "./background";
 import { chromeApi } from "./chrome";
+import { extPageOpenUrl } from "./serve";
 import { makeI18nNs } from "./i18n";
 import type { I18nResolved } from "./i18n";
 
@@ -343,6 +344,40 @@ export function buildApi(
      the second argument, exactly as in Firefox. The same overloads
      exist on connect: connect(name) keeps the legacy name form, and
      connect(otherId, { name }) opens an external port. */
+    /* #518: openOptionsPage walks the same granted-navigation flow the
+       host's zl:openExtPage uses: a rooted page URL with a 5-minute
+       page token, opened through the real tabs bridge. Firefox's
+       open_in_tab=false embedding has no host surface here, so the
+       page always opens as a tab (compat.ts documents it). */
+    openOptionsPage: (): Promise<void> => {
+      const url = extPageOpenUrl(ext, "options");
+      if (!url) return Promise.reject(new Error("zeolite: no options page declared"));
+      return TABS.create({ url, active: true }).then(() => undefined);
+    },
+    /* #518: runtime.reload re-parses the stored package (same
+       identity), drops the messenger listeners so stale closures
+       cannot answer, and re-boots the background. The boot marker
+       persists, so the re-boot fires onStartup and never onInstalled,
+       exactly like Firefox. ponytail: the re-boot is async by
+       necessity (package re-parse), but the caller's runtime object
+       must not die mid-call, so the reload is fired, not awaited. */
+    reload: (): void => {
+      if (!mgr) throw new Error("zeolite: no manager attached to this engine");
+      void (async () => {
+        await mgr.reload(ext.id);
+        deps.messenger.clear(ext.id);
+        const live = mgr.get(ext.id);
+        if (!live || !live.enabled || !live.background) return;
+        if (backgroundIsServiceWorker(live)) {
+          idleTerminate(ext.id); /* the next event wakes the fresh code */
+          return;
+        }
+        await bootExtension(live);
+      })().catch(() => {
+        /* a failed reload keeps the record's lastError; the engine
+           must not propagate an extension failure */
+      });
+    },
     sendMessage: (...args: unknown[]): Promise<unknown> => {
       const [a, b] = args;
       if (typeof a === "string" && a.length > 0 && args.length > 1) {

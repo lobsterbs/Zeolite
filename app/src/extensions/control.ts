@@ -15,7 +15,7 @@ import { extensions } from "./manager";
 import { NOTIFY } from "./notifications";
 import { normalizeExtensionPath } from "./origin";
 import { handleExtPageCall } from "./pageapi";
-import { EXT_ROUTE, mintPageToken, pageClientOf } from "./serve";
+import { EXT_ROUTE, extPageOpenUrl, mintPageToken, pageClientOf } from "./serve";
 import type { ExtensionRecord } from "./types";
 import type { ExtensionStorageArea } from "./storage";
 import { TABS, tabView } from "./tabs";
@@ -455,23 +455,23 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
       break;
     }
     case "zl:openExtPage": {
-      /* #40: host-only. Resolves an extension's options or popup
-         page and mints a 5-minute page token. #560: the URL is
-         ROOTED at the origin root (/options.html?zlExt=...) because
-         extension page worlds dispatch their boot on
+      /* #40: host-only. Resolves an extension's options or popup page
+         and mints a 5-minute page token through the shared opener
+         (#518: runtime.openOptionsPage uses the same flow). #560: the
+         URL is ROOTED at the origin root (/options.html?zlExt=...)
+         because extension page worlds dispatch their boot on
          location.pathname; the token grants the first navigation and
          registered page clients self-navigate without one. */
       const op = msg as { extId?: unknown; which?: unknown };
       const which = op.which === "popup" ? "popup" : "options";
       const extId = typeof op.extId === "string" ? op.extId : "";
       const orec = extId ? extensions.get(extId) : null;
-      const raw = which === "popup" ? orec?.action?.defaultPopup : orec?.options?.page;
-      const norm = raw ? normalizeExtensionPath(raw.startsWith("/") ? raw : "/" + raw) : null;
-      if (!orec || !orec.enabled || !norm) {
+      const url = orec ? extPageOpenUrl(orec, which) : null;
+      if (!url) {
         reply({ ok: false, error: "no such " + which + " page" });
         break;
       }
-      reply({ ok: true, url: norm + "?zlExt=" + orec.id + "&zlPageTok=" + mintPageToken(orec.id, norm) });
+      reply({ ok: true, url });
       break;
     }
     default:
