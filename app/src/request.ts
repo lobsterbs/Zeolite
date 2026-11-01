@@ -1291,6 +1291,17 @@ export function requestInitiator(req: Request): string {
   return "UNKNOWN";
 }
 
+/** Request headers shared with extension interception APIs.
+    Internal attribution metadata is never part of the extension-facing
+    WebRequest surface. */
+export function extensionRequestHeaders(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    if (name.toLowerCase() !== REQUEST_INITIATOR_HEADER) out[name] = value;
+  });
+  return out;
+}
+
 /** The request destination from the spec source of truth first:
     sec-fetch-* are forbidden headers the browser's network layer
     adds, and SW-visible requests can lack them entirely (Firefox;
@@ -3405,12 +3416,7 @@ export function handleFetch(e: FetchEvent): void {
         if (rtype === "worker") kinds.push("worker");
         if (rtype === "websocket") kinds.push("websocket");
         if (rtype === "fetch") kinds.push("fetch");
-        const flatReq: Record<string, string> = {};
-        e.request.headers.forEach((v, k) => {
-          /* Internal initiator evidence is inspector-only. Do not expose
-             this engine marker to extension request hooks or webRequest. */
-          if (k.toLowerCase() !== REQUEST_INITIATOR_HEADER) flatReq[k] = v;
-        });
+        const flatReq = extensionRequestHeaders(e.request.headers);
         const ic = runRequestInterception(kinds, {
           url: ruleDec.url ?? target,
           method: e.request.method,

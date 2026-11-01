@@ -124,6 +124,14 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
     headers.set("x-zl-initiator", kind);
     return { ...init, headers };
   };
+  const sameOriginHttp = (value: string): boolean => {
+    try {
+      const u = new NativeURL(value, loc.href);
+      return (u.protocol === "http:" || u.protocol === "https:") && u.origin === loc.origin;
+    } catch {
+      return false;
+    }
+  };
 
   /* Request-object inputs keep their one-shot/native semantics; URL
      inputs can be labeled after an engine route is known. */
@@ -136,7 +144,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
       const d = rel ? null : crossDest(url);
       if ((rel || d) && init?.integrity) init = { ...init, integrity: undefined };
       if (rel) return OF(rel, mark(init, "fetch"));
-      if (!d) return OF(input, mark(init, "fetch"));
+      if (!d) return OF(input, sameOriginHttp(url) ? mark(init, "fetch") : init);
       return mintRoute(d).then((route) =>
         OF((route ?? url) as RequestInfo, route ? mark(init, "fetch") : init),
       );
@@ -233,7 +241,9 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
         const result = rel
           ? OOpen.call(this, a[0], rel, a[2], a[3], a[4])
           : OOpen.apply(this, a);
-        if (isAsync && hasController) OHdr.call(this, "x-zl-initiator", "xhr");
+        if (isAsync && hasController && (rel || sameOriginHttp(s))) {
+          OHdr.call(this, "x-zl-initiator", "xhr");
+        }
         return result;
       }
       pend.set(this, {
