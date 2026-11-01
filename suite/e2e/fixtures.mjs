@@ -31,7 +31,7 @@ import { gzipSync } from "node:zlib";
 export const PORT_A = 7101;
 export const PORT_B = 7102;
 export const ORIGIN_A = `http://127.0.0.1:${PORT_A}`;
-export const ORIGIN_B = `http://127.0.0.1:${PORT_B}`;
+export const ORIGIN_B = `http://localhost:${PORT_B}`;
 
 /* 1x1 transparent PNG (naturalWidth > 0 asserts the image decoded). */
 const PNG = Buffer.from(
@@ -107,7 +107,7 @@ function send(res, type, body, extra) {
 }
 
 export function startFixture(port) {
-  const origin = `http://127.0.0.1:${port}`;
+  const origin = port === PORT_B ? ORIGIN_B : ORIGIN_A;
   const hits = [];
   const sseStreams = [];
   const server = createServer((req, res) => {
