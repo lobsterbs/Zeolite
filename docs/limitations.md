@@ -154,8 +154,14 @@ The constructor wrapper folds the virtual-site token, classic/module script
 type and credentials mode into the native worker name. This prevents
 accidental classic/module and cross-site instance sharing while preserving
 the same scoped identity for repeated same-site, same-type constructions.
-Chromium sharing, teardown and hostile same-engine-page isolation still need
-end-to-end verification for #453. The virtual sites remain browser-same-origin.
+The real-Chromium suite now compares native direct behavior with proxied
+same-site reuse and cross-site separation, and covers multi-tab connections,
+classic/module and credentials separation, worker-scoped IndexedDB and cookie
+inheritance, one-client port closure, and reconnect persistence. Chromium owns
+the exact termination time of an unreferenced SharedWorker, so the suite does
+not claim to force a particular shutdown event; an explicit engine teardown,
+service-worker restart, and hostile same-engine-page token guessing remain
+outside this verification. The virtual sites remain browser-same-origin.
 
 ## window.location is not virtualized
 

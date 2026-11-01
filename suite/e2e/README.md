@@ -16,7 +16,10 @@ fixture pages through `/?url=<target>` and asserts:
 
 - Routing: absolute and relative links, 302 redirects, SPA pushState
   with rerouted API fetches, reload, query-bearing fetches keep their
-  query exactly once (#38).
+  query exactly once (#38). Initial fragments, engine-followed redirect
+  fragments, meta refresh, form navigation, same-document anchors and
+  history back/forward are compared with direct Chromium (#543); fixture
+  wire paths are checked to ensure fragments never reach the server.
 - Recovery (#31): a malformed engine route and an unroutable unlisted
   target answer navigations with the engine-owned error page, never a
   bare text strand; the SPA and recovery checks all run against
@@ -25,11 +28,19 @@ fixture pages through `/?url=<target>` and asserts:
   routing), EventSource, sendBeacon, classic and shared workers
   (prelude, importScripts), localStorage/sessionStorage, document.cookie
   (jar round-trip and upstream Set-Cookie capture), IndexedDB, Cache
-  API, the navigator.serviceWorker shim.
+  API, the navigator.serviceWorker shim. SharedWorker tests compare a
+  direct Chromium oracle with proxied same-site multi-tab reuse and
+  cross-site isolation, classic/module/credentials keys, worker IDB and
+  cookie scope, and client-port close/reconnect behavior (#547).
 - Rewriter: img/src/srcset (including a data URL candidate), CSS url()
   in a linked stylesheet and an inline style block, iframe src, iframe
   srcdoc, base href folding, meta refresh navigation, module-script
   import specifiers.
+- Network inspector (#545): fetch, XHR, EventSource, sendBeacon, worker
+  fetch, parser resource and navigation fixtures are classified by
+  observed request evidence; internal marker headers are absent from
+  the fixture's upstream request and inspector header detail, while
+  request bodies and cookie values are not recorded.
 - Privacy (#32/#34): window.__ZL carries no plaintext destination, page
   surfaces show only engine routes, two virtual contexts stay isolated
   (storage, cookie jar, Cache API names).
