@@ -67,6 +67,28 @@ describe("Google AI Mode mss module recovery", () => {
     expect(secondSeen).toHaveLength(1);
   });
 
+  it("does not spend a target's retry opportunity before a matching base is observed", async () => {
+    const attempts: string[] = [];
+    const early = await recoverFlagSurgeryScript(
+      "https://www.google.com/search?q=ai",
+      target,
+      new Headers(),
+      async (url) => { attempts.push(url); return js(); },
+    );
+    expect(early).toBeNull();
+    expect(attempts).toHaveLength(0);
+
+    recordScriptUrl("https://www.google.com/search?q=ai", observed);
+    const later = await recoverFlagSurgeryScript(
+      "https://www.google.com/search?q=ai",
+      target,
+      new Headers(),
+      async (url) => { attempts.push(url); return js(); },
+    );
+    expect(later?.url).toContain("/_/mss/search-next/_/js/");
+    expect(attempts).toHaveLength(1);
+  });
+
   it("does not reuse a base from another app namespace or origin", async () => {
     recordScriptUrl("https://www.google.com/search?q=ai", observed);
     const otherApp = target.replace("/mss/search-next/", "/mss/search/");
