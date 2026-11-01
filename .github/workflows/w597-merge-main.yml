@@ -26,7 +26,7 @@ jobs:
             echo "CONFLICTED FILES: [$conflicts]"
             for f in $conflicts; do
               case "$f" in
-                app/src/control.ts|app/src/extensions/compat.ts|app/src/extensions/downloads.ts|docs/matrix.md)
+                app/src/control.ts|app/src/extensions/compat.ts|app/src/extensions/downloads.ts|app/src/extensions/idb.ts|docs/matrix.md)
                   git checkout --ours -- "$f"
                   git add "$f"
                   ;;

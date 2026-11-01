@@ -2,13 +2,15 @@
 
    Service workers have no localStorage, so IndexedDB is the persistence
    layer for installed extension packages, metadata and extension
-   storage. Kept deliberately tiny: no schema migrations beyond a
-   version bump with a recreate. */
+   storage. Kept deliberately tiny: the upgrade path only creates
+   missing stores, so a version bump never destroys existing data. */
 
 const DB_NAME = "zl-extensions";
-/* v5: #594 adds the runtime.alarms table (one record per extension
-   id). A version bump with a recreate, the only migration this helper
-   does; existing stores and records survive untouched. */
+/* #541: v5 adds the download-handoffs store (extension download
+   handoff persistence); #594 adds the runtime.alarms table (one
+   record per extension id). The upgrade path below only CREATES
+   missing stores, so every v4 store (meta/files/storage/cookies/
+   downloads/download-partials) and its data survives untouched. */
 const DB_VERSION = 5;
 export const STORE_META = "meta";
 export const STORE_FILES = "files";
@@ -17,10 +19,13 @@ export const STORE_COOKIES = "cookies";
 export const STORE_DOWNLOADS = "downloads";
 /* #118: partial download bytes per registry entry id. */
 export const STORE_PARTIALS = "download-partials";
+/* #541: extension download handoff records (downloads.download() ->
+   host zl:downloadState), keyed by handoff id. State only - never
+   file bytes. */
+export const STORE_HANDOFFS = "download-handoffs";
 /* #594: the runtime.alarms table, one record (an Alarm[] array) per
    extension id. */
 export const STORE_ALARMS = "alarms";
-
 let dbp: Promise<IDBDatabase> | null = null;
 
 export function openDb(): Promise<IDBDatabase> {
@@ -35,12 +40,24 @@ export function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_COOKIES)) db.createObjectStore(STORE_COOKIES);
       if (!db.objectStoreNames.contains(STORE_DOWNLOADS)) db.createObjectStore(STORE_DOWNLOADS);
       if (!db.objectStoreNames.contains(STORE_PARTIALS)) db.createObjectStore(STORE_PARTIALS);
+      if (!db.objectStoreNames.contains(STORE_HANDOFFS)) db.createObjectStore(STORE_HANDOFFS);
       if (!db.objectStoreNames.contains(STORE_ALARMS)) db.createObjectStore(STORE_ALARMS);
     };
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error ?? new Error("zeolite: indexeddb open failed"));
+    req.onerror = () => {
+      /* #541: a failed open must not wedge every later call behind a
+         cached rejection; the next open retries. */
+      dbp = null;
+      reject(req.error ?? new Error("zeolite: indexeddb open failed"));
+    };
   });
   return dbp;
+}
+
+/* #541 (tests): drop the cached connection so a fresh open - or a
+   stubbed open failure - can actually be exercised. */
+export function resetDbForTests(): void {
+  dbp = null;
 }
 
 function tx(db: IDBDatabase, store: string, mode: IDBTransactionMode): IDBObjectStore {
