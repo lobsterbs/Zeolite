@@ -2,6 +2,7 @@ import "fake-indexeddb/auto";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { ALARMS } from "../alarms";
 import type { Alarm } from "../alarms";
+import { openDb, idbPut, STORE_ALARMS } from "../idb";
 import { ExtensionManager } from "../manager";
 import { buildApi } from "../runtime";
 import { ExtensionMessenger } from "../messaging";
@@ -92,6 +93,89 @@ describe("AlarmRegistry", () => {
     ALARMS.create("e5", "gone", { delayInMinutes: 5 });
     ALARMS.drop("e5");
     expect(ALARMS.getAll("e5")).toHaveLength(0);
+  });
+});
+
+describe("alarm persistence (#594)", () => {
+  beforeEach(() => {
+    /* fake-indexeddb schedules its async steps on setImmediate; faking
+       it would hang every open(), so only the timer APIs the registry
+       itself uses are faked. */
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    ALARMS.resetForTests();
+  });
+  afterEach(() => {
+    ALARMS.resetForTests();
+    vi.useRealTimers();
+  });
+
+  it("persists the table and re-arms it after a worker restart", async () => {
+    await ALARMS.hydrate();
+    ALARMS.create("p1", "tick", { periodInMinutes: 0.05 });
+    ALARMS.create("p1", "once", { delayInMinutes: 0.1 });
+    await ALARMS.flushForTests();
+    /* the SW dies: memory is gone, the store survives. */
+    ALARMS.resetForTests();
+    /* the SW boots again: hydration re-arms, and the background's
+       listeners re-register exactly as a wake would. */
+    await ALARMS.hydrate();
+    const seen: string[] = [];
+    ALARMS.onAlarm("p1", (a) => seen.push(a.name));
+    await vi.advanceTimersByTimeAsync(7_000);
+    expect(seen).toContain("once");
+    expect(seen.filter((n) => n === "tick").length).toBeGreaterThanOrEqual(1);
+    expect(ALARMS.get("p1", "tick")).toBeDefined();
+    expect(ALARMS.get("p1", "once")).toBeUndefined();
+  });
+
+  it("clears persist too: a cleared alarm does not come back", async () => {
+    await ALARMS.hydrate();
+    ALARMS.create("p2", "gone", { delayInMinutes: 1 });
+    await ALARMS.flushForTests();
+    ALARMS.clear("p2", "gone");
+    await ALARMS.flushForTests();
+    ALARMS.resetForTests();
+    await ALARMS.hydrate();
+    expect(ALARMS.get("p2", "gone")).toBeUndefined();
+  });
+
+  it("corrupted store records are skipped, never trusted", async () => {
+    await ALARMS.hydrate();
+    const db = await openDb();
+    await idbPut(db, STORE_ALARMS, "evil", [
+      { name: 123, scheduledTime: "no" },
+      null,
+      { name: "ok", scheduledTime: Date.now() + 60_000 },
+    ]);
+    ALARMS.resetForTests();
+    await ALARMS.hydrate();
+    expect(ALARMS.get("evil", "ok")).toBeDefined();
+    expect(ALARMS.getAll("evil")).toHaveLength(1);
+  });
+
+  it("an alarm created while hydration is still loading wins the merge", async () => {
+    await ALARMS.hydrate();
+    ALARMS.create("p3", "stored", { delayInMinutes: 1 });
+    await ALARMS.flushForTests();
+    /* the boot race: hydration's load is in flight when a replacement
+       create lands; the live timer must win, never double-arm, and the
+       store must keep the replacement */
+    ALARMS.resetForTests();
+    const slow = ALARMS.hydrate();
+    ALARMS.create("p3", "stored", { delayInMinutes: 2 });
+    await slow;
+    await ALARMS.flushForTests();
+    expect(ALARMS.getAll("p3")).toHaveLength(1);
+    const alarm = ALARMS.get("p3", "stored");
+    expect(alarm).toBeDefined();
+    /* the replaced (2-minute) schedule is what survived, not the stored
+       1-minute one */
+    expect(alarm!.scheduledTime).toBeGreaterThan(Date.now() + 60_000);
+    /* and the store agrees after a fresh restart */
+    ALARMS.resetForTests();
+    await ALARMS.hydrate();
+    expect(ALARMS.getAll("p3")).toHaveLength(1);
+    expect(ALARMS.get("p3", "stored")!.scheduledTime).toBeGreaterThan(Date.now() + 60_000);
   });
 });
 

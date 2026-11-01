@@ -246,6 +246,29 @@ export class DownloadsHost {
       if (st.id > this.seq) this.seq = st.id;
     }
   }
+  /** #593: browsingData.removeDownloads drops this registry's terminal
+      handoff records; active handoffs stay tracked until the host
+      reports them terminal. Returns how many records were dropped.
+      The files the host saved are the host's, exactly like Firefox's
+      removeDownloads clearing the list but not the files. */
+  clearHistory(filter: { since?: number } = {}): number {
+    let removed = 0;
+    for (const [id, st] of this.states) {
+      if (!TERMINAL[st.status]) continue;
+      if (typeof filter.since === "number" && (st.ended ?? 0) < filter.since) continue;
+      this.states.delete(id);
+      removed++;
+    }
+    return removed;
+  }
+
+  /** Tests only. */
+  resetForTests(): void {
+    this.states.clear();
+    this.changed.clear();
+    this.seq = 0;
+    this.dispatch = null;
+  }
 
   /** An extension sees only its own handoffs, newest first. */
   search(ext: ExtensionRecord, query: { id?: number } = {}): DownloadState[] {

@@ -141,6 +141,17 @@ data survive untouched):
   clears a done entry's buffer.
 
 
+## browsingData.removeDownloads (#593)
+
+The extension browsingData remover clears the registry's history:
+terminal entries (done/error/cancelled/paused) leave the ring with
+their stored partials and persisted records, active streams stay
+tracked, and the origins/since filters run against each entry's
+source origin and end time. The extension handoff registry's terminal
+records drop the same way. The files the browser already wrote are
+the host's, exactly like Firefox's removeDownloads clearing the list
+but not the files.
+
 ## Filename sources
 
 `downloadFilename` honors RFC 6266/5987 `filename*` ext-values (charset'lang' prefix stripped, percent-decoded, taking precedence over a plain `filename`); malformed ext-values fall back to the plain `filename`. (#292)

@@ -7,9 +7,10 @@
 
 const DB_NAME = "zl-extensions";
 /* #541: v5 adds the download-handoffs store (extension download
-   handoff persistence). The upgrade path below only CREATES missing
-   stores, so every v4 store (meta/files/storage/cookies/downloads/
-   download-partials) and its data survives untouched. */
+   handoff persistence); #594 adds the runtime.alarms table (one
+   record per extension id). The upgrade path below only CREATES
+   missing stores, so every v4 store (meta/files/storage/cookies/
+   downloads/download-partials) and its data survives untouched. */
 const DB_VERSION = 5;
 export const STORE_META = "meta";
 export const STORE_FILES = "files";
@@ -22,7 +23,9 @@ export const STORE_PARTIALS = "download-partials";
    host zl:downloadState), keyed by handoff id. State only - never
    file bytes. */
 export const STORE_HANDOFFS = "download-handoffs";
-
+/* #594: the runtime.alarms table, one record (an Alarm[] array) per
+   extension id. */
+export const STORE_ALARMS = "alarms";
 let dbp: Promise<IDBDatabase> | null = null;
 
 export function openDb(): Promise<IDBDatabase> {
@@ -38,6 +41,7 @@ export function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_DOWNLOADS)) db.createObjectStore(STORE_DOWNLOADS);
       if (!db.objectStoreNames.contains(STORE_PARTIALS)) db.createObjectStore(STORE_PARTIALS);
       if (!db.objectStoreNames.contains(STORE_HANDOFFS)) db.createObjectStore(STORE_HANDOFFS);
+      if (!db.objectStoreNames.contains(STORE_ALARMS)) db.createObjectStore(STORE_ALARMS);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => {
