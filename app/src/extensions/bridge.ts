@@ -94,7 +94,12 @@ export const BRIDGE_SOURCE = `(function () {
           throw new Error("zeolite: runtime.connect from content scripts is not supported yet");
         },
       },
-      storage: { local: storageArea("local") },
+  /* #520: session mounts alongside local; the SW-side gate refuses
+     ops while the extension's session access level is the Firefox
+     default (trusted contexts only), and setAccessLevel opens it.
+     The area object exists either way so the error is honest - the
+     gate is the boundary, not feature detection. */
+      storage: { local: storageArea("local"), session: storageArea("session") },
     };
   }
   /* tabs.sendMessage delivery: verify the message is from the
