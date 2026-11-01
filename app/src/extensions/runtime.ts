@@ -44,8 +44,9 @@ import { MGMT, infoOf } from "./management";
 import type { MgmtListener } from "./management";
 import type { ExtensionManager } from "./manager";
 import { bootEnabled, bootExtension, idleTerminate, backgroundIsServiceWorker } from "./background";
+import { browsingDataRemoveCache, browsingDataRemoveCookies, browsingDataSettings, browsingDataUnreachable, type BrowsingDataOptions } from "./browsingdata";
 import { chromeApi } from "./chrome";
-import { extPageOpenUrl } from "./serve";
+import { extPageOpenUrl, pageClientsOf } from "./serve";
 import { makeI18nNs } from "./i18n";
 import type { I18nResolved } from "./i18n";
 
@@ -357,6 +358,14 @@ export function buildApi(
       Promise.resolve(hostPlatformInfo()),
     getBrowserInfo: (): Promise<{ name: string; version: string }> =>
       Promise.resolve(hostBrowserInfo()),
+    /* #518: live extension contexts. The background answers, so it
+       exists; registered page clients of this extension are live
+       extension pages served as tabs. Ids are not derivable yet and
+       Firefox makes them optional. */
+    getContexts: async (): Promise<Array<{ contextType: string }>> => [
+      { contextType: "BACKGROUND" },
+      ...pageClientsOf(ext.id).map(() => ({ contextType: "TAB" })),
+    ],
     /* #518: Firefox-shaped overloads. runtime.sendMessage(message)
      sends internally; runtime.sendMessage(targetId, message) sends
      cross-extension (delivered to the target's onMessageExternal when
@@ -911,6 +920,26 @@ export function buildApi(
     onDisabled: bridged<MgmtListener>((l) => MGMT.on("disabled", l)),
   };
 
+  /* #520: browsingData over the engine-owned stores (cache, cookie
+     jar). The unreachable types mount and reject honestly - see
+     ./browsingdata. Mounted only with the permission, so feature
+     detection answers honestly. */
+  const browsingDataNs = ext.permissions.includes("browsingData")
+    ? {
+        settings: browsingDataSettings,
+        removeCache: (options: BrowsingDataOptions = {}) => browsingDataRemoveCache(options),
+        removeCookies: (options: BrowsingDataOptions = {}) => browsingDataRemoveCookies(options),
+        removeDownloads: browsingDataUnreachable("removeDownloads"),
+        removeFormData: browsingDataUnreachable("removeFormData"),
+        removeHistory: browsingDataUnreachable("removeHistory"),
+        removeIndexedDB: browsingDataUnreachable("removeIndexedDB"),
+        removeLocalStorage: browsingDataUnreachable("removeLocalStorage"),
+        removePasswords: browsingDataUnreachable("removePasswords"),
+        removePluginData: browsingDataUnreachable("removePluginData"),
+        removeServiceWorkers: browsingDataUnreachable("removeServiceWorkers"),
+      }
+    : undefined;
+
   const browser: Record<string, unknown> = {
     runtime,
     ...(extensionNs ? { extension: extensionNs } : {}),
@@ -931,6 +960,7 @@ export function buildApi(
     ...(pageActionNs ? { pageAction: pageActionNs } : {}),
     ...(notificationsNs && !isApiDetached("notifications") ? { notifications: notificationsNs } : {}),
     ...(cookiesNs && !isApiDetached("cookies") ? { cookies: cookiesNs } : {}),
+    ...(browsingDataNs && !isApiDetached("browsingData") ? { browsingData: browsingDataNs } : {}),
   };
   /* Share implementations while honoring Chrome callbacks. */
   return { browser, chrome: chromeApi(browser) };
