@@ -11,6 +11,11 @@ and emits ONE `UNSUPPORTED` diagnostic per name per worker lifetime
 (a `register()` that throws degrades the same way, with a RUNTIME
 warning).
 
+A design for the 7.0 first-party signed module system (origin-local signed
+bundles, typed permissions, stream hooks) lives in
+`docs/plugin-modules-design.md`. It is design-only — nothing described there
+is implemented; the static registry remains the shipped capability.
+
 A plugin is a TypeScript module in `app/src/plugins/` that exports
 `register(hooks)`, listed in a site's `plugins` child node in
 `siteconfig.kdl` and added to the registry:

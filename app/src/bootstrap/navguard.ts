@@ -35,7 +35,7 @@ import { applyIsolation } from "./isolation";
 import { applyStorage } from "./storage";
 import { applySenderShim } from "./postmsg";
 import { anchorVirtual, NativeURL } from "./anchorshim";
-import { embedPopup } from "./embedsync";
+import { embedPopup, popupFacade } from "./embedsync";
 
 export const NAV = "/__zl_nav__";
 /* #101: parent-relative marker. A same-origin child realm (an
@@ -44,6 +44,13 @@ export const NAV = "/__zl_nav__";
    the SW decodes the parent route and resolves the tail against its
    destination. */
 export const NAVP = "/__zl_prel__";
+
+/* #536: bounds for the pre-existing-open-shadow-root sweep. A
+   pathological document cannot turn the once-per-realm sweep into
+   an unbounded walk: at most this many elements are examined and
+   this many roots join the guard (first-come). */
+export const SWEEP_MAX_ELEMENTS = 8192;
+export const SWEEP_MAX_ROOTS = 64;
 
 /** #101/#109/#157: true when a navigation- or fetch-bound input
     must stay native: engine surfaces and markers, fragments,
@@ -475,7 +482,8 @@ export function applyNavGuard(
       w.open = function (this: AnyRecord, u?: string | URL, t?: string, f?: string) {
         const s = u == null ? undefined : typeof u === "string" ? u : u.href;
         if (!/^_(self|top|parent)$/i.test(t ?? "") &&
-            embedPopup(w, s ?? "", () => (OW as AnyRecord).call(this, s == null ? u : rewire(s), t, f))) return null;
+            embedPopup(w, s ?? "", () => (OW as AnyRecord).call(this, s == null ? u : rewire(s), t, f)))
+            return popupFacade(w, t);
         if (s == null) return (OW as AnyRecord).call(this, u, t, f);
         const d = destAbs(s);
         if (!d) return (OW as AnyRecord).call(this, rewire(s), t, f);
@@ -879,13 +887,61 @@ export function applyNavGuard(
     }
     /* Frames already in the DOM when this realm is guarded (a child
        realm guarded on load): the observer only sees later
-       additions, so give the present ones their realm guard.
-       Frames inside shadow roots created before this guard ran
-       keep their native loads: the hook above only covers roots
-       created after it (a documented residual). */
+       additions, so give the present ones their realm guard. */
     if (typeof D.querySelectorAll === "function") {
       const frames = D.querySelectorAll("iframe,frame") as ArrayLike<AnyRecord>;
       for (let i = 0; i < frames.length; i++) guardChild(frames[i]);
+    }
+    /* #536: pre-existing OPEN shadow roots. The attachShadow hook
+       above only covers roots created after the guard installed, so
+       a root built before it (bootstrap racing first content, or a
+       child realm guarded on load) kept native frame loads. Sweep
+       the light DOM once for hosts with a visible .shadowRoot -
+       exactly the OPEN roots; a CLOSED mode root returns null from
+       .shadowRoot and is invisible to page script by browser rule,
+       which stays the documented boundary, not a sweep target.
+       Every discovered root joins the same observer contract as a
+       hook-created root and gets the same frame pass. Bounded: a
+       hostile or pathological document cannot turn the sweep into
+       an unbounded walk - at most SWEEP_MAX_ELEMENTS elements are
+       examined per realm and at most SWEEP_MAX_ROOTS roots join
+       the guard (first-come; the rest keep native loads, same
+       residual as before, now for an explicitly enumerated cap). */
+    if (typeof D.querySelectorAll === "function") {
+      let elsLeft = SWEEP_MAX_ELEMENTS;
+      let rootsLeft = SWEEP_MAX_ROOTS;
+      const seen = new Set<AnyRecord>();
+      const sweepRoot = (root: AnyRecord): void => {
+        if (typeof root.querySelectorAll !== "function") return;
+        const frames = root.querySelectorAll("iframe,frame") as ArrayLike<AnyRecord>;
+        for (let i = 0; i < frames.length; i++) rewired(frames[i]);
+        const all = root.querySelectorAll("*") as ArrayLike<AnyRecord>;
+        for (let i = 0; i < all.length; i++) {
+          if (elsLeft <= 0 || rootsLeft <= 0) return;
+          elsLeft--;
+          const inner = all[i].shadowRoot;
+          if (!inner || typeof inner !== "object" || seen.has(inner)) continue;
+          seen.add(inner);
+          rootsLeft--;
+          safe(() => obs?.observe(inner, { childList: true, subtree: true }));
+          sweepRoot(inner);
+        }
+      };
+      try {
+        const all = D.querySelectorAll("*") as ArrayLike<AnyRecord>;
+        for (let i = 0; i < all.length; i++) {
+          if (elsLeft <= 0 || rootsLeft <= 0) break;
+          elsLeft--;
+          const root = all[i].shadowRoot;
+          if (!root || typeof root !== "object" || seen.has(root)) continue;
+          seen.add(root);
+          rootsLeft--;
+          safe(() => obs?.observe(root, { childList: true, subtree: true }));
+          sweepRoot(root);
+        }
+      } catch {
+        /* a hostile querySelectorAll never breaks the guard */
+      }
     }
   }
   /* WebRTC connects directly; presence would be a fake feature. */

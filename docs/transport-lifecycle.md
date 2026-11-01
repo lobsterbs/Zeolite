@@ -60,3 +60,31 @@ This is a safety contract, not proof of exactly-once delivery. Full server-side
 fault injection at every acceptance boundary, including dropping a connection
 after upstream commit, remains required before closing #454. Local adapter
 fault tests and typed outcomes do not establish what a remote server committed.
+
+## Redirect re-issue diagnostics and the hop-loop audit (#514)
+
+The CI torture probe's intermittent "zeolite: upstream fetch failed"
+signature on the redirect-semantics check now carries hop context from
+both ends. Engine-side, an upstream failure on a RE-ISSUE hop (never
+the initial fetch) records a bounded UPSTREAM diagnostic naming the
+hop index and the status that redirected there - no bodies, no URLs;
+the failed hop URL stays in the netlog row the outer catch already
+writes. Probe-side, suite/e2e/torture.mjs records which redirect code
+failed and the full "zeolite: upstream fetch failed: ..." suffix
+(fields failedCode/upstreamError in the probe JSON contract) instead
+of a JSON.parse SyntaxError or a 200-character preview.
+
+Audit result on the re-issue path itself (307/308 replay across the
+10-hop cap, pinned by unit test with byte equality and single-copy
+reference identity): each re-fetch receives the one buffered/spooled
+ArrayBuffer, never a re-read of the consumed original stream; the
+wedge-guard yield is a single awaited timeout per iteration and cannot
+double-fire; and the spool release now rides the same finally as the
+transport copy, so a copy over the measured 8 MiB bound frees the
+spool file and its live budget immediately instead of stranding it
+until the ten-minute orphan sweep (that release-timing defect was the
+one concrete finding; it is fixed, minimally). No consumed-stream or
+double-re-issue defect was found: the intermittent probe failure
+remains diagnosed, not explained - the per-hop diagnostic and the full
+error suffix exist so the next red run names its cause instead of
+eating it.

@@ -191,34 +191,50 @@ served to the browser. The opt-in stays off by default.
 
 The hop chain buffers a request stream body once and replays it on
 every redirect kind, so 307/308 POSTs follow like a real browser; a
-cross-origin hop drops Authorization per the fetch spec. Two measured
+cross-origin hop drops Authorization per the fetch spec. Three measured
 realities shape the over-cap behavior:
 
 - Chromium never exposes Content-Length on service-worker-intercepted
   requests, so a page upload always reaches the engine as an unannounced
-  stream. Without the host-authorized replay spool (#556, zl:config
-  spoolUploads), a body that overflows the replay cap (32 MiB default,
-  zl:config replayCapMb, range 1 to 32) fails with the honest 502 naming
-  the cap: never a truncated body, never a surfaced redirect.
+  stream and discovers the cap (32 MiB default, zl:config replayCapMb,
+  range 1 to 32) mid-read.
 - The vendored transport artifact full-buffers every request body into
   its wasm heap before the socket sees it. Measured through the engine:
   8 MiB uploads ride, 16 MiB uploads kill the renderer process
   deterministically. The ceiling is independent of the spool.
+- Over-cap upload staging rides Origin Private File System storage by
+  default (#556): an over-cap streamed body is written once to a spool
+  file (per-request cap 256 MiB, live budget 512 MiB across concurrent
+  spools) and replays from there with byte-identical bytes, bounded by
+  one materialized transport copy per redirect chain. A deployment that
+  refuses disk-backed upload staging opts out with zl:config
+  spoolUploads false (engine.ts spoolUploads) - upload bytes then never
+  reach persistent storage.
 
-When the embedder authorizes the spool, an over-cap body is written
-once to Origin Private File System storage (per-request cap 256 MiB,
-live budget 512 MiB across concurrent spools). The spooled file is the
-replay source; the engine materializes one ArrayBuffer copy per
-redirect chain, bounded by the measured 8 MiB transport ceiling, so
-the copy fails honestly instead of crashing the renderer when a
-spooled body exceeds it. Redirects on spooled bodies follow with
-byte-identical replay (pinned by suite/e2e/replay-spool.mjs).
-Upload bytes reach persistent storage only on that explicit opt-in;
-storage that fails before the first byte keeps the documented honest
-failure, and a failure after the first byte fails the request honestly
-instead of serving a truncated body. Bodies above the transport
-ceiling remain impossible until the artifact streams uploads from a
-read callback, which is the remaining #556 work.
+Failure behavior, fail-honest on every branch:
+
+- Spool unavailable before the first byte (storage refused or opted
+  out): the request keeps its documented fallback - an announced
+  over-cap body streams one-shot and the redirect surfaces with its
+  Location mapped to an engine route; an unannounced body keeps the
+  memory replay path and fails with the honest 502 naming the cap when
+  it overflows. Never a truncated body, never a half-followed redirect
+  without the mapped Location. A TRANSPORT DIAG event records the
+  unavailable spool.
+- Failure after the first byte (write error, per-request cap, live
+  budget): the request fails with the honest 502, the partial spool
+  file is deleted and the budget returned. The engine never silently
+  retries and never re-issues a POST/PATCH after delivery-unknown.
+- A spooled body above the measured 8 MiB transport ceiling fails with
+  the honest 502 naming the bound instead of crashing the renderer.
+- Orphaned spool files (a worker killed mid-chain) are swept by the
+  next spool, bounded per sweep.
+
+Redirects on spooled bodies follow with byte-identical replay (pinned
+by suite/e2e/replay-spool.mjs, which also pins the opted-out 502 and
+the production ceiling). Bodies above the transport ceiling remain
+impossible until the artifact streams uploads from a read callback,
+which is the remaining #556 work.
 
 ## SharedWorker identity is scoped, not a separate origin
 
@@ -339,8 +355,9 @@ honestly unavailable for them and a mid-request failure cannot be
 replayed. A Content-Length-announced body over the cap would stream one-shot,
 but Chromium never announces Content-Length to the service worker, so
 the real page traffic class is the unannounced one: it fails honestly
-at the cap unless the host authorized the OPFS replay spool (#556),
-which captures it to disk past the memory cap and materializes one
+at the cap unless the OPFS replay spool engages (#556, on by default;
+zl:config spoolUploads false is the opt-out), which captures it to
+disk past the memory cap and materializes one
 bounded transport copy per redirect chain.
 Every cap trip is counted (replayCapTrips in app/src/request.ts) and
 logged, and every script-body mask (the #158/#159 honesty layer) is

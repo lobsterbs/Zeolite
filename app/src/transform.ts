@@ -230,6 +230,11 @@ export function rewriteStream(
   /* #529: optional diagnostics trace id; the rewriter's aggregated
      decisions join the request's trace at stream end. */
   traceId?: string,
+  /* #551: precomputed <style data-zl-cosmetic> markup (cosmetics.ts)
+     spliced with the init script after the doctype. Document
+     call sites only: injectInit=false (fetch/XHR HTML) never
+     receives cosmetics - a programmatic read is not a document. */
+  cosmeticStyle = "",
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const modP = rewriter();
@@ -255,7 +260,12 @@ export function rewriteStream(
         /* #414: injectInit=false serves fetch/XHR HTML with the URL
            rewrite but no bootstrap splice, so a plain-text API answer
            behind an HTML content-type survives byte intact. */
-        const init = injectInit ? initScript(base, deps!.fpScript() ?? (await deps!.siteScript(base))) : "";
+        /* #551: cosmetic styles ride the same after-doctype splice as
+           the init script. The wasm rewriter's add_injection only
+           emits <script src> tags (crates/rewriter html::emit_injections),
+           so a style element goes through this splice instead - the
+           smallest seam that keeps the rewriter untouched. */
+        const init = injectInit ? initScript(base, deps!.fpScript() ?? (await deps!.siteScript(base))) + cosmeticStyle : "";
         /* #531: scan only document-shaped rewrites; a fetch/XHR HTML
            body (injectInit=false) is programmatic data, never a
            document with subresource integrity metadata. */
@@ -684,3 +694,4 @@ export async function scriptPinsOrigins(js: string): Promise<boolean> {
     return false;
   }
 }
+
