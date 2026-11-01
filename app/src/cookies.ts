@@ -97,12 +97,51 @@ export interface VirtualOrigin {
   pathBase: string;
 }
 
-/** One admission decision, for tests and diagnostics. */
+/** One admission decision, for tests and diagnostics.
+    #520: successful admissions also carry the cookie view the jar now
+    holds (stored) or held before the deletion (deleted), whether an
+    existing identity was replaced, and the jar namespace — the seam
+    cookies.onChanged observes. */
 export interface SetCookieResult {
   name: string;
   stored: boolean;
   deleted: boolean;
   rejected?: string;
+  cookie?: Cookie;
+  replaced?: boolean;
+  namespace?: string;
+}
+
+/* ---- #520: jar merge observation ------------------------------------
+
+   One hook, fired from admitCookie after every real admission (an
+   upstream Set-Cookie capture, a document.cookie write, or an
+   extension cookies.set): the extensions bridge maps these onto
+   cookies.onChanged with Firefox causes. Nothing fires for rejected
+   or no-op admissions. */
+
+export interface JarCookieChange {
+  result: SetCookieResult;
+  responseUrl: string;
+  fromScript: boolean;
+}
+
+const jarChangeListeners = new Set<(c: JarCookieChange) => void>();
+
+export function onCookieJarChange(l: (c: JarCookieChange) => void): () => void {
+  jarChangeListeners.add(l);
+  return () => jarChangeListeners.delete(l);
+}
+
+function noteJarChange(result: SetCookieResult, responseUrl: string, fromScript: boolean): void {
+  if (!result.cookie) return;
+  for (const l of [...jarChangeListeners]) {
+    try {
+      l({ result, responseUrl, fromScript });
+    } catch {
+      /* a listener must never break the admission path */
+    }
+  }
 }
 
 /* ---- virtual-origin registry --------------------------------------- */
@@ -148,6 +187,12 @@ const jars = new Map<string, Cookie[]>();
    jar with lb_inc. */
 
 const PROFILE_DEFAULT = "default";
+/** #520: cookies.onChanged surfaces only admissions into this durable
+    namespace — extension reads see jarDefaultEnumeration, so events
+    from session-profile jars must not leak. */
+export function isDefaultJarNamespace(ns: string | undefined): boolean {
+  return ns === PROFILE_DEFAULT;
+}
 /* A frame recovered from an authenticated handle may beat its host
    window's profile re-push after a worker restart. Keep that request
    cookie-free until the host re-establishes its profile. */
@@ -752,13 +797,29 @@ function admitCookie(
     const before = jar.length;
     /* #337: a document.cookie write never deletes an HttpOnly
        cookie; only a server response retires one. */
-    const kept = jar.filter((c) => !sameCookie(c) || (fromScript && c.httpOnly));
+    let removedCookie: Cookie | null = null;
+    const kept = jar.filter((c) => {
+      if (sameCookie(c) && !(fromScript && c.httpOnly)) {
+        removedCookie = c;
+        return false;
+      }
+      return true;
+    });
     if (kept.length !== before) {
       if (kept.length) jars.set(key, kept);
       else jars.delete(key);
       schedulePersist();
       traceDecision({ subsystem: "cookies", original: responseUrl, result: "deleted " + name });
-      return { name, stored: false, deleted: true };
+      const result: SetCookieResult = {
+        name,
+        stored: false,
+        deleted: true,
+        cookie: removedCookie ?? undefined,
+        replaced: true,
+        namespace,
+      };
+      noteJarChange(result, responseUrl, fromScript);
+      return result;
     }
     return { name, stored: false, deleted: false };
   }
@@ -790,7 +851,9 @@ function admitCookie(
   jars.set(key, jar);
   schedulePersist();
   traceDecision({ subsystem: "cookies", original: responseUrl, result: "stored " + name });
-  return { name, stored: true, deleted: false };
+  const result: SetCookieResult = { name, stored: true, deleted: false, cookie: fresh, replaced: idx >= 0, namespace };
+  noteJarChange(result, responseUrl, fromScript);
+  return result;
 }
 
 /** Jar header view of a transport Response. Response construction
