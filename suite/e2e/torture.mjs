@@ -35,11 +35,12 @@
    call; no infrastructure redesign.
 
    Honest gaps (documented, not faked): WebSocket targets need a TLS
-   fixture (the engine upgrades ws to wss by design; loopback is plain
-   HTTP), IDN hostnames need a real domain (the fixtures are loopback
-   IPs), and downloads need a UI-observable harness (the #90 registry
-   is unit-tested; a fetch-shaped attachment is just another body
-   probe). None are covered here; all are listed in README.md.
+   fixture (plaintext ws:// passes through since #525, but the
+   loopback fixtures are plain HTTP and a wss:// terminator is out of
+   scope here), IDN hostnames need a real domain (the fixtures are
+   loopback IPs), and downloads need a UI-observable harness (the #90
+   registry is unit-tested; a fetch-shaped attachment is just another
+   body probe). None are covered here; all are listed in README.md.
 
    Run: node suite/e2e/torture.mjs   (same prerequisites as e2e.mjs) */
 
@@ -485,10 +486,24 @@ async function main() {
        SW error text, and JSON.parse turned it into a SyntaxError that
        ate the message; a hang ate the whole 45s evaluate window. Each
        code now records its own outcome, so a red run names the failing
-       code and the full error text. The timeout wording keeps the
-       harness wedge-restart signature ("Timeout NNNNNms exceeded"). */
+       code and the full error text: the first failing code and the
+       FULL "zeolite: upstream fetch failed: ..." suffix ride the probe
+       result as failedCode/upstreamError (bounded to 2000 chars - the
+       engine 502 body is one line, the bound only keeps a hostile
+       non-JSON body from bloating the JSON contract). The timeout
+       wording keeps the harness wedge-restart signature ("Timeout
+       NNNNNms exceeded"). */
     const probe = `async () => {
       const out = {};
+      let failedCode = null;
+      let upstreamError = null;
+      const recordFailure = (code, text) => {
+        out[code] = { probeError: text };
+        if (failedCode === null) {
+          failedCode = code;
+          upstreamError = text;
+        }
+      };
       const withDeadline = (p, ms) => Promise.race([
         p,
         new Promise((res) => setTimeout(() => res({ __deadline: ms }), ms)),
@@ -497,29 +512,44 @@ async function main() {
         try {
           const r = await withDeadline(fetch("/api/redir" + code, { method: "POST", headers: { "content-type": "text/zl-t" }, body: "zl-redir-body" }), 8000);
           if (r && r.__deadline) {
-            out[code] = { probeError: "Timeout " + r.__deadline + "ms exceeded (fetch never settled)" };
+            recordFailure(code, "Timeout " + r.__deadline + "ms exceeded (fetch never settled)");
             continue;
           }
           const text = await r.text();
           try {
             out[code] = JSON.parse(text);
           } catch {
-            out[code] = { probeError: "non-JSON body: " + text.slice(0, 200) };
+            /* the full error body, not the SyntaxError and not a
+               200-char preview: the upstream suffix is the diagnosis */
+            recordFailure(code, "non-JSON body: " + text.slice(0, 2000));
           }
         } catch (e) {
-          out[code] = { probeError: String((e && e.message) || e) };
+          recordFailure(code, String((e && e.message) || e));
         }
+      }
+      if (failedCode !== null) {
+        out.failedCode = failedCode;
+        out.upstreamError = upstreamError;
       }
       return JSON.stringify(out);
     }`;
     const { direct, proxied } = await dualProbe(probe);
     /* #514: surface the recorded per-code outcomes before any comparison,
-       with the full engine error text instead of a SyntaxError. */
+       with the full engine error text instead of a SyntaxError, and
+       name the failing code both sides of the wire. */
+    for (const side of ["direct", "proxied"]) {
+      const rec = side === "direct" ? direct : proxied;
+      if (rec.failedCode !== undefined) {
+        throw new Error(
+          side + " redirect probe failed on code " + rec.failedCode + ": " + rec.upstreamError,
+        );
+      }
+    }
     for (const code of [301, 302, 303, 307, 308]) {
       for (const side of ["direct", "proxied"]) {
-        const rec = (side === "direct" ? direct : proxied)[code];
-        if (rec && typeof rec === "object" && typeof rec.probeError === "string") {
-          throw new Error(side + " " + code + " redirect fetch: " + rec.probeError);
+        const r = (side === "direct" ? direct : proxied)[code];
+        if (r && typeof r === "object" && typeof r.probeError === "string") {
+          throw new Error(side + " " + code + " redirect fetch: " + r.probeError);
         }
       }
     }

@@ -1,13 +1,62 @@
 import "fake-indexeddb/auto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /* #155: the upstreamFetch choke point buffers a POST body that
    arrives as a ReadableStream exactly once, so the relay can carry
    it (#137 accepts string/ArrayBuffer only) and the transport retry
-   (#74) replays it instead of dying on a disturbed stream. */
+   (#74) replays it instead of dying on a disturbed stream.
 
-import { replayCapTrips, replayableInit, spoolTransportCopy } from "../request";
-import { setReplayCapMb } from "../swstate";
+   The hop-level #556 cases below drive the real handleFetch loop, so
+   the two browser-bound modules request.ts pulls are mocked the same
+   way request.test.ts mocks the transport: the vendored bundle is a
+   browser/wasm artifact (its absence is exactly why this file could
+   not collect before), and the wasm rewriter is irrelevant to the
+   redirect-replay contract under test - the stubs pass bodies through
+   untouched. */
+
+const hopMock = vi.hoisted(() => ({
+  urls: [] as string[],
+  inits: [] as Array<{ method?: string; headers?: Headers; body?: unknown } | undefined>,
+  queue: [] as Response[],
+  failCall: null as number | null,
+}));
+
+vi.mock("../transport", () => ({
+  currentEngine: () => "libcurl",
+  wispTransport: {
+    ready: async () => {},
+    fetch: async (url: string, init?: { method?: string; headers?: Headers; body?: unknown }) => {
+      hopMock.urls.push(url);
+      /* snapshot: the hop loop mutates one shared Headers object */
+      hopMock.inits.push(init ? { method: init.method, headers: new Headers(init.headers), body: init.body } : undefined);
+      if (hopMock.failCall !== null && hopMock.urls.length === hopMock.failCall) {
+        throw new Error("Could not connect to server");
+      }
+      const queued = hopMock.queue.shift();
+      if (queued) return queued;
+      return new Response("mock", { headers: { "content-type": "text/html" } });
+    },
+  },
+}));
+
+vi.mock("../transform", () => ({
+  isHtml: () => false,
+  isCss: () => false,
+  isJs: () => false,
+  boundedBody: async () => ({ head: new Uint8Array(0), rest: null }),
+  passthroughStream: () => new ReadableStream({ start: (c) => c.close() }),
+  rawFrom: () => new ReadableStream({ start: (c) => c.close() }),
+  rewriteStream: (body: unknown) => body,
+  cssRewriteStream: (body: unknown) => body,
+  rewriteJsBody: async (src: string) => src,
+  scriptPinsOrigins: async () => null,
+  workerPrelude: async () => "",
+}));
+
+import { handleFetch, replayCapTrips, replayableInit, spoolTransportCopy } from "../request";
+import { DIAG } from "../diag";
+import { encodeDestLegacy } from "../codec";
+import { setReplayCapMb, setSpoolUploads, spoolUploadsEnabled } from "../swstate";
 import { setSpoolRootForTests, type SpoolDir, type SpoolFileHandle, type SpoolRoot } from "../bodyspool";
 
 const streamOf = (chunks: (string | Uint8Array)[]): ReadableStream<Uint8Array> =>
@@ -197,15 +246,19 @@ describe("replayableInit spool branch (#556 hop replay)", () => {
     expect(out).toBe(init);
   });
 
-  it("falls back to one-shot streaming when storage is unavailable", async () => {
+  it("falls back to one-shot streaming with an explicit DIAG event when storage is unavailable", async () => {
     setSpoolRootForTests(null);
     const init = {
       method: "POST",
       headers: new Headers({ "content-length": String(64 * 1024 * 1024) }),
       body: streamOf(["hello"]),
     };
+    const before = DIAG.snapshot(0).events.length;
     const out = await replayableInit(init, { hopReplay: true, spoolAuthorized: true });
     expect(out).toBe(init);
+    const events = DIAG.snapshot(0).events.slice(before);
+    /* the fallback is recorded, never silent (#556 honesty layer) */
+    expect(events.some((e) => /replay spool unavailable/.test(e.message))).toBe(true);
   });
 
   it("spools an unannounced hop-replay body without adding a content-length", async () => {
@@ -296,5 +349,198 @@ describe("spoolTransportCopy (#556 hop transport body)", () => {
       "spooled body exceeds the transport body bound"
     );
     expect(replayCapTrips()).toBe(before + 1);
+  });
+});
+
+/* #556 follow-up: the spool is the default upload-replay path, so the
+   hop LOOP (not only replayableInit) must follow over-cap redirects
+   with byte-identical replay. These cases drive the real handleFetch
+   hop chain against the in-memory spool root; the cap is tightened so
+   the unit stays fast (the 32 MiB default is covered by the e2e
+   suite). */
+describe("hop loop replays over-cap spooled bodies (#556 follow-up)", () => {
+  const ORIGIN = "https://w.example.org";
+  const HALF = 512 * 1024;
+
+  /* deterministic 1.5 MiB pattern: an announced content-length over the
+     tightened 1 MiB cap, which is also the real page-traffic shape
+     once Chromium's missing Content-Length is taken into account */
+  const pattern = (n: number): Uint8Array => {
+    const u8 = new Uint8Array(n);
+    for (let i = 0; i < n; i++) u8[i] = (i * 7 + 13) & 255;
+    return u8;
+  };
+  const N = HALF * 3;
+
+  const sha256 = async (b: unknown): Promise<string> => {
+    const bytes = b instanceof ArrayBuffer ? new Uint8Array(b) : (b as Uint8Array);
+    const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
+    return Array.from(new Uint8Array(digest)).map((x) => x.toString(16).padStart(2, "0")).join("");
+  };
+
+  const mkPostEvent = (target: string, body: unknown, headers: Headers) => {
+    const armed: Promise<Response>[] = [];
+    const awaited: Promise<unknown>[] = [];
+    const ev = {
+      request: {
+        url: ORIGIN + encodeDestLegacy(target),
+        method: "POST",
+        mode: "navigate",
+        destination: "document",
+        credentials: "same-origin",
+        referrer: "",
+        body,
+        headers,
+      },
+      clientId: "spool-hop",
+      resultingClientId: "spool-hop-new",
+      respondWith: (p: Promise<Response>) => void armed.push(p),
+      waitUntil: (p: Promise<unknown>) => void awaited.push(p),
+    } as unknown as FetchEvent;
+    return { ev, armed, awaited };
+  };
+
+  beforeEach(() => {
+    hopMock.urls = [];
+    hopMock.inits = [];
+    hopMock.queue = [];
+    hopMock.failCall = null;
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN },
+      registration: { scope: ORIGIN + "/" },
+      clients: { get: async () => null },
+    });
+    vi.stubGlobal("caches", {
+      open: async () => {
+        throw new Error("no cache storage");
+      },
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setReplayCapMb(32);
+    setSpoolRootForTests(null);
+    setSpoolUploads(true);
+  });
+
+  const runTwoHops = async (code: 307 | 308) => {
+    setReplayCapMb(1);
+    setSpoolUploads(true);
+    setSpoolRootForTests(spoolTestRoot());
+    const expected = await sha256(pattern(N));
+    hopMock.queue = [
+      new Response(null, { status: code, headers: { location: "https://site.example/next" } }),
+      new Response(null, { status: code, headers: { location: "https://site.example/final" } }),
+      new Response("ok", { headers: { "content-type": "text/plain" } }),
+    ];
+    const { ev, armed, awaited } = mkPostEvent(
+      "https://site.example/upload",
+      streamOf([pattern(HALF), pattern(HALF), pattern(HALF)]),
+      new Headers({ "content-length": String(N), "content-type": "application/octet-stream" }),
+    );
+    handleFetch(ev);
+    const served = await armed[0]!;
+    /* settle the fetch-event lifetime: the spool release rides waitUntil */
+    await Promise.allSettled(awaited);
+    expect(served.status).toBe(200);
+    expect(hopMock.urls).toEqual([
+      "https://site.example/upload",
+      "https://site.example/next",
+      "https://site.example/final",
+    ]);
+    expect(hopMock.inits.map((i) => i?.method)).toEqual(["POST", "POST", "POST"]);
+    /* every re-issue carried the full spooled body, byte-identical:
+       the announced length was replaced by the spooled truth */
+    for (const init of hopMock.inits) {
+      expect(init?.body).toBeInstanceOf(ArrayBuffer);
+      expect(await sha256(init?.body)).toBe(expected);
+      expect((init?.body as ArrayBuffer).byteLength).toBe(N);
+    }
+  };
+
+  it("follows an over-cap announced 307 through two hops with body-hash equality", async () => {
+    await runTwoHops(307);
+  });
+
+  it("follows an over-cap announced 308 through two hops with body-hash equality", async () => {
+    await runTwoHops(308);
+  });
+
+  it("the spool authorization is on by default (the opt-out is the zl:config false)", () => {
+    expect(spoolUploadsEnabled()).toBe(true);
+  });
+
+  /* #514 regression: the re-issue path replays the SAME buffered copy
+     across the full hop cap - byte equality on every re-issue, and the
+     original request stream is never handed to the transport again
+     (every hop body is the one ArrayBuffer, by reference). */
+  it("replays a 307 POST across the 10-hop cap byte-identically without re-consuming the original stream", async () => {
+    setSpoolUploads(false); /* pure memory replay, no OPFS in the loop */
+    setSpoolRootForTests(null);
+    const expected = await sha256(pattern(N));
+    hopMock.queue = [];
+    for (let i = 0; i < 10; i++) {
+      hopMock.queue.push(
+        new Response(null, {
+          status: 307,
+          headers: { location: "https://site.example/hop" + (i + 1) },
+        }),
+      );
+    }
+    hopMock.queue.push(new Response("ok", { headers: { "content-type": "text/plain" } }));
+    const { ev, armed } = mkPostEvent(
+      "https://site.example/upload",
+      streamOf([pattern(HALF), pattern(HALF), pattern(HALF)]),
+      new Headers({ "content-type": "application/octet-stream" }),
+    );
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    /* initial request + MAX_REDIRECT_HOPS re-issues */
+    expect(hopMock.urls).toHaveLength(11);
+    expect(hopMock.urls[0]).toBe("https://site.example/upload");
+    expect(hopMock.urls[10]).toBe("https://site.example/hop10");
+    const bodies = hopMock.inits.map((i) => i?.body);
+    for (const b of bodies) {
+      expect(b).toBeInstanceOf(ArrayBuffer); /* never a (consumed) stream */
+      expect(await sha256(b)).toBe(expected);
+      expect((b as ArrayBuffer).byteLength).toBe(N);
+    }
+    /* one shared buffered copy: the loop re-issues the identical
+       instance instead of re-reading the original stream */
+    for (const b of bodies) expect(b).toBe(bodies[0]);
+  });
+
+  /* #514: an upstream failure on a RE-ISSUE hop is a bounded,
+     attributable diagnostic (hop index + the status that redirected),
+     never a body and never a URL. */
+  it("records a bounded UPSTREAM warning when a re-issue hop fails, then serves the honest error", async () => {
+    setSpoolUploads(false);
+    setSpoolRootForTests(null);
+    hopMock.queue = [
+      new Response(null, { status: 307, headers: { location: "https://site.example/next" } }),
+    ];
+    hopMock.failCall = 2; /* the first RE-ISSUE, not the initial fetch */
+    const before = DIAG.snapshot(0).events.length;
+    const { ev, armed } = mkPostEvent(
+      "https://site.example/upload",
+      streamOf([pattern(HALF)]),
+      new Headers({ "content-type": "application/octet-stream" }),
+    );
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(502); /* the honest error strand */
+    const events = DIAG.snapshot(0).events.slice(before);
+    const hopFailure = events.find(
+      (e) =>
+        e.category === "UPSTREAM" &&
+        e.stage === "REDIRECT_HOP" &&
+        e.cause === "upstream" &&
+        /re-issue hop 1 failed upstream \(redirected by 307\)/.test(e.message),
+    );
+    expect(hopFailure).toBeDefined();
+    /* no bodies, no URLs in the bounded message */
+    expect(hopFailure!.message).not.toMatch(/site\.example|upload|zl-redir/);
   });
 });

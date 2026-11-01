@@ -46,7 +46,8 @@ Content-Disposition, then the last path segment of the source URL, then
 ## Persistence (2.2 Arsenide)
 
 The ring persists to site-scoped IndexedDB (one record per source
-origin, the extension subsystem's idb helper, DB version 4): entries
+origin, the extension subsystem's idb helper, DB version 5 since #541
+added the `download-handoffs` store): entries
 survive a service-worker restart. Writes are debounced and flush on
 lifecycle transitions (registered, done, error, cancelled, paused).
 On load, an entry that was active when the worker died is honestly
@@ -69,9 +70,46 @@ states are final - later reports for the same id are refused.
 
 Honest limits: these ids are the numeric handoff ids from
 `zl:downloadOp`, a separate namespace from the `dl<N>` attachment
-registry above; a handoff the host never reports stays `active`; and
-the registry is in-memory, so a service-worker restart drops it (the
-same honest-restart rule as `zl:adblock`).
+registry above, and a handoff the host never reports stays `active`.
+
+### Extension handoff persistence (#541)
+
+The handoff registry itself (this section's records, not the attachment
+ring above) is persisted to the extension DB's `download-handoffs`
+store (DB version 5; the upgrade only creates the store, so the
+meta/files/storage/cookies/downloads/download-partials stores and their
+data survive untouched):
+
+- What is persisted: the handoff state record per id - id, owning
+  extension, status, the URL and filename the extension itself
+  supplied, received/size counts, error text, start/end times. Never
+  file bytes, never response bodies, never anything the host reported
+  beyond that state report.
+- Write-through: every transition (the initial `active` record at
+  `downloads.download()` - durable before the id resolves - and every
+  `zl:downloadState` report) is written through. A storage failure is
+  a bounded diagnostic and an in-memory registry, never a failed
+  handoff.
+- Restart recovery: on background boot the registry rehydrates. A
+  record whose host never reported a terminal state recovers as its
+  last known non-terminal status with a `recoveredAt` marker - no fake
+  completion. Terminal records restore as terminal and stay final: a
+  `zl:downloadState` report for an already-terminal id is a no-op
+  plus one bounded diagnostic (once per id), never a resurrection.
+  Handoff ids stay unique across restarts (the sequence restarts past
+  every restored id).
+- Retention: records older than 7 days (`HANDOFF_RETENTION_MS`) are
+  dropped and deleted on load. That window bounds the only user data
+  the store holds: the extension-supplied URL/filename plus counters.
+- What the engine cannot know: the host's `zl:downloadState` is the
+  ONLY channel reporting what happened to a handoff. A browser-side
+  cancel (the browser's own download shelf) and a tab close before the
+  report look identical to "the host never answered": the record stays
+  at its last known non-terminal state, honestly, forever (until
+  retention). The engine does not guess a terminal state it never
+  observed, and recovery fires no synthesized `downloads.onChanged`
+  events - a restarted background that wants the truth reads
+  `downloads.search` (the `recoveredAt` marker is in the row).
 
 ## Honest limits
 

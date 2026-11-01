@@ -5,10 +5,12 @@
    transport decision (wired by sw.ts through ghosteryListFetch,
    #381), never browser fetch.
 
-   This adapter currently applies network block and resource-redirect
-   decisions. Cosmetic selectors and scriptlets need a separate,
-   CSP-aware document-rewrite integration and are deliberately not
-   injected here. */
+   This adapter applies network block and resource-redirect
+   decisions. #551 first slice: cosmetic CSS selectors for the
+   document URL are computed from this engine by ./cosmetics and
+   spliced into the document rewrite as a <style data-zl-cosmetic>
+   (transform.ts init splice). Scriptlets and extended/HTML filters
+   are counted and refused, never executed. */
 
 import {
   FiltersEngine,
@@ -52,7 +54,10 @@ export interface GhosteryDecision {
   redirect?: GhosteryRedirect;
 }
 
-function requestType(type: ResourceType, destination?: string): RequestType {
+/** Engine resource type mapping (#551 exports it so the cosmetic
+    seam labels documents with the same vocabulary; getCosmeticsFilters
+    itself is hostname-scoped and takes no request type). */
+export function requestType(type: ResourceType, destination?: string): RequestType {
   if (destination === "iframe" || destination === "frame") return "sub_frame";
   if (destination === "document") return "document";
   if (destination === "object") return "object";
@@ -223,6 +228,14 @@ export function configureGhostery(fetcher: typeof fetch): void {
     }
     return response;
   };
+}
+
+/** The loaded matcher, or null while the list load is pending/failed.
+    #551: the cosmetic injection seam reads the same engine instance
+    the network matcher answers from, so both arms agree on what is
+    loaded; never a second parse. */
+export function ghosteryEngine(): FiltersEngine | null {
+  return engine;
 }
 
 /** The request event uses this to keep a lazy filter-list load alive. */
