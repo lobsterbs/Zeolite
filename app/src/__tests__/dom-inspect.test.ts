@@ -74,7 +74,7 @@ vi.mock("../transform", () => ({
   scriptPinsOrigins: async () => false,
 }));
 
-import { applyDomInspect } from "../bootstrap/dominspect";
+import { applyDomInspect } from "../dominspect-core";
 import {
   domInspectAuthorize,
   domInspectRequest,
@@ -394,9 +394,10 @@ describe("engine half: sessions and relay (#550)", () => {
     domInspectResetForTests();
     clientsGet = vi.fn(async (_id: string) => null);
     (globalThis as unknown as { self: unknown }).self = {
-      location: { origin: ORIGIN },
+      location: { origin: ORIGIN, href: ORIGIN + "/sw.js" },
       clients: { get: clientsGet },
     };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("BRIDGE-SOURCE", { status: 200 })));
   });
 
   afterEach(() => {
@@ -446,6 +447,24 @@ describe("engine half: sessions and relay (#550)", () => {
     const r2 = await domInspectRequest("client-c", "snapshot");
     expect(r2.ok).toBe(false);
     expect(r2.error).toBe("no inspection session for clientId");
+  });
+
+  it("the authorize message carries the compiled bridge source", async () => {
+    const { client, posts } = fakeBridgeClient((msg) =>
+      msg.type === "zl:domInspectCtl" ? { ok: true, gen: FAKE_GEN } : null,
+    );
+    clientsGet.mockResolvedValue(client);
+    await domInspectAuthorize("code-1");
+    expect(posts[0]).toMatchObject({ type: "zl:domInspectCtl", on: true, code: "BRIDGE-SOURCE" });
+  });
+
+  it("authorize fails honestly when the inspector bundle is unavailable", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
+    const { client, posts } = fakeBridgeClient(() => null);
+    clientsGet.mockResolvedValue(client);
+    const r = await domInspectAuthorize("nobundle-1", 30);
+    expect(r).toEqual({ ok: false, error: "inspector bundle unavailable" });
+    expect(posts).toEqual([]);
   });
 
   it("authorize refuses host-page targets and dead clients", async () => {
@@ -515,9 +534,10 @@ describe("zl:domInspect control message (#550)", () => {
     domInspectResetForTests();
     clientsGet = vi.fn(async (_id: string) => null);
     (globalThis as unknown as { self: unknown }).self = {
-      location: { origin: ORIGIN },
+      location: { origin: ORIGIN, href: ORIGIN + "/sw.js" },
       clients: { get: clientsGet },
     };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("BRIDGE-SOURCE", { status: 200 })));
   });
   afterEach(() => {
     domInspectResetForTests();

@@ -1,4 +1,13 @@
-/* Zeolite bootstrap: Tier 2 DOM inspection bridge (#550, first slice).
+/* Zeolite page-side Tier 2 DOM inspection bridge (#550, first slice).
+
+   Shipped on demand like the in-page finder (#29): this module is a
+   PAGE-side artifact, not bootstrap code - the SW attaches its
+   compiled bundle (dist/dominspect.js, a sibling of sw.js) to the
+   authorize ctl message and the bootstrap loader (findload.ts)
+   evaluates it once per document, handing over the event that
+   carried the code. Keeping it out of the static bootstrap bundle
+   is also the smaller security surface: a document that was never
+   authorized never even holds the inspector code.
 
    The devtools page never touches page DOM directly (power-features
    spec §2): the controlling service worker relays inspection requests
@@ -209,7 +218,10 @@ export function applyDomInspect(w: Record<string, unknown>): void {
     return out;
   }
 
-  sw.addEventListener("message", (ev: MessageEvent) => {
+  /* The loader hands the event that carried the code to this same
+     handler (a listener added during dispatch never sees the
+     in-flight event, so this is the authorize message's only pass). */
+  function handle(ev: MessageEvent): void {
     if (ev.source !== ctl) return;
     const m = ev.data as CtlMessage | null;
     if (!m) return;
@@ -261,5 +273,8 @@ export function applyDomInspect(w: Record<string, unknown>): void {
       return;
     }
     port.postMessage({ ok: false, gen, error: "bad op" });
-  });
+  }
+
+  w.__zlDomInspect = handle;
+  sw.addEventListener("message", handle);
 }
