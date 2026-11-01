@@ -185,7 +185,7 @@ describe("embedder popup routing (#416)", () => {
     const e = setup();
     /* #553: a queued popup is accepted for routing, so window.open
        answers the limited facade instead of null. */
-    const facade = e.open("https://accounts.example/signin", "_blank", "noopener");
+    const facade = e.open("https://accounts.example/signin", "_blank", "noopener") as { name: string };
     expect(facade).toBeTruthy();
     expect(facade.name).toBe("_blank");
     expect(e.nativeOpen).not.toHaveBeenCalled(); expect(e.parent.postMessage).not.toHaveBeenCalled();
