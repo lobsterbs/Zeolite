@@ -24,7 +24,7 @@ describe("request initiator attribution (#545)", () => {
   it("classifies browser evidence without guessing empty-destination requests", () => {
     expect(requestInitiator(request({ mode: "navigate" }))).toBe("NAVIGATION");
     expect(requestInitiator(request({ headers: { accept: "text/event-stream" } }))).toBe("EVENTSOURCE");
-    expect(requestInitiator(request({ destination: "image" }))).toBe("PARSER_RESOURCE");
+    expect(requestInitiator(request({ destination: "image" }))).toBe("RESOURCE");
     expect(requestInitiator(request())).toBe("UNKNOWN");
     expect(requestInitiator(request({ headers: { "x-zl-initiator": "spoofed" } }))).toBe("UNKNOWN");
   });

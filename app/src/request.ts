@@ -1287,7 +1287,7 @@ export function requestInitiator(req: Request): string {
   if (marked === "worker-fetch") return "WORKER_FETCH";
   if (req.mode === "navigate") return "NAVIGATION";
   if ((req.headers.get("accept") ?? "").toLowerCase().includes("text/event-stream")) return "EVENTSOURCE";
-  if (req.destination) return "PARSER_RESOURCE";
+  if (req.destination) return "RESOURCE";
   return "UNKNOWN";
 }
 

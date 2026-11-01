@@ -46,7 +46,8 @@ request row in the DevTools page to view it.
 Initiator types use only observed evidence: page/worker runtime labels
 for Fetch, XHR, sendBeacon and worker fetch; the request's
 text/event-stream Accept header for EventSource; Request.destination for
-parser resources; and Request.mode for navigation. The internal label
+resource requests (it does not prove parser versus script creation); and
+Request.mode for navigation. The internal label
 is stripped before upstream forwarding and is not stored in header
 details. No body or credential values are recorded.
 
