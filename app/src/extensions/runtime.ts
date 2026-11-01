@@ -35,6 +35,7 @@ import { hostPatternsMatch } from "./permissions";
 import { isApiDetached } from "./apis";
 import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
+import { setSessionAccessLevel, SYNC_MAX_ITEMS, SYNC_MAX_WRITE_OPERATIONS_PER_HOUR, SYNC_MAX_WRITE_OPERATIONS_PER_MINUTE, SYNC_QUOTA_BYTES, SYNC_QUOTA_BYTES_PER_ITEM } from "./storage";
 import type { ExtensionStorageArea, StorageValue } from "./storage";
 import type { ExtensionMessenger, MessageListener, ConnectListener, MessageSender, ExtensionPort } from "./messaging";
 import { ALARMS } from "./alarms";
@@ -461,13 +462,59 @@ export function buildApi(
   /* #50: Firefox gates browser.storage on the "storage" permission;
      mounted only when granted - like cookies/notifications/webRequest -
      so feature detection answers honestly and the background/page
-     surface agrees with the content-script storage gate in the SW. */
+     surface agrees with the content-script storage gate in the SW.
+     #520: storage.onChanged is the top-level Firefox event - every
+     area of this extension's own storage reports (changes, areaName)
+     here, in every background context (one context per extension
+     shares the area instances, so cross-surface changes arrive).
+     storage.session gains Firefox's setAccessLevel, enforced at the
+     SW content-script gate from the same registry. The sync surface
+     reports Firefox's real quota constants, and the engine enforces
+     them (102400 total, 8192 per item, 512 items, write-op rates). */
   const storageNs = ext.permissions.includes("storage")
-    ? {
-        local: wrapArea(deps.storage.local),
-        sync: wrapArea(deps.storage.sync),
-        session: wrapArea(deps.storage.session),
-      }
+    ? (() => {
+        const areas = [deps.storage.local, deps.storage.sync, deps.storage.session];
+        const onChanged = {
+          addListener: (l: (changes: Record<string, unknown>, area: string) => void) => {
+            if (offs.has(l)) return;
+            const wrap = (changes: Record<string, unknown>, area: string) => {
+              try {
+                l(changes, area);
+              } catch {
+                /* a broken listener is the extension's own problem */
+              }
+            };
+            for (const a of areas) a.addListener(wrap);
+            offs.set(l, () => {
+              for (const a of areas) a.removeListener(wrap);
+            });
+          },
+          removeListener: (l: unknown) => {
+            offs.get(l)?.();
+            offs.delete(l);
+          },
+          hasListener: (l: unknown) => offs.has(l),
+        };
+        return {
+          local: wrapArea(deps.storage.local),
+          sync: {
+            ...wrapArea(deps.storage.sync),
+            QUOTA_BYTES: SYNC_QUOTA_BYTES,
+            QUOTA_BYTES_PER_ITEM: SYNC_QUOTA_BYTES_PER_ITEM,
+            MAX_ITEMS: SYNC_MAX_ITEMS,
+            MAX_WRITE_OPERATIONS_PER_HOUR: SYNC_MAX_WRITE_OPERATIONS_PER_HOUR,
+            MAX_WRITE_OPERATIONS_PER_MINUTE: SYNC_MAX_WRITE_OPERATIONS_PER_MINUTE,
+          },
+          session: {
+            ...wrapArea(deps.storage.session),
+            /* #520: Firefox documents the plain-string form; Chrome's
+               {accessLevel} object form is accepted too. The level is
+               enforced at the SW content-script gate immediately. */
+            setAccessLevel: (arg: unknown) => setSessionAccessLevel(ext.id, arg),
+          },
+          onChanged,
+        };
+      })()
     : undefined;
   /* tabs: the engine-side mirror of the UI tab model (see ./tabs).
      The tabs permission (or a matching host permission) gates url and
