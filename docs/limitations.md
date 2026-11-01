@@ -37,8 +37,11 @@ An iframe carrying a sandbox attribute without allow-same-origin (for
 example sandbox="allow-scripts") gets an opaque origin, and Chromium
 does not make opaque-origin frames service-worker clients (the same
 client-binding class as the about:blank children a parent writes
-with document.write; about:srcdoc children left this class at
-Chromium 156, see the matrix row): their
+with document.write; about:srcdoc children left this class only
+on newer Chromium - the platform is split on crbug.com/41411856
+(SW clients at 156, still bypassing at 131 where CI runs) and the
+srcdoc-clients suite pins the measured class per build, see the
+matrix row): their
 route fetches bypass the engine entirely. The engine answers such
 bypassed internal routes (/j/, /__zl_nav__/, /__zl_prel__/,
 /__zl_navh__/) with a fixed bypass notice, a 404 carrying no-store and
