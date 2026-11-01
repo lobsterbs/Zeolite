@@ -33,7 +33,9 @@ siteconfig rule; explicit rules still win, including `off`. The selection
 reverts on worker restart and the host re-pushes it. Operator decision
 2026-11-01: the deployment default stays legacy (per-origin siteconfig data,
 corroborated auto-targeting, and this opt-in); LobsterBrowse exposes the flag
-in its beta debug menu, default off.
+in its beta debug menu, default off. The flag is wired end to end as of commit
+6f6caa5: a requested selection becomes effective policy, not an
+observation-only setting.
 
 ## Automatic targeting (gate 4)
 
