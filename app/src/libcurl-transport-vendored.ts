@@ -1345,10 +1345,12 @@ export function openWebSocket(
     (code, reason) => h.onclose(code, reason),
     (error) => h.onerror(error),
   );
-  /* No ping/lastPongAt seam (#61): connect() (dist 2.0.5, libcurl.js
-     0.7.4) exposes no WS control-frame surface, so the wsbridge
-     keepalive watchdog stays off against this transport. If a future
-     transport build grows WS ping support, add the optional
-     ping()/lastPongAt() pair here and the watchdog arms itself. */
+  /* No ping/lastPongAt seam (#61) and no drainAt write-acceptance seam
+     (#546): connect() (dist 2.0.5, libcurl.js 0.7.4) exposes no WS
+     control-frame surface and no accepted-bytes counter, so the wsbridge
+     keepalive watchdog stays off and page bufferedAmount stays
+     bridge-queue accounting against this transport. If a future
+     transport build grows either seam, add the optional methods to the
+     returned handle and the bridge arms itself. */
   return { send, close };
 }

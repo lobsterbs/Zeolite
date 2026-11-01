@@ -40,17 +40,38 @@ the sender's virtual context, never re-schemed).
   framing, masking and fragmentation.
 - Reconnecting libraries see normal error/close sequences and can
   reconnect as usual.
-- `bufferedAmount` (#462) counts UTF-8 text and binary payload bytes
-  while page/worker messages await acceptance at the service-worker
-  bridge. The bridge sends a byte-count acknowledgment only after its
-  transport `send()` succeeds; failed writes receive no acknowledgment.
-  This is deliberately **bridge-queue accounting**, not an assertion
-  that data reached the peer or left the underlying TLS/Wisp buffer.
-  Sends discarded in CLOSING/CLOSED still add their payload bytes, matching
-  Chromium. Those discarded bytes receive no bridge acknowledgment.
-  Network-level bufferedAmount parity requires transport drain signals
-  that the current WsHandle does not expose.
+- `bufferedAmount` (#462, #546) is a transport-accepted-bytes estimate,
+  not native network backpressure - see "Observable semantics" below
+  for the exact contract.
 - Non-ws schemes fall through to the native constructor.
+
+## Observable semantics (#546)
+
+- `url` is the URL the constructor resolved, serialized: resolved
+  against the calling realm base, scheme-less http(s) references mapped
+  to ws(s), explicit ws/wss kept as written, fragments refused with
+  SyntaxError (WHATWG throws on a non-null fragment, so the value can
+  never carry one). This is the string the page constructed - nothing
+  new leaks page-side, the property is never re-minted into an engine
+  route and never the retargeted destination. The SW decodes the
+  destination from its own virtual context; engine-side logs and the
+  netlog keep engine-side identity and never log the page-written
+  original.
+- `bufferedAmount` counts UTF-8 text and binary payload bytes the page
+  has sent whose acceptance has not been acknowledged yet. The bridge
+  acknowledges each frame only after its transport `send()` succeeds;
+  failed writes receive no acknowledgment. When a transport exposes the
+  optional `WsHandle.drainAt()` write-acceptance seam (#546), the
+  acknowledgment carries the bytes the transport actually accepted (the
+  monotone delta since the previous acknowledgment, re-baselined
+  without underflow if a transport reports a lower counter), so the
+  counter tracks transport acceptance. Today's vendored transports
+  expose no such seam, so the acknowledgment is the send-returned
+  bridge acceptance and `bufferedAmount` stays bridge-queue accounting:
+  bytes leave the counter when the bridge call returns, not when the
+  peer or the network consumes them. Sends discarded in
+  CLOSING/CLOSED still add their payload bytes, matching Chromium, and
+  those discarded bytes receive no bridge acknowledgment.
 
 ## URL handling (#279)
 
