@@ -175,16 +175,33 @@ function parseWebAccessible(
   v: unknown,
   mv: 2 | 3,
   diags: ManifestDiagnostics
-): { globs: string[]; scoped: Array<{ resources: string[]; matches: string[] }> } {
+): {
+  globs: string[];
+  scoped: Array<{
+    resources: string[];
+    matches: string[];
+    extensionIds?: string[];
+    useDynamicUrl?: boolean;
+  }>;
+} {
   if (Array.isArray(v)) {
     /* MV2: plain string globs. */
     if (mv === 2) return { globs: strArr(v), scoped: [] };
-    /* MV3: array of { resources, matches, extension_ids }. Entries with
-       matches are scope-bound to the requesting page (#51); entries
-       without matches keep the MV2-style open glob exposure, with a
-       warning that they are not destination-scoped. */
+    /* MV3: array of { resources, matches, extension_ids, use_dynamic_url }.
+       Entries with matches are scope-bound to the requesting page (#51);
+       #524: entries with extension_ids are admitted to registered page
+       clients of the listed extensions ("*" admits every extension);
+       an entry with neither matches nor extension_ids keeps the
+       MV2-style open glob exposure, with a warning that it is not
+       destination-scoped. use_dynamic_url is recorded but not
+       enforced (same-origin serving has no dynamic origin to bind). */
     const globs: string[] = [];
-    const scoped: Array<{ resources: string[]; matches: string[] }> = [];
+    const scoped: Array<{
+      resources: string[];
+      matches: string[];
+      extensionIds?: string[];
+      useDynamicUrl?: boolean;
+    }> = [];
     for (const e of objArr(v)) {
       const res = strArr(e.resources);
       if (res.length === 0) {
@@ -192,11 +209,23 @@ function parseWebAccessible(
         continue;
       }
       const matches = strArr(e.matches);
-      if (matches.length === 0) {
+      const extensionIds = strArr(e.extension_ids);
+      const useDynamicUrl = e.use_dynamic_url === true;
+      if (matches.length === 0 && extensionIds.length === 0) {
         diags.warnings.push("web_accessible_resources: MV3 entry without matches exposed by glob only");
         globs.push(...res);
       } else {
-        scoped.push({ resources: res, matches });
+        scoped.push({
+          resources: res,
+          matches,
+          ...(extensionIds.length > 0 ? { extensionIds } : {}),
+          ...(useDynamicUrl ? { useDynamicUrl } : {}),
+        });
+        if (useDynamicUrl) {
+          diags.warnings.push(
+            "web_accessible_resources: use_dynamic_url recorded but not enforced (same-origin serving has no dynamic origin to bind)",
+          );
+        }
       }
     }
     return { globs, scoped };
