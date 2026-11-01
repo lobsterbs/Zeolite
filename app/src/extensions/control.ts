@@ -8,6 +8,7 @@ import type { ActionKind } from "./action";
 import { bootInstalled, wakeExtension } from "./background";
 import { contentScriptMatches } from "./content-scripts";
 import { MESSENGER, getExtensionContext } from "./context";
+import { senderOrigin } from "./messaging";
 import { MENUS } from "./contextmenus";
 import { DOWNLOADS } from "./downloads";
 import { extensions } from "./manager";
@@ -550,6 +551,7 @@ async function handleExtMessage(
     id: rec.id,
     context: "content",
     url: dest,
+    origin: senderOrigin(dest),
   }, m.msg);
   return { ok: true, response };
 }
