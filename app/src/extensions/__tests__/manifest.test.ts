@@ -95,14 +95,77 @@ describe("parseManifest MV3", () => {
     });
     expect(parsed?.action?.kind).toBe("action");
   });
-  it("reads the gecko id from browser_specific_settings", () => {
-    const { parsed } = parseManifest({
+  it("reads the gecko id and version bounds from browser_specific_settings", () => {
+    const { parsed, diags } = parseManifest({
       manifest_version: 3,
       name: "M3",
       version: "1.0",
-      browser_specific_settings: { gecko: { id: "{abc@test}" } },
+      browser_specific_settings: {
+        gecko: { id: "{12345678-1234-1234-1234-123456789abc}", strict_min_version: "109.0", strict_max_version: "128.*" },
+      },
     });
-    expect(parsed?.geckoId).toBe("{abc@test}");
+    expect(parsed?.geckoId).toBe("{12345678-1234-1234-1234-123456789abc}");
+    expect(parsed?.geckoMinVersion).toBe("109.0");
+    /* "128.*" is a Firefox-legal bound but not purely dotted: recorded
+       as-is with a warning, the engine does not enforce the range. */
+    expect(parsed?.geckoMaxVersion).toBe("128.*");
+    expect(diags.warnings.some((w) => w.includes("strict_max_version"))).toBe(true);
+  });
+  it("accepts JID-shaped gecko ids and dotted bounds", () => {
+    const { parsed, ok } = parseManifest({
+      manifest_version: 2,
+      name: "J",
+      version: "1.0",
+      browser_specific_settings: {
+        gecko: { id: "add-on@example.org", strict_min_version: "102", strict_max_version: "115.0.1" },
+      },
+    });
+    expect(ok).toBe(true);
+    expect(parsed?.geckoId).toBe("add-on@example.org");
+    expect(parsed?.geckoMinVersion).toBe("102");
+    expect(parsed?.geckoMaxVersion).toBe("115.0.1");
+  });
+  it("rejects a malformed gecko id with a Firefox-style error", () => {
+    const { ok, diags } = parseManifest({
+      manifest_version: 3,
+      name: "Bad",
+      version: "1.0",
+      browser_specific_settings: { gecko: { id: "not an id" } },
+    });
+    expect(ok).toBe(false);
+    expect(diags.errors.some((e) => e.includes("browser_specific_settings.gecko.id"))).toBe(true);
+  });
+  it("warns on unsupported bss engines and gecko keys", () => {
+    const { diags } = parseManifest({
+      manifest_version: 2,
+      name: "W",
+      version: "1.0",
+      browser_specific_settings: { gecko: { id: "w@example.org", unknown_key: 1 }, safari: {} },
+    });
+    expect(diags.warnings.some((w) => w.includes("unsupported key 'unknown_key'"))).toBe(true);
+    expect(diags.warnings.some((w) => w.includes("engine 'safari'"))).toBe(true);
+  });
+  it("parses and records theme and dictionaries (#524)", () => {
+    const { parsed, diags } = parseManifest({
+      manifest_version: 2,
+      name: "Theme",
+      version: "1.0",
+      theme: { colors: { frame: "#000000" }, images: {}, properties: { color_scheme: "dark" } },
+      dictionaries: ["en", "de"],
+      developer: { name: "Dev" },
+    });
+    expect(parsed?.theme?.colors).toEqual({ frame: "#000000" });
+    expect(diags.unsupportedFields).not.toContain("theme");
+    expect(diags.unsupportedFields).not.toContain("developer");
+  });
+  it("records dictionaries as a locale -> path map", () => {
+    const { parsed } = parseManifest({
+      manifest_version: 2,
+      name: "Dict",
+      version: "1.0",
+      dictionaries: { en: "dictionaries/en.dic", de: "dictionaries/de.dic" },
+    });
+    expect(parsed?.dictionaries).toEqual({ en: "dictionaries/en.dic", de: "dictionaries/de.dic" });
   });
 });
 
