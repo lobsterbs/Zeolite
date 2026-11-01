@@ -271,17 +271,24 @@ jobs:
         # zl:decodeRoutes engine-arg oracle, the bounded readyVirtualBase
         # poll and the register forward wiring ride bootstrap.js;
         # measured 47288, baseline 46170.
+        # 47480 -> 48480 for #579: flag-surgery recovery (distinct-target
+        # budget) and mss path-shape recovery ride bootstrap.js via
+        # assetbases.ts; measured 48413, baseline 47288.
         # 47480 -> 48000 for #536: the pre-existing open shadow-root
         # sweep (join already-open roots to the MutationObserver at
         # nav-guard install) rides bootstrap.js via navguard.ts;
         # measured 47920, baseline 47288.
+        # 48480 -> 49280 at the #591 merge: the #536 sweep delta (632
+        # bytes over baseline 47288) stacks on the #579 measured
+        # 48413; estimate 49045, to be corrected to the measured
+        # value CI prints once the combined bundle builds.
         # resolves lazily (virtual-origin marker + injected vpath
         # at call time) so a page's relative register() lands on the
         # page's virtual URL; measured 41310, baseline 41025.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 48000 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 48000)"; exit 1; fi
+          if [ "$SIZE" -ge 49280 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 49280)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
