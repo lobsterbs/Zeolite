@@ -3,6 +3,8 @@
 
 import { decodeClientUrl } from "../codec";
 import type { ControlMessage } from "../control";
+import { ACTION } from "./action";
+import type { ActionKind } from "./action";
 import { bootInstalled, wakeExtension } from "./background";
 import { contentScriptMatches } from "./content-scripts";
 import { MESSENGER, getExtensionContext } from "./context";
@@ -304,6 +306,47 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
       reply({ ok: true });
       break;
     }
+    case "zl:actionEvent": {
+      /* #519: the host reports a rendered toolbar button click. Same
+         trust shape as zl:notifyEvent: the click kind is the host's
+         (it rendered the button), the tab resolves through the tabs
+         bridge, and an idle MV3 background wakes before delivery. */
+      const ae = msg as { extId?: string; msg?: unknown };
+      const info = ae.msg as {
+        tabId?: unknown;
+        kind?: unknown;
+        button?: unknown;
+        modifiers?: unknown;
+        pageUrl?: unknown;
+      } | undefined;
+      const actExtId = typeof ae.extId === "string" ? ae.extId : "";
+      const kind: ActionKind | null =
+        info?.kind === "action" || info?.kind === "browser_action" || info?.kind === "page_action"
+          ? info.kind
+          : null;
+      if (!actExtId || !kind || typeof info?.tabId !== "number") {
+        reply({ ok: false, error: "bad actionEvent" });
+        break;
+      }
+      const arec = extensions.get(actExtId);
+      if (!arec || !arec.enabled) {
+        reply({ ok: false, error: "no such extension" });
+        break;
+      }
+      const tab = TABS.get(info.tabId) ?? TABS.list().find((t) => t.url === info.pageUrl) ?? null;
+      e.waitUntil(
+        wakeExtension(actExtId).then(() => {
+          ACTION.click(actExtId, kind, {
+            tabId: info.tabId as number,
+            ...(typeof info?.button === "number" ? { button: info.button } : {}),
+            ...(Array.isArray(info?.modifiers) ? { modifiers: info.modifiers.map(String) } : {}),
+            ...(tab ? { tab: tabView(arec, tab) } : {}),
+          });
+        }),
+      );
+      reply({ ok: true });
+      break;
+    }
     case "zl:extPage": {
       /* #40: RPC from an extension-origin page (options/popup). The
          sender must be a client registered as that extension's page:
@@ -517,6 +560,6 @@ async function handleExtMessage(
 // labels the switch in dispatchExtControl below handles. control.test.ts
 // pins it against that switch.
 export const EXT_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ext", "zl:tabs", "zl:listExt", "zl:installExt", "zl:installExtFiles", "zl:extEnable", "zl:extInfo", "zl:extUninstall", "zl:menuClick", "zl:listMenus", "zl:notifyEvent", "zl:extPage", "zl:openExtPage", "zl:downloadState",
+  "zl:ext", "zl:tabs", "zl:listExt", "zl:installExt", "zl:installExtFiles", "zl:extEnable", "zl:extInfo", "zl:extUninstall", "zl:menuClick", "zl:listMenus", "zl:notifyEvent", "zl:actionEvent", "zl:extPage", "zl:openExtPage", "zl:downloadState",
 ]);
 

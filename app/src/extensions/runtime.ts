@@ -20,6 +20,8 @@ import type { NavigationCommitted, NavigationKind } from "./webnavigation";
 import { WEBREQ } from "./webrequest";
 import type { WrKind } from "./webrequest";
 import { MENUS } from "./contextmenus";
+import { ACTION } from "./action";
+import type { ActionKind, ActionClickedListener } from "./action";
 import { DOWNLOADS } from "./downloads";
 import { NOTIFY } from "./notifications";
 import type {
@@ -514,6 +516,108 @@ export function buildApi(
         };
       })()
     : undefined;
+  /* #519: the toolbar action family over one per-tab registry (see
+     ./action). Mounted per manifest kind exactly as Firefox mounts
+     them: browser.action for an MV3 action key, browserAction or
+     pageAction for the MV2 keys. State changes hand off to the host UI
+     via zl:actionOp; clicks come back through zl:actionEvent. Firefox
+     shape per kind: action.onClicked fires the listener as
+     (tab, clickInfo) — two arguments, not one merged object — while
+     browserAction/pageAction deliver the Tab. All mutators are async
+     like Firefox: invalid details reject instead of throwing. */
+  const actionNsFor = (kind: ActionKind) => {
+    /* Seeding at mount: the host gets the manifest-default state op
+       before any setter runs, and get* answers exist immediately. */
+    ACTION.touch(ext, kind);
+    return {
+    isEnabled: async (details?: { tabId?: number | null }) => ACTION.isEnabled(ext, kind, details),
+    enable: async (tabId?: number | null) => {
+      ACTION.enable(ext, kind, tabId);
+    },
+    disable: async (tabId?: number | null) => {
+      ACTION.disable(ext, kind, tabId);
+    },
+    setTitle: async (details: Record<string, unknown> = {}) =>
+      ACTION.setTitle(ext, kind, details as { title?: unknown; tabId?: number | null }),
+    getTitle: async (details?: { tabId?: number | null }) => ACTION.getTitle(ext, kind, details),
+    setBadgeText: async (details: Record<string, unknown> = {}) =>
+      ACTION.setBadgeText(ext, kind, details as { text?: unknown; tabId?: number | null }),
+    getBadgeText: async (details?: { tabId?: number | null }) => ACTION.getBadgeText(ext, kind, details),
+    setBadgeBackgroundColor: async (details: Record<string, unknown> = {}) =>
+      ACTION.setBadgeBackgroundColor(ext, kind, details as { color?: unknown; tabId?: number | null }),
+    getBadgeBackgroundColor: async (details?: { tabId?: number | null }) =>
+      ACTION.getBadgeBackgroundColor(ext, kind, details),
+    setBadgeTextColor: async (details: Record<string, unknown> = {}) =>
+      ACTION.setBadgeTextColor(ext, kind, details as { color?: unknown; tabId?: number | null }),
+    getBadgeTextColor: async (details?: { tabId?: number | null }) =>
+      ACTION.getBadgeTextColor(ext, kind, details),
+    setPopup: async (details: Record<string, unknown> = {}) =>
+      ACTION.setPopup(ext, kind, details as { popup?: unknown; tabId?: number | null }),
+    getPopup: async (details?: { tabId?: number | null }) => ACTION.getPopup(ext, kind, details),
+    setIcon: async (details: Record<string, unknown> = {}) =>
+      ACTION.setIcon(ext, kind, details as { path?: unknown; tabId?: number | null }),
+    onClicked: bridged<(tab: unknown, info: unknown) => void>((l) =>
+      ACTION.onClicked(ext.id, kind, (c) => {
+        try {
+          if (kind === "action") {
+            /* Firefox: action.onClicked delivers (tab, clickInfo).
+               clickInfo carries only the keys the host reported
+               (button for non-primary clicks, modifiers). */
+            const { tab, button, modifiers } = c;
+            l(
+              tab,
+              {
+                ...(button !== undefined ? { button } : {}),
+                ...(modifiers ? { modifiers } : {}),
+              },
+            );
+          } else {
+            l(c.tab);
+          }
+        } catch {
+          /* a broken listener is the extension's own problem */
+        }
+      }),
+    ),
+    };
+  };
+  const actionNs = ext.action?.kind === "action" ? actionNsFor("action") : undefined;
+  const browserActionNs = ext.action?.kind === "browser_action" ? actionNsFor("browser_action") : undefined;
+  /* pageAction: Firefox mounts no badge surface and no enable/disable
+     on it; visibility is per-tab via show/hide and starts hidden. */
+  const pageActionNs = ext.action?.kind === "page_action"
+    ? (() => {
+        ACTION.touch(ext, "page_action");
+        return {
+        isShown: async (details?: { tabId?: number | null }) => ACTION.isShown(ext, details),
+        show: async (tabId: number) => {
+          ACTION.show(ext, tabId);
+        },
+        hide: async (tabId: number) => {
+          ACTION.hide(ext, tabId);
+        },
+        setTitle: async (details: Record<string, unknown> = {}) =>
+          ACTION.setTitle(ext, "page_action", details as { title?: unknown; tabId?: number | null }),
+        getTitle: async (details?: { tabId?: number | null }) =>
+          ACTION.getTitle(ext, "page_action", details),
+        setPopup: async (details: Record<string, unknown> = {}) =>
+          ACTION.setPopup(ext, "page_action", details as { popup?: unknown; tabId?: number | null }),
+        getPopup: async (details?: { tabId?: number | null }) =>
+          ACTION.getPopup(ext, "page_action", details),
+        setIcon: async (details: Record<string, unknown> = {}) =>
+          ACTION.setIcon(ext, "page_action", details as { path?: unknown; tabId?: number | null }),
+        onClicked: bridged<(info: unknown) => void>((l) =>
+          ACTION.onClicked(ext.id, "page_action", (c) => {
+            try {
+              l(c.tab);
+            } catch {
+              /* a broken listener is the extension's own problem */
+            }
+          }),
+        ),
+        };
+      })()
+    : undefined;
   /* #42: cookies over the virtual jar (see ./cookies), mounted only
      with the "cookies" permission; every call also host-permission
      gates the target URL. */
@@ -680,6 +784,9 @@ export function buildApi(
     ...(isApiDetached("management") ? {} : { management: managementNs }),
     ...(webRequestNs && !isApiDetached("webRequest") ? { webRequest: webRequestNs } : {}),
     ...(alarmsNs && !isApiDetached("alarms") ? { alarms: alarmsNs } : {}),
+    ...(actionNs ? { action: actionNs } : {}),
+    ...(browserActionNs ? { browserAction: browserActionNs } : {}),
+    ...(pageActionNs ? { pageAction: pageActionNs } : {}),
     ...(notificationsNs && !isApiDetached("notifications") ? { notifications: notificationsNs } : {}),
     ...(cookiesNs && !isApiDetached("cookies") ? { cookies: cookiesNs } : {}),
   };
