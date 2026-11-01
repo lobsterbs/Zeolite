@@ -63,6 +63,25 @@ supports, at most: DOM tree snapshot, element highlight, computed styles,
 console capture, storage view. Full CDP is out of scope; the bridge speaks
 a tiny JSON schema of our own.
 
+Status (#550, first slice shipped): the bridge exists
+(`app/src/bootstrap/dominspect.ts`, wired into the bootstrap) and
+speaks the tiny JSON schema: bounded DOM tree snapshot (depth 12, 500
+nodes, truncation counted), computed styles for a snapshot node (64
+properties), and a bounded redacted console ring (128 entries, 8 args
+x 500 chars, objects flattened to their class name). The bridge
+answers only the controlling service worker, only with serialized
+data. Privacy shape: OFF by default - the devtools page (a host page)
+authorizes an inspection session for one live proxied client with
+`zl:domInspect {op:"authorize"}`; the console patch and every snapshot
+run only while authorized; revoke, navigation (new document
+generation) and client death tear it down. Replies carry the page
+generation; the engine and the devtools page discard stale
+generations, so a stale DevTools view cannot inspect a later document.
+NOT in this slice: element highlighting, storage view, and the
+"strict" privacy mode that would disable devtools entirely (the spec
+toggle does not exist yet; the gate is purely the explicit per-session
+host authorization).
+
 Both tiers respect permissions: an inspector that is not granted
 observe:requests shows nothing. Devtools are disabled entirely when the
 user is in a "strict" privacy mode.

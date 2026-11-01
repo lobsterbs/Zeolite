@@ -47,6 +47,7 @@ import { applyVirtualOrigin } from "./bootstrap/vorigin";
 import { applyVloc } from "./bootstrap/vloc";
 import { applyEmbedSync } from "./bootstrap/embedsync";
 import { applyAnchorShim, applyUrlShim } from "./bootstrap/anchorshim";
+import { applyDomInspect } from "./bootstrap/dominspect";
 
 const w = window as unknown as Record<string, unknown>;
 const loc = w.location as Location;
@@ -93,3 +94,7 @@ applyVloc(w, ZL.vpath);
 /* #107 phase 2: URL/title sync up to a registered embedder (split
    origin); inert without one. */
 applyEmbedSync(w);
+/* #550 Tier 2 DOM inspection bridge (first slice): inert until the
+   host authorizes an inspection session for this client; answers the
+   SW-relayed requests with serialized data only. */
+applyDomInspect(w);
