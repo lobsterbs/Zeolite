@@ -108,4 +108,39 @@ describe("browser.permissions", () => {
     expect(all.permissions).not.toContain("tabs");
     expect(all.origins).toEqual([]);
   });
+
+  it("fires onAdded with only the delta on a mixed request (#522)", async () => {
+    wireBackend();
+    const rec = await install("PermMixed");
+    const api = makeApi(rec);
+    const perms = api.browser.permissions as unknown as PermsNs;
+    expect(await perms.request({ permissions: ["downloads"] })).toBe(true);
+    const fired: unknown[] = [];
+    perms.onAdded.addListener((p) => fired.push(p));
+    // "downloads" is already granted: only the new entry is reported
+    expect(await perms.request({ permissions: ["downloads", "tabs"] })).toBe(true);
+    expect(fired).toEqual([{ permissions: ["tabs"], origins: [] }]);
+    // a full re-request fires nothing at all
+    fired.length = 0;
+    expect(await perms.request({ permissions: ["downloads", "tabs"] })).toBe(true);
+    expect(fired).toEqual([]);
+  });
+
+  it("onRemoved reports only entries that really left the set (#522)", async () => {
+    wireBackend();
+    const rec = await install("PermMixedRemove");
+    const api = makeApi(rec);
+    const perms = api.browser.permissions as unknown as PermsNs;
+    expect(await perms.request({ permissions: ["downloads", "tabs"] })).toBe(true);
+    const fired: unknown[] = [];
+    perms.onRemoved.addListener((p) => fired.push(p));
+    // "downloads" and "tabs" are both granted; the refused "cookies"
+    // entry exercises the not-granted half of the delta
+    expect(await perms.remove({ permissions: ["cookies", "downloads"] })).toBe(true);
+    expect(fired).toEqual([{ permissions: ["downloads"], origins: [] }]);
+    // revoking already-revoked entries fires nothing
+    fired.length = 0;
+    expect(await perms.remove({ permissions: ["cookies", "downloads"] })).toBe(true);
+    expect(fired).toEqual([]);
+  });
 });
