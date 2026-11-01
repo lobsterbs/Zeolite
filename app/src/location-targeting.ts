@@ -111,7 +111,8 @@ function marked(target: string): boolean {
 
 /** #456 gate 4 effective policy: an explicit siteconfig rule always
     wins (including "off" - the host said so); the host experimental
-    hybridLocation selection (zl:config, default off) takes the
+    hybridLocation selection (zl:config, default on since the
+    2026-11-01 operator flip) takes the
     hybrid pass for every origin without an explicit rule; a
     corroborated origin takes the hybrid pass; everything else keeps
     the legacy default. The swstate flag is the host kill switch. */

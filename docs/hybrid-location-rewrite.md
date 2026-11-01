@@ -3,8 +3,9 @@
 Status: **Partial**. Per-site policy, bounded AST work, the shared streaming cap, per-instance
 reason telemetry and gate 4 (corroborated automatic targeting) are
 implemented.
-Legacy behavior remains the deployment default; this is not a default-off
-migration or complete location virtualization.
+Hybrid location rewriting is the engine default for otherwise-legacy
+origins (operator flip 2026-11-01); this is not complete location
+virtualization.
 
 ## Configuration
 
@@ -27,15 +28,16 @@ An explicit rule always wins over the learned mark below, including `off`.
 
 ### Host-side global opt-in (experimental flag)
 
-`zl:config { experimental: { hybridLocation: true } }` (host-only, memory-only,
-default off) takes the bounded hybrid pass for every origin without an explicit
+`zl:config { experimental: { hybridLocation: false } }` (host-only, memory-only)
+deselects the bounded hybrid pass for every origin without an explicit
 siteconfig rule; explicit rules still win, including `off`. The selection
 reverts on worker restart and the host re-pushes it. Operator decision
-2026-11-01: the deployment default stays legacy (per-origin siteconfig data,
-corroborated auto-targeting, and this opt-in); LobsterBrowse exposes the flag
-in its beta debug menu, default off. The flag is wired end to end as of commit
-6f6caa5: a requested selection becomes effective policy, not an
-observation-only setting.
+2026-11-01 (flip): hybrid location rewriting is the engine default ON for
+otherwise-legacy origins; per-origin siteconfig rules, corroborated
+auto-targeting, and this opt-out remain the control seams. LobsterBrowse
+exposes the flag in its beta debug menu, default on since the flip. The flag
+is wired end to end as of commit 6f6caa5: a requested selection becomes
+effective policy, not an observation-only setting.
 
 ## Automatic targeting (gate 4)
 
