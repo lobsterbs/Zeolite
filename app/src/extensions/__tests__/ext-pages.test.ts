@@ -15,6 +15,7 @@ import { handleExtPageCall, pageCallList, pageNamespaceList } from "../pageapi";
 import { PAGE_BRIDGE_SOURCE } from "../pagebridge";
 import { MESSENGER } from "../context";
 import { dispatchExtControl } from "../control";
+import { idleTerminate } from "../background";
 import type { ExtensionRecord } from "../types";
 
 const enc = new TextEncoder();
@@ -62,6 +63,32 @@ async function pageExt(): Promise<ExtensionRecord> {
     "options.html": PAGE_HTML,
     "secret.js": "var notForTheWeb = 1;",
   });
+}
+
+async function messagePageExt(): Promise<ExtensionRecord> {
+  await extensions.startup();
+  const manifest = {
+    manifest_version: 3,
+    name: "PageMessaging #" + seq++,
+    version: "1.0",
+    permissions: [],
+    options_page: "options.html",
+    background: { service_worker: "sw.js" },
+  };
+  const files = new Map<string, Uint8Array>([
+    ["manifest.json", enc.encode(JSON.stringify(manifest))],
+    ["options.html", enc.encode(PAGE_HTML)],
+    ["sw.js", enc.encode(
+      "browser.runtime.onMessage.addListener(function (m, sender, sendResponse) {" +
+      "if (m.kind === 'none') return undefined;" +
+      "if (m.kind === 'false') return false;" +
+      "setTimeout(function () { sendResponse({ pong: m.kind }); }, 5);" +
+      "return true;" +
+      "});",
+    )],
+  ]);
+  const { id } = await extensions.installFiles(files);
+  return extensions.get(id)!;
 }
 
 function reqUrl(href: string): { req: Request; url: URL } {
@@ -190,6 +217,60 @@ describe("extension pages (#40)", () => {
     expect(prop.ok).toBe(false);
     const badPath = await handleExtPageCall(rec, null, { path: [1, 2], args: [] });
     expect(badPath.ok).toBe(false);
+  });
+
+  it("routes delayed, false and no-reply background responses back through the extension-page RPC (#573)", async () => {
+    const rec = await messagePageExt();
+    const clientId = "page-send-" + seq++;
+    registerPageClient(clientId, rec.id);
+    const pending: Promise<unknown>[] = [];
+    const replies: unknown[] = [];
+    const e = {
+      source: { id: clientId, url: "https://sw.example/options.html" },
+      ports: [],
+      waitUntil(p: Promise<unknown>) { pending.push(p); },
+    } as unknown as ExtendableMessageEvent;
+
+    const send = async (kind: string) => {
+      await dispatchExtControl({
+        type: "zl:extPage",
+        extId: rec.id,
+        msg: { path: ["runtime", "sendMessage"], args: [{ kind }] },
+      } as never, { e, reply: (value) => replies.push(value) });
+      await Promise.all(pending.splice(0));
+      return replies.pop();
+    };
+
+    try {
+      expect(await send("ping")).toEqual({ ok: true, response: { pong: "ping" } });
+      expect(await send("false")).toEqual({ ok: true, response: false });
+      expect(await send("none")).toEqual({ ok: true, response: undefined });
+    } finally {
+      idleTerminate(rec.id);
+    }
+  });
+
+  it("page bridge resolves both the returned promise and trailing callback (#573)", async () => {
+    const page: Record<string, unknown> = {};
+    const controller = {
+      postMessage(_message: unknown, ports: MessagePort[]) {
+        queueMicrotask(() => ports[0].postMessage({ ok: true, response: "pong" }));
+      },
+    };
+    const installBridge = new Function(
+      "ZL_PAGE_CFG", "window", "navigator", "MessageChannel", PAGE_BRIDGE_SOURCE,
+    ) as (cfg: unknown, win: unknown, nav: unknown, channel: typeof MessageChannel) => void;
+    installBridge(
+      { ext: "e".repeat(32), calls: ["runtime.sendMessage"] },
+      page,
+      { serviceWorker: { controller } },
+      MessageChannel,
+    );
+    let callbackReply: unknown = "pending";
+    const chrome = page.chrome as { runtime: { sendMessage: (m: unknown, cb: (value: unknown) => void) => Promise<unknown> } };
+    const result = await chrome.runtime.sendMessage({ method: "ping" }, (value) => { callbackReply = value; });
+    expect(result).toBe("pong");
+    expect(callbackReply).toBe("pong");
   });
 
   it("mounts page cookies and storage only with their permissions", async () => {

@@ -30,6 +30,8 @@
         "use strict";
         var statusEl = document.getElementById("status");
         var workers = new Map();
+
+        function workerKey(origin, scope) { return origin + String.fromCharCode(0) + scope; }
         var control = null;
 
         function setStatus(text) {
@@ -45,8 +47,16 @@
            can open this bridge. Proxied pages cannot spawn guests. */
         function connect() {
           var sw = navigator.serviceWorker;
-          if (!sw || !sw.controller) {
-            setStatus("no engine service worker controlling this page");
+          if (!sw) {
+            setStatus("service workers unavailable");
+            return;
+          }
+          /* Send host-only messages only through controller. Messaging
+             registration.active before this page is controlled makes the
+             worker see a ServiceWorker source, not an authenticated Client.
+             Waiting for controllerchange preserves the existing sender gate. */
+          if (!sw.controller) {
+            setStatus("waiting for engine service worker control");
             return;
           }
           var channel = new MessageChannel();
@@ -54,14 +64,19 @@
           control.onmessage = function (ev) {
             var d = ev.data || {};
             if (d.op === "spawn") spawn(d);
-            else if (d.op === "terminate") terminate(String(d.origin));
+            else if (d.op === "terminate") terminate(String(d.origin), String(d.scope || ""), d.id);
           };
           sw.controller.postMessage({ type: "zl:guestHost" }, [channel.port2]);
           setStatus("guest host ready");
         }
+        navigator.serviceWorker && navigator.serviceWorker.addEventListener("controllerchange", connect);
 
         function spawn(d) {
           var origin = String(d.origin || "");
+          var scope = String(d.scope || "");
+          var id = Number(d.id);
+          var key = workerKey(origin, scope);
+          terminate(origin, scope);
           try {
             var worker = new Worker(
               URL.createObjectURL(new Blob([d.script], { type: "text/javascript" }))
@@ -71,27 +86,37 @@
               post({
                 kind: "zl:guestError",
                 origin: origin,
+                scope: scope,
+                id: id,
                 error: e && e.message ? e.message : "guest worker error"
               });
             };
             worker.postMessage({ zl: "harnessPort" }, [channel.port1]);
-            workers.set(origin, worker);
+            workers.set(key, { worker: worker, id: id });
             post(
-              { kind: "zl:guestSpawned", origin: origin, port: channel.port2 },
+              { kind: "zl:guestSpawned", origin: origin, scope: scope, id: id, port: channel.port2 },
               [channel.port2]
             );
           } catch (err) {
-            post({ kind: "zl:guestSpawnFailed", origin: origin, error: String(err) });
+            post({ kind: "zl:guestSpawnFailed", origin: origin, scope: scope, id: id, error: String(err) });
           }
         }
 
-        function terminate(origin) {
-          var worker = workers.get(origin);
-          if (worker) {
-            worker.terminate();
-            workers.delete(origin);
+        function terminate(origin, scope, requestedId) {
+          var key = workerKey(origin, scope);
+          var record = workers.get(key);
+          if (record && (requestedId == null || record.id === Number(requestedId))) {
+            record.worker.terminate();
+            workers.delete(key);
           }
-          post({ kind: "zl:guestTerminated", origin: origin });
+          if (record || requestedId != null) {
+            post({
+              kind: "zl:guestTerminated",
+              origin: origin,
+              scope: scope,
+              id: record ? record.id : Number(requestedId)
+            });
+          }
         }
 
         if (document.readyState === "loading") {

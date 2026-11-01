@@ -388,6 +388,7 @@ addEventListener("message", windowRelay);
           return Array.isArray(d) ? (d as (string | null)[]) : null;
         }),
       forwardRegister: (payload) => swQuery(payload, 30000),
+      forwardUnregister: (payload) => swQuery(payload, 5000),
     },
   );
  }
