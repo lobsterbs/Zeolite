@@ -23,6 +23,7 @@ import { normalizeExtensionPath } from "./origin";
 import { globToRegExp } from "./content-scripts";
 import { hostPatternsMatch } from "./permissions";
 import { ALARMS } from "./alarms";
+import { ACTION } from "./action";
 import type { ExtensionId, ExtensionRecord } from "./types";
 
 export type LifecycleListener = (rec: ExtensionRecord) => void;
@@ -205,6 +206,8 @@ export class ExtensionManager {
     this.changed(id);
     this.exts.delete(id);
     ALARMS.drop(id);
+    /* #519: the toolbar action registry is per-extension state. */
+    ACTION.drop(id);
   }
 
   async setEnabled(id: ExtensionId, enabled: boolean): Promise<void> {

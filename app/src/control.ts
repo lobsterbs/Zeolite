@@ -80,6 +80,7 @@ export interface ControlMessage {
     | "zl:menuClick"
     | "zl:listMenus"
     | "zl:notifyEvent"
+    | "zl:actionEvent"
     | "zl:extPage"
     | "zl:openExtPage"
     | "zl:listExt"

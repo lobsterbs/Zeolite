@@ -74,7 +74,27 @@ const KNOWN_FIELDS = new Set([
   "incognito", "offline_enabled", "optional_host_permissions",
   "granted_host_permissions", "hidden", "user_scripts", "export",
   "default_icon",
+  /* #524: Firefox keys parsed below. theme/dictionaries are recorded
+     on the record (no theme or spellcheck host yet — compat.ts says
+     so); developer is plain metadata; lwt_* ride static themes. */
+  "theme", "dictionaries", "developer", "lwt_background", "lwt_alpha",
 ]);
+
+/** #524: Firefox accepts a GUID ({8-4-4-4-12} hex) or an id that looks
+    like add-on@example.org. Anything else is a hard install error, as
+    in Firefox ("The extension ID is invalid"). */
+function validGeckoId(id: string): boolean {
+  if (/^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$/.test(id)) return true;
+  return /^[a-zA-Z0-9-._]+@[a-zA-Z0-9-._]+$/.test(id);
+}
+
+/** #524: dotted version bounds ("109.0", "128.0.1"); Firefox rejects
+    non-numeric components. A malformed value warns and is recorded
+    as-is — the engine does not enforce Gecko version ranges. */
+function dottedVersion(v: unknown): string | null {
+  if (typeof v !== "string" || v.length === 0) return null;
+  return /^\d+(\.\d+)*$/.test(v) ? v : null;
+}
 
 function parseContentScripts(v: unknown, diags: ManifestDiagnostics): ContentScriptSpec[] {
   const out: ContentScriptSpec[] = [];
@@ -219,6 +239,67 @@ export function parseManifest(
       : null;
   const gecko = bss && isObj(bss.gecko) ? (bss.gecko as Record<string, unknown>) : null;
   const geckoId = gecko && typeof gecko.id === "string" ? gecko.id : null;
+  /* #524: browser_specific_settings.gecko validation. A malformed id is
+     a Firefox-style hard error; malformed version bounds warn (the
+     engine records but does not enforce Gecko version ranges); engine
+     keys other than gecko/gecko_android have no Zeolite support. */
+  if (geckoId !== null && !validGeckoId(geckoId)) {
+    diags.errors.push(
+      "browser_specific_settings.gecko.id: '" + geckoId + "' is not a valid extension ID (a GUID like {12345678-...} or an id like add-on@example.org)",
+    );
+  }
+  if (gecko) {
+    for (const k of Object.keys(gecko)) {
+      if (k !== "id" && k !== "strict_min_version" && k !== "strict_max_version" && k !== "update_url") {
+        diags.warnings.push("browser_specific_settings.gecko: unsupported key '" + k + "' ignored");
+      }
+    }
+  }
+  if (bss) {
+    for (const engine of Object.keys(bss)) {
+      if (engine !== "gecko" && engine !== "gecko_android") {
+        diags.warnings.push("browser_specific_settings: engine '" + engine + "' has no Zeolite support, ignored");
+      }
+    }
+  }
+  /* Firefox-legal non-dotted bounds like "128.*" are recorded as-is
+     with a warning; dropping the value would lose manifest truth, and
+     the engine does not enforce Gecko version ranges anyway. */
+  const geckoMinVersion =
+    gecko && typeof gecko.strict_min_version === "string" && gecko.strict_min_version.length > 0
+      ? gecko.strict_min_version
+      : null;
+  const geckoMaxVersion =
+    gecko && typeof gecko.strict_max_version === "string" && gecko.strict_max_version.length > 0
+      ? gecko.strict_max_version
+      : null;
+  if (gecko?.strict_min_version !== undefined && dottedVersion(gecko.strict_min_version) === null) {
+    diags.warnings.push("browser_specific_settings.gecko.strict_min_version: '" + String(gecko.strict_min_version) + "' is not a dotted version, recorded as-is");
+  }
+  if (gecko?.strict_max_version !== undefined && dottedVersion(gecko.strict_max_version) === null) {
+    diags.warnings.push("browser_specific_settings.gecko.strict_max_version: '" + String(gecko.strict_max_version) + "' is not a dotted version, recorded as-is");
+  }
+  /* #524: static theme (Firefox "theme" key) parsed and recorded; the
+     engine has no theme host, so nothing consumes it yet. */
+  const themeRaw = isObj(raw.theme) ? (raw.theme as Record<string, unknown>) : null;
+  const theme = themeRaw
+    ? {
+        colors: isObj(themeRaw.colors) ? { ...(themeRaw.colors as Record<string, unknown>) } : {},
+        images: isObj(themeRaw.images) ? { ...(themeRaw.images as Record<string, unknown>) } : {},
+      }
+    : null;
+  /* #524: dictionaries map locale -> spellcheck dictionary path;
+     recorded for the host, no spellcheck integration yet. */
+  const dictionaries = isObj(raw.dictionaries)
+    ? Object.fromEntries(
+        Object.entries(raw.dictionaries as Record<string, unknown>).filter(
+          (e): e is [string, string] => typeof e[1] === "string",
+        ),
+      )
+    : null;
+  if (raw.dictionaries !== undefined && dictionaries !== null && Object.keys(dictionaries).length === 0) {
+    diags.warnings.push("dictionaries: no usable locale -> path entries");
+  }
 
   const optionsUi = isObj(raw.options_ui)
     ? (raw.options_ui as Record<string, unknown>)
@@ -270,6 +351,10 @@ export function parseManifest(
     manifestVersion: mv,
     manifest: raw,
     geckoId,
+    geckoMinVersion,
+    geckoMaxVersion,
+    theme,
+    dictionaries,
     permissions,
     hostPermissions,
     optionalPermissions: strArr(raw.optional_permissions),

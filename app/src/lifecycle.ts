@@ -31,6 +31,7 @@ declare const self: ServiceWorkerGlobalScope;
 import { DIAG } from "./diag";
 import { decodeClientUrl } from "./codec";
 import { senderIsHostPage } from "./cpgate";
+import type { ActionOp } from "./extensions/action";
 import type { DownloadOp } from "./extensions/downloads";
 import type { NotifyOp } from "./extensions/notifications";
 import type { ScriptingMessage } from "./extensions/scripting";
@@ -159,6 +160,7 @@ export interface DispatchHosts {
   scripting: { setDispatch(fn: ((msg: ScriptingMessage) => void) | null): void };
   downloads: { setDispatch(fn: ((op: DownloadOp) => void) | null): void };
   notify: { setDispatch(fn: ((op: NotifyOp) => void) | null): void };
+  action: { setDispatch(fn: ((op: ActionOp) => void) | null): void };
 }
 
 /** #243: wire the five dispatch seams with host-only and
@@ -198,6 +200,11 @@ export function wireDispatchers(
   hosts.notify.setDispatch((op) =>
     each((c) => {
       if (isHostClient(c)) c.postMessage({ type: "zl:notifyOp", op });
+    }),
+  );
+  hosts.action.setDispatch((op) =>
+    each((c) => {
+      if (isHostClient(c)) c.postMessage({ type: "zl:actionOp", op });
     }),
   );
 }

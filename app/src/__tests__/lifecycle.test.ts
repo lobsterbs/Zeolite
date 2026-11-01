@@ -11,7 +11,7 @@ import {
 } from "../lifecycle";
 import { DIAG } from "../diag";
 import { b64uEncode, buildNavHandleUrl, setRouteKey, setScheme } from "../codec";
-import type { DownloadOp, NotifyOp, ScriptingMessage, TabMessage, TabsOp } from "../extensions";
+import type { ActionOp, DownloadOp, NotifyOp, ScriptingMessage, TabMessage, TabsOp } from "../extensions";
 
 /* #243-#247: the service-worker security and lifecycle contracts
    from the sw.ts review, pinned as tests:
@@ -57,6 +57,7 @@ interface Captured {
   scripting: ((msg: ScriptingMessage) => void) | null;
   downloadOp: ((op: DownloadOp) => void) | null;
   notifyOp: ((op: NotifyOp) => void) | null;
+  actionOp: ((op: ActionOp) => void) | null;
 }
 
 const capture = (): { captured: Captured; hosts: DispatchHosts } => {
@@ -66,6 +67,7 @@ const capture = (): { captured: Captured; hosts: DispatchHosts } => {
     scripting: null,
     downloadOp: null,
     notifyOp: null,
+    actionOp: null,
   };
   const hosts: DispatchHosts = {
     tabs: {
@@ -89,6 +91,11 @@ const capture = (): { captured: Captured; hosts: DispatchHosts } => {
     notify: {
       setDispatch: (fn) => {
         captured.notifyOp = fn;
+      },
+    },
+    action: {
+      setDispatch: (fn) => {
+        captured.actionOp = fn;
       },
     },
   };

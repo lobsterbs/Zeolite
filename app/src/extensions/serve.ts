@@ -24,6 +24,7 @@ import { contentScriptMatches } from "./content-scripts";
 import { BRIDGE_SOURCE } from "./bridge";
 import { LISTENER_SOURCE } from "./scripting";
 import { PAGE_BRIDGE_SOURCE } from "./pagebridge";
+import { ACTION } from "./action";
 import { pageCallList, pageNamespaceList } from "./pageapi";
 import { resolvePackageI18n } from "./i18n";
 import type { ExtensionRecord } from "./types";
@@ -184,6 +185,31 @@ export function checkPageToken(extId: string, path: string, token: string): bool
     return false;
   }
   return true;
+}
+
+/** Rooted, tokened URL for an extension's options or popup page —
+    the host's zl:openExtPage flow (#40) and runtime.openOptionsPage
+    (#518) share it, so both open through the same granted navigation.
+    For popups the action registry's per-tab/per-default state wins
+    over the manifest default. Null when the extension is disabled or
+    declares no such page. */
+export function extPageOpenUrl(
+  rec: ExtensionRecord,
+  which: "options" | "popup",
+  tabId?: number | null,
+): string | null {
+  if (!rec.enabled) return null;
+  let raw: string | null | undefined = null;
+  if (which === "options") {
+    raw = rec.options?.page;
+  } else {
+    const kind = rec.action?.kind;
+    raw = kind ? (ACTION.popupFor(rec, kind, tabId) ?? rec.action?.defaultPopup) : rec.action?.defaultPopup;
+  }
+  if (!raw) return null;
+  const norm = normalizeExtensionPath(raw.startsWith("/") ? raw : "/" + raw);
+  if (!norm) return null;
+  return norm + "?zlExt=" + rec.id + "&zlPageTok=" + mintPageToken(rec.id, norm);
 }
 
 /* Registered extension-page clients, keyed by the SW-observed client
