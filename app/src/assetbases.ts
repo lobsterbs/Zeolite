@@ -296,25 +296,31 @@ export async function recoverFlagSurgeryScript(
      identical module URLs several times when one 404s; those retries
      must not starve other distinct chunks on the same page. */
   const targetKey = u.origin + u.pathname + u.search;
-  const attempted = flagRecoveryTargets.get(pageOrigin) ?? new Set<string>();
-  if (attempted.has(targetKey)) {
+  const attempted = flagRecoveryTargets.get(pageOrigin);
+  if (attempted?.has(targetKey)) {
     miss("target URL already attempted");
     return null;
   }
-  if (attempted.size >= FLAG_RECOVERY_DISTINCT_TARGETS_PER_ORIGIN) {
+  if ((attempted?.size ?? 0) >= FLAG_RECOVERY_DISTINCT_TARGETS_PER_ORIGIN) {
     miss("per-origin distinct-target budget already exhausted");
     return null;
   }
-  attempted.add(targetKey);
-  flagRecoveryTargets.delete(pageOrigin);
-  flagRecoveryTargets.set(pageOrigin, attempted);
-  if (flagRecoveryTargets.size > FLAG_RECOVERY_ORIGINS) {
-    const oldest = flagRecoveryTargets.keys().next();
-    if (!oldest.done) {
-      flagRecoveryTargets.delete(oldest.value);
-      flagRecoveryRequests.delete(oldest.value);
+  /* Record the target only when at least one safe, observed recovery
+     candidate exists. An early 404 must not burn its retry chance before
+     the page has loaded any matching script base. */
+  const rememberTarget = (): void => {
+    const targets = flagRecoveryTargets.get(pageOrigin) ?? new Set<string>();
+    targets.add(targetKey);
+    flagRecoveryTargets.delete(pageOrigin);
+    flagRecoveryTargets.set(pageOrigin, targets);
+    if (flagRecoveryTargets.size > FLAG_RECOVERY_ORIGINS) {
+      const oldest = flagRecoveryTargets.keys().next();
+      if (!oldest.done) {
+        flagRecoveryTargets.delete(oldest.value);
+        flagRecoveryRequests.delete(oldest.value);
+      }
     }
-  }
+  };
 
   const safe = new Headers();
   for (const h of ["user-agent", "accept", "accept-language"]) {
@@ -347,6 +353,7 @@ export async function recoverFlagSurgeryScript(
       miss("no observed Google mss script base for app " + uMss.app);
       return null;
     }
+    rememberTarget();
     for (const candUrl of [...candidates].slice(0, FLAG_RECOVERY_REQUESTS_PER_CALL)) {
       if ((flagRecoveryRequests.get(pageOrigin) ?? 0) >= FLAG_RECOVERY_REQUESTS_PER_ORIGIN) {
         miss("per-origin candidate request budget exhausted");
@@ -381,6 +388,7 @@ export async function recoverFlagSurgeryScript(
     miss("per-origin candidate request budget exhausted");
     return null;
   }
+  rememberTarget();
   for (const c of cands.slice(0, 3)) {
     let cu: URL;
     try {
