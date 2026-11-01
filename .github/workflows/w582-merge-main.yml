@@ -30,7 +30,7 @@ jobs:
           UNEXPECTED=0
           for f in $(git diff --name-only --diff-filter=U); do
             case "$f" in
-              app/src/request.ts|app/src/transform.ts|app/src/control.ts|app/src/extensions/compat.ts)
+              app/src/request.ts|app/src/transform.ts|app/src/control.ts|app/src/extensions/compat.ts|AGENTS.md|app/src/__tests__/transform.test.ts)
                 echo "resolved file, taking branch version: $f"
                 git checkout --ours -- "$f"
                 git add "$f"
