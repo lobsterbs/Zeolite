@@ -386,3 +386,35 @@ describe("effective base delivery (#532)", () => {
     expect(seen).toEqual([]);
   });
 });
+
+describe("cosmetic style splice (#551)", () => {
+  const DOC = "<!doctype html><html><head><title>t</title></head><body></body></html>";
+  const TAG = '<style data-zl-cosmetic>.banner-ad{display:none!important}</style>';
+
+  it("the cosmetic <style> rides the init splice after the doctype", async () => {
+    const out = await readAll(
+      rewriteStream(streamOf([DOC]), BASE, {}, [], "text/html",
+        undefined, true, undefined, undefined, undefined, TAG),
+    );
+    expect(out).toContain(TAG);
+    /* After the doctype, ahead of the rewritten document markup. */
+    expect(out.startsWith("<!doctype html>")).toBe(true);
+    expect(out.indexOf("data-zl-cosmetic")).toBeLessThan(out.indexOf("<title>"));
+  });
+
+  it("injectInit=false (fetch/XHR HTML) never receives cosmetics", async () => {
+    const out = await readAll(
+      rewriteStream(streamOf([DOC]), BASE, {}, [], "text/html",
+        undefined, false, undefined, undefined, undefined, TAG),
+    );
+    expect(out).not.toContain("data-zl-cosmetic");
+  });
+
+  it("an empty cosmetic parameter splices nothing extra", async () => {
+    const out = await readAll(
+      rewriteStream(streamOf([DOC]), BASE, {}, [], "text/html"),
+    );
+    expect(out).not.toContain("data-zl-cosmetic");
+    expect(out).toContain("<!doctype html>");
+  });
+});

@@ -38,8 +38,7 @@ requests during initial loading use the local host rules until the
 matcher is ready. It refreshes after seven days while the worker
 remains active. A worker restart reloads it on the next matching
 request. If subscription loading fails, local host rules remain active
-and Ghostery retries after a short cooldown. Cosmetic selectors and
-scriptlets are not applied by this integration. List downloads are
+and Ghostery retries after a short cooldown. List downloads are
 limited to Ghostery's HTTPS asset directory; redirects and unsuccessful
 responses fail initialization rather than being followed elsewhere.
 
@@ -47,6 +46,49 @@ Local allow entries take precedence over Ghostery. A per-site
 `adblock: false` override and the global zl:adblock toggle disable both
 the local block list and Ghostery network matches for that site or
 session.
+
+## Ghostery cosmetic styles (#551, first slice)
+
+When a document (destination `document`, `iframe` or `frame`) is
+served through the HTML rewrite and the Ghostery matcher is loaded and
+enabled, the engine's cosmetic filters for the document URL compile to
+one stylesheet that is spliced into the rewritten head as a single
+`<style data-zl-cosmetic>` element, after the doctype (the same splice
+the bootstrap init script rides; the wasm rewriter's `add_injection`
+only emits script tags, so the style goes through this seam instead).
+Cache-hit documents get the same treatment as fresh ones.
+
+What applies in this slice:
+
+- the engine's `styles` arm for the document URL only: hostname- and
+  entity-anchored hide rules plus the engine's precompiled generic
+  base stylesheet;
+- the gate is the network-blocking gate: the zl:adblock toggle, the
+  per-site `adblock: false` override (zl:rules) and the shipped
+  captcha/anti-bot allowlist (rules.kdl `allow` entries, the same
+  compiled list the block evaluation consults) each refuse cosmetics
+  for the document host entirely.
+
+What never applies in this slice, with counts in a per-document
+REWRITE diagnostic event (applied / skipped-by-exception /
+unsupported, plus a truncation flag; no selectors, no page content):
+
+- scriptlets (`+js(...)`) and extended/HTML filters: counted as
+  unsupported, never executed or compiled;
+- class-, id- or href-anchored generic hides that need DOM feature
+  extraction: the service worker has no DOM at rewrite time, so those
+  rules stay dormant;
+- frame-ancestor-constrained rules (the frame chain is not tracked
+  service-worker side);
+- re-injection on dynamic DOM mutations (the engine's
+  `dom-update` lifecycle): not shipped;
+- stylesheets larger than 64 KiB are truncated at that cap and the
+  truncation is reported in the same event.
+
+This is not EasyList/Ghostery cosmetic compatibility: a large share of
+every public cosmetic list (DOM-anchored and extended rules) does
+nothing here yet. The honest measure of the slice is the diagnostic
+counts, not a coverage claim.
 
 The host toggles the compiled data with the zl:adblock control message
 ({ type: "zl:adblock", enabled: boolean }). Disabled rules are a
@@ -182,9 +224,12 @@ where stream is a TransformStream of byte chunks. Ordering and bounds:
 
 Implemented (1.1 Oxide; zl:rules per-site overrides added on the
 deep-integration line; Ghostery network matching added on the
-Ghostery integration line). Honest limits: rules.kdl stays global
-(per-site compatibility stays in siteconfig.kdl; per-site adblock and
-UA arrive at runtime via zl:rules); Ghostery cosmetic filters are not
-applied; transformed responses are not page-cached. The streaming
-transform arm (#552) carries unknown-length and large bodies behind
-declared bounds; the buffered arm stays capped at BODY_LIMIT.
+Ghostery integration line; Ghostery cosmetic styles shipped as the
+#551 first slice, bounded as listed above). Honest limits: rules.kdl
+stays global (per-site compatibility stays in siteconfig.kdl; per-site
+adblock and UA arrive at runtime via zl:rules); Ghostery cosmetic
+coverage is partial by design (scriptlets, extended and DOM-anchored
+rules are counted, not applied; no dynamic re-injection); transformed
+responses are not page-cached. The streaming transform arm (#552)
+carries unknown-length and large bodies behind declared bounds; the
+buffered arm stays capped at BODY_LIMIT.

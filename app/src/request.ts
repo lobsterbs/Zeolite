@@ -36,6 +36,7 @@ import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, siteUaFor, type GhosteryRedirect, type ResourceType } from "./rules";
 import { ghosteryLoadInProgress } from "./ghostery";
+import { ghosteryCosmeticsForDocument } from "./cosmetics";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
 import { DIAG, classifyStageFailure, type DiagStage } from "./diag";
 /* #451: per-attempt CAPTCHA tracing rides the existing CHALLENGE emit
@@ -3595,6 +3596,10 @@ export function handleFetch(e: FetchEvent): void {
               const chRules = await siteRules();
               const chRule = ruleFor(chRules, target);
               const csInject = csInjectUrls(target, e.request, e.request.referrer);
+              /* #551: cosmetic styles for the cached document, gated
+                 exactly like the fresh path below (toggle, per-site
+                 override, captcha allowlist, loaded engine). */
+              const cosmeticStyle = await ghosteryCosmeticsForDocument(engineRules, target, dest, traceId);
               const hitCt = hit.headers.get("content-type") ?? "text/html";
               /* Issue B: the served copy is re-encoded UTF-8. */
               hitHeaders.set("content-type", utf8ContentType(hitCt));
@@ -3604,7 +3609,8 @@ export function handleFetch(e: FetchEvent): void {
                 }, true, docSri, docMap,
                 /* #532: the cache-hit rewrite folds the same first
                    base; the message rides the served stream. */
-                (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb)),
+                (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
+                cosmeticStyle),
                 { status: hit.status, headers: hitHeaders },
               );
             }
@@ -4534,6 +4540,12 @@ export function handleFetch(e: FetchEvent): void {
                subresource fetches do not arrive in navigate mode. */
             if (e.request.mode === "navigate") WEBNAV.committed(target);
             const csInject = csInjectUrls(target, e.request, e.request.referrer);
+            /* #551: cosmetic styles for this document, from the same
+               engine the network matcher answers from. Gated on the
+               zl:adblock toggle, the per-site zl:rules override and
+               the captcha/anti-bot allowlist exactly like network
+               blocking (rules.ts); "" when they do not apply. */
+            const cosmeticStyle = await ghosteryCosmeticsForDocument(engineRules, target, dest, traceId);
             const rewriteDone = () => {
               /* webNavigation.onCompleted + webRequest.onCompleted:
                  the document stream (and with it the navigation) is
@@ -4551,6 +4563,8 @@ export function handleFetch(e: FetchEvent): void {
                   resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone, true, docSri, docMap,
                   /* #532: the effective-base delivery seam. */
                   (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
+                  /* #551: the cosmetic <style> rides the init splice. */
+                  cosmeticStyle,
                 ),
                 {
                   status: resp.status,
@@ -4573,6 +4587,8 @@ export function handleFetch(e: FetchEvent): void {
                   true, docSri, docMap,
                   /* #532: the sniffed document folds the same. */
                   (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
+                  /* #551: same splice for the sniffed document. */
+                  cosmeticStyle,
                 ),
                 {
                   status: resp.status,
