@@ -43,19 +43,19 @@ the client), initiator type, redacted request and response headers, and
 Set-Cookie names from the response (values are never stored). Click a
 request row in the DevTools page to view it.
 
-Initiator types use only observed evidence: page/worker runtime labels
-for Fetch, XHR, sendBeacon and worker fetch; the request's
-text/event-stream Accept header for EventSource; Request.destination for
-resource requests (it does not prove parser versus script creation); and
-Request.mode for navigation. The internal label
-is stripped before upstream forwarding and is not stored in header
-details. No body or credential values are recorded.
+Initiator types use only observed evidence: page-side markers on
+minted cross-origin Fetch/XHR and engine-routed sendBeacon, a worker
+marker for worker fetch, the text/event-stream Accept header for
+EventSource, Request.destination for resource kind (not parser versus
+script provenance), and Request.mode for navigation. The marker is
+stripped before upstream forwarding and omitted from inspector and
+extension-facing header views. No body or credential values are stored.
 
-Honest limits: cookie values are never stored (names only); the
-initiator is UNKNOWN when a request has no trustworthy marker or
-standard request evidence (including Request-object fetch input), and
-the controlling-page initiator may be unavailable after a worker
-restart or when client lookup fails; WebSocket rows land with 1.3.
+Honest limits: same-origin requests that bypass the page re-emitter,
+Request-object fetch inputs, and requests without verifiable evidence
+remain UNKNOWN. The controlling-page initiator may be unavailable
+after a worker restart or client lookup failure; WebSocket rows land
+with 1.3.
 
 ## Status
 

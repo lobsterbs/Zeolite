@@ -123,7 +123,7 @@ export function flatRed(headers: Headers): Record<string, string> {
   const out: Record<string, string> = {};
   headers.forEach((v, k) => {
     const name = k.toLowerCase();
-    if (name === "x-zl-init") return;
+    if (name === "x-zl-i") return;
     if (name === "cookie" || name === "authorization" || name === "proxy-authorization" || name === "set-cookie") {
       out[k] = "[redacted]";
       return;
