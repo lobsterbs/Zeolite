@@ -1277,8 +1277,10 @@ async function revalidateBeforeUse(req: Request, hit: Response, context: CookieR
     engine strips it before the upstream hop. */
 export const REQUEST_INITIATOR_HEADER = "x-zl-i";
 
-/** Classify only request evidence or labels inserted by our runtime
-    wrappers. An empty destination without a marker stays UNKNOWN. */
+/** Classify browser evidence or the diagnostic marker inserted by our
+    wrappers. A page can forge that header, so it is never a trust
+    boundary and only changes the inspector label. Empty/unproven
+    requests stay UNKNOWN. */
 export function requestInitiator(req: Request): string {
   const marked = req.headers.get(REQUEST_INITIATOR_HEADER);
   if (marked === "fetch") return "FETCH";
