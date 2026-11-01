@@ -135,8 +135,15 @@ function recordsForOrigin(store: SwShimStore, pageUrl: string): StoredRegistrati
   const origin = new NativeURL(pageUrl).origin;
   return storedRecords(store).filter((record) => {
     try {
-      return new NativeURL(record.scope).origin === origin &&
-        new NativeURL(record.scriptURL).origin === origin;
+      const script = new NativeURL(record.scriptURL);
+      const scope = new NativeURL(record.scope);
+      const badPath = /%(?:2f|5c)/i;
+      return script.origin === origin && scope.origin === origin &&
+        /^https?:$/.test(script.protocol) && /^https?:$/.test(scope.protocol) &&
+        script.href === record.scriptURL && scope.href === record.scope &&
+        !badPath.test(script.pathname) && !badPath.test(scope.pathname) &&
+        !script.hash && !scope.hash && !scope.search &&
+        !script.username && !script.password;
     } catch {
       return false;
     }

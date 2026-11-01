@@ -46,6 +46,7 @@ const guestKey = (origin: string, scope: string): string => origin + "\0" + scop
 
 /** Hard cap on the guest script body the kernel will ever wrap. */
 export const GUEST_SCRIPT_MAX = 256 * 1024;
+export const GUEST_REGISTRATIONS_MAX_PER_ORIGIN = 64;
 
 /** Deadline for the host handshake of one spawn or terminate, ms. */
 export const GUEST_HANDSHAKE_MS = 10000;
@@ -366,6 +367,10 @@ export class GuestKernel {
     }
     const key = guestKey(identity.origin, identity.scope);
     const existing = this.guests.get(key);
+    if (!existing && [...this.guests.values()].filter((g) => g.origin === identity.origin).length >= GUEST_REGISTRATIONS_MAX_PER_ORIGIN) {
+      reply({ ok: false, error: "guest registration limit reached for this origin" });
+      return;
+    }
     if (existing && existing.state !== "terminating" &&
         existing.scriptURL === identity.scriptURL && existing.script === msg.script) {
       if (existing.state === "running") reply({ ok: true, origin: identity.origin });
@@ -1171,6 +1176,10 @@ export function guestSpawn(msg: GuestSpawnMessage, reply: GuestReplyFn): void {
 
 export function guestTerminate(origin: string, reply?: GuestReplyFn): void {
   kernel.terminate(origin, reply);
+}
+
+export function guestUnregister(origin: string, scope: string, scriptURL: string, reply?: GuestReplyFn): void {
+  kernel.unregisterScope(origin, scope, scriptURL, reply);
 }
 
 /** #538: register (or clear) the engine network bridge the kernel uses

@@ -4,6 +4,7 @@ import { swc } from "./siteid";
 export function controlQuery(message: unknown, reply: (data: any) => void, timeout = 5000): () => void {
   const ch = new MessageChannel();
   let done = false;
+  let posted = false;
   let serviceWorker: ServiceWorkerContainer | null = null;
   const onControllerChange = () => {
     const ctl = swc();
@@ -20,12 +21,13 @@ export function controlQuery(message: unknown, reply: (data: any) => void, timeo
     if (notify) reply(data);
   };
   const send = (ctl?: ServiceWorker | null) => {
-    if (done) return;
+    if (done || posted) return;
     if (!ctl) {
       finish();
       return;
     }
     try {
+      posted = true;
       ctl.postMessage(message, [ch.port2]);
     } catch {
       finish();
