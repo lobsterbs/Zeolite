@@ -7,7 +7,7 @@ import type { JarConflictRule } from "./cookies";
 import { cookieStoreOp, documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
 import type { FacadeCookie } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
-import { GUEST_SCRIPT_MAX, guestRegisterHost, guestSpawn, guestTerminate, type GuestPortLike } from "./kernel/guests/executor";
+import { GUEST_SCRIPT_MAX, guestRegisterHost, guestSpawn, guestTerminate, guestUnregister, type GuestPortLike } from "./kernel/guests/executor";
 /* #477: canonical registration identity; inputs from untrusted pages
    pass the verified-client gates first (dispatch, below). */
 import { canonicalGuestRegistration } from "./kernel/guests/registration";
@@ -484,10 +484,10 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       break;
     }
     case "zl:guestUnregister": {
-      /* #477 wave 3: the page names no target; the sender's own decoded
-         page origin is the only candidate, so a page can only ever
-         terminate its own guest. */
+      /* Re-derive the caller's virtual origin and validate its exact
+         registration identity before terminating a guest. */
       const gu = e.source as Client | null;
+      const gr = msg as unknown as { scriptURL?: unknown; scope?: unknown };
       let guPage: string | null = null;
       if (gu && gu.url) {
         try {
@@ -496,17 +496,16 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
           guPage = null;
         }
       }
-      if (!guPage) {
-        reply({ ok: false, error: "guest unregister needs a verified page" });
+      if (!guPage || typeof gr.scriptURL !== "string" || typeof gr.scope !== "string") {
+        reply({ ok: false, error: "guest unregister needs a verified page, script URL and scope" });
         break;
       }
-      let guOrigin = "";
       try {
-        guOrigin = new URL(guPage).origin;
-      } catch {
-        guOrigin = "";
+        const identity = canonicalGuestRegistration(guPage, gr.scriptURL, gr.scope);
+        guestUnregister(identity.origin, identity.scope, identity.scriptURL, reply);
+      } catch (err) {
+        reply({ ok: false, error: err instanceof TypeError ? err.message : String(err) });
       }
-      guestTerminate(guOrigin, reply);
       break;
     }
 

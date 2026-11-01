@@ -1116,7 +1116,7 @@ export class GuestKernel {
           severity: "warning",
           cause: "failure",
           message: "guest fetch budget exceeded; engine path serves the request",
-          technicalReason: origin,
+          technicalReason: g.origin + " " + g.scope,
         });
         p.done({ handled: false });
       }, GUEST_FETCH_BUDGET_MS);
