@@ -3,7 +3,7 @@
    cover the new pure surface only. */
 
 import { afterEach, describe, it, expect } from "vitest";
-import { setEngine, currentEngine, stripEsmExports, inlineDataImports, reset, isConnectClassError, reconnectDelay, installWispWatcher, bustWispUrl } from "../libcurl-transport-vendored";
+import { setEngine, currentEngine, stripEsmExports, inlineDataImports, reset, isConnectClassError, reconnectDelay, installWispWatcher, bustWispUrl, LIBCURL_CONNECTIONS } from "../libcurl-transport-vendored";
 import { setTransportState, onTransportState, transportState, waitForTransportState } from "../transport-lifecycle";
 
 describe("transport engine selection", () => {
@@ -205,5 +205,14 @@ describe("transport lifecycle (#119)", () => {
   it("waitForTransportState is bounded: false on timeout, never a hang", async () => {
     setTransportState("dead", "t");
     expect(await waitForTransportState("connected", 5)).toBe(false);
+  });
+});
+
+
+describe("bounded libcurl connection pool", () => {
+  it("keeps the active pool, idle cache and per-host cap explicit", () => {
+    expect(LIBCURL_CONNECTIONS).toEqual([64, 48, 8]);
+    expect(LIBCURL_CONNECTIONS[0]).toBeGreaterThan(LIBCURL_CONNECTIONS[2]);
+    expect(LIBCURL_CONNECTIONS[0]).toBeLessThan(256);
   });
 });
