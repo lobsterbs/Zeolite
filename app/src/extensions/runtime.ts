@@ -44,7 +44,7 @@ import { MGMT, infoOf } from "./management";
 import type { MgmtListener } from "./management";
 import type { ExtensionManager } from "./manager";
 import { bootEnabled, bootExtension, idleTerminate, backgroundIsServiceWorker } from "./background";
-import { browsingDataRemoveCache, browsingDataRemoveCookies, browsingDataSettings, browsingDataUnreachable, type BrowsingDataOptions } from "./browsingdata";
+import { browsingDataRemoveCache, browsingDataRemoveCookies, browsingDataRemoveDownloads, browsingDataRemoveIndexedDB, browsingDataRemoveServiceWorkers, browsingDataSettings, browsingDataUnreachable, type BrowsingDataOptions } from "./browsingdata";
 import { chromeApi } from "./chrome";
 import { extPageOpenUrl, pageClientsOf } from "./serve";
 import { makeI18nNs } from "./i18n";
@@ -920,23 +920,24 @@ export function buildApi(
     onDisabled: bridged<MgmtListener>((l) => MGMT.on("disabled", l)),
   };
 
-  /* #520: browsingData over the engine-owned stores (cache, cookie
-     jar). The unreachable types mount and reject honestly - see
-     ./browsingdata. Mounted only with the permission, so feature
-     detection answers honestly. */
+  /* #520/#593: browsingData over the engine-owned stores (cache,
+     cookie jar, download history, the virtual IndexedDB partition,
+     the guest service-worker realms). The host-browser-owned types
+     mount and reject honestly - see ./browsingdata. Mounted only with
+     the permission, so feature detection answers honestly. */
   const browsingDataNs = ext.permissions.includes("browsingData")
     ? {
         settings: browsingDataSettings,
         removeCache: (options: BrowsingDataOptions = {}) => browsingDataRemoveCache(options),
         removeCookies: (options: BrowsingDataOptions = {}) => browsingDataRemoveCookies(options),
-        removeDownloads: browsingDataUnreachable("removeDownloads"),
+        removeDownloads: (options: BrowsingDataOptions = {}) => browsingDataRemoveDownloads(options),
         removeFormData: browsingDataUnreachable("removeFormData"),
         removeHistory: browsingDataUnreachable("removeHistory"),
-        removeIndexedDB: browsingDataUnreachable("removeIndexedDB"),
+        removeIndexedDB: (options: BrowsingDataOptions = {}) => browsingDataRemoveIndexedDB(options),
         removeLocalStorage: browsingDataUnreachable("removeLocalStorage"),
         removePasswords: browsingDataUnreachable("removePasswords"),
         removePluginData: browsingDataUnreachable("removePluginData"),
-        removeServiceWorkers: browsingDataUnreachable("removeServiceWorkers"),
+        removeServiceWorkers: () => browsingDataRemoveServiceWorkers(),
       }
     : undefined;
 

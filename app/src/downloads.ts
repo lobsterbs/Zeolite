@@ -268,15 +268,17 @@ export class DownloadTracker {
       list.push(e);
       bySite.set(k, list);
     }
-    for (const k of await idbGetAllKeys(db, STORE_DOWNLOADS)) {
-      if (!bySite.has(k)) bySite.set(k, []); /* drop sites that emptied */
-    }
+    /* #593: a site that emptied (ring eviction, or a browsingData
+       history clear) has its record DELETED, not stored as an empty
+       list - the persisted store mirrors the ring exactly. */
+    const emptied = (await idbGetAllKeys(db, STORE_DOWNLOADS)).filter((k) => !bySite.has(k));
     /* #27: one site's quota error must not lose the other sites'
-       writes: settle every put independently and surface the count
+       writes: settle every write independently and surface the count
        instead of swallowing it. */
-    const settled = await Promise.allSettled(
-      [...bySite].map(([k, list]) => idbPut(db, STORE_DOWNLOADS, k, list)),
-    );
+    const settled = await Promise.allSettled([
+      ...[...bySite].map(([k, list]) => idbPut(db, STORE_DOWNLOADS, k, list)),
+      ...emptied.map((k) => idbDelete(db, STORE_DOWNLOADS, k)),
+    ]);
     const failed = settled.filter((r) => r.status === "rejected").length;
     if (failed > 0) {
       console.warn(`download registry: ${failed}/${settled.length} site writes failed`);
@@ -673,6 +675,38 @@ export class DownloadTracker {
               ? (e.received / (e.endedAt - e.startedAt)) * 1000
               : 0,
       }));
+  }
+
+  /** #593: browsingData.removeDownloads clears the registry's history.
+      Terminal entries (done/error/cancelled/paused) leave the ring
+      with their stored partials and persisted records; an active
+      stream stays tracked exactly like Firefox keeping an in-progress
+      download. The origins filter matches each entry's source origin;
+      since drops only entries that ended at/after it. Returns how
+      many entries were removed so honest logs (and tests) can assert
+      the effect. */
+  clearHistory(filter: { origins?: string[]; since?: number } = {}): number {
+    const origins = filter.origins ?? null;
+    let removed = 0;
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const e = this.entries[i];
+      if (e.status === "active") continue;
+      if (typeof filter.since === "number" && e.endedAt < filter.since) continue;
+      if (origins !== null) {
+        let o: string;
+        try {
+          o = new URL(e.source).origin;
+        } catch {
+          o = "unknown";
+        }
+        if (!origins.includes(o)) continue;
+      }
+      this.forgetPartial(e.id);
+      this.entries.splice(i, 1);
+      removed++;
+    }
+    if (removed > 0) this.schedulePersist();
+    return removed;
   }
 
   /** Tests only. */

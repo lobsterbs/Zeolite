@@ -1195,6 +1195,18 @@ export function guestUnregister(origin: string, scope: string, scriptURL: string
   kernel.unregisterScope(origin, scope, scriptURL, reply);
 }
 
+/** #593: browsingData.removeServiceWorkers terminates every running
+    guest realm across origins - each termination also drops that
+    guest's kernel-side registration record and caches (the
+    session-scoped stores die with the realm). Returns the number of
+    distinct origins that had guests; zero is a successful clear of an
+    empty registry, not an error, matching Firefox's semantics. */
+export function guestTerminateAll(): number {
+  const origins = [...new Set(kernel.active().map((g) => g.origin))];
+  for (const origin of origins) kernel.terminate(origin);
+  return origins.length;
+}
+
 /** #538: register (or clear) the engine network bridge the kernel uses
     for guest fetches and script refetches. */
 export function guestWireFetch(b: GuestNetFetchBridge | null): void {
