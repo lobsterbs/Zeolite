@@ -47,9 +47,11 @@ Initiator types use only observed evidence: page-side markers on
 minted cross-origin Fetch/XHR and engine-routed sendBeacon, a worker
 marker for worker fetch, the text/event-stream Accept header for
 EventSource, Request.destination for resource kind (not parser versus
-script provenance), and Request.mode for navigation. The marker is
-stripped before upstream forwarding and omitted from inspector and
-extension-facing header views. No body or credential values are stored.
+script provenance), and Request.mode for navigation. A proxied page can forge the marker and therefore spoof its own
+inspector label; it is diagnostic only, never a trust or routing
+signal. It is stripped before upstream forwarding and omitted from
+inspector and extension-facing header views. No body or credential
+values are stored.
 
 Honest limits: same-origin requests that bypass the page re-emitter,
 Request-object fetch inputs, and requests without verifiable evidence
