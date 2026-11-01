@@ -228,6 +228,17 @@ export function pageClientOf(clientId: string | undefined): string | null {
   return clientId ? (pageClients.get(clientId) ?? null) : null;
 }
 
+/** Every live registered page client of one extension (#518:
+    runtime.getContexts). Order is insertion order; the caller shapes
+    the result. */
+export function pageClientsOf(extId: string): string[] {
+  const out: string[] = [];
+  for (const [clientId, id] of pageClients) {
+    if (id === extId) out.push(clientId);
+  }
+  return out;
+}
+
 /* #40: serving context for extension-page access. Client ids come
    from the FetchEvent (SW-observed), never from the page. */
 /* #560: rooted extension pages. Extension page worlds that dispatch
