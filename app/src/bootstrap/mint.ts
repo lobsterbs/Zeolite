@@ -113,13 +113,8 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
      and without an anchor nothing changes. */
   const relRoute = makeRel(parentRoutePath, loc.origin);
 
-  /* API initiator labels are diagnostics-only. Attach them only to
-     engine-routed requests so a missing controller/mint never changes
-     cross-origin CORS behavior or leaks an internal header upstream. */
-  const hasController = !!(w.navigator as { serviceWorker?: { controller?: unknown } } | undefined)
-    ?.serviceWorker?.controller;
+  /* Internal diagnostic label, only on engine-routed requests. */
   const mark = (init: RequestInit | undefined, kind: string): RequestInit => {
-    if (!hasController) return init ?? {};
     const headers = new Headers(init?.headers);
     headers.set("x-zl-init", kind);
     return { ...init, headers };
@@ -228,7 +223,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
         const result = rel
           ? OOpen.call(this, a[0], rel, a[2], a[3], a[4])
           : OOpen.apply(this, a);
-        if (isAsync && hasController && rel) OHdr.call(this, "x-zl-init", "xhr");
+        if (isAsync && rel) OHdr.call(this, "x-zl-init", "xhr");
         return result;
       }
       pend.set(this, {
@@ -236,7 +231,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
         url: dest,
         user: a[3] == null ? null : String(a[3]),
         pw: a[4] == null ? null : String(a[4]),
-        headers: hasController ? [["x-zl-init", "xhr"]] : [],
+        headers: [],
       });
       /* Native open() reports OPENED synchronously; the deferred
          re-open would leave readyState at UNSENT until the mint
@@ -268,6 +263,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
         pend.delete(self);
         delete self.readyState;
         OOpen.call(self, st.method, route ?? st.url, true, st.user, st.pw);
+        if (route) OHdr.call(self, "x-zl-init", "xhr");
         for (const h of st.headers) OHdr.call(self, h[0], h[1]);
         OSend.apply(self, a);
       });
