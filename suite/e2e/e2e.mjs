@@ -970,7 +970,7 @@ async function main() {
     eq(fetchValue, "initiator-ok", "fetch initiator fixture");
     const xhrValue = await evalIn(frame, "XHR initiator", `() => new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
-      x.open("GET", "/api/initiator-probe?kind=xhr");
+      x.open("GET", "${ORIGIN_B}/api/initiator-probe?kind=xhr");
       x.onload = () => resolve(x.responseText);
       x.onerror = () => reject(new Error("XHR initiator probe failed"));
       x.send();
@@ -1016,7 +1016,7 @@ async function main() {
     assert(missing.length === 0, "initiator attribution mismatch: " + missing.join("; "));
     const serialized = JSON.stringify(logs.entries);
     assert(!serialized.includes("body-never-record-this-547"), "network inspector stored a request body");
-    const hits = await fixtureHits(fixtureA);
+    const hits = (await fixtureHits(fixtureA)).concat(await fixtureHits(fixtureB));
     const probeHits = hits.filter((h) => h.path.startsWith("/api/initiator-probe"));
     assert(probeHits.every((h) => h.initiatorHeader == null), "internal initiator metadata reached the origin: " + JSON.stringify(probeHits));
     assert(probeHits.length >= 5, "not all instrumented requests reached the fixture origin");
