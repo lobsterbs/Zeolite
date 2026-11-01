@@ -25,6 +25,18 @@ frame-buster handling continue. An explicit positive integer cap up to 2 MiB
 is supported; invalid modes/caps leave the legacy configuration unchanged.
 An explicit rule always wins over the learned mark below, including `off`.
 
+### Host-side global opt-in (experimental flag)
+
+`zl:config { experimental: { hybridLocation: true } }` (host-only, memory-only,
+default off) takes the bounded hybrid pass for every origin without an explicit
+siteconfig rule; explicit rules still win, including `off`. The selection
+reverts on worker restart and the host re-pushes it. Operator decision
+2026-11-01: the deployment default stays legacy (per-origin siteconfig data,
+corroborated auto-targeting, and this opt-in); LobsterBrowse exposes the flag
+in its beta debug menu, default off. The flag is wired end to end as of commit
+6f6caa5: a requested selection becomes effective policy, not an
+observation-only setting.
+
 ## Automatic targeting (gate 4)
 
 A pathname-reading SPA that answers a correct URL with its own not-found

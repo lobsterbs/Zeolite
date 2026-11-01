@@ -9,6 +9,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseKdl } from "../kdl";
+import { resetExperimentalForTests, selectExperimental } from "../experimental-flags";
 import { rulesFromNodes } from "../siteconfig";
 import { PAGE_MESSAGES } from "../cpgate";
 import { initScript } from "../pageload";
@@ -34,6 +35,7 @@ describe("automatic location targeting (#456 gate 4)", () => {
   });
   afterEach(() => {
     setLocationTargeting(true);
+    resetExperimentalForTests();
     vi.useRealTimers();
   });
 
@@ -58,6 +60,19 @@ describe("automatic location targeting (#456 gate 4)", () => {
     expect(resolveLocationPolicy("https://spa.example/app", {})).toEqual({ mode: "hybrid", maxBytes: 512 * 1024 });
     /* The mark is per-host: a subdomain does not inherit it. */
     expect(resolveLocationPolicy("https://sub.spa.example/", {}).mode).toBe("legacy");
+  });
+
+  it("the host hybridLocation selection promotes unlisted origins; explicit rules still win", () => {
+    /* #456: zl:config experimental hybridLocation (default off, the
+       operator decision 2026-11-01) takes the bounded hybrid pass
+       for every origin without an explicit siteconfig rule. */
+    selectExperimental({ hybridLocation: true });
+    expect(resolveLocationPolicy("https://plain.example/", {})).toEqual({ mode: "hybrid", maxBytes: 512 * 1024 });
+    const rules = rulesFromNodes(parseKdl('site "plain.example" { location-rewrite "off" }'));
+    expect(resolveLocationPolicy("https://plain.example/", rules["plain.example"]!).mode).toBe("off");
+    /* Deselected, the same origin keeps the legacy default. */
+    selectExperimental({ hybridLocation: false });
+    expect(resolveLocationPolicy("https://plain.example/", {}).mode).toBe("legacy");
   });
 
   it("an explicit siteconfig rule always wins over the learned mark", () => {

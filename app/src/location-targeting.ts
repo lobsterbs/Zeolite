@@ -14,6 +14,7 @@
    long-lived worker. */
 
 import { DIAG } from "./diag";
+import { experimentalEnabled } from "./experimental-flags";
 import { locationPolicy, type LocationPolicy, type SiteRule } from "./siteconfig";
 import { locationTargetingEnabled, ZEOLITE_VERSION } from "./swstate";
 
@@ -109,11 +110,16 @@ function marked(target: string): boolean {
 }
 
 /** #456 gate 4 effective policy: an explicit siteconfig rule always
-    wins (including "off" - the host said so); a corroborated origin
-    takes the hybrid pass; everything else keeps the legacy default.
-    The swstate flag is the host kill switch. */
+    wins (including "off" - the host said so); the host experimental
+    hybridLocation selection (zl:config, default off) takes the
+    hybrid pass for every origin without an explicit rule; a
+    corroborated origin takes the hybrid pass; everything else keeps
+    the legacy default. The swstate flag is the host kill switch. */
 export function resolveLocationPolicy(target: string | null | undefined, rule: SiteRule): LocationPolicy {
   if (rule.locationRewrite) return rule.locationRewrite;
+  if (experimentalEnabled("hybridLocation")) {
+    return { mode: "hybrid", maxBytes: 512 * 1024 };
+  }
   if (target && locationTargetingEnabled() && marked(target)) {
     return { mode: "hybrid", maxBytes: 512 * 1024 };
   }

@@ -22,10 +22,11 @@ describe("experimental flag selection (host preferences, not unsafe runtime feat
     expect(ok).toEqual({ ok: true });
     expect(Object.values(experimentalSnapshot().requested)).toEqual([true,true,true,true]);
     expect(experimentalSnapshot().effective).toEqual({
-      adaptiveTransit: false, hybridLocation: false,
+      adaptiveTransit: false, hybridLocation: true,
       cspTranslation: true, virtualSW: false,
     });
     expect(experimentalSnapshot().status.adaptiveTransit).toBe("shadow-only");
+    expect(experimentalSnapshot().status.hybridLocation).toBe("enabled");
     expect(experimentalSnapshot().status.cspTranslation).toBe("deny-only");
     expect(experimentalEnabled("cspTranslation")).toBe(true);
     expect(experimentalSnapshot().status.virtualSW).toBe("not-implemented");
