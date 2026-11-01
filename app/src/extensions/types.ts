@@ -67,6 +67,11 @@ export interface SidebarActionSpec {
   defaultIcon: Record<string, string>;
 }
 
+export interface ThemeSpec {
+  colors: Record<string, unknown>;
+  images: Record<string, unknown>;
+}
+
 export interface ExtensionRecord {
   id: ExtensionId;
   name: string;
@@ -74,6 +79,15 @@ export interface ExtensionRecord {
   manifestVersion: 2 | 3;
   manifest: Record<string, unknown>;
   geckoId: string | null;
+  /* #524: browser_specific_settings.gecko version bounds, recorded as
+     declared; the engine does not enforce Gecko version ranges.
+     Optional: records persisted before #524 load without them. */
+  geckoMinVersion?: string | null;
+  geckoMaxVersion?: string | null;
+  /* #524: static theme and spellcheck dictionaries, parsed and
+     recorded; no theme or spellcheck host exists yet (compat.ts). */
+  theme?: ThemeSpec | null;
+  dictionaries?: Record<string, string> | null;
   permissions: string[];
   hostPermissions: string[];
   optionalPermissions: string[];
