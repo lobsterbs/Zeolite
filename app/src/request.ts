@@ -1811,6 +1811,30 @@ let jarPruneInFlight = false;
    virtual base baked into the head. The token carries page-known
    data only (the opaque site token and the page's own virtual
    URL), never an engine secret; a malformed token fails closed. */
+/* #580: Google-class error-beacon endpoints. A page's own error
+   pipeline reports through fetch/XHR beacons (httpservice/retry/jserror,
+   gen_204 with an err= parameter) - invisible to the console hook, so
+   a session whose error pipeline is firing still exports "0 errors".
+   The classifier is deliberately narrow (the two observed shapes
+   only); the fetch seam emits one diagnostic per beacon hit so an
+   export shows the page's own error signal next to the console
+   hook's silence. */
+export function isErrorBeaconUrl(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.pathname === "/jserror" || u.pathname.endsWith("/jserror")) return true;
+  if (u.pathname === "/gen_204" || u.pathname.endsWith("/gen_204")) {
+    for (const [k, v] of u.searchParams) {
+      if (k === "err" && v !== "") return true;
+    }
+  }
+  return false;
+}
+
 export function zlBwTokenParse(search: string): { s: string; b: string } | null {
   let raw: string | null = null;
   try {
@@ -4135,6 +4159,22 @@ export function handleFetch(e: FetchEvent): void {
           }
 
           DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
+          /* #580: the page's own error beacon pipeline is firing even
+             when the console hook reports zero - make the export show
+             it. Deliberately narrow classifier (jserror / gen_204?err=);
+             the diagnostic ring's own bound keeps repeated beacons
+             from flooding an export. */
+          if (isErrorBeaconUrl(hopUrl)) {
+            DIAG.emit({
+              traceId,
+              requestId: traceId,
+              category: "SERVICE_WORKER",
+              severity: "warning",
+              stage: "UPSTREAM_RESPONSE",
+              message: "page error beacon delivered (fetch-borne; invisible to the console hook) (#580)",
+              url: hopUrl,
+            });
+          }
           /* A 3xx that escaped the hop loop - cap reached, a hop whose
              one-shot body cannot replay, or no resolvable Location - is
              surfaced to the page with a mapped Location. For
@@ -4614,6 +4654,11 @@ export function handleFetch(e: FetchEvent): void {
               (await workerPrelude()) +
               "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n" +
               (preludeW ? "\n" + preludeW : "");
+            /* #580: the rewrite is done the moment the composed body
+               exists - emit the completion stage here like the HTML
+               and CSS stream paths do at stream end, so a worker
+               serve can never sit REWRITE_STARTED in an export. */
+            DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
             WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             /* #35: the page cache holds the composed copy (prelude +
                rewritten specifiers); a stored raw body would serve a
@@ -4725,6 +4770,13 @@ export function handleFetch(e: FetchEvent): void {
             if (jsOutcome.provenUnchanged) netLogAnnotateRewrite(traceId, "js-proven-unchanged");
             else if (jsOutcome.literalChanged) netLogAnnotateRewrite(traceId, "js-literal-rewritten");
             else if (jsOutcome.specifierChanged) netLogAnnotateRewrite(traceId, "js-specifier-rewritten");
+            /* #580: same completion contract as HTML/CSS - the page
+               script's transformation class is fully decided above, so
+               the stage emits here instead of leaving the trace stuck
+               at REWRITE_STARTED (the Google AI Mode / Twitch exports
+               showed 0 completions for large JS bodies and made a
+               telemetry gap look like a hung stream). */
+            DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
             WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             /* Issue B: the decoded-with-upstream-charset body is
                re-encoded UTF-8 by the string Response constructor;
