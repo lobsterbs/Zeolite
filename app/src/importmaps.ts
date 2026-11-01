@@ -133,20 +133,99 @@ export function importmapScanner(note: (body: string) => void): ImportmapScanner
 
 /* ---- per-page registry (memory-only, SW lifetime) ---- */
 
-export interface ImportmapRegistry {
-  /** pageKey -> (specifier -> mapped target) */
-  pages: Map<string, Map<string, string | string[] | null>>;
+/** One mapped target: null is the block form; an array is the
+    fallback-addresses form (the first http(s) address resolves,
+    no probing). */
+export type MappedTarget = string | string[] | null;
+
+/** A page's merged import-map state: the top-level imports plus
+    every scope's map, keyed by the RESOLVED absolute scope
+    prefix (always trailing "/"). */
+export interface PageImportmap {
+  imports: Map<string, MappedTarget>;
+  scopes: Map<string, Map<string, MappedTarget>>;
 }
+
+export interface ImportmapRegistry {
+  /** pageKey -> merged map state */
+  pages: Map<string, PageImportmap>;
+}
+
+/** Scope-map cap: the merged per-page scope count. */
+export const IMPORTMAP_SCOPES_CAP = 32;
 
 export function newImportmapRegistry(): ImportmapRegistry {
   return { pages: new Map() };
 }
 
-/** Record the import map body of one document (raw upstream
-    JSON). A re-served page replaces its own entry; the registry
-    drops the oldest page at the cap. Invalid JSON, a non-object
-    root, or an imports member that is not an object records
-    nothing. */
+/** A string the URL grammar treats as hierarchical rather than as
+    a bare package name: absolute, scheme-relative, root- or
+    dot-relative, or a same-document reference. Chromium ignores
+    an import map rule whose value is a bare specifier ("Ignored
+    an import map value of ...: Bare specifier", observed in a
+    direct-browser probe); the registry mirrors that instead of
+    resolving a bare value against the page and inventing a URL
+    the browser would never load. */
+function isUrlLike(s: string): boolean {
+  return /^[a-z][a-z0-9+.\-]*:/i.test(s) || s.startsWith("/") || s.startsWith(".") ||
+    s.startsWith("#") || s.startsWith("?");
+}
+
+/** Validate one mapped target. Returns undefined for a shape the
+    browser would ignore (bare-specifier value, empty fallback
+    array, non-string members). */
+function mapTarget(v: unknown): MappedTarget | undefined {
+  if (v === null) return null;
+  if (typeof v === "string") return isUrlLike(v) ? v : undefined;
+  if (Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === "string" && isUrlLike(x as string))) {
+    return v as string[];
+  }
+  return undefined;
+}
+
+/** Collect one map object's entries (top-level imports or one
+    scope's map) under the entries cap. First valid definition
+    wins within the object; invalid rules are skipped. */
+function collectEntries(obj: Record<string, unknown>, cap: number): Map<string, MappedTarget> {
+  const m = new Map<string, MappedTarget>();
+  for (const [k, v] of Object.entries(obj)) {
+    const t = mapTarget(v);
+    if (t === undefined) continue;
+    m.set(k, t);
+    if (m.size >= cap) break;
+  }
+  return m;
+}
+
+/** Resolve a scope key the way the browser normalizes one: parse
+    against the document base, require http(s), force the
+    trailing slash. Null when the key cannot normalize. */
+function normalizeScopeKey(pageKey: string, raw: string): string | null {
+  try {
+    const u = new URL(raw, pageKey);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (!u.href.endsWith("/")) return u.href + "/";
+    return u.href;
+  } catch {
+    return null;
+  }
+}
+
+/** Forget one page's merged map state. request.ts calls this when
+    a navigation for the page key starts, so a re-served document
+    rebuilds its maps from scratch instead of merging with the
+    previous document's leftovers (a fresh document owns fresh
+    maps; multiple maps WITHIN one document merge below). */
+export function importmapReset(reg: ImportmapRegistry, pageKey: string): void {
+  reg.pages.delete(pageKey);
+}
+
+/** Record one import map body into the page's merged state.
+    Multiple maps within one document MERGE (direct-Chromium
+    probe: a later map's NEW keys resolve; a redefined key keeps
+    the FIRST mapping with a console warning; an invalid map
+    never poisons later maps). The registry drops the oldest
+    page at the cap. */
 export function importmapNote(reg: ImportmapRegistry, pageKey: string, bodyText: string): void {
   let doc: unknown;
   try {
@@ -155,36 +234,53 @@ export function importmapNote(reg: ImportmapRegistry, pageKey: string, bodyText:
     return;
   }
   if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return;
-  const imports = (doc as { imports?: unknown }).imports;
-  if (typeof imports !== "object" || imports === null || Array.isArray(imports)) return;
-  const entries = new Map<string, string | string[] | null>();
-  for (const [k, v] of Object.entries(imports)) {
-    if (v === null) entries.set(k, null);
-    else if (typeof v === "string") entries.set(k, v);
-    else if (Array.isArray(v) && v.every((x) => typeof x === "string")) entries.set(k, v as string[]);
-    else continue;
-    if (entries.size >= IMPORTMAP_ENTRIES_CAP) break;
+  const d = doc as { imports?: unknown; scopes?: unknown };
+  const importsObj = d.imports;
+  const scopesObj = d.scopes;
+  const hasImports = typeof importsObj === "object" && importsObj !== null && !Array.isArray(importsObj);
+  const hasScopes = typeof scopesObj === "object" && scopesObj !== null && !Array.isArray(scopesObj);
+  if (!hasImports && !hasScopes) return;
+  let page = reg.pages.get(pageKey);
+  if (!page) {
+    if (reg.pages.size >= IMPORTMAP_PAGES_CAP) {
+      const oldest = reg.pages.keys().next().value;
+      if (oldest !== undefined) reg.pages.delete(oldest);
+    }
+    page = { imports: new Map(), scopes: new Map() };
+    reg.pages.set(pageKey, page);
   }
-  if (entries.size === 0) return;
-  if (reg.pages.has(pageKey)) reg.pages.delete(pageKey);
-  else if (reg.pages.size >= IMPORTMAP_PAGES_CAP) {
-    const oldest = reg.pages.keys().next().value;
-    if (oldest !== undefined) reg.pages.delete(oldest);
+  if (hasImports) {
+    for (const [k, v] of collectEntries(importsObj as Record<string, unknown>, IMPORTMAP_ENTRIES_CAP)) {
+      if (!page.imports.has(k)) {
+        if (page.imports.size >= IMPORTMAP_ENTRIES_CAP) break;
+        page.imports.set(k, v);
+      }
+    }
   }
-  reg.pages.set(pageKey, entries);
+  if (hasScopes) {
+    for (const [rawScope, mapObj] of Object.entries(scopesObj as Record<string, unknown>)) {
+      if (page.scopes.size >= IMPORTMAP_SCOPES_CAP) break;
+      /* The scope KEY must be a URL (resolved against the map
+         base); its value must be a map object. */
+      if (typeof mapObj !== "object" || mapObj === null || Array.isArray(mapObj)) continue;
+      const prefix = normalizeScopeKey(pageKey, rawScope);
+      if (!prefix) continue;
+      /* First registration of a scope wins; a later map that
+         redefines the whole scope is ignored, like a redefined
+         top-level key. */
+      if (page.scopes.has(prefix)) continue;
+      page.scopes.set(prefix, collectEntries(mapObj as Record<string, unknown>, IMPORTMAP_ENTRIES_CAP));
+    }
+  }
 }
 
-/** Resolve a bare specifier through the recorded page map:
-    exact key first, then the longest trailing-slash prefix key
-    with the remainder appended to the mapped value (spec order
-    for string values). Returns the ABSOLUTE target URL, or
-    null (no match, the block form, or every fallback failed to
-    resolve): the caller leaves the specifier bare and the load
-    fails natively. */
-export function resolveBareImport(reg: ImportmapRegistry, pageKey: string, spec: string): string | null {
-  const m = reg.pages.get(pageKey);
-  if (!m) return null;
-  const resolveTarget = (v: string | string[] | null, append: string): string | null => {
+/** Resolve one specifier inside ONE map. Three-state result:
+    the ABSOLUTE target URL on a resolved hit; null when a rule
+    MATCHED but is the block form or failed to resolve (the map
+    spoke: the answer is "fail natively"); undefined when no key
+    in the map matches (the caller may cascade to the next map). */
+function resolveIn(m: Map<string, MappedTarget>, spec: string, pageKey: string): string | null | undefined {
+  const resolveTarget = (v: MappedTarget, append: string): string | null => {
     if (v === null) return null;
     const list = Array.isArray(v) ? v : [v];
     for (const s of list) {
@@ -200,13 +296,67 @@ export function resolveBareImport(reg: ImportmapRegistry, pageKey: string, spec:
   const exact = m.get(spec);
   if (exact !== undefined) return resolveTarget(exact, "");
   let bestKey = "";
-  let bestVal: string | string[] | null = null;
+  let bestVal: MappedTarget | undefined;
   for (const [k, v] of m) {
     if (k.endsWith("/") && k.length > bestKey.length && spec.startsWith(k)) {
       bestKey = k;
       bestVal = v;
     }
   }
-  if (!bestKey) return null;
-  return resolveTarget(bestVal, spec.slice(bestKey.length));
+  if (!bestKey) return undefined;
+  return resolveTarget(bestVal as MappedTarget, spec.slice(bestKey.length));
+}
+
+/** Resolve a bare specifier the way the browser would for a module
+    whose importing URL is importerUrl, through the owning page's
+    recorded map (direct-Chromium probe, suite scripts/
+    importmap-scopes probe):
+
+    - scopes whose resolved prefix contains the importer apply,
+      LONGEST first (a /sub/deep/ importer resolves through
+      /sub/deep/, then /sub/, then top-level - verified cascade);
+    - within one map: exact key, then longest prefix key;
+    - a matched rule decides: a block form or an unresolvable
+      target ends the try with null (the most specific map spoke;
+      a less specific map never resurrects a blocked specifier);
+    - NO matching scope, or every matched map missing the key,
+      falls through to the top-level imports;
+    - scope maps never leak upward: a root importer never sees a
+      scope-only key (probe: root import of a scope-only key
+      fails natively).
+
+    importerUrl may be empty/unknown: top-level imports only (the
+    pre-#554-scopes behavior). Returns the ABSOLUTE target URL or
+    null: the caller leaves the specifier bare and the load fails
+    natively, never an invented route. */
+export function resolveBareImportFor(
+  reg: ImportmapRegistry,
+  pageKey: string,
+  importerUrl: string | null,
+  spec: string,
+): string | null {
+  const page = reg.pages.get(pageKey);
+  if (!page) return null;
+  if (importerUrl) {
+    /* Matching scopes longest-first; a scope whose map holds NO
+       matching key cascades to the next scope, then top-level. */
+    const prefixes = [...page.scopes.keys()]
+      .filter((p) => importerUrl.startsWith(p))
+      .sort((a, b) => b.length - a.length);
+    for (const p of prefixes) {
+      const hit = resolveIn(page.scopes.get(p) as Map<string, MappedTarget>, spec, pageKey);
+      if (hit !== undefined) return hit;
+    }
+  }
+  return resolveIn(page.imports, spec, pageKey) ?? null;
+}
+
+/** Resolve a bare specifier through the recorded page map's
+    TOP-LEVEL imports only (the importer-unknown path; no scope
+    application). Kept for callers and tests that predate
+    importer-aware resolution. */
+export function resolveBareImport(reg: ImportmapRegistry, pageKey: string, spec: string): string | null {
+  const page = reg.pages.get(pageKey);
+  if (!page) return null;
+  return resolveIn(page.imports, spec, pageKey) ?? null;
 }
