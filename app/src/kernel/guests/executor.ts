@@ -42,6 +42,8 @@
 import { canonicalGuestRegistration, guestScopeMatches } from "./registration";
 import { DIAG } from "../../diag";
 
+const guestKey = (origin: string, scope: string): string => origin + "\0" + scope;
+
 /** Hard cap on the guest script body the kernel will ever wrap. */
 export const GUEST_SCRIPT_MAX = 256 * 1024;
 
@@ -168,6 +170,7 @@ export interface GuestReply {
 type GuestReplyFn = (r: GuestReply) => void;
 
 interface GuestRecord {
+  id: number;
   origin: string;
   state: "spawning" | "running" | "terminating";
   scope: string;
@@ -285,9 +288,10 @@ export class GuestKernel {
   private now: () => number;
   private onMessage: GuestListener | null = null;
   private fetchSeq = 0;
+  private guestSeq = 0;
   private fetchPending = new Map<
     number,
-    { origin: string; timer: ReturnType<typeof setTimeout>; done: (o: GuestFetchOutcome) => void }
+    { key: string; timer: ReturnType<typeof setTimeout>; done: (o: GuestFetchOutcome) => void }
   >();
   /** #538: engine bridge over upstreamFetch, wired by request.ts. */
   private netFetch: GuestNetFetchBridge | null = null;
@@ -331,9 +335,9 @@ export class GuestKernel {
       this is the documented wave-1 limit. */
   tick(): void {
     const t = this.now();
-    for (const [origin, g] of this.guests) {
+    for (const [key, g] of this.guests) {
       if (t > g.deadlineAt && g.state !== "running") {
-        this.guests.delete(origin);
+        this.guests.delete(key);
         /* #576: confirmed callers do not hang on a dead handshake. */
         for (const pr of g.pendingReply.splice(0)) pr({ ok: false, error: "guest spawn handshake timed out" });
         DIAG.emit({
@@ -341,7 +345,7 @@ export class GuestKernel {
           severity: "warning",
           cause: "unknown",
           message: "guest handshake deadline exceeded; state discarded",
-          technicalReason: "state " + g.state + " origin " + origin,
+          technicalReason: "state " + g.state + " origin " + g.origin + " scope " + g.scope,
         });
       }
     }
@@ -360,29 +364,29 @@ export class GuestKernel {
       reply({ ok: false, error: "guest script body missing or above the size cap" });
       return;
     }
-    const existing = this.guests.get(identity.origin);
-    if (existing && existing.state !== "terminating") {
-      /* #576: a live realm for the SAME registration identity is a
-         native-style success (real sites re-register on every load);
-         a DIFFERENT script for the live origin is a real error. */
-      if (existing.scriptURL === identity.scriptURL && existing.scope === identity.scope) {
-        if (existing.state === "running") {
-          reply({ ok: true, origin: identity.origin });
-        } else {
-          /* Still spawning: settle with the pending handshake. */
-          existing.pendingReply.push(reply);
-        }
-        return;
-      }
-      reply({ ok: false, error: "a different guest script is already active for this origin" });
+    const key = guestKey(identity.origin, identity.scope);
+    const existing = this.guests.get(key);
+    if (existing && existing.state !== "terminating" &&
+        existing.scriptURL === identity.scriptURL && existing.script === msg.script) {
+      if (existing.state === "running") reply({ ok: true, origin: identity.origin });
+      else if (msg.confirm === true) existing.pendingReply.push(reply);
+      else reply({ ok: true, origin: identity.origin });
       return;
     }
-    const host = this.hosts[this.hosts.length - 1];
+
+    /* A registration is one verified virtual origin plus canonical scope.
+       Re-registering replaces only that scope; sibling scopes stay active. */
+    const host = existing?.host ?? this.hosts[this.hosts.length - 1];
     if (!host) {
       reply({ ok: false, error: "no guest host page connected" });
       return;
     }
-    this.guests.set(identity.origin, {
+    const pendingReply = existing?.pendingReply.splice(0) ?? [];
+    if (msg.confirm === true) pendingReply.push(reply);
+    this.clearGuestWork(key);
+    const id = ++this.guestSeq;
+    this.guests.set(key, {
+      id,
       origin: identity.origin,
       state: "spawning",
       scope: identity.scope,
@@ -391,13 +395,13 @@ export class GuestKernel {
       host,
       guest: null,
       deadlineAt: this.now() + GUEST_HANDSHAKE_MS,
-      /* #576: with confirm, only the zl:guestSpawned arm settles the
-         caller; otherwise the wave-1 immediate reply is preserved. */
-      pendingReply: msg.confirm === true ? [reply] : [],
+      pendingReply,
     });
     host.postMessage({
       op: "spawn",
+      id,
       origin: identity.origin,
+      scope: identity.scope,
       script: guestHarness(identity.scope, identity.scriptURL) + msg.script,
     });
     DIAG.emit({
@@ -405,75 +409,100 @@ export class GuestKernel {
       severity: "info",
       cause: "unknown",
       message: "guest spawn requested",
-      technicalReason: identity.origin,
+      technicalReason: identity.origin + " " + identity.scope,
     });
     if (msg.confirm !== true) reply({ ok: true, origin: identity.origin });
   }
 
+  /** Host control terminates all registrations for a verified origin. */
   terminate(origin: string, reply?: GuestReplyFn): void {
     this.tick();
-    const g = this.guests.get(origin);
-    if (!g) {
+    const keys = [...this.guests].filter(([, g]) => g.origin === origin).map(([key]) => key);
+    if (keys.length === 0) {
       if (reply) reply({ ok: false, error: "no guest for origin" });
       return;
     }
-    g.state = "terminating";
-    g.deadlineAt = this.now() + GUEST_HANDSHAKE_MS;
-    g.host.postMessage({ op: "terminate", origin });
-    /* #477 wave 2: a terminating realm never answers pending fetches;
-       fail them closed to the engine path immediately. */
+    for (const key of keys) this.terminateKey(key);
+    if (reply) reply({ ok: true });
+  }
+
+  /** A page may unregister only its own exact scope and script identity. */
+  unregisterScope(origin: string, scope: string, scriptURL: string, reply?: GuestReplyFn): void {
+    this.tick();
+    const key = guestKey(origin, scope);
+    const g = this.guests.get(key);
+    if (!g || g.scriptURL !== scriptURL) {
+      if (reply) reply({ ok: true });
+      return;
+    }
+    this.terminateKey(key);
+    if (reply) reply({ ok: true });
+  }
+
+  private clearGuestWork(key: string): void {
     for (const [id, p] of this.fetchPending) {
-      if (p.origin === origin) {
+      if (p.key === key) {
         this.fetchPending.delete(id);
         clearTimeout(p.timer);
         p.done({ handled: false });
       }
     }
-    /* #538: bounded waitUntil tracking and bridge timers for this
-       origin die with the realm; the caches are torn down too (they
-       are per registration lifetime, like an unregistered worker). */
-    for (const key of [...this.waitPending.keys()]) {
-      if (key.startsWith(origin + "#")) {
-        clearTimeout(this.waitPending.get(key) as ReturnType<typeof setTimeout>);
-        this.waitPending.delete(key);
+    for (const pendingKey of [...this.waitPending.keys()]) {
+      if (pendingKey.startsWith(key + "#")) {
+        clearTimeout(this.waitPending.get(pendingKey) as ReturnType<typeof setTimeout>);
+        this.waitPending.delete(pendingKey);
       }
     }
-    for (const key of [...this.netPending.keys()]) {
-      if (key.startsWith(origin + "#")) {
-        clearTimeout(this.netPending.get(key) as ReturnType<typeof setTimeout>);
-        this.netPending.delete(key);
+    for (const pendingKey of [...this.netPending.keys()]) {
+      if (pendingKey.startsWith(key + "#")) {
+        clearTimeout(this.netPending.get(pendingKey) as ReturnType<typeof setTimeout>);
+        this.netPending.delete(pendingKey);
       }
     }
-    this.cacheStores.delete(origin);
-    this.cacheBytes.delete(origin);
-    DIAG.emit({
-      category: "SERVICE_WORKER",
-      severity: "info",
-      cause: "unknown",
-      message: "guest termination requested",
-      technicalReason: origin,
-    });
-    if (reply) reply({ ok: true });
   }
 
-  private hostMessage(data: unknown, _port: GuestPortLike): void {
-    const m = data as { kind?: unknown; origin?: unknown; port?: unknown; error?: unknown };
+  private terminateKey(key: string): boolean {
+    const g = this.guests.get(key);
+    if (!g) return false;
+    if (g.state !== "terminating") {
+      g.state = "terminating";
+      g.deadlineAt = this.now() + GUEST_HANDSHAKE_MS;
+      g.host.postMessage({ op: "terminate", id: g.id, origin: g.origin, scope: g.scope });
+      this.clearGuestWork(key);
+      DIAG.emit({
+        category: "SERVICE_WORKER",
+        severity: "info",
+        cause: "unknown",
+        message: "guest termination requested",
+        technicalReason: g.origin + " " + g.scope,
+      });
+    }
+    return true;
+  }
+
+  private hostMessage(data: unknown, port: GuestPortLike): void {
+    const m = data as { kind?: unknown; origin?: unknown; scope?: unknown; id?: unknown; port?: unknown; error?: unknown };
     if (!m || typeof m !== "object" || typeof m.kind !== "string") return;
     const origin = typeof m.origin === "string" ? m.origin : "";
+    let key = typeof m.scope === "string" ? guestKey(origin, m.scope) : "";
+    if (!key) {
+      /* Older still-open host pages are accepted only when the origin has
+         exactly one guest, so an ambiguous event can never cross scopes. */
+      const matches = [...this.guests].filter(([, g]) => g.origin === origin);
+      if (matches.length !== 1) return;
+      key = matches[0][0];
+    }
+    const g = this.guests.get(key);
+    const id = typeof m.id === "number" ? m.id : g?.id;
+    if (!g || g.host !== port || g.id !== id) return;
     if (m.kind === "zl:guestSpawned") {
-      const g = this.guests.get(origin);
       const gp = m.port as GuestPortLike | undefined;
-      /* Stray confirmations (a late reply to a superseded spawn) must
-         not disturb a newer record for the same origin. */
-      if (!g || g.state !== "spawning" || !gp || typeof gp.postMessage !== "function") return;
+      if (g.state !== "spawning" || !gp || typeof gp.postMessage !== "function") return;
       g.guest = gp;
       g.state = "running";
       g.deadlineAt = Infinity;
-      /* #576: confirmed spawns settle their callers here, once each. */
       for (const pr of g.pendingReply.splice(0)) pr({ ok: true, origin });
-      gp.onmessage = (ev) => this.guestMessage(origin, ev.data);
-      /* Real install/activate ordering, minus the waiting period the
-         virtual registration facade never modeled. */
+      gp.onmessage = (ev) => this.guestMessage(key, g.id, ev.data);
       gp.postMessage({ zl: "guestEvent", type: "install" });
       gp.postMessage({ zl: "guestEvent", type: "activate" });
       DIAG.emit({
@@ -481,13 +510,11 @@ export class GuestKernel {
         severity: "info",
         cause: "unknown",
         message: "guest running",
-        technicalReason: origin,
+        technicalReason: origin + " " + g.scope,
       });
     } else if (m.kind === "zl:guestSpawnFailed") {
-      const g = this.guests.get(origin);
-      if (!g || g.state !== "spawning") return;
-      this.guests.delete(origin);
-      /* #576: confirmed callers hear the real failure reason. */
+      if (g.state !== "spawning") return;
+      this.guests.delete(key);
       const failed = "guest spawn failed: " + String(m.error ?? "unknown").slice(0, 120);
       for (const pr of g.pendingReply.splice(0)) pr({ ok: false, error: failed });
       DIAG.emit({
@@ -498,20 +525,16 @@ export class GuestKernel {
         technicalReason: String(m.error ?? "").slice(0, 200),
       });
     } else if (m.kind === "zl:guestTerminated") {
-      const g = this.guests.get(origin);
-      /* Only a record we marked terminating is deleted; a stale
-         confirmation must not kill a newer spawn. */
-      if (!g || g.state !== "terminating") return;
-      this.guests.delete(origin);
+      if (g.state !== "terminating") return;
+      this.guests.delete(key);
       DIAG.emit({
         category: "SERVICE_WORKER",
         severity: "info",
         cause: "unknown",
         message: "guest terminated",
-        technicalReason: origin,
+        technicalReason: origin + " " + g.scope,
       });
     } else if (m.kind === "zl:guestError") {
-      /* The worker threw. Contain it: terminate the guest realm. */
       DIAG.emit({
         category: "SERVICE_WORKER",
         severity: "warning",
@@ -519,11 +542,14 @@ export class GuestKernel {
         message: "guest worker error; terminating",
         technicalReason: typeof m.error === "string" ? m.error.slice(0, 200) : "",
       });
-      this.terminate(origin);
+      this.terminateKey(key);
     }
   }
 
-  private guestMessage(origin: string, data: unknown): void {
+  private guestMessage(key: string, id: number, data: unknown): void {
+    const g = this.guests.get(key);
+    if (!g || g.id !== id || g.state !== "running") return;
+    const origin = g.origin;
     const d = data as { zl?: unknown; data?: unknown; error?: unknown; op?: unknown };
     if (!d || typeof d !== "object") return;
     if (d.zl === "guestMessage") {
@@ -559,15 +585,15 @@ export class GuestKernel {
       const p = typeof fh.id === "number" ? this.fetchPending.get(fh.id) : undefined;
       if (p) p.done({ handled: false });
     } else if (d.zl === "guestWait" || d.zl === "guestWaitDone") {
-      this.guestWait(origin, d as { zl?: unknown; wid?: unknown; ok?: unknown; error?: unknown });
+      this.guestWait(key, d as { zl?: unknown; wid?: unknown; ok?: unknown; error?: unknown });
     } else if (d.zl === "guestNetFetch") {
-      this.guestNetFetch(origin, d as { id?: unknown; url?: unknown; method?: unknown; headers?: unknown; body?: unknown });
+      this.guestNetFetch(key, d as { id?: unknown; url?: unknown; method?: unknown; headers?: unknown; body?: unknown });
     } else if (d.zl === "guestCaches") {
-      this.guestCaches(origin, d as { id?: unknown; op?: unknown; payload?: unknown });
+      this.guestCaches(key, d as { id?: unknown; op?: unknown; payload?: unknown });
     } else if (d.zl === "guestControl" && d.op === "unregister") {
-      this.terminate(origin);
+      this.terminateKey(key);
     } else if (d.zl === "guestControl" && d.op === "update") {
-      this.guestUpdate(origin, d as { id?: unknown });
+      this.guestUpdate(key, d as { id?: unknown });
     }
   }
 
@@ -576,27 +602,27 @@ export class GuestKernel {
       engine never blocks a response on waitUntil (the response returns
       as soon as respondWith settles), but no tracker lives past the
       budget, and teardown of the realm clears every tracker. */
-  private guestWait(origin: string, d: { zl?: unknown; wid?: unknown; ok?: unknown; error?: unknown }): void {
+  private guestWait(key: string, d: { zl?: unknown; wid?: unknown; ok?: unknown; error?: unknown }): void {
     const wid = typeof d.wid === "number" ? d.wid : -1;
     if (wid < 0) return;
-    const key = origin + "#" + wid;
+    const pendingKey = key + "#" + wid;
     if (d.zl === "guestWait") {
       const timer = setTimeout(() => {
-        this.waitPending.delete(key);
+        this.waitPending.delete(pendingKey);
         DIAG.emit({
           category: "SERVICE_WORKER",
           severity: "warning",
           cause: "failure",
           message: "guest waitUntil budget exceeded; tracking abandoned",
-          technicalReason: "wid " + wid + " origin " + origin,
+          technicalReason: "wid " + wid + " key " + key,
         });
       }, GUEST_WAITUNTIL_MS);
-      this.waitPending.set(key, timer);
+      this.waitPending.set(pendingKey, timer);
     } else {
-      const timer = this.waitPending.get(key);
+      const timer = this.waitPending.get(pendingKey);
       if (timer !== undefined) {
         clearTimeout(timer);
-        this.waitPending.delete(key);
+        this.waitPending.delete(pendingKey);
         if (d.ok !== true) {
           DIAG.emit({
             category: "SERVICE_WORKER",
@@ -616,10 +642,10 @@ export class GuestKernel {
       request through upstreamFetch. The outer budget guarantees the
       guest promise tracking never hangs. */
   private guestNetFetch(
-    origin: string,
+    key: string,
     d: { id?: unknown; url?: unknown; method?: unknown; headers?: unknown; body?: unknown },
   ): void {
-    const g = this.guests.get(origin);
+    const g = this.guests.get(key);
     const id = typeof d.id === "number" ? d.id : -1;
     if (!g || !g.guest || id < 0) return;
     const guest = g.guest;
@@ -693,15 +719,15 @@ export class GuestKernel {
       bad("engine fetch bridge unavailable");
       return;
     }
-    const key = origin + "#" + id;
+    const pendingKey = key + "#" + id;
     const timer = setTimeout(() => {
-      this.netPending.delete(key);
+      this.netPending.delete(pendingKey);
       bad("guest fetch budget exceeded");
     }, GUEST_NETFETCH_BUDGET_MS);
-    this.netPending.set(key, timer);
+    this.netPending.set(pendingKey, timer);
     const settle = (): boolean => {
-      if (!this.netPending.has(key)) return false;
-      this.netPending.delete(key);
+      if (!this.netPending.has(pendingKey)) return false;
+      this.netPending.delete(pendingKey);
       clearTimeout(timer);
       return true;
     };
@@ -746,11 +772,12 @@ export class GuestKernel {
       canonical URL (fragment dropped) and eviction is oldest-first
       across the origin's caches. No engine cache entry is reachable:
       the namespace is private to the guest program by construction. */
-  private guestCaches(origin: string, d: { id?: unknown; op?: unknown; payload?: unknown }): void {
-    const g = this.guests.get(origin);
+  private guestCaches(key: string, d: { id?: unknown; op?: unknown; payload?: unknown }): void {
+    const g = this.guests.get(key);
     const id = typeof d.id === "number" ? d.id : -1;
     if (!g || !g.guest || id < 0) return;
     const guest = g.guest;
+    const origin = g.origin;
     const reply = (ok: boolean, result?: unknown, error?: string): void => {
       guest.postMessage({ zl: "guestCachesResult", id, ok, result: ok ? result : undefined, error: ok ? undefined : error });
     };
@@ -800,7 +827,7 @@ export class GuestKernel {
               severity: "warning",
               cause: "failure",
               message: "guest cache quota exceeded; open refused",
-              technicalReason: origin,
+              technicalReason: g.origin + " " + g.scope,
             });
             reply(false, undefined, "cache quota exceeded for this site");
             return;
@@ -969,8 +996,8 @@ export class GuestKernel {
       capture used); identical bytes answer no-change, changed bytes
       resolve the caller, then terminate the old realm and spawn the
       new one over the same record, preserving the site's caches. */
-  private guestUpdate(origin: string, d: { id?: unknown }): void {
-    const g = this.guests.get(origin);
+  private guestUpdate(key: string, d: { id?: unknown }): void {
+    const g = this.guests.get(key);
     const id = typeof d.id === "number" ? d.id : -1;
     if (!g || !g.guest || g.state !== "running" || id < 0) return;
     const guest = g.guest;
@@ -988,15 +1015,15 @@ export class GuestKernel {
       bad("engine fetch bridge unavailable");
       return;
     }
-    const key = origin + "#update" + id;
+    const pendingKey = key + "#update" + id;
     const timer = setTimeout(() => {
-      this.netPending.delete(key);
+      this.netPending.delete(pendingKey);
       bad("update refetch budget exceeded");
     }, GUEST_NETFETCH_BUDGET_MS);
-    this.netPending.set(key, timer);
+    this.netPending.set(pendingKey, timer);
     const settle = (): boolean => {
-      if (!this.netPending.has(key)) return false;
-      this.netPending.delete(key);
+      if (!this.netPending.has(pendingKey)) return false;
+      this.netPending.delete(pendingKey);
       clearTimeout(timer);
       return true;
     };
@@ -1029,9 +1056,9 @@ export class GuestKernel {
           severity: "info",
           cause: "unknown",
           message: "guest script changed; replacing the realm",
-          technicalReason: origin,
+          technicalReason: g.origin + " " + g.scope,
         });
-        setTimeout(() => this.replaceGuest(origin, script), 0);
+        setTimeout(() => this.replaceGuest(key, script), 0);
       },
       (err) => {
         if (!settle()) return;
@@ -1043,29 +1070,22 @@ export class GuestKernel {
   /** #538: terminate the current realm for this origin and spawn a
       replacement with the given script over the same record. Pending
       fetches fail closed; the site's caches survive the swap. */
-  private replaceGuest(origin: string, script: string): void {
-    const g = this.guests.get(origin);
+  private replaceGuest(key: string, script: string): void {
+    const g = this.guests.get(key);
     if (!g || g.state !== "running") return;
-    g.state = "terminating";
-    g.host.postMessage({ op: "terminate", origin });
-    for (const [id, p] of this.fetchPending) {
-      if (p.origin === origin) {
-        this.fetchPending.delete(id);
-        clearTimeout(p.timer);
-        p.done({ handled: false });
-      }
-    }
-    for (const key of [...this.waitPending.keys()]) {
-      if (key.startsWith(origin + "#")) {
-        clearTimeout(this.waitPending.get(key) as ReturnType<typeof setTimeout>);
-        this.waitPending.delete(key);
-      }
-    }
+    this.clearGuestWork(key);
     g.script = script;
     g.guest = null;
+    g.id = ++this.guestSeq;
     g.state = "spawning";
     g.deadlineAt = this.now() + GUEST_HANDSHAKE_MS;
-    g.host.postMessage({ op: "spawn", origin, script: guestHarness(g.scope, g.scriptURL) + script });
+    g.host.postMessage({
+      op: "spawn",
+      id: g.id,
+      origin: g.origin,
+      scope: g.scope,
+      script: guestHarness(g.scope, g.scriptURL) + script,
+    });
   }
 
   /** #477 wave 2: dispatch one synthetic fetch event to the running
@@ -1074,15 +1094,15 @@ export class GuestKernel {
       response, script error, timeout, termination) resolves
       handled:false and the engine request path serves the request
       exactly as with no guest. */
-  dispatchFetch(origin: string, request: GuestFetchRequest): Promise<GuestFetchOutcome> {
+  dispatchFetch(key: string, request: GuestFetchRequest): Promise<GuestFetchOutcome> {
     this.tick();
-    const g = this.guests.get(origin);
+    const g = this.guests.get(key);
     if (!g || g.state !== "running" || !g.guest) return Promise.resolve({ handled: false });
     const guest = g.guest;
     const id = ++this.fetchSeq;
     return new Promise<GuestFetchOutcome>((resolve) => {
-      const p: { origin: string; timer: ReturnType<typeof setTimeout>; done: (o: GuestFetchOutcome) => void } = {
-        origin,
+      const p: { key: string; timer: ReturnType<typeof setTimeout>; done: (o: GuestFetchOutcome) => void } = {
+        key,
         timer: null as unknown as ReturnType<typeof setTimeout>,
         done: (o: GuestFetchOutcome): void => {
           this.fetchPending.delete(id);
@@ -1105,19 +1125,18 @@ export class GuestKernel {
     });
   }
 
-  /** #477 P3: route one request to the running guest whose canonical
-      scope matches the request URL (the real SW fetch contract).
-      Guests are keyed by origin and guestScopeMatches requires origin
-      equality, so at most one record can ever match; the first match
-      is exact. No match resolves handled:false and the engine request
-      path serves the request exactly as with no guest. */
+  /** Route to the most-specific running registration, matching native
+      Service Worker scope selection when scopes overlap. */
   dispatchFetchForUrl(url: string, request: GuestFetchRequest): Promise<GuestFetchOutcome> {
     this.tick();
+    let best: GuestRecord | null = null;
     for (const g of this.guests.values()) {
-      if (g.state !== "running" || !g.guest) continue;
-      if (guestScopeMatches(g.scope, url)) return this.dispatchFetch(g.origin, request);
+      if (g.state !== "running" || !g.guest || !guestScopeMatches(g.scope, url)) continue;
+      if (!best || g.scope.length > best.scope.length) best = g;
     }
-    return Promise.resolve({ handled: false });
+    return best
+      ? this.dispatchFetch(guestKey(best.origin, best.scope), request)
+      : Promise.resolve({ handled: false });
   }
 
   /** Test and diagnostic view of live guest state. */
