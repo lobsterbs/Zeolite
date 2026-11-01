@@ -8,6 +8,7 @@ interface NetDetail {
   internalUrl: string;
   ttfb: number;
   initiator?: string;
+  initiatorType?: string;
   reqHeaders?: Record<string, string>;
   respHeaders?: Record<string, string>;
   cookies?: string[];
@@ -101,6 +102,7 @@ function showDetail(e: NetEntry): void {
   if (e.finalDest) lines.push("final destination: " + e.finalDest);
   lines.push(e.method + " -> " + e.status + "  ttfb " + (d?.ttfb ?? e.ms) + " ms, total " + e.ms + " ms");
   if (d?.initiator) lines.push("initiator: " + d.initiator);
+  if (d?.initiatorType) lines.push("initiator type: " + d.initiatorType);
   lines.push("transport: " + (e.transport ?? "") + (e.fallbackReason ? " (" + e.fallbackReason + ")" : ""));
   if (e.verdict) lines.push("verdict: " + e.verdict);
   if (e.err) lines.push("error: " + e.err);
