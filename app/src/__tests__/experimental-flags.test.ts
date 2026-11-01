@@ -6,12 +6,12 @@ import {
 afterEach(resetExperimentalForTests);
 
 describe("experimental flag selection (host preferences, not unsafe runtime features)", () => {
-  it("all four default off and none can activate unfinished prototypes", () => {
+  it("hybridLocation defaults on (#456 operator flip 2026-11-01); unfinished prototypes stay off", () => {
     expect(experimentalSnapshot().requested).toEqual({
-      adaptiveTransit: false, hybridLocation: false,
+      adaptiveTransit: false, hybridLocation: true,
       cspTranslation: false, virtualSW: false,
     });
-    expect(Object.values(experimentalSnapshot().effective)).toEqual([false,false,false,false]);
+    expect(Object.values(experimentalSnapshot().effective)).toEqual([false,true,false,false]);
   });
 
   it("stores four requested booleans without implying effective execution", () => {
@@ -27,7 +27,7 @@ describe("experimental flag selection (host preferences, not unsafe runtime feat
     });
     expect(experimentalSnapshot().status.adaptiveTransit).toBe("shadow-only");
     expect(experimentalSnapshot().status.hybridLocation).toBe("enabled");
-    expect(experimentalSnapshot().status.cspTranslation).toBe("deny-only");
+    expect(experimentalSnapshot().status.cspTranslation).toBe("deny-only+engine-source-lists");
     expect(experimentalEnabled("cspTranslation")).toBe(true);
     expect(experimentalSnapshot().status.virtualSW).toBe("not-implemented");
   });
@@ -36,7 +36,7 @@ describe("experimental flag selection (host preferences, not unsafe runtime feat
     selectExperimental({ virtualSW: true });
     expect(selectExperimental({ cspTranslation: true }).ok).toBe(true);
     expect(experimentalSnapshot().requested).toMatchObject({
-      adaptiveTransit: false, hybridLocation: false,
+      adaptiveTransit: false, hybridLocation: true,
       cspTranslation: true, virtualSW: true,
     });
   });
