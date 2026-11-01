@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyNavGuard, navEncode, NAVP } from "../bootstrap/navguard";
+import { applyNavGuard, navEncode, NAVP, SWEEP_MAX_ROOTS } from "../bootstrap/navguard";
 
 const LOC = "https://engine.host/j/abc";
 const ENGINE = "https://engine.host";
@@ -259,5 +259,140 @@ describe("unquoted srcdoc values (#116 residual 3)", () => {
     expect(srcdoc.read(el)).toBe(
       `<a href="${navEncode(REAL)}">x</a><form action=${navEncode(REAL)}></form><img src="/local.png">`,
     );
+  });
+});
+
+/* #536: pre-existing OPEN shadow roots. A root that existed before
+   the guard installed escaped both the observer and the attachShadow
+   hook, so its frames loaded browser-direct. The sweep now joins
+   every visible root to the same observer contract and gives its
+   frames the same pass; CLOSED roots are invisible to page script
+   by browser rule (.shadowRoot is null) and stay the documented
+   boundary; the sweep is bounded. */
+describe("pre-existing open shadow root sweep (#536)", () => {
+  function makeSweepEnv(hosts: Array<{ el: any; root: any | null }>) {
+    const observers: Array<{ cb: (muts: any[]) => void; target: any; opts: any }> = [];
+    class MO {
+      cb: (muts: any[]) => void;
+      constructor(cb: (muts: any[]) => void) {
+        this.cb = cb;
+      }
+      observe(target: any, opts: any) {
+        observers.push({ cb: this.cb, target, opts });
+      }
+    }
+    const lightAll: any[] = hosts.map((h) => h.el);
+    const w: Record<string, any> = {
+      MutationObserver: MO,
+      Element: { prototype: { attachShadow() { return { nodeType: 11 }; } } },
+      document: {
+        documentElement: { tag: "html" },
+        querySelectorAll(sel: string) {
+          if (sel === "*") return lightAll;
+          return [];
+        },
+      },
+      open() {
+        return 1;
+      },
+    };
+    applyNavGuard(w, LOC, ENGINE);
+    return { w, observers };
+  }
+
+  function shadowFrame(src: string) {
+    return {
+      nodeType: 1,
+      tagName: "IFRAME",
+      _attrs: { src } as Record<string, string>,
+      getAttribute(n: string) {
+        return n in this._attrs ? this._attrs[n] : null;
+      },
+      setAttribute(n: string, v: string) {
+        this._attrs[n] = v;
+      },
+    };
+  }
+
+  it("joins a pre-existing open root to the observer and rewires its frames", async () => {
+    const root: any = { nodeType: 11, tag: "pre-existing" };
+    const frame = shadowFrame(REAL);
+    root.querySelectorAll = (sel: string) =>
+      sel === "iframe,frame" ? [frame] : sel === "*" ? [] : [];
+    const host: any = { tagName: "DIV", shadowRoot: root };
+    const e = makeSweepEnv([{ el: host, root }]);
+    const installs = e.observers.filter((o) => o.target === root);
+    expect(installs.length).toBe(1);
+    expect(installs[0].opts).toEqual({ childList: true, subtree: true });
+    expect(frame._attrs.src).toBe("");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(frame._attrs.src).toBe(navEncode(REAL));
+  });
+
+  it("finds nested open roots inside discovered roots", () => {
+    const outer: any = { nodeType: 11, tag: "outer" };
+    const inner: any = { nodeType: 11, tag: "inner" };
+    const innerHost: any = { tagName: "SPAN", shadowRoot: inner };
+    outer.querySelectorAll = (sel: string) => (sel === "iframe,frame" ? [] : [innerHost]);
+    const outerHost: any = { tagName: "DIV", shadowRoot: outer };
+    const e = makeSweepEnv([{ el: outerHost, root: outer }]);
+    const targets = e.observers.map((o) => o.target);
+    expect(targets).toContain(outer);
+    expect(targets).toContain(inner);
+  });
+
+  it("never observes the same root twice (host re-listed, nested cycle)", () => {
+    const root: any = { nodeType: 11, tag: "r" };
+    root.querySelectorAll = (sel: string) => (sel === "iframe,frame" ? [] : []);
+    const hostA: any = { tagName: "DIV", shadowRoot: root };
+    const hostB: any = { tagName: "DIV", shadowRoot: root };
+    const e = makeSweepEnv([{ el: hostA, root }, { el: hostB, root }]);
+    expect(e.observers.filter((o) => o.target === root).length).toBe(1);
+  });
+
+  it("a closed root (shadowRoot null) is invisible and harmless", () => {
+    const closedHost: any = { tagName: "DIV", shadowRoot: null };
+    const e = makeSweepEnv([{ el: closedHost, root: null }]);
+    expect(e.observers.length).toBe(1); /* documentElement only */
+  });
+
+  it("stops at the roots cap: later roots keep native loads (bounded sweep)", () => {
+    const hosts: Array<{ el: any; root: any | null }> = [];
+    const roots: any[] = [];
+    for (let i = 0; i < SWEEP_MAX_ROOTS + 3; i++) {
+      const root: any = { nodeType: 11, tag: "r" + i };
+      root.querySelectorAll = (sel: string) => (sel === "iframe,frame" ? [] : []);
+      roots.push(root);
+      hosts.push({ el: { tagName: "DIV", shadowRoot: root }, root });
+    }
+    const e = makeSweepEnv(hosts);
+    const guarded = e.observers.filter((o) => roots.includes(o.target));
+    expect(guarded.length).toBe(SWEEP_MAX_ROOTS);
+    expect(e.observers.filter((o) => o.target === roots[roots.length - 1]).length).toBe(0);
+  });
+
+  it("a hostile querySelectorAll throw never breaks the guard install", () => {
+    const observers: Array<{ target: any }> = [];
+    class MO {
+      observe(target: any) {
+        observers.push({ target });
+      }
+    }
+    const w: Record<string, any> = {
+      MutationObserver: MO,
+      Element: { prototype: { attachShadow() { return { nodeType: 11 }; } } },
+      document: {
+        documentElement: { tag: "html" },
+        querySelectorAll(sel: string) {
+          if (sel === "*") throw new Error("hostile");
+          return [];
+        },
+      },
+      open() {
+        return 1;
+      },
+    };
+    expect(() => applyNavGuard(w, LOC, ENGINE)).not.toThrow();
+    expect(observers.length).toBe(1); /* documentElement observed before the sweep */
   });
 });

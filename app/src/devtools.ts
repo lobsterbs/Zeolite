@@ -8,6 +8,7 @@ interface NetDetail {
   internalUrl: string;
   ttfb: number;
   initiator?: string;
+  initiatorType?: string;
   reqHeaders?: Record<string, string>;
   respHeaders?: Record<string, string>;
   cookies?: string[];
@@ -101,6 +102,7 @@ function showDetail(e: NetEntry): void {
   if (e.finalDest) lines.push("final destination: " + e.finalDest);
   lines.push(e.method + " -> " + e.status + "  ttfb " + (d?.ttfb ?? e.ms) + " ms, total " + e.ms + " ms");
   if (d?.initiator) lines.push("initiator: " + d.initiator);
+  if (d?.initiatorType) lines.push("initiator type: " + d.initiatorType);
   lines.push("transport: " + (e.transport ?? "") + (e.fallbackReason ? " (" + e.fallbackReason + ")" : ""));
   if (e.verdict) lines.push("verdict: " + e.verdict);
   if (e.err) lines.push("error: " + e.err);
@@ -291,6 +293,13 @@ function tick(): void {
       diagEvents = [];
       traceLast = 0;
       traceEntries = [];
+      /* #550: an inspection session does not survive the worker that
+         authorized it; the stale page view cannot inspect anything. */
+      domClient = null;
+      domTreeEl.replaceChildren();
+      domConsoleEl.textContent = "";
+      domStylesEl.textContent = "no node selected";
+      domReset("worker restarted; select a request and authorize again");
       render();
       return;
     }
@@ -472,6 +481,174 @@ doctorExport.addEventListener("click", () => {
   };
   if (lastDoctor) exportReport(lastDoctor);
   else doctorRequest(false, exportReport);
+});
+
+/* #550 Tier 2 DOM inspection, first slice. The devtools page never
+   touches a proxied document's DOM: it authorizes a session for a
+   live client, and the SW relays bounded requests to that page's
+   bootstrap bridge (serialized data only). The generation the
+   authorize handshake pins must appear on every reply; a mismatched
+   generation is a later document and is discarded, never rendered. */
+interface DomNode {
+  i: number;
+  tag: string;
+  id?: string;
+  class?: string;
+  attrs?: Record<string, string>;
+  children?: DomNode[];
+  truncated?: boolean;
+}
+interface DomConsoleEntry {
+  level: string;
+  ts: number;
+  args: string[];
+}
+const domStatus = document.getElementById("domStatus")!;
+const domAuthorizeBtn = document.getElementById("domAuthorize") as HTMLButtonElement;
+const domRevokeBtn = document.getElementById("domRevoke") as HTMLButtonElement;
+const domSnapshotBtn = document.getElementById("domSnapshot") as HTMLButtonElement;
+const domConsoleBtn = document.getElementById("domConsoleBtn") as HTMLButtonElement;
+const domStylesEl = document.getElementById("domStyles")!;
+const domTreeEl = document.getElementById("domTree")!;
+const domConsoleEl = document.getElementById("domConsoleList")!;
+let domClient: string | null = null;
+let domGen = -1;
+let domAuthorized = false;
+
+function domApplyButtons(): void {
+  domAuthorizeBtn.disabled = !domClient || domAuthorized;
+  domRevokeBtn.disabled = !domAuthorized;
+  domSnapshotBtn.disabled = !domAuthorized;
+  domConsoleBtn.disabled = !domAuthorized;
+}
+
+function domReset(why: string): void {
+  domAuthorized = false;
+  domGen = -1;
+  domApplyButtons();
+  domStatus.textContent = why;
+}
+
+/* A row selection carries the clientId the SW verified for that
+   request's trace; only such verified clients are authorizable. */
+function domTargetFromSelection(): string | null {
+  return selectedRequest?.clientId ?? null;
+}
+
+domAuthorizeBtn.addEventListener("click", () => {
+  const clientId = domTargetFromSelection();
+  if (!clientId) {
+    domStatus.textContent = "No verified client: select a request row first.";
+    return;
+  }
+  domStatus.textContent = "authorizing...";
+  post({ type: "zl:domInspect", op: "authorize", clientId }, (data) => {
+    if (data?.ok && typeof data.gen === "number") {
+      domClient = clientId;
+      domGen = data.gen;
+      domAuthorized = true;
+      domApplyButtons();
+      domStatus.textContent = "authorized for this document";
+    } else {
+      domClient = null;
+      domApplyButtons();
+      domStatus.textContent = "unavailable: " + (data?.error ?? "no answer");
+    }
+  });
+});
+
+domRevokeBtn.addEventListener("click", () => {
+  if (!domClient) return;
+  const clientId = domClient;
+  post({ type: "zl:domInspect", op: "revoke", clientId }, () => undefined);
+  domTreeEl.replaceChildren();
+  domStylesEl.textContent = "no node selected";
+  domConsoleEl.textContent = "";
+  domReset("session revoked");
+});
+
+domSnapshotBtn.addEventListener("click", () => {
+  if (!domAuthorized || !domClient) return;
+  domStatus.textContent = "snapshotting...";
+  post({ type: "zl:domInspect", op: "snapshot", clientId: domClient }, (data) => {
+    if (!data?.ok) {
+      domReset("unavailable: " + (data?.error ?? "no answer"));
+      return;
+    }
+    if (data.gen !== domGen) {
+      /* Stale generation: this reply describes a later document. */
+      domTreeEl.replaceChildren();
+      domReset("stale document generation; authorize again");
+      return;
+    }
+    domTreeEl.replaceChildren();
+    renderDomTree(data.tree as DomNode, domTreeEl, 0);
+    domStatus.textContent =
+      "snapshot: " + (typeof data.nodes === "number" ? data.nodes : "?") + " nodes" +
+      (data.truncated ? " (truncated)" : "");
+  });
+});
+
+function renderDomTree(node: DomNode | undefined, parent: HTMLElement, depth: number): void {
+  if (!node || depth > 8) return;
+  const row = document.createElement("div");
+  row.className = "dn";
+  const label =
+    "<" + (node.tag ?? "?") + ">" +
+    (node.id ? " #" + node.id : "") +
+    (node.class ? " ." + node.class.split(/\s+/).slice(0, 3).join(".") : "") +
+    (node.truncated ? " …" : "");
+  row.textContent = label;
+  if (typeof node.i === "number") {
+    row.addEventListener("click", () => {
+      domTreeEl.querySelectorAll(".dn.sel").forEach((x) => x.classList.remove("sel"));
+      row.classList.add("sel");
+      requestDomStyles(node.i);
+    });
+  }
+  parent.append(row);
+  for (const child of (node.children ?? []).slice(0, 40)) renderDomTree(child, parent, depth + 1);
+}
+
+function requestDomStyles(nodeId: number): void {
+  if (!domAuthorized || !domClient) return;
+  domStylesEl.textContent = "...";
+  post({ type: "zl:domInspect", op: "styles", clientId: domClient, nodeId }, (data) => {
+    if (!data?.ok) {
+      domStylesEl.textContent = "unavailable: " + (data?.error ?? "no answer");
+      if (data?.stale) domReset("stale document generation; authorize again");
+      return;
+    }
+    if (data.gen !== domGen) {
+      domStylesEl.textContent = "discarded: stale document generation";
+      return;
+    }
+    const styles = (data.styles ?? []) as Array<[string, string]>;
+    domStylesEl.textContent = styles.length
+      ? styles.map(([k, v]) => k + ": " + v).join("\n")
+      : "no computed styles reported";
+  });
+}
+
+domConsoleBtn.addEventListener("click", () => {
+  if (!domAuthorized || !domClient) return;
+  post({ type: "zl:domInspect", op: "console", clientId: domClient }, (data) => {
+    if (!data?.ok) {
+      domConsoleEl.textContent = "unavailable: " + (data?.error ?? "no answer");
+      if (data?.stale) domReset("stale document generation; authorize again");
+      return;
+    }
+    if (data.gen !== domGen) {
+      domConsoleEl.textContent = "discarded: stale document generation";
+      return;
+    }
+    const entries = (data.entries ?? []) as DomConsoleEntry[];
+    domConsoleEl.textContent = entries.length
+      ? entries
+          .map((e) => fmtTime(e.ts) + " " + e.level + ": " + e.args.join(" "))
+          .join("\n") + (data.dropped ? "\n(" + data.dropped + " older entries dropped)" : "")
+      : "console ring is empty";
+  });
 });
 
 tick();

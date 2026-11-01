@@ -14,6 +14,7 @@
 
 import type { ExtensionRecord } from "./types";
 import { hostPatternsMatch } from "./permissions";
+import { checkPageToken } from "./serve";
 
 export interface UiTab {
   id: number;
@@ -71,6 +72,28 @@ function validUrl(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** #518: a ROOTED extension-page URL with a valid zlExt/zlPageTok pair
+    is a granted navigation — the exact gate zl:openExtPage serves the
+    host (5-minute token, per extension+path), so runtime.openOptionsPage
+    can traverse the same tabs bridge. Anything else rooted stays
+    invalid: tabs.create must never become a navigation escape onto
+    engine routes. ponytail: checkPageToken does not consume the token
+    (granted navigations re-check it for subresources), so a tab the
+    host actually opens still passes its own first navigation. */
+function validExtPageUrl(url: string): boolean {
+  if (!url.startsWith("/")) return false;
+  let u: URL;
+  try {
+    u = new URL("https://engine.invalid" + url);
+  } catch {
+    return false;
+  }
+  const extId = u.searchParams.get("zlExt");
+  const tok = u.searchParams.get("zlPageTok");
+  if (!extId || !tok) return false;
+  return checkPageToken(extId, u.pathname, tok);
 }
 
 type PendingUpdate = { want: UpdateProps; resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
@@ -338,7 +361,7 @@ export class TabRegistry {
 
   create(props: CreateProps): Promise<UiTab> {
     if (!this.dispatch) return Promise.reject(new Error("zeolite: no tab host attached to this engine"));
-    if (props.url !== undefined && !validUrl(props.url)) {
+    if (props.url !== undefined && !validUrl(props.url) && !validExtPageUrl(props.url)) {
       return Promise.reject(new Error("zeolite: tabs.create: unsupported URL: " + String(props.url)));
     }
     const nonce = "zl-c" + ++this.nonceSeq;
