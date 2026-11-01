@@ -48,8 +48,10 @@ export interface EngineConfig {
       destinations before fetching them. Absent keeps the engine's
       persisted choice; default off. */
   httpsUpgrade?: boolean;
-  /** Opt-in OPFS replay spool for over-cap streamed bodies on
-      redirect hops (#556). Absent keeps the worker's live choice. */
+  /** OPFS replay spool for over-cap streamed bodies on redirect hops
+      (#556): on by default; `false` opts a deployment out of
+      disk-backed upload staging (upload bytes then never reach
+      persistent storage). Absent keeps the worker's live choice. */
   spoolUploads?: boolean;
 }
 

@@ -1,5 +1,7 @@
 /* #556 acceptance suite: redirect replay of large streamed request
-   bodies through the host-authorized OPFS spool.
+   bodies through the OPFS spool (on by default since the #556
+   follow-up; the no-spool pins below opt out explicitly via
+   zl:config spoolUploads:false).
 
    Measured engine reality this suite pins (2026-10-31 session):
 
@@ -25,9 +27,10 @@
      PUT, a cross-origin hop and an Authorization header, all
      followed through the spooled File with byte-identical SHA-256
      against the direct oracle.
-   - the honest failure pin: over the tightened cap WITHOUT the
-     spool authorization the request fails with the documented 502
-     diagnostic, never a truncated body and never a crash.
+   - the honest failure pin: over the tightened cap with the spool
+     opted out (zl:config spoolUploads false) the request fails with
+     the documented 502 diagnostic, never a truncated body and never a
+     crash.
    - the production ceiling pin: a 32 MiB + 1 upload without the
      spool fails with the same honest 502 (the read loop discards
      and throws before any transport copy), pinning the documented
@@ -220,9 +223,13 @@ async function main() {
 
   /* ---- the honest failure pin at the tightened cap ---- */
 
-  await check("over the tightened cap without the spool: the documented honest 502, never a crash", async () => {
-    const ack = await pushConfig(prox.page, { replayCapMb: TIGHT_CAP_MB });
+  await check("over the tightened cap with the spool opted out: the documented honest 502, never a crash", async () => {
+    /* #556 follow-up: the spool is on by default, so this pin opts out
+       explicitly - upload bytes must stay out of storage when the
+       deployment refuses the spool. */
+    const ack = await pushConfig(prox.page, { replayCapMb: TIGHT_CAP_MB, spoolUploads: false });
     eq(ack.replayCapMb, TIGHT_CAP_MB, "the ack did not echo the tightened replay cap");
+    eq(ack.spoolUploads, false, "the ack did not echo the spool opt-out");
     const out = await probeProxied(prox.frame, 307, "POST", OVER_TIGHT_CAP);
     eq(out.status, 502, "an over-cap upload without the spool authorization did not fail honestly");
     assert(

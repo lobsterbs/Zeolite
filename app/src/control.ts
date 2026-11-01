@@ -20,6 +20,8 @@ import { policyDoctorState } from "./policy";
 import { rulesDoctorState } from "./rules";
 import { siteconfigDoctorState } from "./siteconfig";
 import { DIAG, traceClient } from "./diag";
+/* #451: the bounded per-attempt captcha trace snapshot (zl:captchaTrace). */
+import { CAPTCHA_TRACE } from "./captcha-trace";
 import { buildCompatibilityReport, compatibilityKdl } from "./compat-debugger";
 /* #90: the download registry instance lives in ./downloads; the
    control plane lists and cancels entries through the subsystem. */
@@ -34,6 +36,7 @@ import { pageClientOf } from "./extensions/serve";
 import type { UiTab } from "./extensions/tabs";
 import { TABS } from "./extensions/tabs";
 import { netLogCursor, netLogGeneration, netLogSince } from "./netlog";
+import { domInspectAuthorize, domInspectRevoke, domInspectRequest } from "./dom-inspect";
 import { senderVirtualOrigin } from "./origin";
 import type { RecordingState } from "./recording";
 import { beginRecording, finishRecording } from "./recording";
@@ -91,6 +94,7 @@ export interface ControlMessage {
     | "zl:listExt"
     | "zl:getDiag"
     | "zl:exportDiagnostics"
+    | "zl:captchaTrace"
     | "zl:doctor"
     | "zl:installExt"
     | "zl:installExtFiles"
@@ -130,6 +134,7 @@ export interface ControlMessage {
     | "zl:getJars"
     | "zl:clearJar"
     | "zl:transport"
+  | "zl:domInspect"
   | "zl:loadState";
   /** Experimental selections are preferences only, not security bypasses. */
   experimental?: unknown;
@@ -251,6 +256,12 @@ export interface ControlMessage {
   /** zl:decodeRoutes (#180): route strings from the page's own
       markup; the reply's dests array parallels it. */
   routes?: unknown[];
+  /** zl:domInspect (#550): session op. authorize/revoke name a client
+      (clientId); snapshot/styles/console relay an inspection request
+      to that client's bootstrap bridge. Host-page senders only. */
+  op?: "authorize" | "revoke" | "snapshot" | "styles" | "console";
+  /** zl:domInspect styles op: the snapshot node index. */
+  nodeId?: number;
 }
 
 /* #29 (zl:find): the compiled page-side finder ships to the page
@@ -353,6 +364,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
        handleControlEvent. This case is a fail-closed registry guard. */
     case "zl:doctor":
     case "zl:exportDiagnostics":
+    case "zl:captchaTrace":
       reply({ ok: false, error: "host-only diagnostic preflight required" });
       break;
     case "zl:relayRegister": {
@@ -595,6 +607,22 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         experimental: experimentalSnapshot(),
         profile: jarProfileState((e.source as { id?: string } | null)?.id),
         wispAuth: wispAuthStatus(),
+        /* #544: a compact, factual capability report so a host or page
+           can tell "unavailable by design" from "broken". It names
+           what IS, never what could be: websocket is the transport a
+           page socket would ride right now (the relay arm when an
+           embedder channel is registered, the native wisp bridge
+           otherwise); websocketPlaintext is the unconditional #525
+           pass-through (no scheme upgrade exists anymore); webrtc is
+           constant "unavailable" (RTCPeerConnection is deleted by the
+           navguard, no silent fallback exists); replaySpool echoes the
+           live zl:config authorization for over-cap upload replay. */
+        capabilities: {
+          websocket: relayAvailable() ? "relay" : "native-bridge",
+          websocketPlaintext: true,
+          webrtc: "unavailable",
+          replaySpool: spoolUploadsEnabled(),
+        },
       });
       break;
     case "zl:config": {
@@ -1378,6 +1406,42 @@ case "zl:tracing":
       reply({ ok: true, generation: netLogGeneration(), clientId: clientId ?? null, ...DIAG.snapshot(since, clientId) });
       break;
     }
+    case "zl:domInspect": {
+      /* #550 Tier 2 DOM inspection, first slice. Host-only by the
+         dispatch gate above (not in PAGE_MESSAGES): a proxied page
+         must never open an inspection session, not even for itself.
+         authorize/revoke manage the session; snapshot/styles/console
+         relay one bounded request to the client's bootstrap bridge.
+         Replies carry the page generation the session pinned - the
+         engine discards stale generations, the devtools page also
+         discards replies whose generation no longer matches. */
+      const op = msg.op;
+      const cid = typeof msg.clientId === "string" ? msg.clientId : "";
+      if (!cid || cid.length > 256) {
+        reply({ ok: false, error: "bad zl:domInspect clientId" });
+        break;
+      }
+      if (op === "authorize") {
+        e.waitUntil(
+          domInspectAuthorize(cid).then((r) => reply(r), (err) => reply({ ok: false, error: String(err) })),
+        );
+      } else if (op === "revoke") {
+        reply({ ok: domInspectRevoke(cid) });
+      } else if (op === "snapshot" || op === "styles" || op === "console") {
+        const nodeId = typeof msg.nodeId === "number" && msg.nodeId >= 0 && msg.nodeId <= 100000
+          ? Math.floor(msg.nodeId)
+          : undefined;
+        e.waitUntil(
+          domInspectRequest(cid, op, nodeId).then(
+            (r) => reply(r),
+            (err) => reply({ ok: false, error: String(err) }),
+          ),
+        );
+      } else {
+        reply({ ok: false, error: "bad zl:domInspect op" });
+      }
+      break;
+    }
     default:
       reply({ ok: false, error: "unknown message" });
   }
@@ -1490,6 +1554,17 @@ export async function handleControlEvent(
     reply({ ok: true, ...report, kdl: compatibilityKdl(report) });
     return;
   }
+  /* #451: per-attempt captcha trace snapshot. Host-only like the two
+     exports above (a proxied page must not read other sessions'
+     challenge activity); read-only, so no boot gating either. */
+  if (msg?.type === "zl:captchaTrace") {
+    if (senderIsProxiedPage(e)) {
+      reply({ ok: false, error: "host-only control message" });
+      return;
+    }
+    reply({ ok: true, ...CAPTCHA_TRACE.snapshot() });
+    return;
+  }
   await deps.ready;
 
   /* Bug-scout (#41): a proxied page must not drive the control plane
@@ -1525,7 +1600,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:captchaTrace", "zl:domInspect", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
 ]);
 
 
@@ -1555,7 +1630,9 @@ export function messageListener(deps: ControlDeps) {
         /* #254: keep jar persistence alive for the whole message
            event; flushJarPersist never throws. */
         .then(() => (e.data as ControlMessage)?.type === "zl:doctor" ||
-          (e.data as ControlMessage)?.type === "zl:exportDiagnostics" ? undefined : flushJarPersist()),
+          (e.data as ControlMessage)?.type === "zl:exportDiagnostics" ||
+          (e.data as ControlMessage)?.type === "zl:captchaTrace" ? undefined : flushJarPersist()),
     );
   };
 }
+
