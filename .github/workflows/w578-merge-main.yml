@@ -1,0 +1,48 @@
+name: w578-merge-main
+
+on:
+  push:
+    branches: [fix/issues-577-573-543-547-545]
+  workflow_dispatch:
+
+# One-shot: merge origin/main into this branch so PR #578 merges
+# cleanly. The branch already carries the resolved versions of the
+# five files both sides touched (request.ts, limitations.md,
+# matrix.md, tracing.md, e2e.mjs), so conflicted paths resolve with
+# --ours; every other file main changed is taken from main by the
+# merge itself. Idempotent: exits cleanly when main is already an
+# ancestor.
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issues-577-573-543-547-545
+          fetch-depth: 0
+      - name: Merge origin/main into the branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "main already merged into this branch"
+            exit 0
+          fi
+          if git merge origin/main -m "Merge main into fix/issues-577-573-543-547-545: resolved request.ts, docs and e2e overlaps (CSP #527, tracing #529, srcdoc #528, raw caps #526)"; then
+            echo "clean merge"
+          else
+            echo "conflicted paths:"
+            git diff --name-only --diff-filter=U
+            for f in $(git diff --name-only --diff-filter=U); do
+              git checkout --ours -- "$f"
+              git add "$f"
+            done
+            git commit --no-edit
+          fi
+          git push origin HEAD:fix/issues-577-573-543-547-545

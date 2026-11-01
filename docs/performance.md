@@ -68,3 +68,35 @@ All long-lived buffers are fixed-size rings:
   novelty work).
 - The scoreboard gates only proven-safe capabilities; report-only
   rows exist to surface reality, not to spend CI time pretending.
+
+
+## Runtime performance work (cold starts, transport and page cache)
+
+- Route-key restore and cookie-profile restore start concurrently. Legacy
+  cache cleanup and the already-started worker/extension boot overlap with
+  client-root recovery. Cookie identity is assigned only after both
+  security-critical snapshots settle.
+- The first request records one diagnostic with boot phase durations. It
+  contains no URL, cookie, header or request-body values. Rule and policy
+  fetches are awaited together.
+- libcurl-transport 2.0.6 uses a bounded pool of 64 active connections,
+  48 idle cached connections and 8 connections per host. Its defaults
+  are 60/50/6. Transport diagnostics sample peak pending fetches and
+  mean request-to-headers time every 32 successful Wisp fetches. The
+  library does not expose internal queue wait separately, so this
+  measure includes local pool wait and upstream time-to-headers.
+- The page cache retains its 60-entry cap and 4 MiB per-entry cap, and
+  adds a 32 MiB total byte budget. Unknown-length bodies are metered as
+  they stream into the cache; an oversized cache write cannot consume
+  the live response branch.
+- A separate Vary-aware metadata cache stores byte counts and last-use
+  timestamps, allowing LRU eviction without cloning or rewriting a
+  response body on every cache hit. Missing or corrupt metadata falls
+  back conservatively to the 4 MiB per-entry ceiling.
+- Public static assets continue to use the existing shared cache path
+  when origin cache headers and credential/Vary checks permit it; no
+  separate cache path bypasses those rules.
+
+These limits are bounded tuning choices, not proof that every workload
+is faster. Compare cold/warm direct-Chromium and Zeolite runs on identical
+networks and hardware before raising them.
