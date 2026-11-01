@@ -5,28 +5,36 @@
    - Direct control (a plain recording SW on the fixture origin, no
      engine): every srcdoc parser class (script, module script,
      stylesheet, image, CSS url(), nested srcdoc script) plus the
-     child runtime fetch must BOTH reach the origin server (loads
-     succeed) AND reach the SW fetch handler - Chromium 156 exposes
-     about:srcdoc documents as service-worker clients (the
-     crbug.com/41411856 limitation no longer reproduces; this suite
-     pins the new platform truth). The about:blank control (a
+     child runtime fetch must reach the origin server (loads
+     succeed); whether they ALSO reach the SW fetch handler is the
+     platform class this suite measures, because Chromium builds
+     are split on crbug.com/41411856: at 156 about:srcdoc documents
+     are service-worker clients (the limitation no longer
+     reproduces), while at 131 (where CI runs) they still bypass
+     the SW. The suite probes the running build's class from the
+     direct arm and pins whichever platform truth it measures;
+     both classes are explicit and neither passes silently. The
+     about:blank control (a
      parent-written document.write child) is the REMAINING
      unsupported class: its parser requests still bypass the SW.
    - Proxied control (the real engine): the served srcdoc attribute
      must carry engine routes only (no fixture-origin leak), the
      parent page's own subresource must load through the engine,
-     and the srcdoc child's parser subresources must now be served
+     and the srcdoc child is asserted to match the measured platform
+     class: on a controlled build its parser subresources are served
      through the normal engine pipeline (the SW decodes the routes
-     and fetches the fixture upstream), because the child is an SW
-     client. An about:blank document.write child in the same page
+     and fetches the fixture upstream, and the child reports a
+     controller); on an uncontrolled build the child is the
+     documented residual (uncontrolled, its engine routes fail).
+     An about:blank document.write child in the same page
      stays the honest residual: its requests bypass the SW and 404
      on the engine static server.
 
-   Together these state the integration contract: on current Chromium
-   a service-worker-only path now covers srcdoc parser subresources
-   (nothing left to implement engine-side for srcdoc); the embedder
-   contract applies only to the remaining opaque-client class
-   (about:blank document.write children), which needs host-side
+   Together these state the integration contract: on a controlled
+   build a service-worker-only path covers srcdoc parser subresources
+   (nothing left to implement engine-side for srcdoc); on an
+   uncontrolled build the srcdoc child joins about:blank children in
+   the embedder-contract class. That class needs host-side
    interception that is not client-bound, or an engine-served
    child-document architecture. Ports 6031/7131 never collide with
    e2e.mjs (6002/7101), guest-sw (6009/7109), computed-sinks
@@ -246,6 +254,9 @@ async function main() {
   }
   browser = await chromium.launch({ args: ["--no-sandbox"] });
   const ua = await (await (await browser.newContext()).newPage()).evaluate(() => navigator.userAgent);
+  /* Measured platform class (crbug.com/41411856): set by the direct
+     arm, consumed by the proxied arm. */
+  let platformControlled = null;
   console.log("srcdoc-clients: " + ua);
   console.log("srcdoc-clients: direct control (plain recording SW)");
   {
@@ -322,20 +333,32 @@ async function main() {
         if (!state.bgLoaded) throw new Error("css url() background not applied");
         return "flags set";
       });
-      await check("direct: srcdoc parser classes reach the SW fetch handler (Chromium 156 platform truth)", () => {
-        const missed = classes.filter((c) => !seen.includes(c));
-        if (missed.length) throw new Error("SW never saw parser classes (regressed to the crbug 41411856 state?): " + JSON.stringify(missed));
-        return "the srcdoc child is an SW client; all 6 classes intercepted";
+      /* Platform class probe (crbug.com/41411856): measured, not
+         assumed from a version number (observed: controlled at 156,
+         uncontrolled at 131 where CI runs). */
+      platformControlled = classes.every((c) => seen.includes(c));
+      console.log("srcdoc-clients: platform class " + (platformControlled ? "CONTROLLED (srcdoc children are SW clients)" : "UNCONTROLLED (srcdoc children bypass the SW; crbug 41411856 state)"));
+      await check("direct: srcdoc parser classes match the measured platform class", () => {
+        if (platformControlled) {
+          const missed = classes.filter((c) => !seen.includes(c));
+          if (missed.length) throw new Error("SW never saw parser classes: " + JSON.stringify(missed));
+          return "controlled build: all 6 parser classes intercepted";
+        }
+        const leaked = classes.filter((c) => seen.includes(c));
+        if (leaked.length) throw new Error("uncontrolled build, but the SW saw: " + JSON.stringify(leaked) + " (platform changed: update this suite)");
+        return "uncontrolled build: all 6 parser classes bypass the SW";
       });
-      await check("direct: nested srcdoc script is intercepted and runs", () => {
-        if (!seen.includes("/d/nested.js")) throw new Error("nested srcdoc request bypassed the SW");
+      await check("direct: nested srcdoc script runs and matches the platform class", () => {
         if (state.nested !== 1) throw new Error("nested script did not run");
-        return "nested class intercepted";
+        if (platformControlled && !seen.includes("/d/nested.js")) throw new Error("nested srcdoc request bypassed the SW on a controlled build");
+        if (!platformControlled && seen.includes("/d/nested.js")) throw new Error("nested srcdoc request was intercepted on an uncontrolled build (platform changed: update this suite)");
+        return platformControlled ? "nested class intercepted" : "nested class runs uncontrolled";
       });
-      await check("direct: child runtime fetch is intercepted by the SW", () => {
-        if (!seen.includes("/d/runtime.js")) throw new Error("child runtime fetch bypassed the SW");
+      await check("direct: child runtime fetch matches the platform class", () => {
         if (state.cls && state.cls.runtime !== 200) throw new Error("runtime fetch status: " + state.cls.runtime);
-        return "runtime class controlled";
+        if (platformControlled && !seen.includes("/d/runtime.js")) throw new Error("child runtime fetch bypassed the SW on a controlled build");
+        if (!platformControlled && seen.includes("/d/runtime.js")) throw new Error("child runtime fetch was intercepted on an uncontrolled build (platform changed: update this suite)");
+        return platformControlled ? "runtime class controlled" : "runtime fetch succeeds uncontrolled";
       });
       await check("direct: about:blank document.write child still bypasses the SW (remaining class)", () => {
         if (seen.includes("/d/blank.js")) throw new Error("about:blank child request reached the SW (platform widened: update this suite)");
@@ -409,20 +432,36 @@ async function main() {
         if (routes < 4) throw new Error("expected at least 4 engine routes (app, mod, css, img), found " + routes + ": " + a.slice(0, 300));
         return routes + " engine routes";
       });
-      await check("proxied: srcdoc child parser subresources are served through the engine pipeline", async () => {
-        if (!st.cls) throw new Error("child state unavailable: " + JSON.stringify(st).slice(0, 400));
-        if (st.cls.app !== 1) throw new Error("app.js never ran in the child (cls=" + JSON.stringify(st.cls) + ")");
-        if (st.cls.mod !== 1) throw new Error("module script never ran");
-        if (!st.imgDecoded) throw new Error("image not decoded through the engine");
-        const wanted = ["/p/app.js", "/p/mod.mjs", "/p/img.png"];
-        const missing = wanted.filter((w) => !hits.includes(w));
-        if (missing.length) throw new Error("engine never fetched upstream: " + JSON.stringify(missing) + " hits=" + JSON.stringify(hits));
-        return "child is an SW client; the SW decodes its routes and fetches upstream";
-      });
-      await check("proxied: srcdoc child reports a controller (client-bound pipeline)", () => {
-        if (st.childCtrl !== true) throw new Error("child ctrl=" + st.childCtrl + " (uncontrolled: engine SW never claimed the srcdoc client)");
-        return "controlled";
-      });
+      if (platformControlled === null) {
+        await check("proxied: platform class known before the proxied arm", () => {
+          throw new Error("the direct arm never measured the platform class");
+        });
+      } else if (platformControlled) {
+        await check("proxied: srcdoc child parser subresources are served through the engine pipeline", async () => {
+          if (!st.cls) throw new Error("child state unavailable: " + JSON.stringify(st).slice(0, 400));
+          if (st.cls.app !== 1) throw new Error("app.js never ran in the child (cls=" + JSON.stringify(st.cls) + ")");
+          if (st.cls.mod !== 1) throw new Error("module script never ran");
+          if (!st.imgDecoded) throw new Error("image not decoded through the engine");
+          const wanted = ["/p/app.js", "/p/mod.mjs", "/p/img.png"];
+          const missing = wanted.filter((w) => !hits.includes(w));
+          if (missing.length) throw new Error("engine never fetched upstream: " + JSON.stringify(missing) + " hits=" + JSON.stringify(hits));
+          return "child is an SW client; the SW decodes its routes and fetches upstream";
+        });
+        await check("proxied: srcdoc child reports a controller (client-bound pipeline)", () => {
+          if (st.childCtrl !== true) throw new Error("child ctrl=" + st.childCtrl + " (uncontrolled: engine SW never claimed the srcdoc client)");
+          return "controlled";
+        });
+      } else {
+        await check("proxied: srcdoc child honestly bypasses on an uncontrolled build (documented residual)", async () => {
+          if (!st.cls) throw new Error("child state unavailable: " + JSON.stringify(st).slice(0, 400));
+          if (st.childCtrl !== false) throw new Error("child ctrl=" + st.childCtrl + " (an uncontrolled build cannot claim the srcdoc client)");
+          if (st.cls.app === 1 || st.cls.mod === 1) throw new Error("child scripts ran without SW mediation on an uncontrolled build: cls=" + JSON.stringify(st.cls));
+          const wanted = ["/p/app.js", "/p/mod.mjs", "/p/img.png"];
+          const leakedUp = wanted.filter((w) => hits.includes(w));
+          if (leakedUp.length) throw new Error("engine fetched srcdoc child routes upstream without a client: " + JSON.stringify(leakedUp));
+          return "child uncontrolled; its engine routes fail (crbug 41411856 residual)";
+        });
+      }
       await check("proxied: an about:blank document.write child still bypasses (honest residual)", async () => {
         const obs = await frame.evaluate(async () => {
           /* Reuse a decoded route from the srcdoc attr as the probe URL. */
