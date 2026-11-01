@@ -36,7 +36,9 @@ sections.
 An iframe carrying a sandbox attribute without allow-same-origin (for
 example sandbox="allow-scripts") gets an opaque origin, and Chromium
 does not make opaque-origin frames service-worker clients (the same
-client-binding class as the srcdoc crbug noted in the matrix): their
+client-binding class as the about:blank children a parent writes
+with document.write; about:srcdoc children left this class at
+Chromium 156, see the matrix row): their
 route fetches bypass the engine entirely. The engine answers such
 bypassed internal routes (/j/, /__zl_nav__/, /__zl_prel__/,
 /__zl_navh__/) with a fixed bypass notice, a 404 carrying no-store and
@@ -45,8 +47,8 @@ observable and never leaks upstream content or a fake success; a
 static miss outside those namespaces keeps the bare 404 (#533).
 Residual: the sandboxed child runs its raw page scripts outside
 engine control, a platform limit; the real fix would need a
-client-binding-free interception host, the same one the srcdoc gap
-needs. The direct-vs-proxied suite pins the bypass notice and never
+client-binding-free interception host, the same one the about:blank
+parent-written child class needs. The direct-vs-proxied suite pins the bypass notice and never
 runs the opaque children proxied.
 
 ## Content Security Policy is stripped for proxied pages
