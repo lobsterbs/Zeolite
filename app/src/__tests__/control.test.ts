@@ -110,7 +110,7 @@ describe("sender gate preserved by the extraction (#41/#48)", () => {
     expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
   });
 
-  it("accepts only host-selected experimental preferences, and reports inactive capabilities", async () => {
+  it("accepts only host-selected experimental preferences, and reports effective capabilities", async () => {
     resetExperimentalForTests();
     const selected = {
       adaptiveTransit: true, hybridLocation: true,
@@ -123,7 +123,7 @@ describe("sender gate preserved by the extraction (#41/#48)", () => {
     expect(posted).toHaveLength(1);
     expect(posted[0]).toMatchObject({
       ok: true, experimental: { requested: selected,
-        effective: { adaptiveTransit: false, hybridLocation: false,
+        effective: { adaptiveTransit: false, hybridLocation: true,
           cspTranslation: true, virtualSW: false } },
     });
     const ping = mkEvent("https://w.example.org/j/token", { type: "zl:ping" });
