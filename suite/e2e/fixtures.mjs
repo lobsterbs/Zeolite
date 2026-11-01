@@ -128,6 +128,32 @@ export function startFixture(port) {
         send(res, "text/html; charset=utf-8", pageHtml(origin));
       } else if (path === "/dir/landing.html") {
         send(res, "text/html; charset=utf-8", `<!doctype html><p id="zl-landing">zl-landing</p>`);
+      } else if (path === "/dir/fragment.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><head><title>fragment fixture</title></head><body>
+          <a id="fragment-anchor" href="#anchor-target">anchor target</a>
+          <div style="height:1200px"></div>
+          <p id="initial-target">initial target</p>
+          <p id="redirect-target">redirect target</p>
+          <p id="meta-target">meta target</p>
+          <p id="form-target">form target</p>
+          <p id="anchor-target">anchor target</p>
+          <p id="history-start">history start</p>
+          <p id="history-target">history target</p>
+        </body></html>`);
+      } else if (path === "/dir/fragment-redirect") {
+        res.writeHead(302, { location: origin + "/dir/fragment.html#redirect-target", "cache-control": "no-store" });
+        res.end();
+      } else if (path === "/dir/fragment-meta.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><head><meta http-equiv="refresh" content="0; url=/dir/fragment.html#meta-target"></head><body>fragment refresh</body></html>`);
+      } else if (path === "/dir/fragment-form.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><body><p id="form-ready">form ready</p><form id="fragment-form" method="get" action="/dir/fragment.html#form-target"><button type="submit">submit fragment navigation</button></form></body></html>`);
+      } else if (path === "/dir/initiator-page.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><body><p id="init-marker">initiator fixture</p><img id="initiator-img" src="/api/initiator-probe.png?kind=parser" alt="probe"></body></html>`);
+      } else if (path === "/dir/initiator-worker.js") {
+        send(res, "text/javascript", `fetch("/api/initiator-probe?kind=worker").then(r => r.text()).then(value => postMessage(value)).catch(e => postMessage("worker-error:" + e));`);
+      } else if (path === "/dir/initiator-nav.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><body><p id="initiator-nav-marker">navigation initiator</p></body></html>`);
+      }
       } else if (path === "/dir/refresh.html") {
         /* #36: the meta refresh target must be rewritten to an engine
            route, otherwise the refresh navigates the proxied frame
@@ -174,11 +200,13 @@ export function startFixture(port) {
           `fetch("http://127.0.0.1:7102/api/data").then(r => r.json()).then(j => { self.__zlConfig.fetched = j.zl; }).catch(() => { self.__zlConfig.fetched = "failed"; });`,
         ].join("\n"));
       } else if (path === "/dir/shared-identity.js") {
-        /* #453: one random ID per actual worker global, returned to each
-           connecting client. The same worker instance reuses its ID. */
+        /* #453/#547: identity is stable for one real worker global.
+           Worker IDB is site-scoped by the injected prelude. */
         send(res, "text/javascript", [
           `const sharedId = Date.now().toString(36) + "." + Math.random().toString(36);`,
-          `self.onconnect = (e) => { const p = e.ports[0]; p.onmessage = (m) => { if (m.data === "id") p.postMessage({ id: sharedId }); }; p.start(); };`,
+          `let connectionCount = 0;`,
+          `function namespaceId() { return new Promise((resolve, reject) => { const q = indexedDB.open("zl-sharedworker-namespace-547", 1); q.onupgradeneeded = () => q.result.createObjectStore("meta"); q.onerror = () => reject(q.error); q.onsuccess = () => { const db = q.result; const tx = db.transaction("meta", "readwrite"); const st = tx.objectStore("meta"); const g = st.get("id"); g.onerror = () => reject(g.error); g.onsuccess = () => { let value = g.result; if (typeof value !== "string") { value = sharedId; st.put(value, "id"); } resolve(value); db.close(); }; }; }); }`,
+          `self.onconnect = (e) => { connectionCount++; const p = e.ports[0]; p.onmessage = async (m) => { if (m.data === "id") { p.postMessage({ id: sharedId }); return; } const d = m.data || {}; if (d.op === "context") { try { const ns = await namespaceId(); const r = await fetch("/api/worker-context?kind=sharedworker", { cache: "no-store" }); const cookie = await r.json(); p.postMessage({ nonce: d.nonce, value: { id: sharedId, connections: connectionCount, namespace: ns, cookie: cookie.cookie } }); } catch (err) { p.postMessage({ nonce: d.nonce, error: String(err) }); } } else if (d.op === "ping") { p.postMessage({ nonce: d.nonce, value: { id: sharedId, connections: connectionCount } }); } }; p.start(); };`,
         ].join("\n"));
       } else if (path === "/dir/pinned.html") {
         /* #449: a page whose loader script pins its generated URLs
@@ -209,6 +237,21 @@ export function startFixture(port) {
       } else if (path === "/api/data") {
         /* No CORS headers: the #34 canary. Browser-direct = unreadable. */
         send(res, "application/json", `{"zl":"api"}`);
+      } else if (path === "/api/worker-context") {
+        send(res, "application/json", JSON.stringify({ cookie: req.headers.cookie ?? "" }), { "cache-control": "no-store" });
+      } else if (path === "/api/initiator-probe.png") {
+        res.writeHead(200, { "content-type": "image/png", "content-length": PNG.length, "cache-control": "no-store" });
+        res.end(PNG);
+      } else if (path === "/api/initiator-probe") {
+        if ((req.headers.accept ?? "").toLowerCase().includes("text/event-stream")) {
+          res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+          res.end("data: eventsource-ok\\n\\n");
+        } else if (req.method === "POST") {
+          res.writeHead(204, { "cache-control": "no-store" });
+          res.end();
+        } else {
+          send(res, "text/plain; charset=utf-8", "initiator-ok", { "cache-control": "no-store" });
+        }
       } else if (path === "/api/echohash") {
         /* #556: reads the whole request body and answers its SHA-256
            plus the request facts, so a redirect-replayed upload is
