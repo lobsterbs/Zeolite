@@ -1275,7 +1275,7 @@ async function revalidateBeforeUse(req: Request, hit: Response, context: CookieR
 /** Fixed-vocabulary page/worker instrumentation header. It is diagnostic
     metadata only, never an authorization or routing signal. The request
     engine strips it before the upstream hop. */
-export const REQUEST_INITIATOR_HEADER = "x-zl-initiator";
+export const REQUEST_INITIATOR_HEADER = "x-zl-init";
 
 /** Classify only request evidence or labels inserted by our runtime
     wrappers. An empty destination without a marker stays UNKNOWN. */
@@ -5640,7 +5640,7 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     "origin",
     "cookie",
     /* Internal API attribution is consumed here and never reaches origin servers. */
-    "x-zl-initiator",
+    "x-zl-init",
     "sec-fetch-site",
     "sec-fetch-mode",
     "sec-fetch-dest",

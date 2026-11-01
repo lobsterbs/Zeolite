@@ -119,8 +119,9 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
   const hasController = !!(w.navigator as { serviceWorker?: { controller?: unknown } } | undefined)
     ?.serviceWorker?.controller;
   const mark = (init: RequestInit | undefined, kind: string): RequestInit => {
+    if (!hasController) return init ?? {};
     const headers = new Headers(init?.headers);
-    headers.set("x-zl-initiator", kind);
+    headers.set("x-zl-init", kind);
     return { ...init, headers };
   };
 
@@ -134,10 +135,10 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
       const rel = relRoute(url);
       const d = rel ? null : crossDest(url);
       if ((rel || d) && init?.integrity) init = { ...init, integrity: undefined };
-      if (rel) return OF(rel, hasController ? mark(init, "fetch") : init);
+      if (rel) return OF(rel, mark(init, "fetch"));
       if (!d) return OF(input, init);
       return mintRoute(d).then((route) =>
-        OF((route ?? url) as RequestInfo, route && hasController ? mark(init, "fetch") : init),
+        OF((route ?? url) as RequestInfo, route ? mark(init, "fetch") : init),
       );
     };
   }
@@ -176,12 +177,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
          path: optimistic true, native fallback on a refused POST */
       const post = (t: string): boolean => {
         if (!OF) return false;
-        OF(t, {
-          method: "POST",
-          body: d ?? null,
-          keepalive: true,
-          ...(hasController ? { headers: { "x-zl-initiator": "send-beacon" } } : {}),
-        }).catch(() => {
+        OF(t, mark({ method: "POST", body: d ?? null, keepalive: true }, "send-beacon")).catch(() => {
           /* #457: a rejected POST may already be accepted upstream;
              replaying a non-idempotent beacon natively risks a double
              write. One attempt: the beacon is honestly lost on
@@ -232,7 +228,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
         const result = rel
           ? OOpen.call(this, a[0], rel, a[2], a[3], a[4])
           : OOpen.apply(this, a);
-        if (isAsync && hasController && rel) OHdr.call(this, "x-zl-initiator", "xhr");
+        if (isAsync && hasController && rel) OHdr.call(this, "x-zl-init", "xhr");
         return result;
       }
       pend.set(this, {
@@ -240,7 +236,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
         url: dest,
         user: a[3] == null ? null : String(a[3]),
         pw: a[4] == null ? null : String(a[4]),
-        headers: hasController ? [["x-zl-initiator", "xhr"]] : [],
+        headers: hasController ? [["x-zl-init", "xhr"]] : [],
       });
       /* Native open() reports OPENED synchronously; the deferred
          re-open would leave readyState at UNSENT until the mint

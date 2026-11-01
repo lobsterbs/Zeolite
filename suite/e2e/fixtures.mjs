@@ -127,7 +127,7 @@ export function startFixture(port) {
           method: req.method,
           referer: req.headers.referer ?? null,
           body,
-          initiatorHeader: req.headers["x-zl-initiator"] ?? null,
+          initiatorHeader: req.headers["x-zl-init"] ?? null,
         });
       }
       if (path === "/dir/page.html") {

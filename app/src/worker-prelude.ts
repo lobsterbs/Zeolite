@@ -322,7 +322,7 @@ export function installWorkerPrelude(route: string): void {
         r && r.startsWith("/") ? engineOrigin + r : r;
       return mintUrlViaRelay(post, abs.href).then((route) => {
         const headers = new Headers(init?.headers);
-        headers.set("x-zl-initiator", "worker-fetch");
+        headers.set("x-zl-init", "worker-fetch");
         return OF(
           absRoute(route) ?? routeWorkerUrl(prefix, workerUrl, engineOrigin, url),
           { ...init, headers },

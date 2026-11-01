@@ -15,7 +15,7 @@ function request(init: {
 
 describe("request initiator attribution (#545)", () => {
   it("uses only the bounded page/worker instrumentation vocabulary", () => {
-    expect(requestInitiator(request({ headers: { "x-zl-initiator": "fetch" } }))).toBe("FETCH");
+    expect(requestInitiator(request({ headers: { "x-zl-init": "fetch" } }))).toBe("FETCH");
     expect(requestInitiator(request({ headers: { "x-zl-initiator": "xhr" } }))).toBe("XHR");
     expect(requestInitiator(request({ headers: { "x-zl-initiator": "send-beacon" } }))).toBe("SEND_BEACON");
     expect(requestInitiator(request({ headers: { "x-zl-initiator": "worker-fetch" } }))).toBe("WORKER_FETCH");
