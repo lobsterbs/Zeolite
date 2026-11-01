@@ -15,6 +15,10 @@ import type { ExtensionId, ExtensionRecord } from "./types";
 
 export const MESSENGER = new ExtensionMessenger();
 
+/* #518: the external messaging gate reads the live manager, so a
+   target installed later is admissible without a restart. */
+MESSENGER.setExternallyConnectableProvider((id) => extensions.get(id) ?? null);
+
 export interface ExtensionContext {
   storage: {
     local: ExtensionStorageArea;

@@ -20,6 +20,8 @@ import type { NavigationCommitted, NavigationKind } from "./webnavigation";
 import { WEBREQ } from "./webrequest";
 import type { WrKind } from "./webrequest";
 import { MENUS } from "./contextmenus";
+import { ACTION } from "./action";
+import type { ActionKind, ActionClickedListener } from "./action";
 import { DOWNLOADS } from "./downloads";
 import { NOTIFY } from "./notifications";
 import type {
@@ -40,8 +42,9 @@ import type { Alarm, AlarmCreateInfo } from "./alarms";
 import { MGMT, infoOf } from "./management";
 import type { MgmtListener } from "./management";
 import type { ExtensionManager } from "./manager";
-import { bootEnabled } from "./background";
+import { bootEnabled, bootExtension, idleTerminate, backgroundIsServiceWorker } from "./background";
 import { chromeApi } from "./chrome";
+import { extPageOpenUrl } from "./serve";
 import { makeI18nNs } from "./i18n";
 import type { I18nResolved } from "./i18n";
 
@@ -333,13 +336,76 @@ export function buildApi(
       Promise.resolve(hostPlatformInfo()),
     getBrowserInfo: (): Promise<{ name: string; version: string }> =>
       Promise.resolve(hostBrowserInfo()),
-    sendMessage: (msg: unknown): Promise<unknown> =>
-      deps.messenger.sendMessage(ext.id, sender, msg),
+    /* #518: Firefox-shaped overloads. runtime.sendMessage(message)
+     sends internally; runtime.sendMessage(targetId, message) sends
+     cross-extension (delivered to the target's onMessageExternal when
+     its externally_connectable.ids admit this extension). A single
+     string argument stays a message payload - the id overload needs
+     the second argument, exactly as in Firefox. The same overloads
+     exist on connect: connect(name) keeps the legacy name form, and
+     connect(otherId, { name }) opens an external port. */
+    /* #518: openOptionsPage walks the same granted-navigation flow the
+       host's zl:openExtPage uses: a rooted page URL with a 5-minute
+       page token, opened through the real tabs bridge. Firefox's
+       open_in_tab=false embedding has no host surface here, so the
+       page always opens as a tab (compat.ts documents it). */
+    openOptionsPage: (): Promise<void> => {
+      const url = extPageOpenUrl(ext, "options");
+      if (!url) return Promise.reject(new Error("zeolite: no options page declared"));
+      return TABS.create({ url, active: true }).then(() => undefined);
+    },
+    /* #518: runtime.reload re-parses the stored package (same
+       identity), drops the messenger listeners so stale closures
+       cannot answer, and re-boots the background. The boot marker
+       persists, so the re-boot fires onStartup and never onInstalled,
+       exactly like Firefox. ponytail: the re-boot is async by
+       necessity (package re-parse), but the caller's runtime object
+       must not die mid-call, so the reload is fired, not awaited. */
+    reload: (): void => {
+      if (!mgr) throw new Error("zeolite: no manager attached to this engine");
+      void (async () => {
+        await mgr.reload(ext.id);
+        deps.messenger.clear(ext.id);
+        const live = mgr.get(ext.id);
+        if (!live || !live.enabled || !live.background) return;
+        if (backgroundIsServiceWorker(live)) {
+          idleTerminate(ext.id); /* the next event wakes the fresh code */
+          return;
+        }
+        await bootExtension(live);
+      })().catch(() => {
+        /* a failed reload keeps the record's lastError; the engine
+           must not propagate an extension failure */
+      });
+    },
+    sendMessage: (...args: unknown[]): Promise<unknown> => {
+      const [a, b] = args;
+      if (typeof a === "string" && a.length > 0 && args.length > 1) {
+        if (a === ext.id) return deps.messenger.sendMessage(ext.id, sender, b);
+        return deps.messenger.sendMessageExternal(a, sender, b);
+      }
+      return deps.messenger.sendMessage(ext.id, sender, a);
+    },
     onMessage: bridged<MessageListener>((l) => deps.messenger.onMessage(ext.id, l)),
     /* #560: both port surfaces are Chrome-shaped: onMessage and
        onDisconnect are event objects, matching how TM-class
        extension code drives a connected port. */
-    connect: (name: string) => chromePortShape(deps.messenger.connect(ext.id, name, sender)) as unknown as ExtensionPort,
+    connect: (...args: unknown[]): ExtensionPort => {
+      const [a, b] = args;
+      const nameOf = (v: unknown): string =>
+        v && typeof v === "object" && typeof (v as { name?: unknown }).name === "string"
+          ? (v as { name: string }).name
+          : "";
+      /* Two string-ish args name a target extension id (Chrome/Firefox
+         external form); a single string stays the legacy port name. */
+      if (typeof a === "string" && args.length > 1) {
+        const name = nameOf(b);
+        if (a === ext.id) return chromePortShape(deps.messenger.connect(ext.id, name, sender)) as unknown as ExtensionPort;
+        return chromePortShape(deps.messenger.connectExternal(a, name, sender)) as unknown as ExtensionPort;
+      }
+      const name = typeof a === "string" ? a : nameOf(a);
+      return chromePortShape(deps.messenger.connect(ext.id, name, sender)) as unknown as ExtensionPort;
+    },
     onConnect: bridged<ConnectListener>((l) =>
       deps.messenger.onConnect(ext.id, (raw) => l(chromePortShape(raw) as unknown as ExtensionPort)),
     ),
@@ -355,13 +421,16 @@ export function buildApi(
        startup; an undefined namespace aborts the whole bootstrap
        with a TypeError inside the init chain, leaving the
        extension deaf: options pages ping forever and never render.
-       There is no external sender in this model (the messenger
-       refuses cross-extension sends), so these register listeners
-       but never fire (compat matrix records them honestly). */
-    onMessageExternal: makeEvent<
-      (msg: unknown, sender: unknown, sendResponse: unknown) => void
-    >(),
-    onConnectExternal: makeEvent<(port: unknown) => void>(),
+       #518: the surfaces are now live for extension-to-extension
+       traffic - a cross-extension send reaches onMessageExternal
+       when the target's externally_connectable.ids admit the sender,
+       with the real sender id/origin. Web-page sends (the matches
+       key) stay refused: a page-world sender carries no trusted
+       cross-extension identity (compat matrix records it). */
+    onMessageExternal: bridged<MessageListener>((l) => deps.messenger.onMessageExternal(ext.id, l)),
+    onConnectExternal: bridged<ConnectListener>((l) =>
+      deps.messenger.onConnectExternal(ext.id, (raw) => l(chromePortShape(raw) as unknown as ExtensionPort)),
+    ),
   };
   /* MV2 chrome.extension: Chrome keeps this namespace on every MV2
      context and removed it in MV3, so it mounts for MV2 records only.
@@ -511,6 +580,108 @@ export function buildApi(
           onClicked: bridged<NotificationClickedListener>((l) => NOTIFY.onClicked(ext.id, l)),
           onClosed: bridged<NotificationClosedListener>((l) => NOTIFY.onClosed(ext.id, l)),
           onButtonClicked: bridged<ButtonClickedListener>((l) => NOTIFY.onButtonClicked(ext.id, l)),
+        };
+      })()
+    : undefined;
+  /* #519: the toolbar action family over one per-tab registry (see
+     ./action). Mounted per manifest kind exactly as Firefox mounts
+     them: browser.action for an MV3 action key, browserAction or
+     pageAction for the MV2 keys. State changes hand off to the host UI
+     via zl:actionOp; clicks come back through zl:actionEvent. Firefox
+     shape per kind: action.onClicked fires the listener as
+     (tab, clickInfo) — two arguments, not one merged object — while
+     browserAction/pageAction deliver the Tab. All mutators are async
+     like Firefox: invalid details reject instead of throwing. */
+  const actionNsFor = (kind: ActionKind) => {
+    /* Seeding at mount: the host gets the manifest-default state op
+       before any setter runs, and get* answers exist immediately. */
+    ACTION.touch(ext, kind);
+    return {
+    isEnabled: async (details?: { tabId?: number | null }) => ACTION.isEnabled(ext, kind, details),
+    enable: async (tabId?: number | null) => {
+      ACTION.enable(ext, kind, tabId);
+    },
+    disable: async (tabId?: number | null) => {
+      ACTION.disable(ext, kind, tabId);
+    },
+    setTitle: async (details: Record<string, unknown> = {}) =>
+      ACTION.setTitle(ext, kind, details as { title?: unknown; tabId?: number | null }),
+    getTitle: async (details?: { tabId?: number | null }) => ACTION.getTitle(ext, kind, details),
+    setBadgeText: async (details: Record<string, unknown> = {}) =>
+      ACTION.setBadgeText(ext, kind, details as { text?: unknown; tabId?: number | null }),
+    getBadgeText: async (details?: { tabId?: number | null }) => ACTION.getBadgeText(ext, kind, details),
+    setBadgeBackgroundColor: async (details: Record<string, unknown> = {}) =>
+      ACTION.setBadgeBackgroundColor(ext, kind, details as { color?: unknown; tabId?: number | null }),
+    getBadgeBackgroundColor: async (details?: { tabId?: number | null }) =>
+      ACTION.getBadgeBackgroundColor(ext, kind, details),
+    setBadgeTextColor: async (details: Record<string, unknown> = {}) =>
+      ACTION.setBadgeTextColor(ext, kind, details as { color?: unknown; tabId?: number | null }),
+    getBadgeTextColor: async (details?: { tabId?: number | null }) =>
+      ACTION.getBadgeTextColor(ext, kind, details),
+    setPopup: async (details: Record<string, unknown> = {}) =>
+      ACTION.setPopup(ext, kind, details as { popup?: unknown; tabId?: number | null }),
+    getPopup: async (details?: { tabId?: number | null }) => ACTION.getPopup(ext, kind, details),
+    setIcon: async (details: Record<string, unknown> = {}) =>
+      ACTION.setIcon(ext, kind, details as { path?: unknown; tabId?: number | null }),
+    onClicked: bridged<(tab: unknown, info?: unknown) => void>((l) =>
+      ACTION.onClicked(ext.id, kind, (c) => {
+        try {
+          if (kind === "action") {
+            /* Firefox: action.onClicked delivers (tab, clickInfo).
+               clickInfo carries only the keys the host reported
+               (button for non-primary clicks, modifiers). */
+            const { tab, button, modifiers } = c;
+            l(
+              tab,
+              {
+                ...(button !== undefined ? { button } : {}),
+                ...(modifiers ? { modifiers } : {}),
+              },
+            );
+          } else {
+            l(c.tab);
+          }
+        } catch {
+          /* a broken listener is the extension's own problem */
+        }
+      }),
+    ),
+    };
+  };
+  const actionNs = ext.action?.kind === "action" ? actionNsFor("action") : undefined;
+  const browserActionNs = ext.action?.kind === "browser_action" ? actionNsFor("browser_action") : undefined;
+  /* pageAction: Firefox mounts no badge surface and no enable/disable
+     on it; visibility is per-tab via show/hide and starts hidden. */
+  const pageActionNs = ext.action?.kind === "page_action"
+    ? (() => {
+        ACTION.touch(ext, "page_action");
+        return {
+        isShown: async (details?: { tabId?: number | null }) => ACTION.isShown(ext, details),
+        show: async (tabId: number) => {
+          ACTION.show(ext, tabId);
+        },
+        hide: async (tabId: number) => {
+          ACTION.hide(ext, tabId);
+        },
+        setTitle: async (details: Record<string, unknown> = {}) =>
+          ACTION.setTitle(ext, "page_action", details as { title?: unknown; tabId?: number | null }),
+        getTitle: async (details?: { tabId?: number | null }) =>
+          ACTION.getTitle(ext, "page_action", details),
+        setPopup: async (details: Record<string, unknown> = {}) =>
+          ACTION.setPopup(ext, "page_action", details as { popup?: unknown; tabId?: number | null }),
+        getPopup: async (details?: { tabId?: number | null }) =>
+          ACTION.getPopup(ext, "page_action", details),
+        setIcon: async (details: Record<string, unknown> = {}) =>
+          ACTION.setIcon(ext, "page_action", details as { path?: unknown; tabId?: number | null }),
+        onClicked: bridged<(info: unknown) => void>((l) =>
+          ACTION.onClicked(ext.id, "page_action", (c) => {
+            try {
+              l(c.tab);
+            } catch {
+              /* a broken listener is the extension's own problem */
+            }
+          }),
+        ),
         };
       })()
     : undefined;
@@ -680,6 +851,9 @@ export function buildApi(
     ...(isApiDetached("management") ? {} : { management: managementNs }),
     ...(webRequestNs && !isApiDetached("webRequest") ? { webRequest: webRequestNs } : {}),
     ...(alarmsNs && !isApiDetached("alarms") ? { alarms: alarmsNs } : {}),
+    ...(actionNs ? { action: actionNs } : {}),
+    ...(browserActionNs ? { browserAction: browserActionNs } : {}),
+    ...(pageActionNs ? { pageAction: pageActionNs } : {}),
     ...(notificationsNs && !isApiDetached("notifications") ? { notifications: notificationsNs } : {}),
     ...(cookiesNs && !isApiDetached("cookies") ? { cookies: cookiesNs } : {}),
   };
