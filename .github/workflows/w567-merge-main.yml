@@ -1,0 +1,31 @@
+name: w567 merge main
+on:
+  push:
+    branches: [perf/cold-start-wisp-cache-v2]
+permissions:
+  contents: write
+jobs:
+  merge-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: perf/cold-start-wisp-cache-v2
+      - name: guarded merge of origin/main
+        run: |
+          git config user.name "zeolite-bot"
+          git config user.email "zeolite-bot@users.noreply.github.com"
+          git fetch origin main
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "main already an ancestor; nothing to do"
+            exit 0
+          fi
+          if git merge origin/main -m "Merge main into perf/cold-start-wisp-cache-v2 (pre-merge resolution for #567)"; then
+            git push origin HEAD:perf/cold-start-wisp-cache-v2
+            exit 0
+          fi
+          echo "=== conflicted files ==="
+          git diff --name-only --diff-filter=U
+          git merge --abort
+          exit 1
