@@ -18,6 +18,7 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => ({
   },
 }));
 import { initTransform, rewriteJsBody, rewriteStream } from "../transform";
+import { resetExperimentalForTests, selectExperimental } from "../experimental-flags";
 
 beforeEach(() => {
   state.rules = { "page.example": { locationRewrite: { mode: "hybrid", maxBytes: 65536 } } };
@@ -26,7 +27,7 @@ beforeEach(() => {
   initTransform({ routeReady: async () => {}, routeKey: () => null, fpScript: () => null,
     siteScript: async () => null, setDegraded: () => {}, lazyImages: () => false });
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); resetExperimentalForTests(); });
 
 describe("location policy transform wiring", () => {
   it("uses the page policy for external CDN scripts while preserving their resolution base", async () => {
@@ -35,6 +36,11 @@ describe("location policy transform wiring", () => {
     expect(state.freed).toBe(1);
   });
   it("keeps legacy mode when the initiating page is unknown", async () => {
+    /* #456 operator flip 2026-11-01: the pristine default is hybrid
+       ON; deselect so this test keeps pinning the unknown-initiator
+       invariant - the page.example rule must NOT be guessed from the
+       resource URL, and the flag-off fallback stays legacy. */
+    selectExperimental({ hybridLocation: false });
     await rewriteJsBody("location.pathname", "https://page.example/code.js");
     expect(state.seen[0]).toEqual(["https://page.example/code.js", "legacy", 2097152]);
   });
