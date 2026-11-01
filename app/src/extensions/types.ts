@@ -67,6 +67,11 @@ export interface SidebarActionSpec {
   defaultIcon: Record<string, string>;
 }
 
+export interface ThemeSpec {
+  colors: Record<string, unknown>;
+  images: Record<string, unknown>;
+}
+
 export interface ExtensionRecord {
   id: ExtensionId;
   name: string;
@@ -74,6 +79,15 @@ export interface ExtensionRecord {
   manifestVersion: 2 | 3;
   manifest: Record<string, unknown>;
   geckoId: string | null;
+  /* #524: browser_specific_settings.gecko version bounds, recorded as
+     declared; the engine does not enforce Gecko version ranges.
+     Optional: records persisted before #524 load without them. */
+  geckoMinVersion?: string | null;
+  geckoMaxVersion?: string | null;
+  /* #524: static theme and spellcheck dictionaries, parsed and
+     recorded; no theme or spellcheck host exists yet (compat.ts). */
+  theme?: ThemeSpec | null;
+  dictionaries?: Record<string, string> | null;
   permissions: string[];
   hostPermissions: string[];
   optionalPermissions: string[];
@@ -84,8 +98,19 @@ export interface ExtensionRecord {
   icons: Record<string, string>;
   webAccessibleResources: string[];
   /* #51: MV3 web_accessible_resources entries whose "matches" are set;
-     served only when the requesting page destination matches. */
-  webAccessibleScoped: Array<{ resources: string[]; matches: string[] }>;
+     served only when the requesting page destination matches.
+     #524: "extension_ids" (exact engine ids or the "*" glob) admits
+     the resource to a registered page client of a listed extension
+     even when the page URL does not match; entries without matches
+     but with extension_ids are extension-gated only. use_dynamic_url
+     is recorded but not enforced (same-origin serving has no dynamic
+     origin to bind). */
+  webAccessibleScoped: Array<{
+    resources: string[];
+    matches: string[];
+    extensionIds?: string[];
+    useDynamicUrl?: boolean;
+  }>;
   externallyConnectable: ExternallyConnectableSpec | null;
   commands: Record<string, unknown>;
   contentSecurityPolicy: string | null;

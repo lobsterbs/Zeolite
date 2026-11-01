@@ -31,16 +31,18 @@ declare const self: ServiceWorkerGlobalScope;
 import { DIAG } from "./diag";
 import { decodeClientUrl } from "./codec";
 import { senderIsHostPage } from "./cpgate";
+import type { ActionOp } from "./extensions/action";
 import type { DownloadOp } from "./extensions/downloads";
 import type { NotifyOp } from "./extensions/notifications";
 import type { ScriptingMessage } from "./extensions/scripting";
 import type { TabMessage, TabsOp } from "./extensions/tabs";
 
 /** The slice of a window Client the dispatch seam needs; tests stub
-    this, a real Client satisfies it. */
+    this, a real Client satisfies it. #517: the scripting results
+    handshake transfers a MessagePort with the message. */
 export interface WinClient {
   url: string;
-  postMessage(msg: unknown): void;
+  postMessage(msg: unknown, transfer?: Transferable[]): void;
 }
 
 /** Every window client of this worker. */
@@ -156,9 +158,10 @@ export interface DispatchHosts {
       fn: ((tabId: number, tabUrl: string, extId: string, payload: TabMessage) => void) | null,
     ): void;
   };
-  scripting: { setDispatch(fn: ((msg: ScriptingMessage) => void) | null): void };
+  scripting: { setDispatch(fn: ((msg: ScriptingMessage, reply: MessagePort | null) => void) | null): void };
   downloads: { setDispatch(fn: ((op: DownloadOp) => void) | null): void };
   notify: { setDispatch(fn: ((op: NotifyOp) => void) | null): void };
+  action: { setDispatch(fn: ((op: ActionOp) => void) | null): void };
 }
 
 /** #243: wire the five dispatch seams with host-only and
@@ -185,11 +188,33 @@ export function wireDispatchers(
       }
     }),
   );
-  hosts.scripting.setDispatch((msg) =>
+  /* #517: scripting injections with result capture carry a reply
+     port. It transfers to exactly ONE matching page client (a port
+     cannot be transferred twice), and an unanswered port is closed
+     so the sender's 30s window resolves instead of leaking; plain
+     fire-and-forget injections (insertCSS) keep the fan-out to every
+     matching client. */
+  hosts.scripting.setDispatch((msg, reply) => {
+    if (reply) {
+      void getClients().then((cs) => {
+        for (const c of cs) {
+          if (clientDest(c) === msg.dest) {
+            c.postMessage(msg, [reply]);
+            return;
+          }
+        }
+        try {
+          reply.close();
+        } catch {
+          /* already closed */
+        }
+      });
+      return;
+    }
     each((c) => {
       if (clientDest(c) === msg.dest) c.postMessage(msg);
-    }),
-  );
+    });
+  });
   hosts.downloads.setDispatch((op) =>
     each((c) => {
       if (isHostClient(c)) c.postMessage({ type: "zl:downloadOp", op });
@@ -198,6 +223,11 @@ export function wireDispatchers(
   hosts.notify.setDispatch((op) =>
     each((c) => {
       if (isHostClient(c)) c.postMessage({ type: "zl:notifyOp", op });
+    }),
+  );
+  hosts.action.setDispatch((op) =>
+    each((c) => {
+      if (isHostClient(c)) c.postMessage({ type: "zl:actionOp", op });
     }),
   );
 }

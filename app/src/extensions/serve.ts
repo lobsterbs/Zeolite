@@ -24,6 +24,7 @@ import { contentScriptMatches } from "./content-scripts";
 import { BRIDGE_SOURCE } from "./bridge";
 import { LISTENER_SOURCE } from "./scripting";
 import { PAGE_BRIDGE_SOURCE } from "./pagebridge";
+import { ACTION } from "./action";
 import { pageCallList, pageNamespaceList } from "./pageapi";
 import { resolvePackageI18n } from "./i18n";
 import type { ExtensionRecord } from "./types";
@@ -186,6 +187,31 @@ export function checkPageToken(extId: string, path: string, token: string): bool
   return true;
 }
 
+/** Rooted, tokened URL for an extension's options or popup page —
+    the host's zl:openExtPage flow (#40) and runtime.openOptionsPage
+    (#518) share it, so both open through the same granted navigation.
+    For popups the action registry's per-tab/per-default state wins
+    over the manifest default. Null when the extension is disabled or
+    declares no such page. */
+export function extPageOpenUrl(
+  rec: ExtensionRecord,
+  which: "options" | "popup",
+  tabId?: number | null,
+): string | null {
+  if (!rec.enabled) return null;
+  let raw: string | null | undefined = null;
+  if (which === "options") {
+    raw = rec.options?.page;
+  } else {
+    const kind = rec.action?.kind;
+    raw = kind ? (ACTION.popupFor(rec, kind, tabId) ?? rec.action?.defaultPopup) : rec.action?.defaultPopup;
+  }
+  if (!raw) return null;
+  const norm = normalizeExtensionPath(raw.startsWith("/") ? raw : "/" + raw);
+  if (!norm) return null;
+  return norm + "?zlExt=" + rec.id + "&zlPageTok=" + mintPageToken(rec.id, norm);
+}
+
 /* Registered extension-page clients, keyed by the SW-observed client
    id of a granted navigation. Subresource fetches and zl:extPage
    messages from these clients authenticate as the extension's page.
@@ -200,6 +226,17 @@ export function registerPageClient(clientId: string | undefined, extId: string):
 
 export function pageClientOf(clientId: string | undefined): string | null {
   return clientId ? (pageClients.get(clientId) ?? null) : null;
+}
+
+/** Every live registered page client of one extension (#518:
+    runtime.getContexts). Order is insertion order; the caller shapes
+    the result. */
+export function pageClientsOf(extId: string): string[] {
+  const out: string[] = [];
+  for (const [clientId, id] of pageClients) {
+    if (id === extId) out.push(clientId);
+  }
+  return out;
 }
 
 /* #40: serving context for extension-page access. Client ids come
@@ -407,13 +444,17 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
     }
   }
 
-  /* web_accessible_resources: WAR globs and MV3 "matches" scopes are
-     checked inside getResource against the SW-observed page
-     destination (#51; the old `from` query param was page-supplied
-     and dead). */
+  /* web_accessible_resources: WAR globs, MV3 "matches" scopes and
+     #524 extension_ids are checked inside getResource against the
+     SW-observed page destination and the registered page-client
+     identity of the requester (#51; the old `from` query param was
+     page-supplied and dead). A page client of another extension
+     carries its identity here; unregistered pages carry none, and
+     the gate then stays page-match-only. */
   const bytes = await extensions.getResource(sr.id, sr.path, {
     fromWeb: true,
     pageUrl: ctx?.pageUrl ?? null,
+    fromExtensionId: pageClientOf(ctx?.clientId),
   });
   return bytes ? assetResponse(bytes, sr.path) : notFound();
 }

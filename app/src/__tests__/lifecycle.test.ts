@@ -11,7 +11,7 @@ import {
 } from "../lifecycle";
 import { DIAG } from "../diag";
 import { b64uEncode, buildNavHandleUrl, setRouteKey, setScheme } from "../codec";
-import type { DownloadOp, NotifyOp, ScriptingMessage, TabMessage, TabsOp } from "../extensions";
+import type { ActionOp, DownloadOp, NotifyOp, ScriptingMessage, TabMessage, TabsOp } from "../extensions";
 
 /* #243-#247: the service-worker security and lifecycle contracts
    from the sw.ts review, pinned as tests:
@@ -54,9 +54,10 @@ const mkEvent = (held: Promise<unknown>[]): ExtendableEvent =>
 interface Captured {
   tabsOp: ((op: TabsOp) => void) | null;
   tabMessage: ((tabId: number, tabUrl: string, extId: string, payload: TabMessage) => void) | null;
-  scripting: ((msg: ScriptingMessage) => void) | null;
+  scripting: ((msg: ScriptingMessage, reply: MessagePort | null) => void) | null;
   downloadOp: ((op: DownloadOp) => void) | null;
   notifyOp: ((op: NotifyOp) => void) | null;
+  actionOp: ((op: ActionOp) => void) | null;
 }
 
 const capture = (): { captured: Captured; hosts: DispatchHosts } => {
@@ -66,6 +67,7 @@ const capture = (): { captured: Captured; hosts: DispatchHosts } => {
     scripting: null,
     downloadOp: null,
     notifyOp: null,
+    actionOp: null,
   };
   const hosts: DispatchHosts = {
     tabs: {
@@ -89,6 +91,11 @@ const capture = (): { captured: Captured; hosts: DispatchHosts } => {
     notify: {
       setDispatch: (fn) => {
         captured.notifyOp = fn;
+      },
+    },
+    action: {
+      setDispatch: (fn) => {
+        captured.actionOp = fn;
       },
     },
   };
@@ -276,29 +283,75 @@ describe("dispatch wiring (#243)", () => {
     const { captured, hosts } = capture();
     wireDispatchers(hosts, async () => [page.c, other.c, host.c]);
     captured.tabMessage!(7, "https://page.example/app", "ext0", { nonce: "n1", msg: { hi: 1 } });
-    captured.scripting!({
-      type: "zl:scripting",
-      extId: "ext0",
-      dest: "https://page.example/app",
-      js: ["void 0"],
-      css: [],
-    });
+    captured.scripting!(
+      {
+        type: "zl:scripting",
+        extId: "ext0",
+        dest: "https://page.example/app",
+        js: ["void 0"],
+        css: [],
+        wantResult: false,
+      },
+      null,
+    );
     await flush();
     expect(page.messages.length).toBe(2);
     expect(other.messages.length).toBe(0);
     expect(host.messages.length).toBe(0);
     /* An unmatched scripting destination is dropped, not broadcast. */
-    captured.scripting!({
-      type: "zl:scripting",
-      extId: "ext0",
-      dest: "https://nowhere.example/",
-      js: ["void 0"],
-      css: [],
-    });
+    captured.scripting!(
+      {
+        type: "zl:scripting",
+        extId: "ext0",
+        dest: "https://nowhere.example/",
+        js: ["void 0"],
+        css: [],
+        wantResult: false,
+      },
+      null,
+    );
     await flush();
     expect(page.messages.length).toBe(2);
     expect(other.messages.length).toBe(0);
     expect(host.messages.length).toBe(0);
+  });
+
+  it("scripting results transfer the reply port to exactly one matching page (#517)", async () => {
+    const pageMessages: unknown[] = [];
+    const otherMessages: unknown[] = [];
+    const transfers: unknown[][] = [];
+    const pageClient: WinClient = {
+      url: navhUrl("https://page.example/app"),
+      postMessage: (m: unknown, t?: Transferable[]) => {
+        pageMessages.push(m);
+        transfers.push(t ?? []);
+      },
+    };
+    const otherClient: WinClient = {
+      url: navhUrl("https://other.example/"),
+      postMessage: (m: unknown) => void otherMessages.push(m),
+    };
+    stubSelf([pageClient, otherClient]);
+    const { captured, hosts } = capture();
+    wireDispatchers(hosts, async () => [pageClient, otherClient]);
+    const port = { close: vi.fn() } as unknown as MessagePort;
+    captured.scripting!(
+      { type: "zl:scripting", extId: "ext0", dest: "https://page.example/app", js: ["1"], css: [], wantResult: true },
+      port,
+    );
+    await flush();
+    expect(pageMessages).toHaveLength(1);
+    expect(transfers[0]).toEqual([port]);
+    expect(otherMessages).toHaveLength(0);
+    /* No matching client: the port is closed instead of leaking, so
+       the sender's answer window resolves rather than hanging. */
+    const port2 = { close: vi.fn() } as unknown as MessagePort;
+    captured.scripting!(
+      { type: "zl:scripting", extId: "ext0", dest: "https://nowhere.example/", js: ["1"], css: [], wantResult: true },
+      port2,
+    );
+    await flush();
+    expect(port2.close).toHaveBeenCalled();
   });
 });
 
