@@ -36,12 +36,14 @@ fixture pages through `/?url=<target>` and asserts:
   in a linked stylesheet and an inline style block, iframe src, iframe
   srcdoc, base href folding, meta refresh navigation, module-script
   import specifiers.
-- Network inspector (#545): fetch, XHR, EventSource, sendBeacon, worker
-  fetch, resource destination and navigation fixtures are classified by
-  observed request evidence; Request.destination does not prove parser
-  versus script creation. Internal marker headers are absent from
-  the fixture's upstream request and inspector header detail, while
-  request bodies and cookie values are not recorded.
+- Network inspector (#545): minted cross-origin fetch/XHR, sendBeacon,
+  EventSource, worker fetch, resource destination and navigation
+  fixtures are classified by observed request evidence.
+  Request.destination does not prove parser versus script creation;
+  same-origin requests that bypass the page re-emitter remain UNKNOWN.
+  Internal marker headers are absent upstream and from inspector and
+  extension-visible headers; request bodies and cookie values are not
+  recorded.
 - Privacy (#32/#34): window.__ZL carries no plaintext destination, page
   surfaces show only engine routes, two virtual contexts stay isolated
   (storage, cookie jar, Cache API names).

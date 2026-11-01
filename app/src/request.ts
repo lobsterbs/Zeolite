@@ -1275,7 +1275,7 @@ async function revalidateBeforeUse(req: Request, hit: Response, context: CookieR
 /** Fixed-vocabulary page/worker instrumentation header. It is diagnostic
     metadata only, never an authorization or routing signal. The request
     engine strips it before the upstream hop. */
-export const REQUEST_INITIATOR_HEADER = "x-zl-init";
+export const REQUEST_INITIATOR_HEADER = "x-zl-i";
 
 /** Classify only request evidence or labels inserted by our runtime
     wrappers. An empty destination without a marker stays UNKNOWN. */
@@ -1283,8 +1283,8 @@ export function requestInitiator(req: Request): string {
   const marked = req.headers.get(REQUEST_INITIATOR_HEADER);
   if (marked === "fetch") return "FETCH";
   if (marked === "xhr") return "XHR";
-  if (marked === "send-beacon") return "SEND_BEACON";
-  if (marked === "worker-fetch") return "WORKER_FETCH";
+  if (marked === "beacon") return "SEND_BEACON";
+  if (marked === "worker") return "WORKER_FETCH";
   if (req.mode === "navigate") return "NAVIGATION";
   if ((req.headers.get("accept") ?? "").toLowerCase().includes("text/event-stream")) return "EVENTSOURCE";
   if (req.destination) return "RESOURCE";
@@ -5640,7 +5640,7 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     "origin",
     "cookie",
     /* Internal API attribution is consumed here and never reaches origin servers. */
-    "x-zl-init",
+    "x-zl-i",
     "sec-fetch-site",
     "sec-fetch-mode",
     "sec-fetch-dest",

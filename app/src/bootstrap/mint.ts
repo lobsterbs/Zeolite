@@ -113,12 +113,10 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
      and without an anchor nothing changes. */
   const relRoute = makeRel(parentRoutePath, loc.origin);
 
-  /* Internal diagnostic label, only on controlled engine routes. */
-  const hasController = !!(w.navigator as AnyRecord)?.serviceWorker?.controller;
+  /* Internal label stays on engine-routed requests. */
   const mark = (init: RequestInit | undefined, kind: string): RequestInit => {
-    if (!hasController) return init ?? {};
     const headers = new Headers(init?.headers);
-    headers.set("x-zl-init", kind);
+    headers.set("x-zl-i", kind);
     return { ...init, headers };
   };
 
@@ -132,7 +130,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
       const rel = relRoute(url);
       const d = rel ? null : crossDest(url);
       if ((rel || d) && init?.integrity) init = { ...init, integrity: undefined };
-      if (rel) return OF(rel, mark(init, "fetch"));
+      if (rel) return OF(rel, init);
       if (!d) return OF(input, init);
       return mintRoute(d).then((route) =>
         OF((route ?? url) as RequestInfo, route ? mark(init, "fetch") : init),
@@ -225,7 +223,6 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
         const result = rel
           ? OOpen.call(this, a[0], rel, a[2], a[3], a[4])
           : OOpen.apply(this, a);
-        if (isAsync && rel && hasController) OHdr.call(this, "x-zl-init", "xhr");
         return result;
       }
       pend.set(this, {
@@ -265,7 +262,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
         pend.delete(self);
         delete self.readyState;
         OOpen.call(self, st.method, route ?? st.url, true, st.user, st.pw);
-        if (route && hasController) OHdr.call(self, "x-zl-init", "xhr");
+        if (route) OHdr.call(self, "x-zl-i", "xhr");
         for (const h of st.headers) OHdr.call(self, h[0], h[1]);
         OSend.apply(self, a);
       });
