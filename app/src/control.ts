@@ -25,6 +25,11 @@ import { buildCompatibilityReport, compatibilityKdl } from "./compat-debugger";
    control plane lists and cancels entries through the subsystem. */
 import { DL } from "./downloads";
 import { EXT_CONTROL_TYPES, dispatchExtControl } from "./extensions/control";
+import { setBrowsingDataCacheDropper } from "./extensions/browsingdata";
+/* #520/#179: the extension browsingData cookie clear drops the page
+   cache exactly like zl:clearJar; the dropper is wired here because
+   the extensions subsystem must not import the request pipeline. */
+setBrowsingDataCacheDropper(pageCacheClear);
 import { pageClientOf } from "./extensions/serve";
 import type { UiTab } from "./extensions/tabs";
 import { TABS } from "./extensions/tabs";
