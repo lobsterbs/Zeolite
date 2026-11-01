@@ -224,6 +224,48 @@ engine route, not the virtual upstream path. Two consequences:
   Virtualizing what page code reads from anchors is a separate, legal
   shim layer. Keep the two classes apart when designing location work.
 
+### 5a. Closing the remaining navigation escapes (#536)
+
+Three navigation classes stay outside every page-side shim. Know them,
+design for them, and never paper over them with another service-worker
+trick:
+
+1. **Writes to `location.href` / `location.assign()` / `location.replace()`.**
+   `Location` is `LegacyUnforgeable`: the write cannot be intercepted by
+   page script, by the bootstrap, or by the service worker. The resulting
+   top-level navigation is *scope-bound*: the browser dispatches a fetch
+   event only for URLs inside the service worker's scope, so a raw
+   `https://` navigation is invisible to the engine's fetch handler by
+   platform rule. **True interception requires host/browser support** -
+   an embedder privileged-layer navigation hook. The required capability:
+   before committing a top-level navigation, the host layer asks the
+   engine for a handle (`zl:navHandle { dest }`, host-only by the sender
+   gate) and rewrites the navigation onto the answered route; a deny
+   verdict blocks the navigation outright. Chromium exposes this as
+   `webContents will-navigate` (Electron-class hosts) or
+   `webNavigation.onBeforeNavigate` (extension-class hosts). A host
+   without one of these has no honest way to close this escape; the
+   engine will not fake one.
+2. **Shadow roots.** Roots created after the navguard installs are
+   observed through the `attachShadow` hook; roots that already existed
+   are joined by a bounded one-time sweep of open roots
+   (`shadowRoot !== null`), same observer contract, same frame pass
+   (SWEEP_MAX_ELEMENTS / SWEEP_MAX_ROOTS bounds a pathological
+   document). **Closed roots are the explicit boundary:** page script
+   cannot see them by browser rule, so neither can the guard - a closed
+   root's frames keep native loads, by design and documented here.
+3. **Cross-origin and sandboxed child frames.** Their realm cannot be
+   inspected safely, so they remain browser-direct by design. This is a
+   fail-closed policy, not a gap: blanket-routing them would capture
+   host-app UI, challenge-provider frames and unrelated embedder frames.
+   The rule for hosts: exempt your own UI and known challenge frames
+   explicitly; do not widen the engine's interception to realms it
+   cannot verify.
+
+Escape telemetry (#30) records what still went direct, so an
+integration can measure its own residual exposure instead of assuming
+it away.
+
 ## 6. Respect the control plane
 
 All control traffic uses `zl:` verbs over `MessageChannel` ports. The
