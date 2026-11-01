@@ -6,7 +6,10 @@
    version bump with a recreate. */
 
 const DB_NAME = "zl-extensions";
-const DB_VERSION = 4;
+/* v5: #594 adds the runtime.alarms table (one record per extension
+   id). A version bump with a recreate, the only migration this helper
+   does; existing stores and records survive untouched. */
+const DB_VERSION = 5;
 export const STORE_META = "meta";
 export const STORE_FILES = "files";
 export const STORE_STORAGE = "storage";
@@ -14,6 +17,9 @@ export const STORE_COOKIES = "cookies";
 export const STORE_DOWNLOADS = "downloads";
 /* #118: partial download bytes per registry entry id. */
 export const STORE_PARTIALS = "download-partials";
+/* #594: the runtime.alarms table, one record (an Alarm[] array) per
+   extension id. */
+export const STORE_ALARMS = "alarms";
 
 let dbp: Promise<IDBDatabase> | null = null;
 
@@ -29,6 +35,7 @@ export function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_COOKIES)) db.createObjectStore(STORE_COOKIES);
       if (!db.objectStoreNames.contains(STORE_DOWNLOADS)) db.createObjectStore(STORE_DOWNLOADS);
       if (!db.objectStoreNames.contains(STORE_PARTIALS)) db.createObjectStore(STORE_PARTIALS);
+      if (!db.objectStoreNames.contains(STORE_ALARMS)) db.createObjectStore(STORE_ALARMS);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error ?? new Error("zeolite: indexeddb open failed"));

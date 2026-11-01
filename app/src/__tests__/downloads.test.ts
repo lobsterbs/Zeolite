@@ -631,3 +631,49 @@ describe("download eviction and buffer budget (#192)", () => {
     t.reset();
   });
 });
+
+describe("DownloadTracker.clearHistory (#593)", () => {
+  it("drops terminal entries, keeps active streams", async () => {
+    const t = new DownloadTracker();
+    const done = t.begin("https://x.test/a.bin", headers({ "content-disposition": 'attachment; filename="a.bin"' }), "application/octet-stream", 5);
+    await drain(t.wrap(done, streamOf([new Uint8Array(5)])));
+    const active = t.begin("https://x.test/b.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", 5);
+    t.wrap(active, streamOf([new Uint8Array(5)])); /* never drained: stays active */
+    const cancelled = t.begin("https://y.test/c.bin", headers({ "content-disposition": "attachment" }), "application/octet-stream", 5);
+    t.cancel(cancelled);
+    expect(t.clearHistory()).toBe(2);
+    const snap = t.snapshot();
+    expect(snap.map((e) => e.id)).toEqual([active]);
+    expect(snap[0].status).toBe("active");
+    t.reset();
+  });
+
+  it("since and origins filter what clearHistory removes", async () => {
+    const t = new DownloadTracker();
+    const a = t.begin("https://x.test/a", headers({ "content-disposition": "attachment" }), "application/octet-stream", 5);
+    await drain(t.wrap(a, streamOf([new Uint8Array(5)])));
+    const b = t.begin("https://y.test/b", headers({ "content-disposition": "attachment" }), "application/octet-stream", 5);
+    await drain(t.wrap(b, streamOf([new Uint8Array(5)])));
+    /* a future since keeps both (both ended in the past) */
+    expect(t.clearHistory({ since: Date.now() + 60_000 })).toBe(0);
+    expect(t.clearHistory({ origins: ["https://other.example"] })).toBe(0);
+    expect(t.clearHistory({ origins: ["https://x.test"] })).toBe(1);
+    expect(t.snapshot().map((e) => e.id)).toEqual([b]);
+    expect(t.clearHistory()).toBe(1);
+    expect(t.snapshot()).toHaveLength(0);
+    t.reset();
+  });
+
+  it("clearHistory drops the persisted records of emptied sites", async () => {
+    const t = new DownloadTracker();
+    const a = t.begin("https://persist.test/a", headers({ "content-disposition": "attachment" }), "application/octet-stream", 5);
+    await drain(t.wrap(a, streamOf([new Uint8Array(5)])));
+    await t.persist();
+    const db = await openDb();
+    expect(await idbGetAllKeys(db, STORE_DOWNLOADS)).toContain("site:https://persist.test");
+    t.clearHistory();
+    await t.persist();
+    expect(await idbGetAllKeys(db, STORE_DOWNLOADS)).not.toContain("site:https://persist.test");
+    t.reset();
+  });
+});
