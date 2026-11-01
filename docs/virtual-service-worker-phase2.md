@@ -91,11 +91,10 @@ intentionally does not fake them.
 
 ## Registration identity and scope mapping
 
-Registration key: (site id, canonical scope). The site id is the
-same per-site partition identity (zl:<sitehash>:) that storage and
-cookie jars already use. The canonical scope resolves against the
-registering page's virtual URL and clamps to that page's virtual
-origin, exactly as phase 1 scopeFor does today.
+Registration key: (verified virtual origin, canonical scope). Multiple
+registrations can coexist on one virtual origin. Each canonical scope
+resolves against the registering page's virtual URL and clamps to that
+same virtual origin.
 
 Matching rule: a request or a page carries its virtual context
 (site id plus URL); a registration matches only when the site id is
@@ -116,7 +115,7 @@ supported, kept honest.
 
 | Feature | Stage | Notes and limits |
 | --- | --- | --- |
-| register / getRegistration(s) / unregister | S1 | Already virtual since 1.6; S1 keys the store by (site, scope) so multiple scopes per origin work. |
+| register / getRegistration(s) / unregister | S1 | Keys the store by (virtual origin, scope); multiple scopes per origin coexist and unregister removes only the exact scope. |
 | registration.update() | S1 | Re-fetches the script URL through the transport and compares stored validators and length; updatefound fires on a real change, never fabricated. |
 | state machine and statechange | S1 | Native-shaped installing / installed / waiting / activating / activated with real waiting periods instead of the microtask settle; statechange events fire on transitions. |
 | ready | S1 | Already resolves; S1 keeps it pending while a registration for the scope is installing, matching native. |
@@ -256,7 +255,7 @@ Honest deviations of wave 1, all deliberate:
 
 ## Wave 3 status (#477 P3): fetch bridging wired into the live request path
 
-- After route decoding, origin-parameter virtualization, the disabled-site gate and client-context establishment, request.ts asks the running guest whose canonical scope matches the request URL first: guestDispatchFetchForUrl (GuestKernel.dispatchFetchForUrl) routes to the single origin-keyed running guest whose scope matches, under the wave-2 250 ms fail-closed budget and response validation.
+- After route decoding, origin-parameter virtualization, the disabled-site gate and client-context establishment, request.ts asks the running guest whose canonical scope matches the request URL first: guestDispatchFetchForUrl (GuestKernel.dispatchFetchForUrl) routes to the most-specific running guest whose scope matches, under the wave-2 250 ms fail-closed budget and response validation.
 - A handled guest answer is served verbatim as the Response, minus Set-Cookie/Set-Cookie2 (a guest response must not stamp cookies onto the engine origin; virtual-site cookies belong to the jar at request time). An invalid status/body combination fails closed. Every uncertain outcome (no guest, scope miss, no handler, malformed or oversize answer, timeout, termination, aborted request, construction error) runs the ordinary engine path unchanged.
 - Recursion guard: synthetic dispatch is provably non-recursive. Guests are network-blind, so a guest answer never originates an engine fetch event, and the pending-id one-shot marker consumes exactly one response per dispatch. Cancellation: an already-aborted request never reaches the guest; the budget bounds everything else.
 - Honest limits: a served guest response bypasses engine response-side processing (rewrite passes, response cache, transport-level policy such as ad-block rules); the request never leaves the engine, so there is no egress or IP exposure. Guest-initiated network fetches remain impossible, so the normal Zeolite SSRF, cookie and policy surfaces apply to the page real requests, not to guest answers. The security review of the full dispatch model remains the merge requirement.

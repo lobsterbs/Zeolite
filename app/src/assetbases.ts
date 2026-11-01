@@ -221,9 +221,25 @@ const FLAG_SEG = /^([a-z][a-z0-9_-]{0,30})=/i;
 const GOOGLE_FLAG_KEYS = new Set(["httpd", "exm", "ed", "cb", "m", "udm", "sxsrf", "sca_esv"]);
 const MIN_GOOGLE_FLAGS = 2;
 const FLAG_RECOVERY_REQUESTS_PER_CALL = 4;
-const FLAG_RECOVERY_REQUESTS_PER_ORIGIN = 8;
+const FLAG_RECOVERY_REQUESTS_PER_ORIGIN = 64;
+const FLAG_RECOVERY_DISTINCT_TARGETS_PER_ORIGIN = 16;
 const FLAG_RECOVERY_ORIGINS = 128;
 const flagRecoveryRequests = new Map<string, number>();
+const flagRecoveryTargets = new Map<string, Set<string>>();
+
+interface GoogleMssPath {
+  token: string;
+  app: string;
+  tail: string;
+}
+
+/* Google rotates the leading path token while keeping the observed
+   module base shape stable. Keep this parser deliberately specific:
+   arbitrary deep application routes must not gain a CDN retry path. */
+function parseGoogleMssPath(pathname: string): GoogleMssPath | null {
+  const m = /^\/([A-Za-z0-9_-]{24,128})\/_\/mss\/([A-Za-z0-9._-]{1,80})\/_\/js\/(k=[^/]+(?:\/.*)?)$/.exec(pathname);
+  return m ? { token: m[1], app: m[2], tail: m[3] } : null;
+}
 
 /** A Google flag-surgery path carries multiple known Google flag names.
     Generic key=value path segments are common in unrelated applications. */
@@ -248,11 +264,6 @@ export async function recoverFlagSurgeryScript(
   fetchUpstream: FlatFetch,
   traceId = "",
 ): Promise<{ url: string; resp: Response } | null> {
-  /* 2026-10-20 sorry-page report: a silent null hid whether recovery
-     had zero recorded script URLs, had spent its budget, or tried
-     candidates that answered badly. One warning per bail, emitted
-     only for traced in-flight fetches, keeps sorry-chunk debugging
-     honest without polluting unit-test runs. */
   const miss = (reason: string) => {
     if (!traceId) return;
     DIAG.emit({
@@ -266,14 +277,10 @@ export async function recoverFlagSurgeryScript(
     });
   };
   if (!initiator) return null;
-  const cands = scriptUrls.get(originOf(initiator)) ?? [];
+  const pageOrigin = originOf(initiator);
+  const cands = scriptUrls.get(pageOrigin) ?? [];
   if (cands.length === 0) {
     miss("no recorded script URLs for this origin");
-    return null;
-  }
-  const pageOrigin = originOf(initiator);
-  if (!pageOrigin || (flagRecoveryRequests.get(pageOrigin) ?? 0) >= FLAG_RECOVERY_REQUESTS_PER_ORIGIN) {
-    miss("per-origin recovery budget already exhausted");
     return null;
   }
   let u: URL;
@@ -283,12 +290,88 @@ export async function recoverFlagSurgeryScript(
     return null;
   }
   if (!isFlagSurgeryPath(u.pathname)) return null;
+  if (!pageOrigin) return null;
+
+  /* Count unique target script URLs, not loader retries. Google retries
+     identical module URLs several times when one 404s; those retries
+     must not starve other distinct chunks on the same page. */
+  const targetKey = u.origin + u.pathname + u.search;
+  const attempted = flagRecoveryTargets.get(pageOrigin) ?? new Set<string>();
+  if (attempted.has(targetKey)) {
+    miss("target URL already attempted");
+    return null;
+  }
+  if (attempted.size >= FLAG_RECOVERY_DISTINCT_TARGETS_PER_ORIGIN) {
+    miss("per-origin distinct-target budget already exhausted");
+    return null;
+  }
+  attempted.add(targetKey);
+  flagRecoveryTargets.delete(pageOrigin);
+  flagRecoveryTargets.set(pageOrigin, attempted);
+  if (flagRecoveryTargets.size > FLAG_RECOVERY_ORIGINS) {
+    const oldest = flagRecoveryTargets.keys().next();
+    if (!oldest.done) flagRecoveryTargets.delete(oldest.value);
+  }
+
   const safe = new Headers();
   for (const h of ["user-agent", "accept", "accept-language"]) {
     const v = reqHeaders.get(h);
     if (v) safe.set(h, v);
   }
   const tried = new Set<string>();
+  let uMss: GoogleMssPath | null = null;
+  uMss = parseGoogleMssPath(u.pathname);
+
+  /* Google AI Mode's token-prefixed mss route. The upstream token is
+     session/page-specific, so reuse only a base observed on this exact
+     Google origin and app namespace, then replace the full tokenized
+     tail with the target's current module path. */
+  if (uMss) {
+    const candidates = new Set<string>();
+    for (const c of cands) {
+      let cu: URL;
+      try {
+        cu = new URL(c);
+      } catch {
+        continue;
+      }
+      if (cu.origin !== u.origin || cu.origin !== pageOrigin) continue;
+      const observed = parseGoogleMssPath(cu.pathname);
+      if (!observed || observed.app !== uMss.app) continue;
+      const prefix = cu.pathname.slice(0, cu.pathname.indexOf("/_/js/") + "/_/js/".length);
+      candidates.add(cu.origin + prefix + uMss.tail + u.search);
+    }
+    if (candidates.size === 0) {
+      miss("no observed Google mss script base for app " + uMss.app);
+      return null;
+    }
+    for (const candUrl of [...candidates].slice(0, FLAG_RECOVERY_REQUESTS_PER_CALL)) {
+      if ((flagRecoveryRequests.get(pageOrigin) ?? 0) >= FLAG_RECOVERY_REQUESTS_PER_ORIGIN) {
+        miss("per-origin candidate request budget exhausted");
+        return null;
+      }
+      if (tried.has(candUrl)) continue;
+      tried.add(candUrl);
+      const attempts = (flagRecoveryRequests.get(pageOrigin) ?? 0) + 1;
+      flagRecoveryRequests.delete(pageOrigin);
+      flagRecoveryRequests.set(pageOrigin, attempts);
+      try {
+        const r = await fetchUpstream(candUrl, { method: "GET", headers: safe });
+        if (r.ok && mimeOkFor("script", r.headers.get("content-type") ?? "")) return { url: candUrl, resp: r };
+        await r.body?.cancel().catch(() => undefined);
+      } catch {
+        /* try the next observed mss base */
+      }
+    }
+    miss(tried.size + " observed Google mss bases answered without JavaScript");
+    return null;
+  }
+
+  /* Existing Google flag-surgery behavior for non-mss paths. */
+  if ((flagRecoveryRequests.get(pageOrigin) ?? 0) >= FLAG_RECOVERY_REQUESTS_PER_ORIGIN) {
+    miss("per-origin candidate request budget exhausted");
+    return null;
+  }
   for (const c of cands.slice(0, 3)) {
     let cu: URL;
     try {
@@ -317,17 +400,13 @@ export async function recoverFlagSurgeryScript(
           return null;
         }
         if ((flagRecoveryRequests.get(pageOrigin) ?? 0) >= FLAG_RECOVERY_REQUESTS_PER_ORIGIN) {
-          miss("stopped at the per-origin cap after " + tried.size + " candidates");
+          miss("per-origin candidate request budget exhausted");
           return null;
         }
         tried.add(candUrl);
         const attempts = (flagRecoveryRequests.get(pageOrigin) ?? 0) + 1;
         flagRecoveryRequests.delete(pageOrigin);
         flagRecoveryRequests.set(pageOrigin, attempts);
-        if (flagRecoveryRequests.size > FLAG_RECOVERY_ORIGINS) {
-          const oldest = flagRecoveryRequests.keys().next();
-          if (!oldest.done) flagRecoveryRequests.delete(oldest.value);
-        }
         try {
           const r = await fetchUpstream(candUrl, { method: "GET", headers: safe });
           if (r.ok && mimeOkFor("script", r.headers.get("content-type") ?? "")) return { url: candUrl, resp: r };
@@ -347,4 +426,5 @@ export function resetAssetBases(): void {
   assetBases.clear();
   scriptUrls.clear();
   flagRecoveryRequests.clear();
+  flagRecoveryTargets.clear();
 }

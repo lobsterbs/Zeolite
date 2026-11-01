@@ -66,7 +66,7 @@ import {
   VCTX_CAP,
   type VirtualContext,
 } from "./vctx";
-import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
+import { assetBaseCount, isFlagSurgeryPath, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
 import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfilesReady, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
@@ -4068,7 +4068,17 @@ export function handleFetch(e: FetchEvent): void {
             /* #296 first: a flag-shaped script miss is the src-surgery class,
              whose recovery owns the flag path shape; the flat-asset gate would
              reject it and log a miss without ever trying the script bases. */
-            let rec = dest === "script" ? await recoverFlagSurgeryScript(initiator ?? "", target, e.request.headers, recoveryUpstream(policy, rtype, traceId), traceId) : null;
+            let flagPath = false;
+            if (dest === "script") {
+              try {
+                flagPath = isFlagSurgeryPath(new URL(target).pathname);
+              } catch {
+                flagPath = false;
+              }
+            }
+            let rec = flagPath
+              ? await recoverFlagSurgeryScript(initiator ?? "", target, e.request.headers, recoveryUpstream(policy, rtype, traceId), traceId)
+              : null;
             if (rec) {
               DIAG.emit({
                 traceId,
@@ -4079,7 +4089,7 @@ export function handleFetch(e: FetchEvent): void {
                 message: "flag-surgery script path recovered against an observed script base (#296)",
                 url: target,
               });
-            } else {
+            } else if (!flagPath) {
               rec = await recoverFlatAsset(initiator ?? "", target, dest, e.request.headers,
                 recoveryUpstream(policy, rtype, traceId));
             }
@@ -4095,11 +4105,10 @@ export function handleFetch(e: FetchEvent): void {
               });
               hopUrl = rec.url;
               resp = rec.resp;
-            } else if (assetBaseCount(initiator ?? "") > 0) {
-              /* #143: the miss is now visible in diagnostics either way -
-                 all observed bases answered badly, or the path shape
-                 was rejected - so a silent no-retry never hides a
-                 recoverable asset again. */
+            } else if (!flagPath && assetBaseCount(initiator ?? "") > 0) {
+              /* #143: retain the generic flat-asset gate and diagnostics
+                 for ordinary asset names. Google flag paths have their own
+                 narrower recovery class and should not be double-reported. */
               let shapeOk = false;
               try {
                 shapeOk = isRecoverableAssetPath(new URL(target).pathname);
