@@ -360,13 +360,16 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
       const extId = typeof ep.extId === "string" ? ep.extId : "";
       const srcId = src && src.url ? src.id : "";
       const srcUrl = src && src.url ? src.url : null;
+      const safeRpcReply = (payload: unknown) => {
+        try { reply(payload); } catch { /* caller closed its RPC endpoint */ }
+      };
       if (!extId || !srcId || pageClientOf(srcId) !== extId) {
-        reply({ ok: false, error: "not an extension page" });
+        safeRpcReply({ ok: false, error: "not an extension page" });
         break;
       }
       const erec = extensions.get(extId);
       if (!erec || !erec.enabled) {
-        reply({ ok: false, error: "no such extension" });
+        safeRpcReply({ ok: false, error: "no such extension" });
         break;
       }
       const call = (ep.msg ?? {}) as { path?: unknown; args?: unknown; port?: unknown; name?: unknown };
@@ -450,8 +453,8 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
       e.waitUntil(
         wake
           .then(() => handleExtPageCall(erec, srcUrl, call))
-          .then(reply)
-          .catch((err: unknown) => reply({ ok: false, error: String(err) })),
+          .then(safeRpcReply)
+          .catch((err: unknown) => safeRpcReply({ ok: false, error: String(err) })),
       );
       break;
     }
