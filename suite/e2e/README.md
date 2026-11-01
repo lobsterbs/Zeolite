@@ -66,9 +66,10 @@ fixture pages through `/?url=<target>` and asserts:
 
 ## Honest gaps (not faked)
 
-- WebSocket bridge: skipped. The engine upgrades ws to wss by design
-  and the fixture origins are plain HTTP, so the bridge cannot be
-  exercised against loopback without a TLS fixture.
+- WebSocket bridge: skipped. Plaintext ws:// passes through since
+  #525, but the fixture origins are plain HTTP and a wss:// (or
+  plaintext ws://) terminator is not part of the fixture set, so the
+  bridge cannot be exercised here without a socket fixture.
 - SW restart: not covered yet.
 - SVG paint url() attributes (fill/stroke/filter/...): covered by the
   rewriter's Rust unit tests (#36), not here - a browser-side
@@ -167,8 +168,9 @@ infrastructure redesign (issue acceptance).
 
 ## Honest gaps (not faked)
 
-- WebSocket: needs a TLS fixture (the engine upgrades ws to wss by
-  design); same gap as the #35 suite.
+- WebSocket: needs a socket fixture (plaintext ws:// passes through
+  since #525, but neither suite ships a ws endpoint); same gap as the
+  #35 suite.
 - IDN hostnames: need a real domain; the fixtures are loopback IPs.
 - Downloads: the #90 registry is unit-tested; a fetch-shaped
   attachment is just another body probe, and a UI-observable download

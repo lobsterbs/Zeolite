@@ -18,12 +18,18 @@ in-page raw-stream implementation (RFC 6455 framing by hand in the
 bootstrap) was removed: it could speak only plaintext, so wss://
 destinations never actually worked.
 
-## ws:// upgraded to wss://
+## ws:// passes through as written (since #525)
 
-Insecure ws:// URLs are rewritten to wss:// before the transport sees
-them (the upgrade decision is traced under subsystem websocket). No
-plaintext WebSocket leaves the transport. Honest limit: targets that
-serve WebSocket only without TLS will fail; this is deliberate.
+Plaintext ws:// URLs are dialed as plaintext: no scheme upgrade exists
+anymore. The old force-upgrade to wss:// sent a TLS ClientHello to
+every plaintext-ws origin (an http-only origin cannot answer it, the
+handshake never settles and the page socket stalls), while cleartext
+http already rides the same wisp tunnel - so #525 removed the upgrade
+and passes ws:// through, traced under subsystem websocket with the
+rule "plaintext". Plaintext-only WebSocket servers therefore work.
+There is no configuration surface and no fallback: the URL the page
+wrote is the URL the transport dials (retargeted engine-side through
+the sender's virtual context, never re-schemed).
 
 ## Semantics
 
@@ -111,13 +117,28 @@ The bridge registry holds only live connections: entries are dropped
 at close, at error-before-open, and at zl:teardown (every live
 connection is closed and forgotten before the SW unregisters).
 
+## WebRTC is unavailable (#544)
+
+WebRTC is not proxied and not faked: the bootstrap navguard deletes
+`RTCPeerConnection` outright (plus its prefixed aliases), so the exact
+failure mode is a plain constructor absence - a `ReferenceError`/
+`TypeError` at construction, never a half-working object, never a
+silent fallback onto another transport. The reason is egress honesty:
+ICE/STUN negotiates direct browser-to-peer UDP paths that bypass the
+service worker and the engine transport entirely, so a constructible
+WebRTC API would leak real connection metadata and traffic around the
+proxy. Hosts detect this state via the `zl:ping` capability report
+(`webrtc: "unavailable"`, `websocket: "native-bridge" | "relay"`,
+`websocketPlaintext: true`, `replaySpool: <live zl:config choice>`);
+a report of "unavailable" means designed absence, not breakage.
+
 ## Status
 
 Implemented (1.3 Carbide). Honest limits: the bridge requires SW
 control (a page outside the engine scope fails with error + close
 1006, which matches native offline behavior); subprotocol and
-extension negotiation follow libcurl; targets without TLS fail by
-design (ws:// is upgraded).
+extension negotiation follow libcurl; plaintext ws:// targets are
+dialed as plaintext since #525 (no upgrade, no TLS fallback).
 
 Synchronous transport send failures terminate the bridge connection (#485).
 The page receives an error followed by an abnormal 1006 close; the bridge
