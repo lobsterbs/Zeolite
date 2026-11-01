@@ -225,7 +225,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
         const result = rel
           ? OOpen.call(this, a[0], rel, a[2], a[3], a[4])
           : OOpen.apply(this, a);
-        if (isAsync && rel) OHdr.call(this, "x-zl-init", "xhr");
+        if (isAsync && rel && hasController) OHdr.call(this, "x-zl-init", "xhr");
         return result;
       }
       pend.set(this, {
