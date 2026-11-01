@@ -24,6 +24,12 @@ export interface WsHandle {
      pong. The watchdog treats a ping as answered only when this
      advances between ticks. */
   lastPongAt?(): number;
+  /* #546 write-acceptance seam, optional: cumulative payload bytes the
+     transport has accepted for the wire so far, or null when it cannot
+     say. Mirrors the optional ping()/lastPongAt() pattern: absent (or
+     null) means the bridge keeps the send-returned acknowledgment and
+     page bufferedAmount stays bridge-queue accounting. */
+  drainAt?(): number | null;
 }
 
 export interface WsFactory {
@@ -93,6 +99,9 @@ interface Conn {
   ka?: ReturnType<typeof setInterval>;
   missed: number;
   lastPong: number;
+  /* #546: the transport-accepted watermark already acknowledged to
+     the page, for drains computed from the drainAt() seam. */
+  drainAcked: number;
 }
 
 export interface WsBridgeOptions {
@@ -143,6 +152,7 @@ export class WsBridge {
       pending: [],
       missed: 0,
       lastPong: 0,
+      drainAcked: 0,
     };
     this.conns.set(port, conn);
     port.onmessage = (ev) => {
@@ -254,8 +264,23 @@ export class WsBridge {
     this.hooks.onBytes(conn.token, 0, sentBytes);
     /* #462: acknowledge acceptance by the transport's send() seam.
        This drains the page/worker bridge queue; the lower-level Wisp
-       socket's actual network buffer is not observable here. */
-    port.postMessage({ ev: "drain", bytes: sentBytes });
+       socket's actual network buffer is not observable here.
+       #546: when the transport exposes the optional drainAt()
+       write-acceptance seam, the acknowledgment carries the bytes the
+       transport actually accepted (the delta since the previous
+       acknowledgment, monotone, re-baselined without underflow when a
+       transport reports a lower counter), so page bufferedAmount
+       tracks transport acceptance instead of the bridge call. Absent
+       or null keeps the send-returned acknowledgment below. */
+    let acked = sentBytes;
+    if (typeof conn.handle.drainAt === "function") {
+      const accepted = conn.handle.drainAt();
+      if (typeof accepted === "number" && Number.isFinite(accepted) && accepted >= 0) {
+        acked = Math.max(0, accepted - conn.drainAcked);
+        conn.drainAcked = accepted;
+      }
+    }
+    port.postMessage({ ev: "drain", bytes: acked });
     this.hooks.trace({ subsystem: "websocket", original: "tx", result: conn.url, resource: "websocket" });
     return true;
   }

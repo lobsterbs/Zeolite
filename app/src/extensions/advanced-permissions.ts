@@ -83,34 +83,56 @@ export class PermissionRegistry {
     return { permissions: [...v.permissions], origins: [...v.origins] };
   }
 
+  /** #522: the event payload is the DELTA actually applied — requested
+      entries that changed state against the recorded view — never the
+      requested superset. A re-request of already-granted permissions
+      fires nothing; a mixed request fires only the new entries. The
+      view (not the record snapshot) is the prior source: the manager
+      hands out shallow clones, so the record object the API closure
+      holds can go stale across grants. */
+  private static delta(
+    requested: ApiPermissions,
+    prior: { permissions: ReadonlySet<string>; origins: ReadonlySet<string> },
+    after: { permissions: string[]; origins: string[] },
+  ): ApiPermissions {
+    const nowP = new Set(after.permissions);
+    const nowO = new Set(after.origins);
+    return {
+      permissions: (requested.permissions ?? []).filter((p) => !prior.permissions.has(p) && nowP.has(p)),
+      origins: (requested.origins ?? []).filter((p) => !prior.origins.has(p) && nowO.has(p)),
+    };
+  }
+
+  private static nonEmpty(d: ApiPermissions): boolean {
+    return (d.permissions?.length ?? 0) > 0 || (d.origins?.length ?? 0) > 0;
+  }
+
   async request(ext: ExtensionRecord, perms: ApiPermissions): Promise<boolean> {
     if (!this.backend) return false;
-    /* The backend mutates the live record object this closure holds,
-       so the delta must be computed against a snapshot taken BEFORE
-       the grant, or onAdded never fires. */
-    const prior = new Set(ext.permissions);
-    const priorHost = new Set(ext.hostPermissions);
+    const prior = this.view(ext);
+    const priorSets = { permissions: new Set(prior.permissions), origins: new Set(prior.origins) };
     const after = await this.backend(ext.id, "grant", perms);
     if (!after) return false;
-    const newlyGranted =
-      (perms.permissions ?? []).some((p) => !prior.has(p)) ||
-      (perms.origins ?? []).some((p) => !priorHost.has(p));
     this.views.set(ext.id, after);
-    if (newlyGranted) this.fire(this.added, perms);
+    const granted = PermissionRegistry.delta(perms, priorSets, after);
+    if (PermissionRegistry.nonEmpty(granted)) this.fire(this.added, granted);
     return true;
   }
 
   async remove(ext: ExtensionRecord, perms: ApiPermissions): Promise<boolean> {
     if (!this.backend) return false;
-    const prior = new Set(ext.permissions);
-    const priorHost = new Set(ext.hostPermissions);
+    const prior = this.view(ext);
+    const priorSets = { permissions: new Set(prior.permissions), origins: new Set(prior.origins) };
     const after = await this.backend(ext.id, "revoke", perms);
     if (!after) return false;
-    const wasGranted =
-      (perms.permissions ?? []).some((p) => prior.has(p)) ||
-      (perms.origins ?? []).some((p) => priorHost.has(p));
     this.views.set(ext.id, after);
-    if (wasGranted) this.fire(this.removed, perms);
+    /* onRemoved mirrors onAdded: only entries that really left the
+       granted set are reported, as in Firefox. */
+    const revoked: ApiPermissions = {
+      permissions: (perms.permissions ?? []).filter((p) => priorSets.permissions.has(p) && !after.permissions.includes(p)),
+      origins: (perms.origins ?? []).filter((p) => priorSets.origins.has(p) && !after.origins.includes(p)),
+    };
+    if (PermissionRegistry.nonEmpty(revoked)) this.fire(this.removed, revoked);
     return true;
   }
 }

@@ -96,9 +96,23 @@ const GUEST_V1 = [
   "    }));",
   "  } else if (p === \"/dir/state\") {",
   "    e.respondWith(Promise.resolve({ status: 200, headers: { \"content-type\": \"text/plain\", \"x-zl-guest\": M }, body: M + \"|\" + self.__zlAct + \"|\" + self.__zlClients }));",
+  "  } else if (p === \"/dir/app/state\") {",
+  "    e.respondWith(Promise.resolve({ status: 200, headers: { \"content-type\": \"text/plain\", \"x-zl-guest\": M + \"-parent\" }, body: M + \"-parent-fallback\" }));",
   "  } else if (p === \"/dir/update-me\") {",
   "    e.respondWith(Promise.resolve({ status: 200, headers: { \"content-type\": \"text/plain\", \"x-zl-guest\": M }, body: \"updating\" }));",
   "    self.registration.update();",
+  "  }",
+  "});",
+  "",
+].join("\n");
+
+/* A more-specific same-origin scope must win over GUEST_V1's
+   /dir/ scope. Unregistering it must reveal the parent guest again. */
+const GUEST_NESTED = [
+  'var M = "guest-nested";',
+  "self.addEventListener(\"fetch\", function (e) {",
+  "  if (new URL(e.request.url).pathname === \"/dir/app/state\") {",
+  "    e.respondWith(Promise.resolve({ status: 200, headers: { \"content-type\": \"text/plain\", \"x-zl-guest\": M }, body: M }));",
   "  }",
   "});",
   "",
@@ -166,6 +180,9 @@ function startFixture(port) {
     } else if (path === "/dir/sw.js") {
       res.writeHead(200, { "content-type": "text/javascript" });
       res.end(fx.script);
+    } else if (path === "/dir/app/sw.js") {
+      res.writeHead(200, { "content-type": "text/javascript" });
+      res.end(GUEST_NESTED);
     } else if (path === "/dir/api/data") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end('{"zl":"api"}');
@@ -416,6 +433,62 @@ async function main() {
       throw new Error("unexpected guest state: " + JSON.stringify(r.body));
     }
     return r.body;
+  });
+
+  await check("multiple same-origin scopes route to the longest scope and unregister independently", async () => {
+    const nested = await evalIn(
+      frame,
+      "register nested guest",
+      'function(){return navigator.serviceWorker.register("/dir/app/sw.js", {scope:"/dir/app/"}).then(function(r){return {scope:r.scope};});}',
+    );
+    if (!nested.scope.endsWith("/dir/app/")) {
+      throw new Error("nested registration scope mismatch: " + JSON.stringify(nested));
+    }
+    const registrations = await evalIn(
+      frame,
+      "list guest registrations",
+      'function(){return navigator.serviceWorker.getRegistrations().then(function(rs){return rs.map(function(r){return r.scope;}).sort();});}',
+    );
+    if (registrations.length !== 2 || !registrations.some((s) => s.endsWith("/dir/")) ||
+        !registrations.some((s) => s.endsWith("/dir/app/"))) {
+      throw new Error("expected both scopes, got " + JSON.stringify(registrations));
+    }
+    const selected = await evalIn(
+      frame,
+      "select matching nested registration",
+      'function(){return navigator.serviceWorker.getRegistration("/dir/app/page.html").then(function(r){return r && r.scope;});}',
+    );
+    if (!String(selected).endsWith("/dir/app/")) {
+      throw new Error("getRegistration did not choose the longest scope: " + selected);
+    }
+    const before = await waitFor("nested guest fetch", 20000, async () => {
+      const r = await guestFetch(frame, "/dir/app/state");
+      return r.guest === "guest-nested" ? r : null;
+    });
+    if (before.body !== "guest-nested") throw new Error("nested guest did not intercept: " + JSON.stringify(before));
+
+    const unregistered = await evalIn(
+      frame,
+      "unregister nested registration",
+      'function(){return navigator.serviceWorker.getRegistration("/dir/app/page.html").then(function(r){return r.unregister();});}',
+    );
+    if (unregistered !== true) throw new Error("nested unregister failed: " + unregistered);
+    const remaining = await evalIn(
+      frame,
+      "list remaining registration",
+      'function(){return navigator.serviceWorker.getRegistrations().then(function(rs){return rs.map(function(r){return r.scope;});});}',
+    );
+    if (remaining.length !== 1 || !remaining[0].endsWith("/dir/")) {
+      throw new Error("unregister removed the wrong scope: " + JSON.stringify(remaining));
+    }
+    const parentFallback = await waitFor("parent guest fallback", 20000, async () => {
+      const r = await guestFetch(frame, "/dir/app/state");
+      return r.guest === "guest-v1-parent" ? r : null;
+    });
+    if (parentFallback.body !== "guest-v1-parent-fallback") {
+      throw new Error("parent guest did not resume: " + JSON.stringify(parentFallback));
+    }
+    return "nested scope won, then parent guest resumed after exact unregister";
   });
 
   await check("registration.update() swaps the realm on changed bytes; caches survive", async () => {

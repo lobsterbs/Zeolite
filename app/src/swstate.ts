@@ -92,12 +92,17 @@ export function setHttpsUpgrade(on: boolean): void {
   httpsUpgrade = on;
 }
 
-/* #556: host authorization for the OPFS replay spool. Off by
-   default: upload bytes reach persistent storage only when the
-   embedder explicitly opted in (zl:config spoolUploads). Ephemeral
-   like the other toggles: a worker restart reverts it, the host
-   re-pushes on boot. */
-let spoolUploads = false;
+/* #556: OPFS spool authorization for over-cap streamed request bodies
+   on redirect hops. On by default since the #556 follow-up: the spool
+   is the only path that follows a redirect on a body past the memory
+   cap, its budgets are hard (per request 256 MiB, live 512 MiB,
+   bodyspool.ts), and every failure mode fails the request honestly
+   instead of serving a truncated upload. Embedders that refuse
+   disk-backed upload staging opt OUT here (zl:config spoolUploads
+   false, engine.ts): upload bytes then never reach persistent
+   storage. Ephemeral like the other toggles: a worker restart reverts
+   to the default, the host re-pushes on boot. */
+let spoolUploads = true;
 
 export function spoolUploadsEnabled(): boolean {
   return spoolUploads;

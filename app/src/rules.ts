@@ -147,6 +147,31 @@ export function setRulesEnabled(enabled: boolean): void {
   rulesEnabled = enabled;
 }
 
+/** Current global toggle state (#551): the cosmetic injection gate in
+    cosmetics.ts reads the same flag the network block evaluation
+    short-circuits on, so zl:adblock disables both together. */
+export function isRulesEnabled(): boolean {
+  return rulesEnabled;
+}
+
+/** Allow-listed host for a URL, or null: the same compiled allow list
+    the block evaluation checks (allow beats block). Ghostery cosmetic
+    injection reuses this single source of truth so the shipped
+    captcha/anti-bot allowlist takes precedence over cosmetics without
+    a second list to keep in sync (#551). */
+export function allowlistedHostFor(
+  r: CompiledRules,
+  url: string,
+  rtype: ResourceType = "document",
+): string | null {
+  const host = hostOf(url);
+  if (!host) return null;
+  for (const e of r.allow) {
+    if (matchesHost(e, host) && typeOk(e.types, rtype)) return e.host;
+  }
+  return null;
+}
+
 /** Evaluate all lists against one request. Deterministic order: allow
     beats block; rewrite and modify accumulate. */
 export function applyRules(

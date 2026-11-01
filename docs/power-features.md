@@ -63,6 +63,25 @@ supports, at most: DOM tree snapshot, element highlight, computed styles,
 console capture, storage view. Full CDP is out of scope; the bridge speaks
 a tiny JSON schema of our own.
 
+Status (#550, first slice shipped): the bridge exists
+(`app/src/bootstrap/dominspect.ts`, wired into the bootstrap) and
+speaks the tiny JSON schema: bounded DOM tree snapshot (depth 12, 500
+nodes, truncation counted), computed styles for a snapshot node (64
+properties), and a bounded redacted console ring (128 entries, 8 args
+x 500 chars, objects flattened to their class name). The bridge
+answers only the controlling service worker, only with serialized
+data. Privacy shape: OFF by default - the devtools page (a host page)
+authorizes an inspection session for one live proxied client with
+`zl:domInspect {op:"authorize"}`; the console patch and every snapshot
+run only while authorized; revoke, navigation (new document
+generation) and client death tear it down. Replies carry the page
+generation; the engine and the devtools page discard stale
+generations, so a stale DevTools view cannot inspect a later document.
+NOT in this slice: element highlighting, storage view, and the
+"strict" privacy mode that would disable devtools entirely (the spec
+toggle does not exist yet; the gate is purely the explicit per-session
+host authorization).
+
 Both tiers respect permissions: an inspector that is not granted
 observe:requests shows nothing. Devtools are disabled entirely when the
 user is in a "strict" privacy mode.
@@ -194,6 +213,38 @@ unfixable: unforgeable location reads inside frames (#32 class)
 and the datacenter IP failing Google's risk engine even on a
 direct headless load. The no-bypass rule stands; hCaptcha and
 Cloudflare Turnstile frames take the same engine-routed path.
+
+### Per-attempt tracing (#451)
+
+`app/src/captcha-trace.ts` keeps a bounded per-attempt record of WHICH
+observable stage a CAPTCHA flow reached, so a failed flow can be told
+apart from a refused one. Stages, fixed vocabulary: `BOOTSTRAP_SEEN`
+(the challenge URL itself was fetched), `ASSET_LOAD` (a widget asset
+response was observed), `FRAME_HANDSHAKE` (a challenge iframe/frame
+navigation was observed), `SUBMISSION` (an upstream verify-family
+request was observed), `VERIFY_OUTCOME` (HTTP outcome class: `200` |
+`403` | `429` | `other-status` | `transport-failure`, plus the
+transport route and timing when the caller observed them). The provider
+class (`recaptcha` | `hcaptcha` | `turnstile` | `unknown`) is derived
+only from URL classification. Records carry no bodies, no POST data,
+no cookies, no tokens; URLs and notes pass the same `redactSecrets`
+gate as every diagnostic, and the trace stores exactly what that gate
+leaves. A stage the engine could not observe is either absent or
+explicitly marked `unknown` - never guessed.
+
+Bounds: 64 attempts, 16 stage records per attempt, overwrite-oldest,
+with honest drop counters. An engine that never sees a challenge holds
+no trace state at all. The host reads the snapshot with the new
+host-only `zl:captchaTrace` control message; per-session records are
+keyed by the browser client id so two concurrent sessions never mix
+attempts. Honest limits: the engine hooks only its existing CHALLENGE
+diagnostic emit points, so `SUBMISSION`/`VERIFY_OUTCOME` are recorded
+for the flows those points observe (today the pass-challenge class);
+a widget-internal verify call the engine never intercepts stays
+unrecorded, which is not a pass. This is observability for a human
+solving the challenge inside the session - not a solver, and it never
+feeds one.
+
 ## 5. Lazy images (opt-in rewrite pass)
 
 A zl:config imageLazy true push (boolean, absent keeps the live
