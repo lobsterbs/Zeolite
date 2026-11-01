@@ -172,7 +172,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
          path: optimistic true, native fallback on a refused POST */
       const post = (t: string): boolean => {
         if (!OF) return false;
-        OF(t, mark({ method: "POST", body: d ?? null, keepalive: true }, "send-beacon")).catch(() => {
+        OF(t, mark({ method: "POST", body: d ?? null, keepalive: true }, "beacon")).catch(() => {
           /* #457: a rejected POST may already be accepted upstream;
              replaying a non-idempotent beacon natively risks a double
              write. One attempt: the beacon is honestly lost on
