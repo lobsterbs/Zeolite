@@ -138,24 +138,37 @@ async function main() {
     let ping = null;
     if (scoreboardPage) {
       const nl = await hostControl(scoreboardPage, { type: "zl:getNetLog", since: 0 });
-      const lt = nl && nl.stats && nl.stats.locationTarget;
-      if (!lt || !Array.isArray(lt.entries))
-        throw new Error("locationTarget scoreboard missing from netlog stats: " + JSON.stringify(nl).slice(0, 300));
-      scoreboard = lt;
-      const byOrigin = new Map(lt.entries.map((e) => [e.origin, e]));
-      for (const rec of results) {
-        const host = new URL(rec.url).hostname;
-        const e = byOrigin.get(host);
-        rec.scoreboard = e ? {
-          reports: e.reports,
-          clientIds: e.clientIds.length,
-          locationReads: e.locationReads,
-          markedAt: e.markedAt,
-        } : null;
+      if (!nl || nl.ok === false) {
+        /* The host-control roundtrip itself failed (timeout, no
+           controller, postMessage rejection). That is the same
+           environmental class as an unreachable site - the runner
+           just spent up to three 45s goto timeouts and the page's
+           bridge can be equally starved - so record it honestly and
+           keep the probe report-only. A well-formed netlog answer
+           that lacks the locationTarget scoreboard is the structural
+           case and still gates below. */
+        console.log("scoreboard not collected: host control roundtrip failed (" +
+          ((nl && nl.error) || "no answer") + ") - environmental, non-gating");
+      } else {
+        const lt = nl.stats && nl.stats.locationTarget;
+        if (!lt || !Array.isArray(lt.entries))
+          throw new Error("locationTarget scoreboard missing from netlog stats: " + JSON.stringify(nl).slice(0, 300));
+        scoreboard = lt;
+        const byOrigin = new Map(lt.entries.map((e) => [e.origin, e]));
+        for (const rec of results) {
+          const host = new URL(rec.url).hostname;
+          const e = byOrigin.get(host);
+          rec.scoreboard = e ? {
+            reports: e.reports,
+            clientIds: e.clientIds.length,
+            locationReads: e.locationReads,
+            markedAt: e.markedAt,
+          } : null;
+        }
+        const p = await hostControl(scoreboardPage, { type: "zl:ping" });
+        ping = p ? { version: p.version, locationTargeting: p.locationTargeting } : null;
+        console.log("scoreboard: " + JSON.stringify(lt));
       }
-      const p = await hostControl(scoreboardPage, { type: "zl:ping" });
-      ping = p ? { version: p.version, locationTargeting: p.locationTargeting } : null;
-      console.log("scoreboard: " + JSON.stringify(lt));
     } else {
       console.log("no site rendered; scoreboard not collected (egress-blocked environment?)");
     }

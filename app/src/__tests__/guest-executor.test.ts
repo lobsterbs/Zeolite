@@ -118,26 +118,35 @@ describe("guest kernel", () => {
     expect(() => guest.deliver({ zl: "guestMessage", data: 2 })).not.toThrow();
   });
 
-  it("terminates on request and on guest unregister, and confirms cleanup", () => {
+  it("terminates on host request and on guest unregister, confirming each exact generation", () => {
     const k = new GuestKernel(() => 0);
     const host = new FakePort();
     k.registerHost(host);
     k.spawn(spawnMsg(), () => {});
-    const origin = (host.sent[0] as { origin: string }).origin;
-    const guest = new FakePort();
-    host.deliver({ kind: "zl:guestSpawned", origin, port: guest });
+    const firstFrame = host.sent[0] as { origin: string; scope: string; id: number };
+    const firstGuest = new FakePort();
+    host.deliver({ kind: "zl:guestSpawned", ...firstFrame, port: firstGuest });
+
     const c = collect();
-    k.terminate(origin, c.push);
+    k.terminate(firstFrame.origin, c.push);
     expect(c.replies[0].ok).toBe(true);
-    const tf = host.sent.find((m) => (m as { op?: string }).op === "terminate");
-    expect(tf).toBeTruthy();
-    /* Guest-initiated unregister also triggers termination. */
-    guest.deliver({ zl: "guestControl", op: "unregister" });
-    expect(host.sent.filter((m) => (m as { op?: string }).op === "terminate").length).toBe(2);
-    host.deliver({ kind: "zl:guestTerminated", origin });
+    expect(host.sent.filter((m) => (m as { op?: string }).op === "terminate")).toHaveLength(1);
+    host.deliver({ kind: "zl:guestTerminated", ...firstFrame });
     expect(k.active()).toEqual([]);
+
+    /* A new running generation can independently unregister itself. */
+    k.spawn(spawnMsg(), () => {});
+    const frames = host.sent.filter((m) => (m as { op?: string }).op === "spawn") as Array<{ origin: string; scope: string; id: number }>;
+    const secondFrame = frames[1];
+    const secondGuest = new FakePort();
+    host.deliver({ kind: "zl:guestSpawned", ...secondFrame, port: secondGuest });
+    secondGuest.deliver({ zl: "guestControl", op: "unregister" });
+    expect(host.sent.filter((m) => (m as { op?: string }).op === "terminate")).toHaveLength(2);
+    host.deliver({ kind: "zl:guestTerminated", ...secondFrame });
+    expect(k.active()).toEqual([]);
+
     const second = collect();
-    k.terminate(origin, second.push);
+    k.terminate(firstFrame.origin, second.push);
     expect(second.replies[0].ok).toBe(false);
     expect(second.replies[0].error).toContain("no guest for origin");
   });
@@ -159,25 +168,29 @@ describe("guest kernel", () => {
     expect(k.active()[0].state).toBe("spawning");
   });
 
-  it("#576: a same-identity re-register is a native-style success; a different script for the live origin is refused", () => {
+  it("re-registers idempotently and replaces changed script bytes only at the same scope", () => {
     const k = new GuestKernel(() => 0);
     const host = new FakePort();
     k.registerHost(host);
     k.spawn(spawnMsg(), () => {});
-    const origin = (host.sent[0] as { origin: string }).origin;
-    host.deliver({ kind: "zl:guestSpawned", origin, port: new FakePort() });
-    /* Same scriptURL + scope: ok, no respawn (sites re-register on
-       every load; the native container also resolves this). */
+    const firstFrame = host.sent[0] as { origin: string; scope: string; id: number };
+    host.deliver({ kind: "zl:guestSpawned", ...firstFrame, port: new FakePort() });
+
     const again = collect();
     k.spawn(spawnMsg(), again.push);
     expect(again.replies[0].ok).toBe(true);
-    expect(again.replies[0].origin).toBe(origin);
-    expect(host.sent.filter((m) => (m as { op?: string }).op === "spawn").length).toBe(1);
-    /* A different script for the same live origin is a real error. */
-    const third = collect();
-    k.spawn({ ...spawnMsg(), scriptURL: "https://a.example/sw2.js" }, third.push);
-    expect(third.replies[0].ok).toBe(false);
-    expect(third.replies[0].error).toContain("already active for this origin");
+    expect(again.replies[0].origin).toBe(firstFrame.origin);
+    expect(host.sent.filter((m) => (m as { op?: string }).op === "spawn")).toHaveLength(1);
+
+    const changed = collect();
+    k.spawn({ ...spawnMsg(), scriptURL: "https://a.example/sw2.js", script: "self.x=2;" }, changed.push);
+    expect(changed.replies[0].ok).toBe(true);
+    const frames = host.sent.filter((m) => (m as { op?: string }).op === "spawn") as Array<{ origin: string; scope: string; id: number; script: string }>;
+    expect(frames).toHaveLength(2);
+    expect(frames[1].scope).toBe(firstFrame.scope);
+    expect(frames[1].id).not.toBe(firstFrame.id);
+    expect(frames[1].script).toContain("self.x=2;");
+    expect(k.active()).toEqual([{ origin: firstFrame.origin, state: "spawning" }]);
   });
 
   it("drops the record when the host reports a spawn failure", () => {

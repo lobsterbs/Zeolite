@@ -74,7 +74,27 @@ const KNOWN_FIELDS = new Set([
   "incognito", "offline_enabled", "optional_host_permissions",
   "granted_host_permissions", "hidden", "user_scripts", "export",
   "default_icon",
+  /* #524: Firefox keys parsed below. theme/dictionaries are recorded
+     on the record (no theme or spellcheck host yet — compat.ts says
+     so); developer is plain metadata; lwt_* ride static themes. */
+  "theme", "dictionaries", "developer", "lwt_background", "lwt_alpha",
 ]);
+
+/** #524: Firefox accepts a GUID ({8-4-4-4-12} hex) or an id that looks
+    like add-on@example.org. Anything else is a hard install error, as
+    in Firefox ("The extension ID is invalid"). */
+function validGeckoId(id: string): boolean {
+  if (/^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$/.test(id)) return true;
+  return /^[a-zA-Z0-9-._]+@[a-zA-Z0-9-._]+$/.test(id);
+}
+
+/** #524: dotted version bounds ("109.0", "128.0.1"); Firefox rejects
+    non-numeric components. A malformed value warns and is recorded
+    as-is — the engine does not enforce Gecko version ranges. */
+function dottedVersion(v: unknown): string | null {
+  if (typeof v !== "string" || v.length === 0) return null;
+  return /^\d+(\.\d+)*$/.test(v) ? v : null;
+}
 
 function parseContentScripts(v: unknown, diags: ManifestDiagnostics): ContentScriptSpec[] {
   const out: ContentScriptSpec[] = [];
@@ -155,16 +175,33 @@ function parseWebAccessible(
   v: unknown,
   mv: 2 | 3,
   diags: ManifestDiagnostics
-): { globs: string[]; scoped: Array<{ resources: string[]; matches: string[] }> } {
+): {
+  globs: string[];
+  scoped: Array<{
+    resources: string[];
+    matches: string[];
+    extensionIds?: string[];
+    useDynamicUrl?: boolean;
+  }>;
+} {
   if (Array.isArray(v)) {
     /* MV2: plain string globs. */
     if (mv === 2) return { globs: strArr(v), scoped: [] };
-    /* MV3: array of { resources, matches, extension_ids }. Entries with
-       matches are scope-bound to the requesting page (#51); entries
-       without matches keep the MV2-style open glob exposure, with a
-       warning that they are not destination-scoped. */
+    /* MV3: array of { resources, matches, extension_ids, use_dynamic_url }.
+       Entries with matches are scope-bound to the requesting page (#51);
+       #524: entries with extension_ids are admitted to registered page
+       clients of the listed extensions ("*" admits every extension);
+       an entry with neither matches nor extension_ids keeps the
+       MV2-style open glob exposure, with a warning that it is not
+       destination-scoped. use_dynamic_url is recorded but not
+       enforced (same-origin serving has no dynamic origin to bind). */
     const globs: string[] = [];
-    const scoped: Array<{ resources: string[]; matches: string[] }> = [];
+    const scoped: Array<{
+      resources: string[];
+      matches: string[];
+      extensionIds?: string[];
+      useDynamicUrl?: boolean;
+    }> = [];
     for (const e of objArr(v)) {
       const res = strArr(e.resources);
       if (res.length === 0) {
@@ -172,11 +209,23 @@ function parseWebAccessible(
         continue;
       }
       const matches = strArr(e.matches);
-      if (matches.length === 0) {
+      const extensionIds = strArr(e.extension_ids);
+      const useDynamicUrl = e.use_dynamic_url === true;
+      if (matches.length === 0 && extensionIds.length === 0) {
         diags.warnings.push("web_accessible_resources: MV3 entry without matches exposed by glob only");
         globs.push(...res);
       } else {
-        scoped.push({ resources: res, matches });
+        scoped.push({
+          resources: res,
+          matches,
+          ...(extensionIds.length > 0 ? { extensionIds } : {}),
+          ...(useDynamicUrl ? { useDynamicUrl } : {}),
+        });
+        if (useDynamicUrl) {
+          diags.warnings.push(
+            "web_accessible_resources: use_dynamic_url recorded but not enforced (same-origin serving has no dynamic origin to bind)",
+          );
+        }
       }
     }
     return { globs, scoped };
@@ -219,6 +268,67 @@ export function parseManifest(
       : null;
   const gecko = bss && isObj(bss.gecko) ? (bss.gecko as Record<string, unknown>) : null;
   const geckoId = gecko && typeof gecko.id === "string" ? gecko.id : null;
+  /* #524: browser_specific_settings.gecko validation. A malformed id is
+     a Firefox-style hard error; malformed version bounds warn (the
+     engine records but does not enforce Gecko version ranges); engine
+     keys other than gecko/gecko_android have no Zeolite support. */
+  if (geckoId !== null && !validGeckoId(geckoId)) {
+    diags.errors.push(
+      "browser_specific_settings.gecko.id: '" + geckoId + "' is not a valid extension ID (a GUID like {12345678-...} or an id like add-on@example.org)",
+    );
+  }
+  if (gecko) {
+    for (const k of Object.keys(gecko)) {
+      if (k !== "id" && k !== "strict_min_version" && k !== "strict_max_version" && k !== "update_url") {
+        diags.warnings.push("browser_specific_settings.gecko: unsupported key '" + k + "' ignored");
+      }
+    }
+  }
+  if (bss) {
+    for (const engine of Object.keys(bss)) {
+      if (engine !== "gecko" && engine !== "gecko_android") {
+        diags.warnings.push("browser_specific_settings: engine '" + engine + "' has no Zeolite support, ignored");
+      }
+    }
+  }
+  /* Firefox-legal non-dotted bounds like "128.*" are recorded as-is
+     with a warning; dropping the value would lose manifest truth, and
+     the engine does not enforce Gecko version ranges anyway. */
+  const geckoMinVersion =
+    gecko && typeof gecko.strict_min_version === "string" && gecko.strict_min_version.length > 0
+      ? gecko.strict_min_version
+      : null;
+  const geckoMaxVersion =
+    gecko && typeof gecko.strict_max_version === "string" && gecko.strict_max_version.length > 0
+      ? gecko.strict_max_version
+      : null;
+  if (gecko?.strict_min_version !== undefined && dottedVersion(gecko.strict_min_version) === null) {
+    diags.warnings.push("browser_specific_settings.gecko.strict_min_version: '" + String(gecko.strict_min_version) + "' is not a dotted version, recorded as-is");
+  }
+  if (gecko?.strict_max_version !== undefined && dottedVersion(gecko.strict_max_version) === null) {
+    diags.warnings.push("browser_specific_settings.gecko.strict_max_version: '" + String(gecko.strict_max_version) + "' is not a dotted version, recorded as-is");
+  }
+  /* #524: static theme (Firefox "theme" key) parsed and recorded; the
+     engine has no theme host, so nothing consumes it yet. */
+  const themeRaw = isObj(raw.theme) ? (raw.theme as Record<string, unknown>) : null;
+  const theme = themeRaw
+    ? {
+        colors: isObj(themeRaw.colors) ? { ...(themeRaw.colors as Record<string, unknown>) } : {},
+        images: isObj(themeRaw.images) ? { ...(themeRaw.images as Record<string, unknown>) } : {},
+      }
+    : null;
+  /* #524: dictionaries map locale -> spellcheck dictionary path;
+     recorded for the host, no spellcheck integration yet. */
+  const dictionaries = isObj(raw.dictionaries)
+    ? Object.fromEntries(
+        Object.entries(raw.dictionaries as Record<string, unknown>).filter(
+          (e): e is [string, string] => typeof e[1] === "string",
+        ),
+      )
+    : null;
+  if (raw.dictionaries !== undefined && dictionaries !== null && Object.keys(dictionaries).length === 0) {
+    diags.warnings.push("dictionaries: no usable locale -> path entries");
+  }
 
   const optionsUi = isObj(raw.options_ui)
     ? (raw.options_ui as Record<string, unknown>)
@@ -270,6 +380,10 @@ export function parseManifest(
     manifestVersion: mv,
     manifest: raw,
     geckoId,
+    geckoMinVersion,
+    geckoMaxVersion,
+    theme,
+    dictionaries,
     permissions,
     hostPermissions,
     optionalPermissions: strArr(raw.optional_permissions),
@@ -302,37 +416,59 @@ export function parseManifest(
    substitution only: $placeholder$ variables inside the message
    text are left as written (extName-class fields do not use them).
    Identity is untouched: the digest is over package bytes, so i18n
-   resolution never changes the extension id. */
+   resolution never changes the extension id.
+
+   #523: the substituted field set now covers the user-visible
+   surface beyond name/description - short_name, the action family's
+   default_title (raw blocks and the parsed precedence winner),
+   sidebar_action.default_title, and commands descriptions. Message
+   names fold case-insensitively, as Chrome folds them at runtime.
+   #523: Firefox rejects a manifest that uses __MSG_*__ without a
+   default_locale; that is a hard install error here too. A missing
+   file or key stays a warning with the literal kept (the engine's
+   documented lenience for real-world packages). */
 export function resolveManifestI18n(
   raw: Record<string, unknown>,
   parsed: ParsedExtension,
   readFile: (path: string) => Uint8Array | undefined,
   diags: ManifestDiagnostics,
 ): void {
+  const locale = typeof raw.default_locale === "string" ? raw.default_locale : "";
+  /* Cached folded view of the default_locale messages: keys lowercase,
+     values kept raw (string shorthand or {message}). */
+  let folded: Record<string, unknown> | null = null;
+  let looked = false;
+  const loadMessages = (): Record<string, unknown> | null => {
+    if (looked) return folded;
+    looked = true;
+    if (!locale) return null;
+    for (const p of ["_locales/" + locale + "/messages.json", "/_locales/" + locale + "/messages.json"]) {
+      const bytes = readFile(p);
+      if (!bytes) continue;
+      try {
+        const v = JSON.parse(new TextDecoder().decode(bytes));
+        if (isObj(v)) {
+          const f: Record<string, unknown> = {};
+          for (const [k, val] of Object.entries(v)) f[k.toLowerCase()] = val;
+          folded = f;
+        }
+      } catch {
+        folded = null;
+      }
+      break;
+    }
+    return folded;
+  };
   const sub = (value: string): { text: string; unresolved: boolean } => {
     if (!value.includes("__MSG_")) return { text: value, unresolved: false };
-    let messages: Record<string, unknown> | null = null;
-    const locale = typeof raw.default_locale === "string" ? raw.default_locale : "";
-    if (locale) {
-      for (const p of ["_locales/" + locale + "/messages.json", "/_locales/" + locale + "/messages.json"]) {
-        const bytes = readFile(p);
-        if (!bytes) continue;
-        try {
-          const v = JSON.parse(new TextDecoder().decode(bytes));
-          if (isObj(v)) messages = v;
-        } catch {
-          messages = null;
-        }
-        break;
-      }
-    }
+    const messages = loadMessages();
     if (!messages) return { text: value, unresolved: true };
     let unresolved = false;
     const text = value.replace(/__MSG_([A-Za-z0-9_@]+)__/g, (full, key: string): string => {
-      const entry = messages![key];
+      const entry = messages[key.toLowerCase()];
       const msg =
-        isObj(entry) && typeof entry.message === "string"
-          ? entry.message
+        isObj(entry) && typeof (entry as Record<string, unknown>).message === "string"
+          ? (entry as Record<string, unknown>).message as string
           : typeof entry === "string"
             ? entry
             : null;
@@ -344,23 +480,75 @@ export function resolveManifestI18n(
     });
     return { text, unresolved };
   };
-  const localeName = typeof raw.default_locale === "string" ? raw.default_locale : "(no default_locale)";
-  const name = sub(parsed.name);
-  if (name.unresolved) {
-    diags.warnings.push(
-      "name: __MSG_*__ placeholder could not be resolved from _locales/" + localeName + "; the literal placeholder is kept"
-    );
-  } else if (name.text !== parsed.name) {
-    parsed.name = name.text;
-  }
-  if (typeof raw.description === "string") {
-    const desc = sub(raw.description);
-    if (desc.unresolved) {
-      diags.warnings.push(
-        "description: __MSG_*__ placeholder could not be resolved from _locales/" + localeName + "; the literal placeholder is kept"
+  const apply = (label: string, value: string, set: (t: string) => void): void => {
+    if (!value.includes("__MSG_")) return;
+    if (!locale) {
+      diags.errors.push(
+        label + ": __MSG_*__ placeholder used without a default_locale (Firefox rejects such manifests)",
       );
-    } else if (desc.text !== raw.description) {
-      raw.description = desc.text;
+      return;
+    }
+    const r = sub(value);
+    if (r.unresolved) {
+      diags.warnings.push(
+        label + ": __MSG_*__ placeholder could not be resolved from _locales/" + locale + "; the literal placeholder is kept",
+      );
+    } else {
+      set(r.text);
+    }
+  };
+  apply("name", parsed.name, (t) => {
+    parsed.name = t;
+  });
+  if (typeof raw.description === "string") {
+    apply("description", raw.description, (t) => {
+      raw.description = t;
+    });
+  }
+  if (typeof raw.short_name === "string") {
+    apply("short_name", raw.short_name, (t) => {
+      raw.short_name = t;
+    });
+  }
+  /* The action family: every raw block is substituted (manifest
+     truth), and the parsed precedence winner so the record surfaces
+     the resolved title. */
+  for (const key of ["action", "browser_action", "page_action"]) {
+    const block = isObj(raw[key]) ? (raw[key] as Record<string, unknown>) : null;
+    if (block && typeof block.default_title === "string") {
+      apply(key + ".default_title", block.default_title, (t) => {
+        block.default_title = t;
+      });
+    }
+  }
+  if (parsed.action?.defaultTitle && parsed.action.defaultTitle.includes("__MSG_")) {
+    apply("action.default_title", parsed.action.defaultTitle, (t) => {
+      parsed.action!.defaultTitle = t;
+    });
+  }
+  const sidebarBlock = isObj(raw.sidebar_action) ? (raw.sidebar_action as Record<string, unknown>) : null;
+  if (sidebarBlock && typeof sidebarBlock.default_title === "string") {
+    apply("sidebar_action.default_title", sidebarBlock.default_title, (t) => {
+      sidebarBlock.default_title = t;
+    });
+  }
+  if (parsed.sidebarAction?.defaultTitle && parsed.sidebarAction.defaultTitle.includes("__MSG_")) {
+    apply("sidebar_action.default_title", parsed.sidebarAction.defaultTitle, (t) => {
+      parsed.sidebarAction!.defaultTitle = t;
+    });
+  }
+  const commands = isObj(raw.commands) ? (raw.commands as Record<string, unknown>) : null;
+  if (commands) {
+    for (const [name, c] of Object.entries(commands)) {
+      if (isObj(c) && typeof (c as Record<string, unknown>).description === "string") {
+        apply(
+          "commands." + name + ".description",
+          (c as Record<string, unknown>).description as string,
+          (t) => {
+            (c as Record<string, unknown>).description = t;
+          },
+        );
+      }
     }
   }
 }

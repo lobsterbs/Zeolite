@@ -160,7 +160,11 @@ describe("navigator.serviceWorker shim (1.6)", () => {
     swShimRegister(s, "https://a.example/", "sw.js");
     const reg = swShimGet(s, "https://a.example/");
     expect(reg?.active?.state).toBe("activated");
-    expect(swShimGet(s, "https://a.example/", "/other")).toBeUndefined();
+    /* getRegistration takes a client URL, not a scope: a same-origin
+       path inside the registered scope matches (native behavior), a
+       foreign origin never does. */
+    expect(swShimGet(s, "https://a.example/", "/other")?.scope).toBe("https://a.example/");
+    expect(swShimGet(s, "https://b.example/")).toBeUndefined();
   });
 
   it("records are per-origin isolated", () => {
@@ -350,7 +354,7 @@ describe("swshim guest forwarding (#477 wave 3)", () => {
     expect(await reg.unregister()).toBe(true);
     expect(posted).toEqual([
       { type: "zl:guestRegister", scriptURL: "https://a.example/sw.js", scope: "https://a.example/" },
-      { type: "zl:guestUnregister" },
+      { type: "zl:guestUnregister", scriptURL: "https://a.example/sw.js", scope: "https://a.example/" },
     ]);
   });
 
