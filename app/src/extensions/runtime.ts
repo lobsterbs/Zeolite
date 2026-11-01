@@ -15,8 +15,8 @@ import { TABS, tabView, changeView } from "./tabs";
 import type { TabsEvent } from "./tabs";
 import { SCRIPTING } from "./scripting";
 import type { ScriptingInjection } from "./scripting";
-import { WEBNAV } from "./webnavigation";
-import type { NavigationCommitted, NavigationKind } from "./webnavigation";
+import { WEBNAV, navigationFilterPredicate } from "./webnavigation";
+import type { NavigationCommitted, NavigationKind, NavigationUrlFilter } from "./webnavigation";
 import { WEBREQ } from "./webrequest";
 import type { WrKind } from "./webrequest";
 import { MENUS } from "./contextmenus";
@@ -183,14 +183,16 @@ function makeTabsEvent(
 }
 
 /* webNavigation events gated by the webNavigation permission, exactly
-   as Firefox delivers them. Listener url filters use the webRequest
-   pattern grammar ({ urls: [...] }); Firefox's richer filter object
-   (urlMatches etc.) is not implemented (documented in ./compat). */
+   as Firefox delivers them. Listener filters accept the webRequest
+   pattern grammar ({ urls: [...] }) and Firefox's richer UrlFilter
+   object (urlMatches, hostEquals, queryEquals, ports, ...) (#560
+   residual); an invalid regex throws at addListener, as Firefox
+   throws at the call. */
 function makeWebNavEvent(
   ext: ExtensionRecord,
   kind: NavigationKind,
 ): {
-  addListener: (l: (info: NavigationCommitted) => void, filter?: { urls?: unknown }) => void;
+  addListener: (l: (info: NavigationCommitted) => void, filter?: { urls?: unknown } & NavigationUrlFilter) => void;
   removeListener: (l: (info: NavigationCommitted) => void) => void;
   hasListener: (l: (info: NavigationCommitted) => void) => boolean;
 } {
@@ -198,22 +200,40 @@ function makeWebNavEvent(
   return {
     addListener: (l, filter) => {
       if (offs.has(l)) return;
+      const wrapped = (info: NavigationCommitted): void => {
+        if (!ext.permissions.includes("webNavigation")) return;
+        try {
+          l(info);
+        } catch {
+          /* a broken listener is the extension's own problem */
+        }
+      };
       const urls = (Array.isArray(filter?.urls) ? filter!.urls : []).map(String);
-      offs.set(
-        l,
-        WEBNAV.subscribeKind(
-          kind,
-          (info) => {
-            if (!ext.permissions.includes("webNavigation")) return;
-            try {
-              l(info);
-            } catch {
-              /* a broken listener is the extension's own problem */
-            }
-          },
-          urls.length > 0 ? urls : undefined,
-        ),
-      );
+      const rich: NavigationUrlFilter = {};
+      let hasRich = false;
+      for (const k of [
+        "urlMatches",
+        "originAndPathMatches",
+        "urlPrefix",
+        "urlSuffix",
+        "urlContains",
+        "hostEquals",
+        "queryEquals",
+        "ports",
+      ] as const) {
+        const v = filter?.[k];
+        if (v !== undefined) {
+          rich[k] = v as never;
+          hasRich = true;
+        }
+      }
+      if (hasRich && urls.length > 0) {
+        offs.set(l, WEBNAV.subscribeKindAnd(kind, wrapped, urls, navigationFilterPredicate(rich)));
+      } else if (hasRich) {
+        offs.set(l, WEBNAV.subscribeKind(kind, wrapped, rich));
+      } else {
+        offs.set(l, WEBNAV.subscribeKind(kind, wrapped, urls.length > 0 ? urls : undefined));
+      }
     },
     removeListener: (l) => {
       offs.get(l)?.();
