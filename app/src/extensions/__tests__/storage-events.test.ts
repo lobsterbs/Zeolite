@@ -176,7 +176,7 @@ describe("unlimitedStorage (#520)", () => {
     const rec = extensions.get(id)!;
     const lifted = new ExtensionStorageArea(id, "local", "local", Number.POSITIVE_INFINITY);
     await lifted.set({ huge: "z".repeat(5 * 1024 * 1024 + 1024) });
-    expect((await lifted.get("huge")).huge.length).toBe(5 * 1024 * 1024 + 1024);
+    expect(((await lifted.get("huge")).huge as string).length).toBe(5 * 1024 * 1024 + 1024);
     void rec;
   });
 

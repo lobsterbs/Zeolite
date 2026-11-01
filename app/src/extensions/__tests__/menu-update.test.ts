@@ -144,7 +144,7 @@ describe("OnClickData enrichment (#519)", () => {
     expect(info.frameId).toBe(2);
     expect(info.editable).toBe(false);
     expect(info.documentUrl).toBe("https://page.example/doc");
-    expect((info as Record<string, unknown>).NOT_A_MOD).toBeUndefined();
+    expect((info as unknown as Record<string, unknown>).NOT_A_MOD).toBeUndefined();
     /* No checked/wasChecked/parentId keys for a plain item click. */
     expect("checked" in info).toBe(false);
     expect("parentId" in info).toBe(false);

@@ -678,7 +678,7 @@ export function buildApi(
     getPopup: async (details?: { tabId?: number | null }) => ACTION.getPopup(ext, kind, details),
     setIcon: async (details: Record<string, unknown> = {}) =>
       ACTION.setIcon(ext, kind, details as { path?: unknown; tabId?: number | null }),
-    onClicked: bridged<(tab: unknown, info: unknown) => void>((l) =>
+    onClicked: bridged<(tab: unknown, info?: unknown) => void>((l) =>
       ACTION.onClicked(ext.id, kind, (c) => {
         try {
           if (kind === "action") {
