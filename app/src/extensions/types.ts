@@ -98,8 +98,19 @@ export interface ExtensionRecord {
   icons: Record<string, string>;
   webAccessibleResources: string[];
   /* #51: MV3 web_accessible_resources entries whose "matches" are set;
-     served only when the requesting page destination matches. */
-  webAccessibleScoped: Array<{ resources: string[]; matches: string[] }>;
+     served only when the requesting page destination matches.
+     #524: "extension_ids" (exact engine ids or the "*" glob) admits
+     the resource to a registered page client of a listed extension
+     even when the page URL does not match; entries without matches
+     but with extension_ids are extension-gated only. use_dynamic_url
+     is recorded but not enforced (same-origin serving has no dynamic
+     origin to bind). */
+  webAccessibleScoped: Array<{
+    resources: string[];
+    matches: string[];
+    extensionIds?: string[];
+    useDynamicUrl?: boolean;
+  }>;
   externallyConnectable: ExternallyConnectableSpec | null;
   commands: Record<string, unknown>;
   contentSecurityPolicy: string | null;

@@ -343,7 +343,16 @@ export class ExtensionManager {
   async getResource(
     id: ExtensionId,
     path: string,
-    opts: { fromWeb: boolean; pageUrl?: string | null }
+    opts: {
+      fromWeb: boolean;
+      pageUrl?: string | null;
+      /* #524: the registered page-client extension id of the
+         requesting client, when the requester is itself an extension
+         page (SW-observed, never page-supplied). MV3 extension_ids
+         entries admit this requester even when the page URL does not
+         match the entry's matches. */
+      fromExtensionId?: string | null;
+    }
   ): Promise<Uint8Array | null> {
     const rec = this.exts.get(id);
     if (!rec || !rec.enabled) return null;
@@ -362,15 +371,23 @@ export class ExtensionManager {
       if (!okWar) {
         /* #51: MV3 web_accessible_resources entries with "matches" are
            scope-bound to the requesting page. The page destination is
-           SW-observed only; without one this fails closed. */
+           SW-observed only; without one this fails closed.
+           #524: an entry's extension_ids admits a registered page
+           client of a listed extension ("*" admits every extension)
+           even when the page URL does not match. An entry with only
+           extension_ids (no matches) is extension-gated only. */
         const pageUrl = opts.pageUrl;
+        const reqExt = opts.fromExtensionId ?? null;
         let okScoped = false;
-        if (pageUrl) {
-          for (const s of rec.webAccessibleScoped ?? []) {
-            if (s.resources.some(warGlobHit) && hostPatternsMatch(s.matches, pageUrl)) {
-              okScoped = true;
-              break;
-            }
+        for (const s of rec.webAccessibleScoped ?? []) {
+          if (!s.resources.some(warGlobHit)) continue;
+          const byPage =
+            pageUrl != null && s.matches.length > 0 && hostPatternsMatch(s.matches, pageUrl);
+          const byExt =
+            reqExt !== null && (s.extensionIds ?? []).some((x) => x === "*" || x === reqExt);
+          if (byPage || byExt) {
+            okScoped = true;
+            break;
           }
         }
         if (!okScoped) return null;
