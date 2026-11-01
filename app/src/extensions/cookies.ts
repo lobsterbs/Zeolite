@@ -17,7 +17,7 @@
 
 import type { ExtensionRecord } from "./types";
 import { hostPatternsMatch } from "./permissions";
-import { documentCookieWrite, jarDefaultEnumeration, jarRemoveIdentities } from "../cookies";
+import { documentCookieWrite, jarDefaultEnumeration, jarRemoveIdentities, onCookieJarChange, isDefaultJarNamespace } from "../cookies";
 import type { Cookie } from "../cookies";
 
 interface UrlFacts {
@@ -88,11 +88,15 @@ function activeOrigins(): Array<{ origin: string; cookies: Cookie[] }> {
 
 /* ---- cookies.onChanged (LB #76: more APIs) ------------------------ */
 
-/* Fires for extension-driven set/remove (cause explicit). Upstream
-   Set-Cookie jar merges are not surfaced yet; compat.ts documents
-   that gap instead of firing half the truth for page traffic. */
+/* #520: every jar admission now surfaces — extension cookies.set and
+   removes (cause explicit), page document.cookie writes, and upstream
+   Set-Cookie captures (overwrite for a replaced identity,
+   expired_overwrite for a server-issued deletion, explicit for a new
+   entry). Session-profile admissions stay invisible: extension reads
+   see the durable default jar, so events from other namespaces would
+   be half the truth. */
 export interface CookieChange {
-  cause: "explicit";
+  cause: "explicit" | "overwrite" | "expired_overwrite";
   removed: boolean;
   cookie: Record<string, unknown>;
 }
@@ -106,8 +110,30 @@ export type CookieChangeListener = (change: CookieChange) => void;
 const cookieListeners = new Map<CookieChangeListener, ExtensionRecord>();
 
 export function onCookieChanged(ext: ExtensionRecord, l: CookieChangeListener): () => void {
+  ensureJarSubscription();
   cookieListeners.set(l, ext);
   return () => cookieListeners.delete(l);
+}
+
+/* #520: the bridge subscribes to the jar admission seam once, on the
+   first listener. Admissions carry the jar namespace; only the durable
+   default namespace (the one jarDefaultEnumeration serves) reaches
+   extensions, mapped to Firefox's CookieChangeCause. */
+let jarSubscribed = false;
+function ensureJarSubscription(): void {
+  if (jarSubscribed) return;
+  jarSubscribed = true;
+  onCookieJarChange(({ result }) => {
+    if (!result.cookie) return;
+    if (!isDefaultJarNamespace(result.namespace)) return;
+    const c = result.cookie;
+    const cause: CookieChange["cause"] = result.stored
+      ? result.replaced
+        ? "overwrite"
+        : "explicit"
+      : "expired_overwrite";
+    emitCookieChange({ cause, removed: !result.stored, cookie: view(c) });
+  });
 }
 
 /** #281: a change is visible to an extension only when it holds the
@@ -254,14 +280,14 @@ export function cookiesSet(
   /* documentCookieWrite strips httpOnly: a script context cannot
      mint an HttpOnly cookie (documented in compat.ts). A rejected
      write (domain not scoping the host, samesite none without
-     secure, ...) resolves to null, never a fake view. */
+     secure, ...) resolves to null, never a fake view. #520: the
+     onChanged event now comes from the jar admission seam itself
+     (admitCookie), so this path fires exactly once with the real
+     cause (explicit for a new identity, overwrite for a replaced
+     one) and never double-fires with page-world writes. */
   const r = documentCookieWrite(String(details.url), parts.join("; "));
   if (!r.stored && !r.deleted) return Promise.resolve(null);
-  const rep = cookiesGet(ext, { url: details.url, name });
-  void rep.then((c) => {
-    if (c) emitCookieChange({ cause: "explicit", removed: !!r.deleted, cookie: c });
-  });
-  return rep;
+  return cookiesGet(ext, { url: details.url, name });
 }
 
 export function cookiesRemove(
