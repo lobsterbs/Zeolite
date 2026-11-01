@@ -18,12 +18,18 @@ in-page raw-stream implementation (RFC 6455 framing by hand in the
 bootstrap) was removed: it could speak only plaintext, so wss://
 destinations never actually worked.
 
-## ws:// upgraded to wss://
+## ws:// passes through as written (since #525)
 
-Insecure ws:// URLs are rewritten to wss:// before the transport sees
-them (the upgrade decision is traced under subsystem websocket). No
-plaintext WebSocket leaves the transport. Honest limit: targets that
-serve WebSocket only without TLS will fail; this is deliberate.
+Plaintext ws:// URLs are dialed as plaintext: no scheme upgrade exists
+anymore. The old force-upgrade to wss:// sent a TLS ClientHello to
+every plaintext-ws origin (an http-only origin cannot answer it, the
+handshake never settles and the page socket stalls), while cleartext
+http already rides the same wisp tunnel - so #525 removed the upgrade
+and passes ws:// through, traced under subsystem websocket with the
+rule "plaintext". Plaintext-only WebSocket servers therefore work.
+There is no configuration surface and no fallback: the URL the page
+wrote is the URL the transport dials (retargeted engine-side through
+the sender's virtual context, never re-schemed).
 
 ## Semantics
 
@@ -34,17 +40,38 @@ serve WebSocket only without TLS will fail; this is deliberate.
   framing, masking and fragmentation.
 - Reconnecting libraries see normal error/close sequences and can
   reconnect as usual.
-- `bufferedAmount` (#462) counts UTF-8 text and binary payload bytes
-  while page/worker messages await acceptance at the service-worker
-  bridge. The bridge sends a byte-count acknowledgment only after its
-  transport `send()` succeeds; failed writes receive no acknowledgment.
-  This is deliberately **bridge-queue accounting**, not an assertion
-  that data reached the peer or left the underlying TLS/Wisp buffer.
-  Sends discarded in CLOSING/CLOSED still add their payload bytes, matching
-  Chromium. Those discarded bytes receive no bridge acknowledgment.
-  Network-level bufferedAmount parity requires transport drain signals
-  that the current WsHandle does not expose.
+- `bufferedAmount` (#462, #546) is a transport-accepted-bytes estimate,
+  not native network backpressure - see "Observable semantics" below
+  for the exact contract.
 - Non-ws schemes fall through to the native constructor.
+
+## Observable semantics (#546)
+
+- `url` is the URL the constructor resolved, serialized: resolved
+  against the calling realm base, scheme-less http(s) references mapped
+  to ws(s), explicit ws/wss kept as written, fragments refused with
+  SyntaxError (WHATWG throws on a non-null fragment, so the value can
+  never carry one). This is the string the page constructed - nothing
+  new leaks page-side, the property is never re-minted into an engine
+  route and never the retargeted destination. The SW decodes the
+  destination from its own virtual context; engine-side logs and the
+  netlog keep engine-side identity and never log the page-written
+  original.
+- `bufferedAmount` counts UTF-8 text and binary payload bytes the page
+  has sent whose acceptance has not been acknowledged yet. The bridge
+  acknowledges each frame only after its transport `send()` succeeds;
+  failed writes receive no acknowledgment. When a transport exposes the
+  optional `WsHandle.drainAt()` write-acceptance seam (#546), the
+  acknowledgment carries the bytes the transport actually accepted (the
+  monotone delta since the previous acknowledgment, re-baselined
+  without underflow if a transport reports a lower counter), so the
+  counter tracks transport acceptance. Today's vendored transports
+  expose no such seam, so the acknowledgment is the send-returned
+  bridge acceptance and `bufferedAmount` stays bridge-queue accounting:
+  bytes leave the counter when the bridge call returns, not when the
+  peer or the network consumes them. Sends discarded in
+  CLOSING/CLOSED still add their payload bytes, matching Chromium, and
+  those discarded bytes receive no bridge acknowledgment.
 
 ## URL handling (#279)
 
@@ -111,13 +138,28 @@ The bridge registry holds only live connections: entries are dropped
 at close, at error-before-open, and at zl:teardown (every live
 connection is closed and forgotten before the SW unregisters).
 
+## WebRTC is unavailable (#544)
+
+WebRTC is not proxied and not faked: the bootstrap navguard deletes
+`RTCPeerConnection` outright (plus its prefixed aliases), so the exact
+failure mode is a plain constructor absence - a `ReferenceError`/
+`TypeError` at construction, never a half-working object, never a
+silent fallback onto another transport. The reason is egress honesty:
+ICE/STUN negotiates direct browser-to-peer UDP paths that bypass the
+service worker and the engine transport entirely, so a constructible
+WebRTC API would leak real connection metadata and traffic around the
+proxy. Hosts detect this state via the `zl:ping` capability report
+(`webrtc: "unavailable"`, `websocket: "native-bridge" | "relay"`,
+`websocketPlaintext: true`, `replaySpool: <live zl:config choice>`);
+a report of "unavailable" means designed absence, not breakage.
+
 ## Status
 
 Implemented (1.3 Carbide). Honest limits: the bridge requires SW
 control (a page outside the engine scope fails with error + close
 1006, which matches native offline behavior); subprotocol and
-extension negotiation follow libcurl; targets without TLS fail by
-design (ws:// is upgraded).
+extension negotiation follow libcurl; plaintext ws:// targets are
+dialed as plaintext since #525 (no upgrade, no TLS fallback).
 
 Synchronous transport send failures terminate the bridge connection (#485).
 The page receives an error followed by an abnormal 1006 close; the bridge

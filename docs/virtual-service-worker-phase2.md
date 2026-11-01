@@ -91,18 +91,15 @@ intentionally does not fake them.
 
 ## Registration identity and scope mapping
 
-Registration key: (site id, canonical scope). The site id is the
-same per-site partition identity (zl:<sitehash>:) that storage and
-cookie jars already use. The canonical scope resolves against the
-registering page's virtual URL and clamps to that page's virtual
-origin, exactly as phase 1 scopeFor does today.
+Registration key: (verified virtual origin, canonical scope). Multiple
+registrations can coexist on one virtual origin. Each canonical scope
+resolves against the registering page's virtual URL and clamps to that
+same virtual origin.
 
-Matching rule: a request or a page carries its virtual context
-(site id plus URL); a registration matches only when the site id is
-equal and the canonical scope is a path prefix. Two sites can
-register the same scope path and never see each other, because the
-site id is part of the key: a cross-site URL-prefix match is
-structurally impossible, not merely filtered.
+Matching rule: a registration matches only when the request URL has
+the same verified virtual origin and falls within its canonical scope.
+When multiple scopes match, the longest canonical scope wins. A
+cross-origin URL can never match a registration.
 
 Phase 1's defense in depth (a record that scopes a foreign origin
 is ignored even if it lands in this store) is kept and extended to
@@ -116,7 +113,7 @@ supported, kept honest.
 
 | Feature | Stage | Notes and limits |
 | --- | --- | --- |
-| register / getRegistration(s) / unregister | S1 | Already virtual since 1.6; S1 keys the store by (site, scope) so multiple scopes per origin work. |
+| register / getRegistration(s) / unregister | S1 | Keys the store by (virtual origin, scope); multiple scopes per origin coexist, the longest scope wins, and unregister removes only the exact scope. A hard cap of 64 active guest registrations per virtual origin bounds worker resources. |
 | registration.update() | S1 | Re-fetches the script URL through the transport and compares stored validators and length; updatefound fires on a real change, never fabricated. |
 | state machine and statechange | S1 | Native-shaped installing / installed / waiting / activating / activated with real waiting periods instead of the microtask settle; statechange events fire on transitions. |
 | ready | S1 | Already resolves; S1 keeps it pending while a registration for the scope is installing, matching native. |
@@ -124,7 +121,7 @@ supported, kept honest.
 | page to worker messaging | S2 | A MessageChannel relay to the sandbox. Without executed code there is no receiver, so S1 ships no fake message events. |
 | fetch event routing | S2 | Longest-prefix match over (site id, scope) inside the sandbox request path; a virtual fetch handler sees only requests of its own site. |
 | install / activate / skipWaiting / clients | S2 | Emulated with hard budgets: waitUntil is bounded, clients.claim reaches only pages of its own site. |
-| Cache API (caches) | S2 | Per (site, scope) partition inside the site storage partition, quota-bounded, separate from the engine page cache. |
+| Cache API (caches) | S2 | Origin-scoped and quota-bounded, shared by registrations on that virtual origin, separate from the engine page cache. |
 | push / BackgroundSync / PeriodicSync | N | Requires real browser infrastructure the engine cannot emulate honestly. |
 
 ## Execution sandbox model (stage 2)
@@ -256,7 +253,7 @@ Honest deviations of wave 1, all deliberate:
 
 ## Wave 3 status (#477 P3): fetch bridging wired into the live request path
 
-- After route decoding, origin-parameter virtualization, the disabled-site gate and client-context establishment, request.ts asks the running guest whose canonical scope matches the request URL first: guestDispatchFetchForUrl (GuestKernel.dispatchFetchForUrl) routes to the single origin-keyed running guest whose scope matches, under the wave-2 250 ms fail-closed budget and response validation.
+- After route decoding, origin-parameter virtualization, the disabled-site gate and client-context establishment, request.ts asks the running guest whose canonical scope matches the request URL first: guestDispatchFetchForUrl (GuestKernel.dispatchFetchForUrl) routes to the most-specific running guest whose scope matches, under the wave-2 250 ms fail-closed budget and response validation.
 - A handled guest answer is served verbatim as the Response, minus Set-Cookie/Set-Cookie2 (a guest response must not stamp cookies onto the engine origin; virtual-site cookies belong to the jar at request time). An invalid status/body combination fails closed. Every uncertain outcome (no guest, scope miss, no handler, malformed or oversize answer, timeout, termination, aborted request, construction error) runs the ordinary engine path unchanged.
 - Recursion guard: synthetic dispatch is provably non-recursive. Guests are network-blind, so a guest answer never originates an engine fetch event, and the pending-id one-shot marker consumes exactly one response per dispatch. Cancellation: an already-aborted request never reaches the guest; the budget bounds everything else.
 - Honest limits: a served guest response bypasses engine response-side processing (rewrite passes, response cache, transport-level policy such as ad-block rules); the request never leaves the engine, so there is no egress or IP exposure. Guest-initiated network fetches remain impossible, so the normal Zeolite SSRF, cookie and policy surfaces apply to the page real requests, not to guest answers. The security review of the full dispatch model remains the merge requirement.
@@ -332,6 +329,41 @@ over getter-only accessors like a real Worker realm".
   same record) with the site caches preserved.
 - clients: claim() resolves, matchAll() resolves [] (no client
   enumeration), get() resolves undefined, openWindow() rejects.
+
+### #576: truthful registration end to end
+
+- Arguments: the JS-literal rewriter mints a proxied page's URL
+  literals into engine token routes, so register() can arrive with an
+  opaque engine URL as its script or scope argument. The shim
+  recognizes engine-origin arguments and asks the worker to decode
+  them over zl:decodeRoutes (page-admitted, bounded per message,
+  DECODE_ROUTES_MAX routes at 2048 chars each); a token that fails
+  to decode fails closed with a native-style TypeError("Origin"), and
+  a non-token argument passes through untouched.
+- Timing: a registration before the virtual-origin marker lands is
+  queued behind a bounded wait (baseWaitMs, 2 s, 25 ms poll) and
+  fails closed if the virtual base never arrives: the raw engine
+  route is never used as a registration base.
+- Settling: the register forward rides a reply port; the kernel
+  defers its reply until zl:guestSpawned (confirm: true), passes a
+  zl:guestSpawnFailed through, and reaps a dead handshake as "guest
+  spawn handshake timed out". The page promise therefore resolves
+  only on a guest realm that is actually running; the store is
+  written only after the kernel confirms, so a rejected registration
+  leaves prior records intact.
+- Same-identity re-register: a live realm with the same scriptURL and
+  scope answers ok without a respawn (native parity; real sites
+  re-register on every load); a caller arriving mid-spawn piggybacks
+  on the pending handshake. A different script for the live origin
+  still errors.
+- Diagnostics: every zl:guestRegister rejection emits a bounded
+  SERVICE_WORKER diagnostic ("guest register rejected"), and an
+  accepted registration emits "guest register accepted" before the
+  deferred spawn.
+- Verified: suite/e2e/guest-sw.mjs grows two checks (honest rejection
+  without a host, success after the host lands) and
+  https://webbrowsertools.com/test-service-worker/ reports "Service
+  worker is activated" through the engine.
 
 ### Honest limits of this wave (unchanged unless listed)
 

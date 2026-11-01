@@ -13,7 +13,8 @@ import { DIAG } from "./diag";
 import { streamAlive, streamDone } from "./streams-alive";
 import { charsetFromHeader, makeDecoder, resolveCharset } from "./headers";
 import { docKind, jsBody } from "./transit";
-import { initScript, initSplicePoint } from "./pageload";
+import { traceDecision, tracingEnabled } from "./tracing";
+import { initScript, initSplicePoint, vPath } from "./pageload";
 import { currentPrefix } from "./codec";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { sriScanner } from "./sri";
@@ -54,6 +55,9 @@ interface JsRewriter {
   add_injection(path: string): void;
   set_blocked_hosts(hosts: string[]): void;
   set_lazy_images(): void;
+  /* #529: opt-in token-level decision tracing (see tracing.ts). */
+  set_trace?(on: boolean): void;
+  take_trace?(): string;
 }
 interface JsCssRewriter {
   process(chunk: string): string;
@@ -217,6 +221,20 @@ export function rewriteStream(
      the raw import-map script bodies of the decoded upstream
      text (see importmaps.ts). */
   onImportmap?: (body: string) => void,
+  /* #532: optional sink for the effective document base once the
+     first <base href> folded; receives the HOSTLESS form (the
+     same #144 relaxation as vpath) so the virtual location view
+     can serve document.baseURI reads. Fired once per distinct
+     folded base, at most a couple of times per document. */
+  onVbase?: (vbase: string) => void,
+  /* #529: optional diagnostics trace id; the rewriter's aggregated
+     decisions join the request's trace at stream end. */
+  traceId?: string,
+  /* #551: precomputed <style data-zl-cosmetic> markup (cosmetics.ts)
+     spliced with the init script after the doctype. Document
+     call sites only: injectInit=false (fetch/XHR HTML) never
+     receives cosmetics - a programmatic read is not a document. */
+  cosmeticStyle = "",
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const modP = rewriter();
@@ -242,7 +260,12 @@ export function rewriteStream(
         /* #414: injectInit=false serves fetch/XHR HTML with the URL
            rewrite but no bootstrap splice, so a plain-text API answer
            behind an HTML content-type survives byte intact. */
-        const init = injectInit ? initScript(base, deps!.fpScript() ?? (await deps!.siteScript(base))) : "";
+        /* #551: cosmetic styles ride the same after-doctype splice as
+           the init script. The wasm rewriter's add_injection only
+           emits <script src> tags (crates/rewriter html::emit_injections),
+           so a style element goes through this splice instead - the
+           smallest seam that keeps the rewriter untouched. */
+        const init = injectInit ? initScript(base, deps!.fpScript() ?? (await deps!.siteScript(base))) + cosmeticStyle : "";
         /* #531: scan only document-shaped rewrites; a fetch/XHR HTML
            body (injectInit=false) is programmatic data, never a
            document with subresource integrity metadata. */
@@ -262,7 +285,22 @@ export function rewriteStream(
         const mod = await modP;
         const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
         configureLocation(rw, resolveLocationPolicy(base, rule));
+        /* #529: opt-in token-level decision tracing; off by default
+           the wasm instance records and allocates nothing. */
+        if (tracingEnabled()) rw.set_trace?.(true);
         for (const path of rule.inject ?? []) rw.add_injection(path);
+        /* #532: drain the folded base per chunk (first base wins,
+           the rewriter tracks it); one post per distinct value. */
+        let lastVbase: string | null = null;
+        const drainBase = () => {
+          if (!onVbase) return;
+          const b = (rw as unknown as { take_base?: () => string | undefined }).take_base?.();
+          if (b && b !== lastVbase) {
+            lastVbase = b;
+            const vb = vPath(b);
+            if (vb) onVbase(vb);
+          }
+        };
         if (rule.block?.length) rw.set_blocked_hosts(rule.block);
         if (deps!.lazyImages()) rw.set_lazy_images();
         for (const u of csInject) rw.add_injection(u);
@@ -313,6 +351,21 @@ export function rewriteStream(
             if (rest) emit(rw.process(rest));
             const tail = rw.finish();
             reportLocation(rw, base);
+            drainBase();
+            /* #529: drain the aggregated rewriter decisions into the
+               trace ring; the JSON vocabulary is engine-compiled, so
+               no page data can ride it. A malformed drain never
+               breaks the served stream. */
+            if (tracingEnabled()) {
+              const decisions = rw.take_trace?.();
+              if (decisions && decisions !== "[]") {
+                try {
+                  for (const d of JSON.parse(decisions) as Array<{ pass: string; decision: string; n: number }>) {
+                    traceDecision({ subsystem: "rewriter", rule: d.pass, original: d.decision, result: "count=" + d.n, traceId });
+                  }
+                } catch { /* never break the stream over a trace */ }
+              }
+            }
             if (tail) controller.enqueue(encoder.encode(tail));
             controller.close();
             onDone?.();
@@ -323,6 +376,7 @@ export function rewriteStream(
             sriScan?.feed(t); mapScan?.feed(t);
             emit(rw.process(t));
             reportLocation(rw, base);
+            drainBase();
             continue;
           }
           if (decoder !== null) {
@@ -551,6 +605,80 @@ export async function rewriteJsBody(js: string, base: string, pageBase?: string)
   } finally { rw.free?.(); }
 }
 
+/* #456: total candidate buffering bound for the serve seams. A JS or
+   worker body above the cap streams through byte-identical: the
+   specifier, URL-literal and location passes skip it, fail-open with
+   the same contract as the wasm raw pass's element cap. */
+export const JS_BODY_CAP = 2 * 1024 * 1024;
+
+export type BoundedBody =
+  | { over: false; bytes: Uint8Array }
+  | { over: true; head: Uint8Array[]; rest: ReadableStream<Uint8Array> };
+
+/** Read a body up to JS_BODY_CAP. Over the cap the accumulated head
+    and the remainder stream on verbatim (never buffered whole);
+    cancel reaches the upstream reader through both wrappers. */
+export async function boundedBody(body: ReadableStream<Uint8Array> | null): Promise<BoundedBody> {
+  if (!body) return { over: false, bytes: new Uint8Array(0) };
+  const reader = body.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      const bytes = new Uint8Array(total);
+      let at = 0;
+      for (const p of parts) {
+        bytes.set(p, at);
+        at += p.byteLength;
+      }
+      return { over: false, bytes };
+    }
+    if (value) {
+      parts.push(value);
+      total += value.byteLength;
+    }
+    if (total > JS_BODY_CAP) {
+      const rest = new ReadableStream<Uint8Array>({
+        async pull(c) {
+          const r = await reader.read();
+          if (r.done) c.close();
+          else c.enqueue(r.value);
+        },
+        cancel: (reason) => {
+          void reader.cancel(reason);
+        },
+      });
+      return { over: true, head: parts, rest };
+    }
+  }
+}
+
+/** The passthrough response body: an optional first chunk (the
+    worker prelude) ahead of the bounded head and the remainder. */
+export function passthroughStream(
+  first: Uint8Array | null,
+  head: Uint8Array[],
+  rest: ReadableStream<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  const rd = rest.getReader();
+  const queue = first ? [first, ...head] : head.slice();
+  return new ReadableStream<Uint8Array>({
+    async pull(c) {
+      if (queue.length) {
+        c.enqueue(queue.shift()!);
+        return;
+      }
+      const { done, value } = await rd.read();
+      if (done) c.close();
+      else c.enqueue(value);
+    },
+    async cancel(reason) {
+      await rd.cancel(reason);
+    },
+  });
+}
+
 /* #449: origin-pinning detection for the script-serve seams. A body
    whose generated URLs are validated against an anchored ^https?:
    regex keeps its literals verbatim; the caller records the
@@ -566,3 +694,4 @@ export async function scriptPinsOrigins(js: string): Promise<boolean> {
     return false;
   }
 }
+

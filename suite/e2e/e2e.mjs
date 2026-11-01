@@ -22,9 +22,10 @@
       escape. The gate fails only on positive evidence.
 
    Honest gaps (documented, not faked): WebSocket targets are skipped
-      (the engine upgrades ws to wss by design; the local fixture is
-      plain HTTP, so the bridge cannot be exercised against loopback
-      without a TLS fixture) and the SW-restart group is not covered -
+      (plaintext ws:// passes through since #525, but the local
+      fixture is plain HTTP and neither suite ships a ws endpoint, so
+      the bridge cannot be exercised here without a socket fixture)
+      and the SW-restart group is not covered -
       see suite/e2e/README.md. The #36 rewriter constructs have
       real-Chromium checks below (meta refresh, iframe srcdoc, base
       href, srcset data URL candidates); SVG paint url() attributes
@@ -458,6 +459,93 @@ async function main() {
     return landing.url().slice(0, 44);
   });
 
+  await check("navigation: direct and proxied fragments match across initial load, redirect, meta, form, anchors and history (#543)", async () => {
+    const direct = await context.newPage();
+    let directInitial;
+    try {
+      await direct.goto(ORIGIN_A + "/dir/fragment.html#initial-target");
+      await direct.locator("#initial-target").waitFor();
+      directInitial = await direct.evaluate(() => ({
+        hash: location.hash,
+        top: document.getElementById("initial-target").getBoundingClientRect().top,
+      }));
+    } finally { await direct.close(); }
+    const initial = await openProxied(ORIGIN_A + "/dir/fragment.html#initial-target", "#initial-target");
+    const proxiedInitial = await initial.frame.evaluate(() => ({
+      hash: location.hash,
+      top: document.getElementById("initial-target").getBoundingClientRect().top,
+    }));
+    eq(proxiedInitial.hash, directInitial.hash, "initial fragment");
+    assert(Math.abs(proxiedInitial.top - directInitial.top) < 4, "initial anchor scroll differs from direct Chromium");
+
+    const directRedirect = await context.newPage();
+    let directRedirectResult;
+    try {
+      await directRedirect.goto(ORIGIN_A + "/dir/fragment-redirect");
+      await directRedirect.locator("#redirect-target").waitFor();
+      directRedirectResult = await directRedirect.evaluate(() => ({
+        hash: location.hash,
+        top: document.getElementById("redirect-target").getBoundingClientRect().top,
+      }));
+    } finally { await directRedirect.close(); }
+    const redirect = await openProxied(ORIGIN_A + "/dir/fragment-redirect", "#redirect-target");
+    const proxiedRedirectResult = await redirect.frame.evaluate(() => ({
+      hash: location.hash,
+      top: document.getElementById("redirect-target").getBoundingClientRect().top,
+    }));
+    eq(proxiedRedirectResult.hash, directRedirectResult.hash, "redirect fragment");
+    assert(Math.abs(proxiedRedirectResult.top - directRedirectResult.top) < 4, "redirect fragment scroll differs from direct Chromium");
+    assert(redirect.frame.url().startsWith(ENGINE) && !redirect.frame.url().includes(ORIGIN_A), "redirect route exposed the target origin");
+
+    const directMeta = await context.newPage();
+    try {
+      await directMeta.goto(ORIGIN_A + "/dir/fragment-meta.html");
+      await directMeta.locator("#meta-target").waitFor({ timeout: 12000 });
+      const directHash = await directMeta.evaluate(() => location.hash);
+      const meta = await openProxied(ORIGIN_A + "/dir/fragment-meta.html", "#meta-target");
+      eq(await meta.frame.evaluate(() => location.hash), directHash, "meta refresh fragment");
+    } finally { await directMeta.close(); }
+
+    const directForm = await context.newPage();
+    try {
+      await directForm.goto(ORIGIN_A + "/dir/fragment-form.html");
+      await directForm.locator("#fragment-form button").click();
+      await directForm.locator("#form-target").waitFor();
+      const directHash = await directForm.evaluate(() => location.hash);
+      const form = await openProxied(ORIGIN_A + "/dir/fragment-form.html", "#form-ready");
+      await form.frame.locator("#fragment-form button").click();
+      const target = await waitFor("proxied form fragment target", 20000, () => frameWith(form.page, "#form-target"));
+      eq(await target.evaluate(() => location.hash), directHash, "form navigation fragment");
+    } finally { await directForm.close(); }
+
+    const directHistory = await context.newPage();
+    let directHistoryHash;
+    try {
+      await directHistory.goto(ORIGIN_A + "/dir/fragment.html#history-start");
+      await directHistory.locator("#fragment-anchor").click();
+      await directHistory.waitForFunction(() => location.hash === "#anchor-target");
+      await directHistory.evaluate(() => history.back());
+      await directHistory.waitForFunction(() => location.hash === "#history-start");
+      await directHistory.evaluate(() => history.forward());
+      await directHistory.waitForFunction(() => location.hash === "#anchor-target");
+      directHistoryHash = await directHistory.evaluate(() => location.hash);
+    } finally { await directHistory.close(); }
+    const history = await openProxied(ORIGIN_A + "/dir/fragment.html#history-start", "#history-start");
+    await history.frame.locator("#fragment-anchor").click();
+    await history.frame.waitForFunction(() => location.hash === "#anchor-target");
+    await history.frame.evaluate(() => history.back());
+    await history.frame.waitForFunction(() => location.hash === "#history-start");
+    await history.frame.evaluate(() => history.forward());
+    await history.frame.waitForFunction(() => location.hash === "#anchor-target");
+    eq(await history.frame.evaluate(() => location.hash), directHistoryHash, "anchor history back/forward");
+
+    const hits = await fixtureHits(fixtureA);
+    const fragmentHits = hits.filter((h) => h.path.startsWith("/dir/fragment"));
+    assert(fragmentHits.length > 0, "fragment fixture produced no upstream requests");
+    assert(fragmentHits.every((h) => !h.path.includes("#")), "a fragment reached the upstream HTTP request line");
+    return fragmentHits.length + " upstream fragment routes; direct/proxied fragment navigation agrees";
+  });
+
   await check("routing: SPA pushState re-anchors engine-side and the router reads the virtual path (#236)", async () => {
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "pushState", `async () => {
@@ -759,6 +847,183 @@ async function main() {
     return out;
   });
 
+  await check("api: SharedWorker real-Chromium sharing, site isolation, worker storage and port teardown (#547)", async () => {
+    async function requestContext(frame, label) {
+      return await evalIn(frame, label, `() => new Promise((resolve, reject) => {
+        const w = window.__zlSharedWorker547 || new SharedWorker("/dir/shared-identity.js", { name: "zl-sharedworker-547-context", type: "classic" });
+        window.__zlSharedWorker547 = w;
+        const nonce = String(Date.now()) + Math.random();
+        const timer = setTimeout(() => reject(new Error("shared worker context timeout")), 12000);
+        w.port.onmessage = (e) => {
+          const d = e.data || {};
+          if (d.nonce !== nonce) return;
+          clearTimeout(timer);
+          if (d.error) reject(new Error(d.error));
+          else resolve(d.value);
+        };
+        w.port.start();
+        w.port.postMessage({ op: "context", nonce });
+      })`);
+    }
+    async function pingContext(frame) {
+      return await evalIn(frame, "shared worker surviving-port ping", `() => new Promise((resolve, reject) => {
+        const w = window.__zlSharedWorker547;
+        if (!w) return reject(new Error("shared worker handle missing"));
+        const nonce = String(Date.now()) + Math.random();
+        const timer = setTimeout(() => reject(new Error("shared worker ping timeout")), 8000);
+        w.port.onmessage = (e) => {
+          const d = e.data || {};
+          if (d.nonce !== nonce) return;
+          clearTimeout(timer);
+          if (d.error) reject(new Error(d.error));
+          else resolve(d.value);
+        };
+        w.port.postMessage({ op: "ping", nonce });
+      })`);
+    }
+    async function closeSharedPort(frame) {
+      await frame.evaluate(() => {
+        try { window.__zlSharedWorker547?.port.close(); } catch {}
+      });
+    }
+
+    const direct = await browser.newContext();
+    let directA1, directA2, directB;
+    try {
+      const d1 = await direct.newPage();
+      const d2 = await direct.newPage();
+      const db = await direct.newPage();
+      await Promise.all([
+        d1.goto(ORIGIN_A + "/dir/page.html"),
+        d2.goto(ORIGIN_A + "/dir/page.html"),
+        db.goto(ORIGIN_B + "/dir/page.html"),
+      ]);
+      await d1.evaluate(() => { document.cookie = "shared547=direct-a; path=/"; });
+      await db.evaluate(() => { document.cookie = "shared547=direct-b; path=/"; });
+      async function nativeContext(pg) {
+        return await pg.evaluate(() => new Promise((resolve, reject) => {
+          const w = new SharedWorker("/dir/shared-identity.js", { name: "zl-sharedworker-547-context", type: "classic" });
+          const nonce = String(Date.now()) + Math.random();
+          const timer = setTimeout(() => reject(new Error("direct SharedWorker timeout")), 10000);
+          w.port.onmessage = (e) => {
+            if (e.data?.nonce !== nonce) return;
+            clearTimeout(timer);
+            if (e.data.error) reject(new Error(e.data.error));
+            else resolve(e.data.value);
+          };
+          w.port.start();
+          w.port.postMessage({ op: "context", nonce });
+        }));
+      }
+      [directA1, directA2, directB] = await Promise.all([nativeContext(d1), nativeContext(d2), nativeContext(db)]);
+      assert(directA1.id === directA2.id, "direct Chromium failed to share a same-origin, same-name worker");
+      assert(directA1.namespace === directA2.namespace, "direct same-origin worker IDB namespace diverged");
+      assert(directA1.id !== directB.id, "direct Chromium shared worker globals across origins");
+      assert(directA1.namespace !== directB.namespace, "direct Chromium storage namespaces unexpectedly crossed origins");
+    } finally {
+      await direct.close();
+    }
+
+    const a1 = await openProxied(ORIGIN_A + "/dir/page.html");
+    await a1.frame.evaluate(() => { document.cookie = "shared547=proxy-a; path=/"; });
+    await sleep(400);
+    const a1Info = await requestContext(a1.frame, "proxied shared worker A1");
+    const a2 = await openProxied(ORIGIN_A + "/dir/page.html");
+    const a2Info = await requestContext(a2.frame, "proxied shared worker A2");
+    assert(a1Info.id === a2Info.id, "same virtual site across tabs did not share the worker global");
+    assert(a1Info.namespace === a2Info.namespace, "same virtual site worker storage namespace diverged");
+    assert(a2Info.connections >= 2, "the worker did not observe connections from both tabs: " + JSON.stringify(a2Info));
+    assert(String(a1Info.cookie).includes("shared547=proxy-a"), "worker did not inherit the virtual site's cookie profile: " + JSON.stringify(a1Info.cookie));
+    const a2Alive = await pingContext(a2.frame);
+    assert(a2Alive.id === a1Info.id, "second tab's worker port did not remain live");
+
+    const b = await openProxied(ORIGIN_B + "/dir/page.html");
+    await b.frame.evaluate(() => { document.cookie = "shared547=proxy-b; path=/"; });
+    await sleep(400);
+    const bInfo = await requestContext(b.frame, "proxied shared worker B");
+    assert(a1Info.id !== bInfo.id, "different virtual sites shared a SharedWorker global");
+    assert(a1Info.namespace !== bInfo.namespace, "worker IndexedDB namespace crossed virtual sites");
+    assert(String(bInfo.cookie).includes("shared547=proxy-b"), "second virtual site worker cookie profile missing: " + JSON.stringify(bInfo.cookie));
+    assert(!String(bInfo.cookie).includes("shared547=proxy-a"), "first virtual site's cookie crossed into second worker");
+
+    await closeSharedPort(a1.frame);
+    await a1.page.close();
+    const stillAlive = await pingContext(a2.frame);
+    assert(stillAlive.id === a2Info.id, "closing one client disconnected the other tab's SharedWorker port");
+    await closeSharedPort(a2.frame);
+    await a2.page.close();
+
+    /* Browsers may terminate a now-unreferenced SharedWorker at their
+       discretion. The invariant is that a fresh connection still works
+       and the per-site worker database survives that lifecycle edge. */
+    await sleep(500);
+    const a3 = await openProxied(ORIGIN_A + "/dir/page.html");
+    const a3Info = await requestContext(a3.frame, "proxied SharedWorker after all prior ports closed");
+    assert(a3Info.namespace === a1Info.namespace, "worker storage namespace was lost after port teardown");
+    assert(String(a3Info.cookie).includes("shared547=proxy-a"), "cookie profile did not survive worker reconnect");
+    return "direct Chromium baseline; same-site reuse; cross-site separation; site-scoped worker IDB/cookies; one-port close isolation; reconnect";
+  });
+
+  await check("api: network inspector distinguishes fetch, XHR, EventSource, beacon, worker, parser and navigation initiators (#545)", async () => {
+    const { page, frame } = await openProxied(ORIGIN_A + "/dir/initiator-page.html", "#init-marker");
+    await frame.locator("#initiator-img").evaluate((img) => img.decode());
+    const fetchValue = await evalIn(frame, "fetch initiator", `() => fetch("${ORIGIN_B}/api/initiator-probe?kind=fetch", { cache: "no-store" }).then(r => r.text())`);
+    eq(fetchValue, "initiator-ok", "fetch initiator fixture");
+    const xhrValue = await evalIn(frame, "XHR initiator", `() => new Promise((resolve, reject) => {
+      const x = new XMLHttpRequest();
+      x.open("GET", "${ORIGIN_B}/api/initiator-probe?kind=xhr");
+      x.onload = () => resolve(x.responseText);
+      x.onerror = () => reject(new Error("XHR initiator probe failed"));
+      x.send();
+    })`);
+    eq(xhrValue, "initiator-ok", "XHR initiator fixture");
+    const eventValue = await evalIn(frame, "EventSource initiator", `() => new Promise((resolve, reject) => {
+      const es = new EventSource("${ORIGIN_B}/api/initiator-probe?kind=eventsource");
+      const timer = setTimeout(() => { es.close(); reject(new Error("EventSource initiator timeout")); }, 10000);
+      es.onmessage = (e) => { clearTimeout(timer); es.close(); resolve(e.data); };
+      es.onerror = () => { clearTimeout(timer); es.close(); reject(new Error("EventSource initiator failed")); };
+    })`);
+    eq(eventValue, "eventsource-ok", "EventSource initiator fixture");
+    const beacon = await evalIn(frame, "sendBeacon initiator", `() => navigator.sendBeacon("${ORIGIN_B}/api/initiator-probe?kind=beacon", "body-never-record-this-547")`);
+    eq(beacon, true, "sendBeacon accepted");
+    const workerValue = await evalIn(frame, "worker fetch initiator", `() => new Promise((resolve, reject) => {
+      const w = new Worker("/dir/initiator-worker.js");
+      const timer = setTimeout(() => { w.terminate(); reject(new Error("worker fetch initiator timeout")); }, 12000);
+      w.onmessage = (e) => { clearTimeout(timer); w.terminate(); resolve(e.data); };
+      w.onerror = () => { clearTimeout(timer); w.terminate(); reject(new Error("worker fetch initiator failed")); };
+    })`);
+    eq(workerValue, "initiator-ok", "worker fetch initiator fixture");
+    await openProxied(ORIGIN_A + "/dir/initiator-nav.html?kind=navigation", "#initiator-nav-marker");
+    await sleep(700);
+    const logs = await hostControl(page, { type: "zl:getNetLog", since: 0 });
+    assert(Array.isArray(logs?.entries), "network inspector snapshot unavailable");
+    const expected = [
+      ["fetch", "FETCH"],
+      ["xhr", "XHR"],
+      ["eventsource", "EVENTSOURCE"],
+      ["beacon", "SEND_BEACON"],
+      ["worker", "WORKER_FETCH"],
+      ["parser", "RESOURCE"],
+      ["navigation", "NAVIGATION"],
+    ];
+    const missing = [];
+    for (const [kind, want] of expected) {
+      const row = logs.entries.find((e) => String(e.dest).includes("kind=" + kind));
+      if (!row) { missing.push(kind + ": no log row"); continue; }
+      if (row.detail?.initiatorType !== want) missing.push(kind + ": got " + String(row.detail?.initiatorType));
+      if (row.detail?.reqHeaders && Object.keys(row.detail.reqHeaders).some((k) => k.toLowerCase() === "x-zl-i"))
+        missing.push(kind + ": internal attribution header was stored");
+    }
+    assert(missing.length === 0, "initiator attribution mismatch: " + missing.join("; "));
+    const serialized = JSON.stringify(logs.entries);
+    assert(!serialized.includes("body-never-record-this-547"), "network inspector stored a request body");
+    const hits = (await fixtureHits(fixtureA)).concat(await fixtureHits(fixtureB));
+    const probeHits = hits.filter((h) => h.path.startsWith("/api/initiator-probe"));
+    assert(probeHits.every((h) => h.initiatorHeader == null), "internal initiator metadata reached the origin: " + JSON.stringify(probeHits));
+    assert(probeHits.length >= 5, "not all instrumented requests reached the fixture origin");
+    return expected.map(([kind, type]) => kind + "=" + type).join(", ");
+  });
+
   await check("api: a shared worker relays through the page-side relay", async () => {
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "sharedworker", `() => new Promise((resolve) => {
@@ -844,6 +1109,186 @@ async function main() {
     }`);
     assert(out.includes("fx=1"), "jar cookie missing: " + out);
     return out;
+  });
+
+  /* ---- cookie surface (#534) --------------------------------------
+     The cookieStore facade, the optimistic document.cookie deletion,
+     per-site jar scoping and the SameSite matrix under the approx
+     knob. The cross-site fixture hostname is a *.localhost name:
+     Chromium maps it to loopback by spec and glibc resolves it, and
+     its registrable domain differs from 127.0.0.1, so it is genuinely
+     cross-site for both native Chromium and the schemeful jar key.
+     Honest residuals, matching docs/cookies.md: the SameSite knob is
+     an approximation (every engine request is engine-initiated and the
+     site context comes from the verified virtual initiator, not a
+     reduced Referer), and Secure cookies are not readable on http
+     pages and not attached over http requests, native-consistent. */
+
+  await check("api: cookieStore facade is jar-backed (#534)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const out = await evalIn(frame, "cookiestore", `async () => {
+      if (typeof cookieStore !== "object" || cookieStore === null) return JSON.stringify({ facade: false });
+      await cookieStore.set("zl_cs", "1");
+      const after = await cookieStore.getAll();
+      const rec = await cookieStore.get("zl_cs");
+      await cookieStore.delete({ name: "zl_cs", path: "/" });
+      const gone = await cookieStore.getAll();
+      return JSON.stringify({
+        facade: true,
+        set: after.some((i) => i.name === "zl_cs" && i.value === "1"),
+        get: !!rec && rec.value === "1" && !("domain" in rec),
+        deleted: !gone.some((i) => i.name === "zl_cs"),
+        domainMember: after.some((i) => "domain" in i),
+      });
+    }`);
+    const r = JSON.parse(out);
+    assert(r.facade, "no cookieStore facade in the proxied page");
+    assert(r.set, "set/getAll round-trip failed: " + out);
+    assert(r.get, "get() record wrong: " + out);
+    assert(r.deleted, "delete did not remove the record: " + out);
+    assert(!r.domainMember, "records leaked a domain member: " + out);
+    return out;
+  });
+
+  await check("api: cookieStore change event and HttpOnly hiding (#534)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const out = await evalIn(frame, "cschange", `async () => {
+      const events = [];
+      cookieStore.addEventListener("change", (e) => events.push(e));
+      await fetch("/setcookie3");
+      const t0 = Date.now();
+      while (!events.some((e) => e.changed.some((i) => i.name === "fxs")) && Date.now() - t0 < 8000) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      await fetch("/setcookie4");
+      await new Promise((r) => setTimeout(r, 800));
+      const items = await cookieStore.getAll();
+      return JSON.stringify({
+        fxsEvent: events.some((e) => e.changed.some((i) => i.name === "fxs")),
+        hasFxs: items.some((i) => i.name === "fxs"),
+        hasFxh: items.some((i) => i.name === "fxh"),
+        fxhInEvents: events.some((e) => [...e.changed, ...e.deleted].some((i) => i.name === "fxh")),
+        docCookie: document.cookie,
+      });
+    }`, 20000);
+    const r = JSON.parse(out);
+    assert(r.fxsEvent, "change event never named fxs: " + out);
+    assert(r.hasFxs, "fxs missing from getAll: " + out);
+    assert(!r.hasFxh, "HttpOnly fxh leaked into the facade: " + out);
+    assert(!r.fxhInEvents, "HttpOnly fxh leaked into a change event: " + out);
+    assert(!r.docCookie.includes("fxh"), "HttpOnly fxh leaked into document.cookie: " + out);
+    return out;
+  });
+
+  await check("api: document.cookie deletion leaves no stale readable value (#534)", async () => {
+    const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const out = await evalIn(frame, "cookiedel", `async () => {
+      document.cookie = "zl_del=1; path=/";
+      const before = document.cookie;
+      document.cookie = "zl_del=1; Max-Age=0; path=/";
+      const after = document.cookie;
+      return JSON.stringify({ before, after });
+    }`);
+    const r = JSON.parse(out);
+    assert(r.before.includes("zl_del=1"), "set not visible: " + out);
+    assert(!r.after.includes("zl_del"), "stale value readable after deletion: " + out);
+    return out;
+  });
+
+  await check("api: virtual-site cookie isolation (#534)", async () => {
+    const { frame } = await openProxied("http://cookietest.localhost:7101/dir/page.html");
+    const outA = await evalIn(frame, "isoA", `async () => {
+      await cookieStore.set("zl_iso", "a");
+      return JSON.stringify(await cookieStore.getAll());
+    }`);
+    assert(JSON.parse(outA).some((i) => i.name === "zl_iso"), "zl_iso not set on the fixture host: " + outA);
+    const { frame: frameB } = await openProxied(ORIGIN_B + "/dir/page.html");
+    const outB = await evalIn(frameB, "isoB", `async () => {
+      return JSON.stringify({ items: await cookieStore.getAll(), doc: document.cookie });
+    }`);
+    const r = JSON.parse(outB);
+    assert(!r.items.some((i) => i.name === "zl_iso"), "cross-site facade leak: " + outB);
+    assert(!r.doc.includes("zl_iso"), "cross-site document.cookie leak: " + outB);
+    return outB;
+  });
+
+  await check("api: SameSite matrix under the approx knob (#534)", async () => {
+    const SS_A = "http://cookietest.localhost:7101";
+    const SS_B = "http://cookietest.localhost:7102";
+    const { page: pageA, frame: frameA } = await openProxied(SS_A + "/dir/page.html");
+    const knob = await hostControl(pageA, { type: "zl:sameSite", policy: "approx" });
+    assert(knob?.ok !== false, "sameSite knob rejected: " + JSON.stringify(knob));
+    /* Seed the three cookies same-site; ssNone is Secure so it is
+       stored but never readable on this http page. */
+    const seeded = await evalIn(frameA, "ssseed", `async () => {
+      await fetch("/setsamesite?c=strict");
+      await fetch("/setsamesite?c=lax");
+      await fetch("/setsamesite?c=none");
+      await new Promise((r) => setTimeout(r, 500));
+      return JSON.stringify((await cookieStore.getAll()).map((i) => i.name));
+    }`, 20000);
+    const seededNames = JSON.parse(seeded);
+    assert(seededNames.includes("ssStrict") && seededNames.includes("ssLax"),
+      "Strict/Lax cookies missing from the facade: " + seeded);
+    assert(!seededNames.includes("ssNone"),
+      "Secure None cookie readable on an http page: " + seeded);
+    /* Same-site subresource (same scheme and registrable domain,
+       different port): Strict and Lax attach; the Secure None
+       cookie is not attached over http. */
+    const { page: pageSame, frame: frameSame } = await openProxied(SS_B + "/dir/page.html");
+    await hostControl(pageSame, { type: "zl:sameSite", policy: "approx" });
+    const sameSite = await evalIn(frameSame, "sssame", `async () => {
+      const r = await fetch("${SS_A}/zl-echocookie", { credentials: "include" });
+      return await r.text();
+    }`);
+    assert(sameSite && sameSite.includes("ssStrict=1") && sameSite.includes("ssLax=1"),
+      "same-site subresource did not attach Strict/Lax: " + JSON.stringify(sameSite));
+    assert(!sameSite.includes("ssNone"), "Secure cookie attached over http: " + JSON.stringify(sameSite));
+    /* Cross-site subresource: neither Strict nor Lax attaches. */
+    const { page: pageX, frame: frameX } = await openProxied(ORIGIN_B + "/dir/page.html");
+    await hostControl(pageX, { type: "zl:sameSite", policy: "approx" });
+    const crossSite = await evalIn(frameX, "sscross", `async () => {
+      const r = await fetch("${SS_A}/zl-echocookie", { credentials: "include" });
+      return await r.text();
+    }`);
+    assert(!crossSite || (!crossSite.includes("ssStrict") && !crossSite.includes("ssLax")),
+      "cross-site subresource attached Strict/Lax: " + JSON.stringify(crossSite));
+    /* Cross-site navigation from the ORIGIN_B page to SS_A: the
+       request is navigation-shaped (mode navigate) with a verified
+       cross-site initiator, so Lax attaches and Strict does not
+       under the schemeful approx. #276: the two subresource legs
+       carry credentials include, the contract a cross-origin
+       (different port) or cross-site fetch needs before the jar
+       considers any cookie at all. */
+    await evalIn(frameX, "ssnavgo", `async () => {
+      const a = document.createElement("a");
+      a.id = "zl-nav-go";
+      a.href = "${SS_A}/nav-cookie.html";
+      a.textContent = "go";
+      document.body.appendChild(a);
+    }`);
+    /* Trusted input: the navguard only routes user-driven clicks. */
+    await frameX.locator("#zl-nav-go").click();
+    /* The navguard serves the trusted click at a navh handle route
+       (/nav-cookie.html?zlNavh=...), not an opaque /j/ route, so the
+       frame search matches the route by prefix, not via frameWith. */
+    const navFrame = await waitFor("nav-cookie frame", 45000, async () => {
+      for (const f of pageX.frames()) {
+        try {
+          if (!f.url().startsWith(ENGINE + "/nav-cookie.html")) continue;
+          if ((await f.locator("#zl-nav-cookie").count()) > 0) return f;
+        } catch {}
+      }
+      return null;
+    });
+    const navCookie = await evalIn(navFrame, "ssnav", `async () => {
+      return document.getElementById("zl-nav-cookie").textContent;
+    }`);
+    assert(navCookie.includes("ssLax=1"), "navigation did not attach Lax: " + navCookie);
+    assert(!navCookie.includes("ssStrict"), "navigation attached Strict: " + navCookie);
+    /* Restore the shipped default for every later check. */
+    await hostControl(pageA, { type: "zl:sameSite", policy: "off" });
+    return "lax/strict/none matrix ok";
   });
 
   /* ---- pass-through invariant (#96) --------------------------------
@@ -1038,7 +1483,13 @@ async function main() {
     return out;
   });
 
-  await check("api: navigator.serviceWorker.register in a proxied page is a virtual record", async () => {
+    /* #576: registration is truthful now. Without a connected guest
+     host page the kernel cannot run the guest realm, so the page
+     register() promise rejects with the kernel real reason instead
+     of resolving a phase-1 virtual record that claimed success.
+     The register-to-activated path with a guest host connected is
+     proven in guest-sw.mjs. */
+  await check("api: navigator.serviceWorker.register without a guest host rejects honestly (#576)", async () => {
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const out = await evalIn(frame, "swshim", `async () => {
       try {
@@ -1046,7 +1497,7 @@ async function main() {
         return r ? "ok" : "none";
       } catch (e) { return "REJECTED " + e; }
     }`);
-    eq(out, "ok", "virtual registration");
+    eq(out, "REJECTED TypeError: no guest host page connected", "honest rejection without a guest host page");
     return out;
   });
 
@@ -1244,20 +1695,21 @@ async function main() {
     }
     /* The rewriter half of #36 is assertable: the srcdoc body IS
        rewritten, so the img src must be an engine route and never
-       the fixture origin. The decode half is a documented Chromium
-       platform limitation: about:srcdoc frames are not service-worker
-       clients (crbug.com/41411856; the revert CL e1d141d72688), so
-       their subresource requests bypass the SW, hit the engine
-       static server and 404. The extension host has no such gap
-       (declarativeNetRequest covers frame-initiated loads). Pass
-       when the rewrite is proven and the frame shows exactly the
-       documented uncontrolled-404 state; fail on anything else. */
+       the fixture origin. The decode half follows the platform:
+       current Chromium (verified at 156) makes about:srcdoc frames
+       service-worker clients, so the image decodes through the
+       engine SW decode pipeline; the 404 branch stays for an older
+       Chromium that still bypasses (the crbug.com/41411856 era).
+       The extension host has no such gap either way
+       (declarativeNetRequest covers frame-initiated loads).
+       suite/e2e/srcdoc-clients.mjs (#528) pins both arms class by
+       class; this check stays tolerant of the platform version. */
     assert(String(o.src).startsWith(ENGINE + "/j/"), "srcdoc img was not rewritten to an engine route: " + o.src);
     assert(!String(o.src).includes("7101"), "srcdoc img src leaks the fixture origin: " + o.src);
     if (o.w > 0) return "decoded " + o.src.slice(0, 44);
     assert(o.ctrl === false && Array.isArray(o.probe) && o.probe[0] === 404,
       "srcdoc image did not decode and the frame is not in the documented uncontrolled-404 state (crbug 41411856): " + out);
-    return "rewritten; srcdoc frame not an SW client (crbug 41411856), probe 404 confirms the documented state";
+    return "rewritten; srcdoc frame not an SW client on this Chromium (legacy crbug 41411856-era state)";
   });
 
   await check("rewriter: base href folds later relative URLs (#36)", async () => {
@@ -1506,11 +1958,27 @@ async function main() {
     return "same-site only";
   });
 
-  await check("isolation: cookieStore is absent, not faked (#37)", async () => {
+  await check("isolation: cookieStore is the jar-backed facade, never the native store (#37, #534)", async () => {
+    /* #37 removed the native engine-origin CookieStore; #534 replaces
+       the removal with the per-virtual-site facade. The invariant that
+       survives: the page NEVER holds the engine-origin native store. */
     const { frame } = await openProxied(ORIGIN_A + "/dir/page.html");
-    const t = await evalIn(frame, "cookieStore type", `() => typeof window.cookieStore`);
-    eq(t, "undefined", "cookieStore must be removed (documented absence), not faked");
-    return "absent";
+    const out = await evalIn(frame, "cookieStore facade", `async () => {
+      if (typeof window.cookieStore !== "object" || !window.cookieStore) return "missing";
+      const rec = await cookieStore.get("zl_absent_probe");
+      const entries = await cookieStore.getAll();
+      return JSON.stringify({
+        own: Object.keys(window.cookieStore).sort().join(","),
+        probeNull: rec === null,
+        noDomain: entries.every((i) => !("domain" in i)),
+      });
+    }`);
+    const r = JSON.parse(out);
+    assert(r.own === "addEventListener,delete,get,getAll,onchange,removeEventListener,set",
+      "facade surface changed: " + out);
+    assert(r.probeNull, "get() of a missing name must resolve null: " + out);
+    assert(r.noDomain, "facade records leaked a domain member: " + out);
+    return "facade";
   });
 
   await check("privacy: no browser-direct fixture request in the network capture (#34)", async () => {

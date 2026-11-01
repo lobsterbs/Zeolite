@@ -26,6 +26,7 @@ vi.mock("@ghostery/adblocker", () => ({
 }));
 
 import { applyRules, loadRules } from "../rules";
+import { streamAlive, streamDone } from "../streams-alive";
 import { configureGhostery, ghosteryBlock, ghosteryLoadInProgress } from "../ghostery";
 
 const LIST_URL =
@@ -36,7 +37,14 @@ async function prime(): Promise<void> {
     cap.inits.push(init);
     return Promise.resolve(new Response("ok", { status: 200 }));
   });
+  /* #577: the kick gates on the first proxied body having settled;
+     the real streams-alive pair stands in for that first body. */
+  streamAlive("https://page.example/doc.html");
+  streamDone("https://page.example/doc.html");
   ghosteryBlock(LIST_URL, "script");
+  /* #577: the idle-gated kick needs two consecutive quiet
+     samples 250ms apart, so the first load starts at ~250ms. */
+  await new Promise<void>((r) => setTimeout(r, 300));
   const pending = ghosteryLoadInProgress();
   if (pending) await pending;
 }

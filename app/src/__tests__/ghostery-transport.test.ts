@@ -73,7 +73,13 @@ describe("ghostery list transport (#381)", () => {
     const emit = vi.spyOn(DIAG, "emit");
     const { configureGhostery, ghosteryBlock, ghosteryLoadInProgress } = await import("../ghostery");
     configureGhostery(() => Promise.reject(new Error("list host down")));
+    const { streamAlive, streamDone } = await import("../streams-alive");
+    streamAlive("https://page.example/doc.html");
+    streamDone("https://page.example/doc.html");
     expect(ghosteryBlock(LIST_URL, "script")).toBeNull();
+    /* #577: the idle-gated kick needs two consecutive quiet
+       samples 250ms apart, so the first load starts at ~250ms. */
+    await new Promise<void>((r) => setTimeout(r, 300));
     const pending = ghosteryLoadInProgress();
     if (pending) await pending;
     const row = emit.mock.calls

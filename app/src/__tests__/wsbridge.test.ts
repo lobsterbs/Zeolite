@@ -253,6 +253,100 @@ describe("WsBridge", () => {
   });
 });
 
+/* #546 write-acceptance seam: when a transport exposes drainAt(), the
+   drain acknowledgment carries the transport's accepted-byte delta
+   instead of the bridge send size, so page bufferedAmount tracks
+   transport acceptance. Absent or null keeps the #462 send-returned
+   acknowledgment. */
+describe("WsHandle drainAt write-acceptance seam (#546)", () => {
+  function drainFactory(drainAt: () => number | null): {
+    factory: WsFactory;
+    handlers: FakeHandlers[];
+  } {
+    const handlers: FakeHandlers[] = [];
+    const factory: WsFactory = {
+      open: (url, protocols, h) => {
+        handlers.push({ url, protocols, h });
+        return {
+          send: () => undefined,
+          close: () => undefined,
+          drainAt,
+        };
+      },
+    };
+    return { factory, handlers };
+  }
+
+  const drainsOf = (p: { posted: unknown[] }) =>
+    p.posted
+      .filter((x) => (x as { ev?: string }).ev === "drain")
+      .map((x) => (x as { bytes: number }).bytes);
+
+  it("acknowledges the transport-accepted delta instead of the send size", () => {
+    const { hooks } = fakeHooks();
+    let accepted = 0;
+    const { factory, handlers } = drainFactory(() => accepted);
+    const b = new WsBridge(factory, hooks);
+    const p = fakePort();
+    b.open(p, "wss://example.com/", []);
+    handlers[0]!.h.onopen("");
+    /* The bridge-queued frame is not yet accepted by the transport:
+       the ack carries 0, the page counter keeps the 5 bytes. */
+    p.onmessage?.({ data: { op: "send", data: "hello" } });
+    expect(drainsOf(p)).toEqual([0]);
+    /* The transport reports acceptance lazily; the next send releases
+       the previously accepted bytes first (monotone deltas). */
+    accepted = 5;
+    p.onmessage?.({ data: { op: "send", data: "x" } });
+    expect(drainsOf(p)).toEqual([0, 5]);
+    accepted = 6;
+    p.onmessage?.({ data: { op: "send", data: "y" } });
+    expect(drainsOf(p)).toEqual([0, 5, 1]);
+    /* 7 bytes sent, 6 accepted: exactly 1 byte stays on the page
+       counter (the tail the transport has not accepted yet). */
+    expect(drainsOf(p).reduce((a, c) => a + c, 0)).toBe(6);
+  });
+
+  it("re-baselines a lower transport counter without underflowing the page", () => {
+    const { hooks } = fakeHooks();
+    let accepted = 5;
+    const { factory, handlers } = drainFactory(() => accepted);
+    const b = new WsBridge(factory, hooks);
+    const p = fakePort();
+    b.open(p, "wss://example.com/", []);
+    handlers[0]!.h.onopen("");
+    p.onmessage?.({ data: { op: "send", data: "abc" } }); /* accepted 5 > sent 3 */
+    expect(drainsOf(p)).toEqual([5]);
+    accepted = 2; /* the transport restarted its counter */
+    p.onmessage?.({ data: { op: "send", data: "d" } });
+    expect(drainsOf(p)).toEqual([5, 0]);
+    accepted = 9;
+    p.onmessage?.({ data: { op: "send", data: "e" } });
+    expect(drainsOf(p)).toEqual([5, 0, 7]);
+    for (const d of drainsOf(p)) expect(d).toBeGreaterThanOrEqual(0);
+  });
+
+  it("keeps the send-returned acknowledgment when drainAt returns null or is absent", () => {
+    const { hooks } = fakeHooks();
+    const nulled = drainFactory(() => null);
+    const b = new WsBridge(nulled.factory, hooks);
+    const p = fakePort();
+    b.open(p, "wss://example.com/", []);
+    nulled.handlers[0]!.h.onopen("");
+    p.onmessage?.({ data: { op: "send", data: "é" } });
+    p.onmessage?.({ data: { op: "send", data: new Uint8Array(3) } });
+    expect(drainsOf(p)).toEqual([2, 3]);
+
+    const absent = fakeFactory();
+    const b2 = new WsBridge(absent.factory, hooks);
+    const p2 = fakePort();
+    b2.open(p2, "wss://example.com/", []);
+    absent.handlers[0]!.h.onopen("");
+    p2.onmessage?.({ data: { op: "send", data: "é" } });
+    expect(drainsOf(p2)).toEqual([2]);
+  });
+});
+
 /* #61 keepalive watchdog. Fake timers drive the ticks; the factory
    below owns a controllable ping/lastPongAt seam so the watchdog runs
    against a transport that really answers (or really stays silent). */

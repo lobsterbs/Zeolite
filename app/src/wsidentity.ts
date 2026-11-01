@@ -13,8 +13,10 @@
  * source for engine requests), and the per-site UA override (zl:rules)
  * - with an active fingerprint profile winning, per the 1.8 Telluride
  * wire-surface invariant. ws:/wss: targets are mapped to http:/https:
- * for the jar and rule lookups (the jar only parses http(s), and the
- * bridge upgrades ws->wss before the transport anyway).
+ * for the jar and rule lookups only (the jar and the per-site rules
+ * parse http(s) URLs); the wire scheme is untouched - the bridge
+ * passes ws:// through as plaintext since #525, so the mapping never
+ * upgrades anything on the wire.
  *
  * The page never supplies headers itself: the control message carries
  * only the initiator origin, so a page cannot smuggle arbitrary

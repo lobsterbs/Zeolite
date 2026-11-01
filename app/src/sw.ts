@@ -53,7 +53,7 @@ import { bootExtensionSubsystem, installLifecycle, raceBoot, wireDispatchers } f
    key, fingerprint scripts, per-site profile cache) lives in
    ./swstate; this entrypoint and the request engine are call sites. */
 import { getFpScript, getRouteKey, isImageLazy, setEngineDegraded, siteProfileFor, ZEOLITE_VERSION } from "./swstate";
-import { ALARMS, MGMT, TABS, SCRIPTING, DOWNLOADS, NOTIFY, PERMS, bootEnabled, extensions, wakeExtension } from "./extensions";
+import { ALARMS, MGMT, TABS, SCRIPTING, DOWNLOADS, NOTIFY, ACTION, PERMS, bootEnabled, extensions, wakeExtension } from "./extensions";
 
 import { messageListener } from "./control";
 /* #82: the request engine (route decode, page cache, upstream hop
@@ -153,6 +153,15 @@ const initReady = (async () => {
   } catch {
     /* in-memory registry only */
   }
+  /* #541: restore the extension download handoff registry. Records
+     the host never finished recover as their last known non-terminal
+     state (recoveredAt marker); terminal states stay final. Storage
+     failure means an in-memory registry, never an init failure. */
+  try {
+    await DOWNLOADS.load();
+  } catch {
+    /* in-memory registry only */
+  }
   /* #118: the download resume path issues its Range request through
      the engine transport; the wisp tunnel relays the header
      end-to-end (the seam test pins that it is sent). */
@@ -174,7 +183,7 @@ const initReady = (async () => {
      whose decoded destination matches the target (an unmatched
      scripting payload is dropped, never broadcast to proxied
      pages). Wiring lives in ./lifecycle. */
-  wireDispatchers({ tabs: TABS, scripting: SCRIPTING, downloads: DOWNLOADS, notify: NOTIFY });
+  wireDispatchers({ tabs: TABS, scripting: SCRIPTING, downloads: DOWNLOADS, notify: NOTIFY, action: ACTION });
   /* Advanced permissions: request/remove run through the manager
      so grants persist and the master record stays authoritative. */
   PERMS.setBackend(async (id, op, perms) => {

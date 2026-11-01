@@ -19,6 +19,7 @@ import { b64uDecode, b64uEncode, buildNavHandleUrl, buildQueryHandleUrl, decodeC
 import { decodeBody, mapLocationHeader, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
 import { applyExperimentalCsp } from "./csp-translation";
+import { cspClearClient, cspGate, cspSetClient, engineCspMarker, newCspRegistry, planEngineCsp } from "./csp-enforce";
 import { experimentalEnabled } from "./experimental-flags";
 import { loadRouteHistory, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
@@ -28,16 +29,20 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, type TransitDecision } from "./transit";
+import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, isChallengeMitigated, type TransitDecision } from "./transit";
 import { loadPolicy, behaviorMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
-import { cssRewriteStream, isCss, isHtml, isJs, rawFrom, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
+import { boundedBody, cssRewriteStream, isCss, isHtml, isJs, passthroughStream, rawFrom, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, siteUaFor, type GhosteryRedirect, type ResourceType } from "./rules";
 import { ghosteryLoadInProgress } from "./ghostery";
+import { ghosteryCosmeticsForDocument } from "./cosmetics";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
 import { DIAG, classifyStageFailure, type DiagStage } from "./diag";
+/* #451: per-attempt CAPTCHA tracing rides the existing CHALLENGE emit
+   points below; no new interception logic. */
+import { CAPTCHA_TRACE, outcomeOf } from "./captcha-trace";
 /* #90: the adoptResponse seam lives in ./downloads; the downloads
    subsystem owns its own state and the request engine stays unaware
    of download tracking internals. */
@@ -66,29 +71,33 @@ import {
   VCTX_CAP,
   type VirtualContext,
 } from "./vctx";
-import { assetBaseCount, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
+import { assetBaseCount, isFlagSurgeryPath, isRecoverableAssetDest, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, type FlatFetch } from "./assetbases";
 import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersist, inheritJarClient, isPassChallenge, jarClientHasRoot, jarHeaders, jarProfilesReady, jarProfileState, markJarClientUnbound, pruneJarClients, type CookieRequestContext } from "./cookies";
 /* #87: the shared service-worker runtime state (per-client virtual
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
    control plane are call sites. */
-import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setAdaptiveTransit, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
 import { newSriRegistry, SRI_VERIFY_BYTE_CAP, sriBlockedResponse, sriClearClient, sriExpectation, sriNote, sriVerifyBytes } from "./sri";
-import { newImportmapRegistry, importmapNote, resolveBareImport, pageKeyOf } from "./importmaps";
+import { newImportmapRegistry, importmapNote, importmapReset, resolveBareImportFor, pageKeyOf } from "./importmaps";
 
 /* #531 SRI: engine-side subresource integrity registry. Memory-only by
    design (like VCTX): expectations bind a document client to the
    integrity attributes its HTML carried, and a worker restart
    simply forgets them (page reload repopulates). */
 const SRI = newSriRegistry();
+/* #527: per-client engine-side CSP plans. The same memory-only
+   lifecycle as SRI: plans exist solely in the live worker and are
+   rebuilt from the upstream CSP header on every navigation. */
+const CSPREG = newCspRegistry();
 /* #554: per-page import maps recorded from served documents (see
    importmaps.ts); module-worker serve seams resolve bare specifiers
    through the recorded map of the owning page. */
 const MAPS = newImportmapRegistry();
-import { literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome } from "./adaptive-evidence";
+import { classifyServeFailure, literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome, recordServeFailure } from "./adaptive-evidence";
 import { spoolBody, SpoolHandle, SpoolUnavailableError } from "./bodyspool";
 
-import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, serveExtensionAsset } from "./extensions";
+import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, rootedPageGrant, serveExtensionAsset, serveRootedExtPage } from "./extensions";
 
 
 declare const self: ServiceWorkerGlobalScope;
@@ -197,6 +206,25 @@ export function withBodyStallDeadline(resp: Response, ms: number, traceId: strin
     (out as Response & { rawHeaders?: Array<[string, string]> }).rawHeaders = raw;
   }
   return out;
+}
+
+/* #532: deliver the effective document base to the owning page as a
+   zl:vbase control message (the HOSTLESS form, the same #144
+   relaxation as vpath; the virtual location view serves it as
+   __zl.baseURI). Best-effort and bounded: a page that never
+   receives it keeps the honest fallback (the virtual document
+   URL, the spec default without a base element). */
+function pushVbase(clientId: string, resultingClientId: string, vbase: string): void {
+  const id = resultingClientId || clientId;
+  if (!id) return;
+  void (async () => {
+    try {
+      const client = await raceBoot(self.clients.get(id), "vbase client lookup", PRE_DEADLINE_BOUND_MS);
+      client?.postMessage({ type: "zl:vbase", vbase });
+    } catch {
+      /* no client: the page keeps the fallback view */
+    }
+  })();
 }
 
 export function withDeadline<T>(
@@ -925,7 +953,11 @@ export function replayCapTrips(): number {
     retry is honestly unavailable for it. Non-stream bodies and
     oversized announced bodies pass through untouched; an overflow
     mid-read throws so the caller serves the honest error strand,
-    never a corrupted body. */
+    never a corrupted body. #556: with hopReplay and the spool
+    authorized (default-on; zl:config spoolUploads is the opt-out),
+    the body is staged to the bounded OPFS spool instead of memory -
+    spoolUnavailable before the first byte keeps the documented
+    one-shot/memory paths with an explicit DIAG event. */
 export async function replayableInit(
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
   opts: { relayPossible?: boolean; hopReplay?: boolean; spoolAuthorized?: boolean } = {},
@@ -961,8 +993,8 @@ export async function replayableInit(
   if (/^\d+$/.test(clRaw)) {
     if (Number(clRaw) > replayBodyCap()) {
       /* #556: the hop chain replays an over-cap streamed body through
-         the host-authorized OPFS spool instead of surfacing the
-         redirect to the page. */
+         the OPFS spool (default-on; zl:config spoolUploads false
+         opts out) instead of surfacing the redirect to the page. */
       const spool = await trySpool();
       if (spool) {
         /* The announced length is replaced by the spooled truth,
@@ -985,9 +1017,10 @@ export async function replayableInit(
     return init;
   } else {
     /* #556: an unannounced body with a live replay path spools when
-       the host authorized it: even a chunked upload becomes
-       replayable without a memory copy, and the spool cap (not the
-       32 MiB memory cap) bounds it. */
+       the spool is authorized (default-on since the #556 follow-up;
+       zl:config spoolUploads false opts out): even a chunked upload
+       becomes replayable without a memory copy, and the spool cap (not
+       the 32 MiB memory cap) bounds it. */
     const spool = await trySpool();
     if (spool) return { ...init, body: spool.file, spool };
   }
@@ -1057,6 +1090,9 @@ async function upstreamFetch(
   policy: CompiledPolicy,
   rtype: ResourceType,
   traceId: string,
+  /* #577: isolated = fail without touching the shared client (the
+     ghostery list load). */
+  isolated = false,
 ): Promise<Response> {
   if (init.signal?.aborted) {
     throw init.signal.reason ?? new DOMException("request aborted", "AbortError");
@@ -1159,7 +1195,7 @@ async function upstreamFetch(
   }
   /* #226: thread the trace id so cooldown relay failures are
      attributed in the diagnostics ring. */
-  return wispTransport.fetch(dest, init, traceId);
+  return wispTransport.fetch(dest, init, traceId, { isolated });
 }
 
 /** #290 residual (2026-10-20 sorry-page report): recovery candidates
@@ -1186,7 +1222,7 @@ export function ghosteryListFetch(dest: string, init?: RequestInit): Promise<Res
   const headers = new Headers(init?.headers);
   const method = init?.method ?? "GET";
   return loadPolicy().then((policy) =>
-    upstreamFetch(dest, { method, headers }, policy, "fetch", DIAG.trace()),
+    upstreamFetch(dest, { method, headers }, policy, "fetch", DIAG.trace(), true),
   );
 }
 
@@ -1411,6 +1447,38 @@ async function revalidateBeforeUse(req: Request, hit: Response, context: CookieR
 
 /* ---- Fetch interception -------------------------------------------- */
 
+/** Fixed-vocabulary page/worker instrumentation header. It is diagnostic
+    metadata only, never an authorization or routing signal. The request
+    engine strips it before the upstream hop. */
+export const REQUEST_INITIATOR_HEADER = "x-zl-i";
+
+/** Classify browser evidence or the diagnostic marker inserted by our
+    wrappers. A page can forge that header, so it is never a trust
+    boundary and only changes the inspector label. Empty/unproven
+    requests stay UNKNOWN. */
+export function requestInitiator(req: Request): string {
+  const marked = req.headers.get(REQUEST_INITIATOR_HEADER);
+  if (marked === "fetch") return "FETCH";
+  if (marked === "xhr") return "XHR";
+  if (marked === "beacon") return "SEND_BEACON";
+  if (marked === "worker") return "WORKER_FETCH";
+  if (req.mode === "navigate") return "NAVIGATION";
+  if ((req.headers.get("accept") ?? "").toLowerCase().includes("text/event-stream")) return "EVENTSOURCE";
+  if (req.destination) return "RESOURCE";
+  return "UNKNOWN";
+}
+
+/** Request headers shared with extension interception APIs.
+    Internal attribution metadata is never part of the extension-facing
+    WebRequest surface. */
+export function extensionRequestHeaders(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    if (name.toLowerCase() !== REQUEST_INITIATOR_HEADER) out[name] = value;
+  });
+  return out;
+}
+
 /** The request destination from the spec source of truth first:
     sec-fetch-* are forbidden headers the browser's network layer
     adds, and SW-visible requests can lack them entirely (Firefox;
@@ -1521,12 +1589,16 @@ const routeRestore: Promise<void> = (async () => {
     const cache = await caches.open(ZL_ROUTE_CACHE);
     const hit = await cache.match(routeKeyUrl());
     if (hit) {
-      /* KDL shape: route-config prefix "/j/" https-upgrade #true nav-handles #false */
+      /* KDL shape: route-config prefix "/j/" https-upgrade #true nav-handles #false adaptive-transit #false */
       const [node] = parseKdl(await hit.text());
       if (node && node.name === "route-config") {
         setScheme(typeof node.props.prefix === "string" ? node.props.prefix : "/j/");
         if (typeof node.props["https-upgrade"] === "boolean") setHttpsUpgrade(node.props["https-upgrade"]);
         if (typeof node.props["nav-handles"] === "boolean") setNavHandles(node.props["nav-handles"]);
+        /* #539: the learned-transit kill switch persists with the route
+           shape: a worker restart must not silently rearm demotion
+           that the operator turned off. */
+        if (typeof node.props["adaptive-transit"] === "boolean") setAdaptiveTransit(node.props["adaptive-transit"]);
         /* 2026-10-15: the announced public wisp endpoint persists with
            the route shape so an idle-killed worker instance restores
            it on restart - the embedder re-announces only on
@@ -1607,6 +1679,8 @@ export async function persistRoute(prefix: string): Promise<void> {
           (isHttpsUpgrade() ? "#true" : "#false") +
           " nav-handles " +
           (navHandlesEnabled() ? "#true" : "#false") +
+          " adaptive-transit " +
+          (adaptiveTransitEnabled() ? "#true" : "#false") +
           (altEndpoint() ? " wisp-endpoint " + JSON.stringify(altEndpoint()) : "") +
           (primaryWispOverrideValue() ? " wisp-primary " + JSON.stringify(primaryWispOverrideValue()) : ""),
       ),
@@ -1944,6 +2018,30 @@ let jarPruneInFlight = false;
    virtual base baked into the head. The token carries page-known
    data only (the opaque site token and the page's own virtual
    URL), never an engine secret; a malformed token fails closed. */
+/* #580: Google-class error-beacon endpoints. A page's own error
+   pipeline reports through fetch/XHR beacons (httpservice/retry/jserror,
+   gen_204 with an err= parameter) - invisible to the console hook, so
+   a session whose error pipeline is firing still exports "0 errors".
+   The classifier is deliberately narrow (the two observed shapes
+   only); the fetch seam emits one diagnostic per beacon hit so an
+   export shows the page's own error signal next to the console
+   hook's silence. */
+export function isErrorBeaconUrl(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.pathname === "/jserror" || u.pathname.endsWith("/jserror")) return true;
+  if (u.pathname === "/gen_204" || u.pathname.endsWith("/gen_204")) {
+    for (const [k, v] of u.searchParams) {
+      if (k === "err" && v !== "") return true;
+    }
+  }
+  return false;
+}
+
 export function zlBwTokenParse(search: string): { s: string; b: string } | null {
   let raw: string | null = null;
   try {
@@ -1967,6 +2065,91 @@ export function zlBwHead(prefix: string, site: string, base: string): string {
     "self.__ZL_SITE__=" + JSON.stringify(site) + ";\n" +
     "self.__ZL_WORKER_BASE__=" + JSON.stringify(base) + ";\n"
   );
+}
+
+/* ---- #552: streaming response transforms (engine-owned guards) ---
+   The interception response kind may declare a streaming transform
+   (intercept.ts InterceptStreamTransform). The engine wraps the
+   plugin pipe in two guards it owns:
+   - the upstream guard counts raw bytes entering the plugin pipe: a
+     known content-length over the declared cap never enters it (the
+     caller serves the raw body untouched, fail open), and an
+     unknown-length body that crosses the cap mid-flight errors the
+     whole pipe (the page sees an aborted body, never a corrupted
+     raw-and-transformed mixture);
+   - the downstream guard errors the pipe when the plugin misses its
+   declared first-output deadline (a stalling transform becomes a
+   network-error-shaped failure, not a hang).
+   Everything else is native pipeThrough semantics: backpressure
+   reaches upstream unchanged, a page-side cancel propagates back, an
+   upstream error propagates forward. Exported for the regression
+   tests. */
+export interface ZlStreamGuards {
+  upstream: TransformStream<Uint8Array, Uint8Array>;
+  downstream: TransformStream<Uint8Array, Uint8Array>;
+}
+
+export function zlStreamGuards(
+  maxBytes: number,
+  firstOutputMs?: number,
+): ZlStreamGuards {
+  let seen = 0;
+  let firstOutput = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let downstreamController: TransformStreamDefaultController<Uint8Array> | null =
+    null;
+  const kill = (message: string): void => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    try {
+      downstreamController?.error(new Error(message));
+    } catch {
+      /* already closed: nothing to fail */
+    }
+  };
+  const upstream = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      seen += chunk.byteLength;
+      if (seen > maxBytes) {
+        kill("zl: stream transform over the declared maxInputBytes");
+        controller.error(
+          new Error("zl: body over the declared transform cap"),
+        );
+        return;
+      }
+      if (timer === null && !firstOutput && firstOutputMs !== undefined) {
+        timer = setTimeout(
+          () => kill("zl: stream transform missed the first-output deadline"),
+          firstOutputMs,
+        );
+      }
+      controller.enqueue(chunk);
+    },
+  });
+  const downstream = new TransformStream<Uint8Array, Uint8Array>({
+    start(controller) {
+      downstreamController = controller;
+    },
+    transform(chunk, controller) {
+      if (!firstOutput) {
+        firstOutput = true;
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      }
+      controller.enqueue(chunk);
+    },
+    flush() {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  });
+  return { upstream, downstream };
 }
 
 export function scheduleJarClientPrune(): void {
@@ -2058,13 +2241,21 @@ export function handleFetch(e: FetchEvent): void {
         } catch { /* honest fallback: an empty token still isolates */ }
         const resp = await fetch(e.request);
         const ct = resp.headers.get("content-type") ?? "";
-        const src = decodeBody(await resp.arrayBuffer(), ct);
+        const bb = await boundedBody(resp.body);
         const head =
           "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
           "self.__ZL_SITE__=" + JSON.stringify(site) + ";\n" +
           (await workerPrelude()) +
           "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(e.request.url) ?? "") + ");\n";
-        return new Response(head + src, {
+        /* #456: an over-cap worker body streams through; the prelude
+           still prepends (the runtime seams must hold). */
+        if (bb.over) {
+          return new Response(passthroughStream(new TextEncoder().encode(head), bb.head, bb.rest), {
+            status: resp.status,
+            headers: { "content-type": utf8ContentType(ct) },
+          });
+        }
+        return new Response(head + decodeBody(bb.bytes.buffer as ArrayBuffer, ct), {
           status: resp.status,
           headers: { "content-type": utf8ContentType(ct) },
         });
@@ -2179,6 +2370,32 @@ export function handleFetch(e: FetchEvent): void {
         ),
       );
       return;
+    }
+    /* #560: rooted extension pages (#40 sibling): a navigation whose
+       URL carries zlExt for an extension the engine knows is served
+       at the origin root (see extensions/serve). Engine /zl* routes
+       can never be shadowed, and rootedPageGrant failing closed
+       (null) means the request falls through to virtual handling
+       untouched. */
+    if (e.request.mode === "navigate" || reqDest(e.request) === "document") {
+      const rooted = rootedPageGrant(e.request, url, e.clientId || undefined);
+      if (rooted) {
+        e.respondWith(
+          (async () => {
+            /* Restart-safe: like the /zl-ext/ branch above, a rooted
+               page needs the restored extension registry. */
+            if (engineReady) await raceBoot(engineReady, "extension subsystem boot");
+            return serveRootedExtPage(rooted, e.resultingClientId || undefined);
+          })().catch(
+            (err) =>
+              new Response("zeolite: rooted extension page failed: " + String(err), {
+                status: 500,
+                headers: { "content-type": "text/plain" },
+              }),
+          ),
+        );
+        return;
+      }
     }
   }
   /* Issue #17: the route classification below depends on the restored
@@ -2953,6 +3170,8 @@ export function handleFetch(e: FetchEvent): void {
             message: "pass-challenge redir rewritten to the upstream page URL",
             url: target,
           });
+          /* #451: the challenge URL itself was fetched; feed the trace. */
+          CAPTCHA_TRACE.observe({ attemptId: ctid, clientId: e.resultingClientId || e.clientId, stage: "BOOTSTRAP_SEEN", url: target, note: "pass-challenge redir rewritten" });
           target = fixed;
           /* #492-class re-anchor: a GET navigation must not park on
              the challenge URL once the handoff is repaired. The
@@ -3028,6 +3247,8 @@ export function handleFetch(e: FetchEvent): void {
           message: "recaptcha co= virtualized to the page origin",
           url: target,
         });
+        /* #451: frame navigations are the handshake, other shapes are assets. */
+        CAPTCHA_TRACE.observe({ attemptId: ctid, clientId: e.resultingClientId || e.clientId, stage: e.request.destination === "iframe" || e.request.destination === "frame" ? "FRAME_HANDSHAKE" : "ASSET_LOAD", url: target, note: "recaptcha co= virtualized" });
         target = coFixed;
       }
 
@@ -3089,6 +3310,8 @@ export function handleFetch(e: FetchEvent): void {
           message: "hcaptcha host= virtualized to the page origin",
           url: target,
         });
+        /* #451: frame navigations are the handshake, other shapes are assets. */
+        CAPTCHA_TRACE.observe({ attemptId: htid, clientId: e.resultingClientId || e.clientId, stage: e.request.destination === "iframe" || e.request.destination === "frame" ? "FRAME_HANDSHAKE" : "ASSET_LOAD", url: target, note: "hcaptcha host= virtualized" });
         target = hcFixed;
       }
 
@@ -3135,6 +3358,28 @@ export function handleFetch(e: FetchEvent): void {
           url: target,
         });
         target = arFixed;
+      }
+
+      /* #565: the Disqus Universal Embed Code loader names the
+         page in t_u= (t_i=) from the document URL (LegacyUnforgeable,
+         the #112 co= class): on a virtualized page the parameter
+         names this deployment, Disqus validates it against the
+         forum's Trusted Domains, and the thread area shows "We
+         were unable to load Disqus". Virtualize a t_u=/t_i= whose
+         origin names this deployment at the seam the engine owns. */
+      const dqFixed = virtualDisqusPageUrl(target, e.request.referrer, self.location.origin, initiator);
+      if (dqFixed !== target) {
+        const dqid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: dqid,
+          requestId: dqid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "disqus t_u/t_i virtualized to the page url",
+          url: target,
+        });
+        target = dqFixed;
       }
 
       /* #509: the Telegram Login widget loader builds
@@ -3189,6 +3434,8 @@ export function handleFetch(e: FetchEvent): void {
           message: "challenge widget frame engine-routed (#129)",
           url: target,
         });
+        /* #451: the challenge iframe/frame navigation was observed. */
+        CAPTCHA_TRACE.observe({ attemptId: rtid, clientId: e.resultingClientId || e.clientId, stage: "FRAME_HANDSHAKE", url: target, note: "challenge widget frame engine-routed" });
       }
 
       if (siteDisabled(target)) {
@@ -3227,7 +3474,20 @@ export function handleFetch(e: FetchEvent): void {
         if (newClient && establishContext(VCTX, newClient, target)) capContexts(VCTX, VCTX_CAP);
         /* #531: the stale page's expectations must not gate the next
            document's subresources. */
-        if (e.request.mode === "navigate") sriClearClient(SRI, newClient);
+        if (e.request.mode === "navigate") {
+          sriClearClient(SRI, newClient);
+          /* #527: the new document never inherits the previous page's
+             CSP plan. Until the served document installs a fresh
+             plan, its client is honestly unenforced. */
+          cspClearClient(CSPREG, newClient);
+          /* #554: a fresh document owns fresh import maps. Drop the
+             previous document's merged state for this page key now;
+             the response phase re-records this document's maps in
+             order. Without the reset, a re-served page would merge
+             with its predecessor's leftovers, which no browser does. */
+          const navMapKey = pageKeyOf(e.request.url, self.location.origin);
+          if (navMapKey) importmapReset(MAPS, navMapKey);
+        }
       }
 
       /* #477 P3: fetch bridging into the guest realm. The request has
@@ -3292,11 +3552,13 @@ export function handleFetch(e: FetchEvent): void {
         /* Issue #34: a foreign-origin request has no engine-local path;
            the full URL is its internal identity (and the netLog path). */
         const internalUrl = foreign ? url.href : url.pathname + url.search;
+        const initiatorType = requestInitiator(e.request);
         const mkDetail = (resp?: Response): NetDetail => {
           const d: NetDetail = {
             internalUrl,
             ttfb: Date.now() - t0,
             initiator,
+            initiatorType,
             reqHeaders: flatRed(e.request.headers),
           };
           if (foreign) d.crossOrigin = true;
@@ -3400,8 +3662,7 @@ export function handleFetch(e: FetchEvent): void {
         if (rtype === "worker") kinds.push("worker");
         if (rtype === "websocket") kinds.push("websocket");
         if (rtype === "fetch") kinds.push("fetch");
-        const flatReq: Record<string, string> = {};
-        e.request.headers.forEach((v, k) => (flatReq[k] = v));
+        const flatReq = extensionRequestHeaders(e.request.headers);
         const ic = runRequestInterception(kinds, {
           url: ruleDec.url ?? target,
           method: e.request.method,
@@ -3483,6 +3744,49 @@ export function handleFetch(e: FetchEvent): void {
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
         }
         if (ruleDec.url || ic.url) target = destUpgraded(ic.url ?? ruleDec.url ?? target);
+
+        /* #527: engine-side CSP enforcement at the fetch seam. The
+           requesting client's document carried an upstream
+           source-list policy the browser cannot be handed safely
+           (shared engine origin), so the engine enforces it against
+           the decoded upstream URL - the same truth a direct browser
+           matches its policy against. Blocked loads answer a network
+           error, the exact shape a direct CSP violation produces.
+           Pre-cache and pre-transport: a blocked load never reaches
+           upstream or the page cache. Directives whose lists carry
+           nonce/hash/strict-dynamic tokens stay unenforced (the
+           engine cannot verify an element nonce at this seam); the
+           degrade is a false allow, never a false block. */
+        if (e.request.mode !== "navigate" && !isWorkerDestination(e.request.destination)) {
+          const cspDec = cspGate(CSPREG, e.clientId, dest, target);
+          if (cspDec.blocked) {
+            DIAG.emit({
+              category: "BLOCKED",
+              cause: "blocked",
+              severity: "info",
+              stage: "REQUEST_INTERCEPTED",
+              message: "request blocked by upstream CSP (" + cspDec.directive + ")",
+              url: target,
+              traceId,
+              requestId: traceId,
+            });
+            const cspDecision: TransitDecision = { mode: "Blocked", reason: "BLOCKED_CSP" };
+            netLogPush({
+              method: e.request.method,
+              traceId,
+              path: internalUrl,
+              dest: target,
+              status: 0,
+              rtype: rtype.toUpperCase(),
+              ms: Date.now() - t0,
+              bytes: -1,
+              verdict: "blocked:csp",
+              transport: cspDecision.mode,
+              fallbackReason: reasonOf(cspDecision),
+            });
+            return Response.error();
+          }
+        }
 
         /* Cache-first for proxied GETs. #179: a credential-bearing
            request (Authorization or a jar cookie for the target)
@@ -3595,13 +3899,23 @@ export function handleFetch(e: FetchEvent): void {
               const chRules = await siteRules();
               const chRule = ruleFor(chRules, target);
               const csInject = csInjectUrls(target, e.request, e.request.referrer);
+              /* #551: cosmetic styles for the cached document, gated
+                 exactly like the fresh path below (toggle, per-site
+                 override, captcha allowlist, loaded engine). */
+              const cosmeticStyle = await ghosteryCosmeticsForDocument(engineRules, target, dest, traceId);
               const hitCt = hit.headers.get("content-type") ?? "text/html";
               /* Issue B: the served copy is re-encoded UTF-8. */
               hitHeaders.set("content-type", utf8ContentType(hitCt));
               return new Response(
                 rewriteStream(hit.body, cacheRewriteBase(hit, target), chRule, csInject, hitCt, () => {
                   if (e.request.mode === "navigate") WEBNAV.completed(target);
-                }, true, docSri, docMap),
+                }, true, docSri, docMap,
+                /* #532: the cache-hit rewrite folds the same first
+                   base; the message rides the served stream. */
+                /* #529: join the rewriter's aggregated decisions
+                   to the request trace. */
+                (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb), traceId,
+                cosmeticStyle),
                 { status: hit.status, headers: hitHeaders },
               );
             }
@@ -3687,9 +4001,15 @@ export function handleFetch(e: FetchEvent): void {
                 );
               }
               /* #554: resolve bare specifiers through the owning page recorded
-                 import map (referrer recovery; same key space as docMap). */
+                 import map (referrer recovery; same key space as docMap).
+                 The importing module for the worker body's top-level imports
+                 is the worker script itself, so scopes match against the
+                 page-space worker URL the cache entry serves from. */
               const wrPk = pageKeyOf(e.request.referrer, self.location.origin);
-              const wrBare = wrPk ? (spec: string) => resolveBareImport(MAPS, wrPk, spec) : undefined;
+              const wrImportBase = cacheRewriteBase(hit, target);
+              const wrBare = wrPk
+                ? (spec: string) => resolveBareImportFor(MAPS, wrPk, wrImportBase, spec)
+                : undefined;
               const raw0 = decodeBody(hitBuf, jsCt);
               let src = rewriteModuleWorkerImports(
                 currentPrefix(),
@@ -3852,9 +4172,10 @@ export function handleFetch(e: FetchEvent): void {
              method AND the body, which replayableInit buffers once
              (cap zl:config replayCapMb, default 32 MiB); a cross-origin
              hop drops Authorization
-             per spec. Only an announced body over the cap without the authorized
-             replay spool streams one-shot and surfaces with a mapped
-             Location (#556). */
+             per spec. With the OPFS replay spool unavailable (storage
+             refused, or the deployment opted out via zl:config
+             spoolUploads false) an announced body over the cap streams
+             one-shot and surfaces with a mapped Location (#556). */
           let hopUrl = target;
           let hopMethod = e.request.method;
           let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
@@ -3868,11 +4189,14 @@ export function handleFetch(e: FetchEvent): void {
           if (hopBody != null) {
             const buffered = await replayableInit(
               { method: hopMethod, headers: sendHeaders, body: hopBody, signal: e.request.signal },
-              /* #556: the host-authorized OPFS spool turns an
-                 over-cap streamed body into a replayable File so the
-                 hop chain follows 307/308 (and body-preserving
-                 301/302 on non-POST methods) instead of surfacing
-                 the redirect to the page. */
+              /* #556: the OPFS spool turns an over-cap streamed body
+                 into a replayable File so the hop chain follows
+                 307/308 (and body-preserving 301/302 on non-POST
+                 methods) instead of surfacing the redirect to the
+                 page. Default-on since the #556 follow-up; the
+                 spoolUploads:false opt-out keeps upload bytes out of
+                 persistent storage and restores the surfaced
+                 one-shot. */
               { hopReplay: true, spoolAuthorized: spoolUploadsEnabled() },
             );
             hopBody = buffered.body ?? null;
@@ -3883,14 +4207,23 @@ export function handleFetch(e: FetchEvent): void {
                  anyway, so materialize the one proven body shape from
                  the spool once per chain, bounded by the measured
                  transport ceiling; over it the request fails honestly
-                 instead of crashing the renderer. */
-              hopBody = await spoolTransportCopy(buffered.spool);
-              /* The spool file is dead weight once the final hop's
-                 request body was sent; the fetch event settles only
-                 after the response stream reaches the page, so
-                 releasing there never races a live hop. A failed
-                 release only leaks a file the orphan sweep reclaims. */
-              e.waitUntil(buffered.spool.release().catch(() => {}));
+                 instead of crashing the renderer. #514 audit: the
+                 release rides the same finally as the copy, so a copy
+                 over the transport bound frees the spool file and its
+                 live budget immediately instead of stranding up to
+                 256 MiB against the 512 MiB budget until the ten-minute
+                 orphan sweep. */
+              try {
+                hopBody = await spoolTransportCopy(buffered.spool);
+              } finally {
+                /* The spool file is dead weight once the body is
+                   materialized (the hops replay the ArrayBuffer, never
+                   the File); the fetch event settles only after the
+                   response stream reaches the page, so releasing here
+                   never races a live hop. A failed release only leaks
+                   a file the orphan sweep reclaims. */
+                e.waitUntil(buffered.spool.release().catch(() => {}));
+              }
             }
           }
           /* The navigation TTFB deadline must abort the upstream fetch,
@@ -4043,12 +4376,37 @@ export function handleFetch(e: FetchEvent): void {
                hop; the 10ms bound is invisible next to a redirect
                round trip. */
             await new Promise((r) => setTimeout(r, 10));
-            resp = await withDeadline(
-              upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
-              reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
-              "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
-              navAbort ?? undefined,
-            );
+            /* #514: a re-issue hop that fails upstream becomes a
+               bounded, attributable diagnostic - the CI torture probe's
+               "zeolite: upstream fetch failed" class used to reach the
+               probe with no hop context at all. The message names the
+               hop index and the status that redirected here, never a
+               body and never a URL (DIAG redacts the technical reason
+               on entry; the failed hop URL lives in the netlog row the
+               outer catch already records). One event per failed hop,
+               bounded by the 10-hop cap. */
+            const reIssueHop = hops + 1;
+            const redirectedBy = resp.status;
+            try {
+              resp = await withDeadline(
+                upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
+                reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
+                "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
+                navAbort ?? undefined,
+              );
+            } catch (err) {
+              DIAG.emit({
+                category: "UPSTREAM",
+                cause: "upstream",
+                severity: "warning",
+                stage: "REDIRECT_HOP",
+                traceId,
+                requestId: traceId,
+                message: "redirect re-issue hop " + reIssueHop + " failed upstream (redirected by " + redirectedBy + ")",
+                technicalReason: String(err),
+              });
+              throw err;
+            }
           }
           /* #140/#200: every response settles - an idle-stalled upstream
              body errors instead of pending forever. The TTFB deadline
@@ -4081,7 +4439,17 @@ export function handleFetch(e: FetchEvent): void {
             /* #296 first: a flag-shaped script miss is the src-surgery class,
              whose recovery owns the flag path shape; the flat-asset gate would
              reject it and log a miss without ever trying the script bases. */
-            let rec = dest === "script" ? await recoverFlagSurgeryScript(initiator ?? "", target, e.request.headers, recoveryUpstream(policy, rtype, traceId), traceId) : null;
+            let flagPath = false;
+            if (dest === "script") {
+              try {
+                flagPath = isFlagSurgeryPath(new URL(target).pathname);
+              } catch {
+                flagPath = false;
+              }
+            }
+            let rec = flagPath
+              ? await recoverFlagSurgeryScript(initiator ?? "", target, e.request.headers, recoveryUpstream(policy, rtype, traceId), traceId)
+              : null;
             if (rec) {
               DIAG.emit({
                 traceId,
@@ -4092,7 +4460,7 @@ export function handleFetch(e: FetchEvent): void {
                 message: "flag-surgery script path recovered against an observed script base (#296)",
                 url: target,
               });
-            } else {
+            } else if (!flagPath) {
               rec = await recoverFlatAsset(initiator ?? "", target, dest, e.request.headers,
                 recoveryUpstream(policy, rtype, traceId));
             }
@@ -4108,11 +4476,10 @@ export function handleFetch(e: FetchEvent): void {
               });
               hopUrl = rec.url;
               resp = rec.resp;
-            } else if (assetBaseCount(initiator ?? "") > 0) {
-              /* #143: the miss is now visible in diagnostics either way -
-                 all observed bases answered badly, or the path shape
-                 was rejected - so a silent no-retry never hides a
-                 recoverable asset again. */
+            } else if (!flagPath && assetBaseCount(initiator ?? "") > 0) {
+              /* #143: retain the generic flat-asset gate and diagnostics
+                 for ordinary asset names. Google flag paths have their own
+                 narrower recovery class and should not be double-reported. */
               let shapeOk = false;
               try {
                 shapeOk = isRecoverableAssetPath(new URL(target).pathname);
@@ -4139,6 +4506,22 @@ export function handleFetch(e: FetchEvent): void {
           }
 
           DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
+          /* #580: the page's own error beacon pipeline is firing even
+             when the console hook reports zero - make the export show
+             it. Deliberately narrow classifier (jserror / gen_204?err=);
+             the diagnostic ring's own bound keeps repeated beacons
+             from flooding an export. */
+          if (isErrorBeaconUrl(hopUrl)) {
+            DIAG.emit({
+              traceId,
+              requestId: traceId,
+              category: "SERVICE_WORKER",
+              severity: "warning",
+              stage: "UPSTREAM_RESPONSE",
+              message: "page error beacon delivered (fetch-borne; invisible to the console hook) (#580)",
+              url: hopUrl,
+            });
+          }
           /* A 3xx that escaped the hop loop - cap reached, a hop whose
              one-shot body cannot replay, or no resolvable Location - is
              surfaced to the page with a mapped Location. For
@@ -4197,7 +4580,11 @@ export function handleFetch(e: FetchEvent): void {
               const navClient = e.resultingClientId || e.clientId;
               if (navClient && establishContext(VCTX, navClient, finalDest))
                 capContexts(VCTX, VCTX_CAP);
-              if (e.request.mode === "navigate") sriClearClient(SRI, navClient);
+              if (e.request.mode === "navigate") {
+                sriClearClient(SRI, navClient);
+                /* #527: same lifecycle note as the pre-transport clear. */
+                cspClearClient(CSPREG, navClient);
+              }
             }
           }
           /* 1.4 Boride: capture Set-Cookie into the per-origin jar before
@@ -4231,6 +4618,9 @@ export function handleFetch(e: FetchEvent): void {
               message: "challenge pass-through: cookies captured for " + target,
               url: target,
             });
+          if (isPassChallenge(target) || (hopUrl !== target && isPassChallenge(hopUrl)))
+            /* #451: the pass-challenge response outcome, status class only. */
+            CAPTCHA_TRACE.observe({ attemptId: traceId, stage: "VERIFY_OUTCOME", outcome: outcomeOf(resp.status), url: target, note: "challenge pass-through response" });
           const headers = stripHostile(resp.headers);
           /* Issue #2: engine routes serve their own origin. The preserved
              target ACAO (e.g. "https://excalidraw.com") fails the CORS
@@ -4246,9 +4636,37 @@ export function handleFetch(e: FetchEvent): void {
           /* #452: opt-in, strictly deny-only CSP on HTML documents.
              The live response carries original headers; every
              unsupported policy is left stripped (not passed through). */
-          if (experimentalEnabled("cspTranslation"))
+          if (experimentalEnabled("cspTranslation")) {
+            const cspDoc = DOC_DESTS.has(dest.toLowerCase());
+            const docClient = e.resultingClientId || e.clientId;
             applyExperimentalCsp(outHeaders, resp.headers,
-              resp.headers.get("content-type") ?? "", DOC_DESTS.has(dest.toLowerCase()));
+              resp.headers.get("content-type") ?? "", cspDoc);
+            /* #527: source-list directives have no safe browser-side
+               translation onto the shared engine origin, so the
+               engine enforces them itself at the fetch seam. The
+               plan belongs to the navigating client (its subresource
+               fetches carry that clientId) and installs from the
+               same HTML document shape the browser-side seam
+               accepts. Every navigation rebuilds the plan from the
+               upstream header; nothing persists across pages. */
+            if (
+              cspDoc &&
+              docClient &&
+              /^(?:text\/html|application\/xhtml\+xml)(?:\s*;|\s*$)/i.test(
+                (resp.headers.get("content-type") ?? "").trim())
+            ) {
+              const rawCsp = resp.headers.get("content-security-policy");
+              if (rawCsp && (finalDest ?? target)) {
+                const eng = planEngineCsp(rawCsp, finalDest ?? target);
+                cspSetClient(CSPREG, docClient, eng);
+                const seg = engineCspMarker(eng);
+                if (seg) {
+                  const cur = outHeaders.get("x-zl-csp");
+                  outHeaders.set("x-zl-csp", cur ? cur + "; " + seg : seg);
+                }
+              }
+            }
+          }
           outHeaders.set("x-zl-proxy", "1");
           /* Finding 1: a 3xx that reached the page (hop cap reached, no
              Location, or a hop whose one-shot body cannot replay) must not
@@ -4328,9 +4746,49 @@ export function handleFetch(e: FetchEvent): void {
           if (rIc.headers) {
             for (const [k, v] of Object.entries(rIc.headers)) outHeaders.set(k, v);
           }
+          /* #552: the streaming transform arm. Same eligibility as the
+             buffered arm (never documents or stylesheets: the
+             streaming rewriter owns those), but NO size gate: the raw
+             body pipes through the declared TransformStream with
+             native backpressure, so unknown-length and large bodies
+             transform too. Fail open, decided before any byte flows: a
+             known content-length over the declared maxInputBytes never
+             enters the pipe (the raw body serves untouched). Engine-
+             own routes (/zl-bw/, the prelude, the engine assets) return
+             from the fetch handler long before this site, so a stream
+             transform can never touch engine-owned control assets.
+             A transform changes the body length, so a stale upstream
+             content-length must never reach the page (the browser
+             honors it and truncates or hangs the body). */
+          if (
+            rIc.stream &&
+            !(DOC_DESTS.has(dest) && isHtml(resp)) &&
+            !isCss(resp) &&
+            resp.body
+          ) {
+            const st = rIc.stream;
+            const clen = Number(resp.headers.get("content-length") ?? -1);
+            if (!(clen >= 0 && clen > st.maxInputBytes)) {
+              const g = zlStreamGuards(st.maxInputBytes, st.firstOutputMs);
+              outHeaders.delete("content-length");
+              WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
+              return new Response(
+                resp.body
+                  .pipeThrough(g.upstream)
+                  .pipeThrough(st.stream)
+                  .pipeThrough(g.downstream),
+                { status: resp.status, headers: outHeaders },
+              );
+            }
+          }
           if (rIc.body && !(DOC_DESTS.has(dest) && isHtml(resp)) && !isCss(resp)) {
             const clen = Number(resp.headers.get("content-length") ?? -1);
             if (clen >= 0 && clen <= BODY_LIMIT) {
+              /* The buffered transform changes the body length too: a
+                 stale upstream content-length would truncate a grown
+                 body or hang a shrunk one, so it never reaches the
+                 page. */
+              outHeaders.delete("content-length");
               WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
               return new Response(rIc.body(await resp.text()), {
                 status: resp.status,
@@ -4438,6 +4896,8 @@ export function handleFetch(e: FetchEvent): void {
               message: "pass-challenge navigation re-anchored to the page handle",
               url: challengeReanchor,
             });
+            /* #451: the re-anchored pass-challenge response outcome. */
+            CAPTCHA_TRACE.observe({ attemptId: ratid, stage: "VERIFY_OUTCOME", outcome: outcomeOf(resp.status), url: target, note: "pass-challenge re-anchored" });
             return new Response(null, { status: 302, headers: { location: challengeReanchor } });
           }
           if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body && !cdnCgiNative) {
@@ -4448,6 +4908,12 @@ export function handleFetch(e: FetchEvent): void {
                subresource fetches do not arrive in navigate mode. */
             if (e.request.mode === "navigate") WEBNAV.committed(target);
             const csInject = csInjectUrls(target, e.request, e.request.referrer);
+            /* #551: cosmetic styles for this document, from the same
+               engine the network matcher answers from. Gated on the
+               zl:adblock toggle, the per-site zl:rules override and
+               the captcha/anti-bot allowlist exactly like network
+               blocking (rules.ts); "" when they do not apply. */
+            const cosmeticStyle = await ghosteryCosmeticsForDocument(engineRules, target, dest, traceId);
             const rewriteDone = () => {
               /* webNavigation.onCompleted + webRequest.onCompleted:
                  the document stream (and with it the navigation) is
@@ -4463,6 +4929,11 @@ export function handleFetch(e: FetchEvent): void {
               return new Response(
                 rewriteStream(
                   resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone, true, docSri, docMap,
+                  /* #532: the effective-base delivery seam. */
+                  (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
+                  traceId,
+                  /* #551: the cosmetic <style> rides the init splice. */
+                  cosmeticStyle,
                 ),
                 {
                   status: resp.status,
@@ -4483,6 +4954,11 @@ export function handleFetch(e: FetchEvent): void {
                 rewriteStream(
                   sniffReader, finalDest ?? target, rule, csInject, "text/html", rewriteDone,
                   true, docSri, docMap,
+                  /* #532: the sniffed document folds the same. */
+                  (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
+                  traceId,
+                  /* #551: same splice for the sniffed document. */
+                  cosmeticStyle,
                 ),
                 {
                   status: resp.status,
@@ -4537,12 +5013,38 @@ export function handleFetch(e: FetchEvent): void {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude + specifier pass" });
             traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
             const wrPk = pageKeyOf(e.request.referrer, self.location.origin);
-            const wrBare = wrPk ? (spec: string) => resolveBareImport(MAPS, wrPk, spec) : undefined;
+            /* The importer for the body's top-level imports is the worker
+               script itself; scopes match against its page-space URL. */
+            const wrBare = wrPk
+              ? (spec: string) => resolveBareImportFor(MAPS, wrPk, target, spec)
+              : undefined;
+            /* #456: total candidate buffering bound. An over-cap worker
+               body streams through byte-identical: the prelude still
+               prepends (the runtime seams must hold) but the specifier,
+               literal and location passes skip. ponytail: bare
+               specifiers inside a >2 MiB worker body go native; raise
+               or special-case when a real site needs it. */
+            const bbW = await boundedBody(resp.body);
+            if (bbW.over) {
+              netLogAnnotateRewrite(traceId, "js-body-cap");
+              DIAG.stage(traceId, "RAW_BODY_CAP", { url: target, message: "worker body over the buffering cap serves verbatim (#456)" });
+              const preW =
+                "self.__ZL_PREFIX__=" + JSON.stringify(currentPrefix()) + ";\n" +
+                "self.__ZL_SITE__=" + JSON.stringify(siteToken(target)) + ";\n" +
+                (await workerPrelude()) +
+                "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n";
+              WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
+              outHeaders.set("content-type", utf8ContentType(respCt));
+              return new Response(passthroughStream(new TextEncoder().encode(preW), bbW.head, bbW.rest), {
+                status: resp.status,
+                headers: outHeaders,
+              });
+            }
             const src = rewriteModuleWorkerImports(
               currentPrefix(),
               target,
               self.location.origin,
-              decodeBody(await resp.arrayBuffer(), respCt),
+              decodeBody(bbW.bytes.buffer as ArrayBuffer, respCt),
               wrBare,
             );
             const preludeW = getFpWorkerScript() ?? (await siteProfileFor(target))?.workerScript ?? "";
@@ -4552,6 +5054,11 @@ export function handleFetch(e: FetchEvent): void {
               (await workerPrelude()) +
               "\nself.__zlPreludeInit&&self.__zlPreludeInit(" + JSON.stringify(encodeDestLegacy(target)) + ");\n" +
               (preludeW ? "\n" + preludeW : "");
+            /* #580: the rewrite is done the moment the composed body
+               exists - emit the completion stage here like the HTML
+               and CSS stream paths do at stream end, so a worker
+               serve can never sit REWRITE_STARTED in an export. */
+            DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
             WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             /* #35: the page cache holds the composed copy (prelude +
                rewritten specifiers); a stored raw body would serve a
@@ -4579,9 +5086,28 @@ export function handleFetch(e: FetchEvent): void {
              rewriter gap (#36): the parser path, not this seam. */
           if (JS_TRANSFORM_DESTS.has(e.request.destination) && isJs(resp) && resp.body && !policyNativeJs && !cdnCgiNative) {
             curStage = "REWRITE_STARTED";
+            /* #539: the response's own status class is observe-only
+               evidence. An upstream 3xx/4xx/5xx or a challenge-flagged
+               body is upstream's answer, never proof the rewrite broke
+               the site: an application 404 is indistinguishable from
+               an upstream one at this seam, so no status demotes. */
+            recordServeFailure(target, classifyServeFailure(resp.status, null, isChallengeMitigated(resp.headers)));
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "page script specifier + body pass" });
             traceDecision({ subsystem: "rewriter", rule: "script-imports", original: target, result: "rewritten", resource: rtype, traceId });
-            const jsRaw = decodeBody(await resp.arrayBuffer(), respCt);
+            /* #456: total candidate buffering bound. An over-cap
+               script body streams through byte-identical; the
+               specifier, literal and location passes skip it. */
+            const bbS = await boundedBody(resp.body);
+            if (bbS.over) {
+              netLogAnnotateRewrite(traceId, "js-body-cap");
+              DIAG.stage(traceId, "RAW_BODY_CAP", { url: target, message: "script body over the buffering cap serves verbatim (#456)" });
+              WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
+              return new Response(passthroughStream(null, bbS.head, bbS.rest), {
+                status: resp.status,
+                headers: outHeaders,
+              });
+            }
+            const jsRaw = decodeBody(bbS.bytes.buffer as ArrayBuffer, respCt);
             let src = rewriteModuleWorkerImports(currentPrefix(), target, self.location.origin, jsRaw);
             /* #449: an origin-pinning script body (anchored ^https?:
                regex, the gapi-class loader) keeps its URL literals
@@ -4644,6 +5170,13 @@ export function handleFetch(e: FetchEvent): void {
             if (jsOutcome.provenUnchanged) netLogAnnotateRewrite(traceId, "js-proven-unchanged");
             else if (jsOutcome.literalChanged) netLogAnnotateRewrite(traceId, "js-literal-rewritten");
             else if (jsOutcome.specifierChanged) netLogAnnotateRewrite(traceId, "js-specifier-rewritten");
+            /* #580: same completion contract as HTML/CSS - the page
+               script's transformation class is fully decided above, so
+               the stage emits here instead of leaving the trace stuck
+               at REWRITE_STARTED (the Google AI Mode / Twitch exports
+               showed 0 completions for large JS bodies and made a
+               telemetry gap look like a hung stream). */
+            DIAG.stage(traceId, "REWRITE_COMPLETED", { url: target, category: "REWRITE" });
             WEBREQ.completed({ ...wrDetailsFinal, statusCode: resp.status });
             /* Issue B: the decoded-with-upstream-charset body is
                re-encoded UTF-8 by the string Response constructor;
@@ -4692,6 +5225,13 @@ export function handleFetch(e: FetchEvent): void {
              category and cause (a rewrite failure was mislabeled
              TRANSPORT/upstream before). */
           const failure = classifyStageFailure(curStage);
+          /* #539: a transport or rewrite-stage failure on a JS serve
+             destination is observe-only evidence. The only demoting
+             signal remains the literal pass's own throw, recorded at
+             its own catch; a decode or transport failure never
+             demotes. */
+          if (JS_TRANSFORM_DESTS.has(e.request.destination))
+            recordServeFailure(target, classifyServeFailure(null, failure.cause === "rewrite" ? "rewrite" : "transport", false));
           DIAG.failure({
             traceId,
             category: failure.category,
@@ -5268,6 +5808,60 @@ export function virtualAuthorizeRedirect(target: string, referrer: string, engin
   );
 }
 
+/** #565: the Disqus Universal Embed Code loader names the page in
+    t_u= (t_i=) from the document URL (LegacyUnforgeable, the #112
+    co= class): on a virtualized page the parameter names this
+    deployment, Disqus validates it against the forum's Trusted
+    Domains, and the thread area shows "We were unable to load
+    Disqus". Virtualize a t_u=/t_i= whose origin names this
+    deployment on the disqus.com embed-comments request at the
+    seam the engine owns; an identifier that is not a URL naming
+    this deployment is the page's own choice and passes through.
+    Rendering fidelity only. */
+export function virtualDisqusPageUrl(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host !== "disqus.com") return target;
+  if (!u.pathname.startsWith("/embed/comments/")) return target;
+  let eo: URL;
+  try {
+    eo = new URL(engineOrigin);
+  } catch {
+    return target;
+  }
+  /* No honest widget-side fallback exists: without a decoded page
+     URL the trusted-domain check has nothing real to validate, so
+     the request passes through unchanged. */
+  const page = referrerPageUrl(referrer, initiator);
+  if (!page) return target;
+  let out = u.href;
+  for (const key of ["t_u", "t_i"]) {
+    const m = new RegExp("([?&])" + key + "=([^&]*)").exec(new URL(out).search);
+    if (!m || !m[2]) continue;
+    let dec: string;
+    try {
+      dec = decodeURIComponent(m[2]);
+    } catch {
+      continue;
+    }
+    let du: URL;
+    try {
+      du = new URL(dec);
+    } catch {
+      continue;
+    }
+    if (!/^https?:$/.test(du.protocol)) continue;
+    if (du.origin !== eo.origin) continue;
+    out = out.replace(m[0], m[1] + key + "=" + encodeURIComponent(page));
+  }
+  return out;
+}
+
 /** A frame fragment is browser-only and never reaches handleFetch.
     zl:mint still sees the original URL, so a verified sender can
     normalize the hCaptcha frame's host= there before route encoding.
@@ -5345,6 +5939,42 @@ function referrerOrigin(referrer: string, initiator?: string): string | null {
       ref = decodeLegacyRoute(refU.pathname);
     }
     return ref ? new URL(ref).origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/* #565: the Disqus t_u=/t_i= rewrite needs the page's full virtual
+   URL (origin + path + query), not just the origin: mirror the
+   referrerOrigin decode chain and keep the destination. The
+   initiator is the client's decoded current URL (ctx.currentUrl or
+   decodeClientUrl of the client URL), so its href is already the
+   page's virtual URL. */
+function referrerPageUrl(referrer: string, initiator?: string): string | null {
+  if (initiator) {
+    try {
+      const u = new URL(initiator);
+      if (u.protocol === "https:" || u.protocol === "http:") return u.href;
+    } catch { /* malformed context falls through */ }
+  }
+  if (!referrer) return null;
+  try {
+    const refU = new URL(referrer, "https://zl.invalid/");
+    let ref = decodePath(refU.pathname);
+    if (!ref && refU.pathname.startsWith(NAVH + "/")) {
+      /* #144 split identity: the navh token carries the origin and
+         the route carries the real path and query, so the page's
+         full virtual URL is the decoded destination plus the route
+         search. */
+      const nd = decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1));
+      if (nd) ref = nd + (refU.search || "");
+    }
+    if (!ref && queryHandleToken(refU.search) !== null)
+      ref = decodeQueryHandle(refU)?.destination ?? null;
+    if (!ref) {
+      ref = decodeLegacyRoute(refU.pathname);
+    }
+    return ref ?? null;
   } catch {
     return null;
   }
@@ -5439,6 +6069,8 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     "referer",
     "origin",
     "cookie",
+    /* Internal API attribution is consumed here and never reaches origin servers. */
+    "x-zl-i",
     "sec-fetch-site",
     "sec-fetch-mode",
     "sec-fetch-dest",
@@ -5573,5 +6205,6 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
   }
   return out;
 }
+
 
 

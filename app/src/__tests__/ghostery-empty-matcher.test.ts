@@ -39,6 +39,7 @@ interface Fresh {
   configureGhostery: typeof import("../ghostery").configureGhostery;
   ghosteryBlock: typeof import("../ghostery").ghosteryBlock;
   ghosteryLoadInProgress: typeof import("../ghostery").ghosteryLoadInProgress;
+  settle: () => void;
   emit: ReturnType<typeof vi.fn>;
 }
 
@@ -48,7 +49,14 @@ async function fresh(): Promise<Fresh> {
   const d = await import("../diag");
   const emit = d.DIAG.emit as unknown as ReturnType<typeof vi.fn>;
   emit.mockClear();
+  const s = await import("../streams-alive");
+  /* #577: the kick gates on the first proxied body having settled. */
+  const settle = () => {
+    s.streamAlive("https://page.example/doc.html");
+    s.streamDone("https://page.example/doc.html");
+  };
   return {
+    settle,
     configureGhostery: g.configureGhostery,
     ghosteryBlock: g.ghosteryBlock,
     ghosteryLoadInProgress: g.ghosteryLoadInProgress,
@@ -57,7 +65,11 @@ async function fresh(): Promise<Fresh> {
 }
 
 async function load(x: Fresh): Promise<void> {
+  x.settle();
   x.ghosteryBlock(LIST_URL, "script");
+  /* #577: the idle-gated kick needs two consecutive quiet
+     samples 250ms apart, so the first load starts at ~250ms. */
+  await new Promise<void>((r) => setTimeout(r, 300));
   const pending = x.ghosteryLoadInProgress();
   if (pending) await pending;
 }
@@ -122,6 +134,9 @@ describe("ghostery empty or partial matcher (#500)", () => {
     vi.setSystemTime(new Date(Date.now() + 8 * 24 * 60 * 60 * 1000));
     cap.filtersPerLoad.push(0);
     expect(x.ghosteryBlock(AD_URL, "script")).not.toBeNull();
+    /* #577: the refresh kick rides the idle gate too (two quiet
+       samples); wait past the confirm poll before reading. */
+    await new Promise<void>((r) => setTimeout(r, 300));
     const pending = x.ghosteryLoadInProgress();
     if (pending) await pending;
     const rows = parsedRows(x);

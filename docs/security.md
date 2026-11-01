@@ -121,7 +121,13 @@ app/src/__tests__/leak.test.ts):
     exists behind the cspTranslation experimental flag (#527): the
     audited 'none' directives are served on proxied documents with a
     visible x-zl-csp decision marker, every unsupported policy stays
-    stripped and never widened. See docs/limitations.md.
+    stripped and never widened; origin/path source lists, 'self' and
+    the default-src fallback - directives with no safe browser-side
+    translation onto the shared engine origin - are enforced by the
+    engine itself at the fetch seam against the decoded upstream URL
+    (app/src/csp-enforce.ts), so a blocked load answers a network
+    error before cache or transport and no broadened grant is
+    possible. See docs/limitations.md.
   - Set-Cookie is captured into the per-origin jar before being
     stripped, so the page never sees raw Set-Cookie headers; cookies
     only flow through jar-controlled Cookie headers.
@@ -192,14 +198,24 @@ upstream bytes.
 
 ## WebSocket
 
-- ws:// targets are upgraded to wss:// before the transport sees
-  them; plaintext WS is never dialed (traced as subsystem websocket,
-  rule upgrade).
+- ws:// targets pass through as plaintext since #525: no scheme
+  upgrade exists anymore. The old force-upgrade dialed a TLS
+  ClientHello at every plaintext-ws origin (an http-only origin cannot
+  answer it, so the handshake never settled and the page socket
+  stalled), while cleartext http already rides the same wisp tunnel.
+  Passthrough is traced (subsystem websocket, rule "plaintext"), and
+  the wire path is the same single audited transport every other
+  request uses - there is no second, unguarded WebSocket egress.
 - The bridge registry holds only live connections; zl:teardown closes
   all of them.
 - Re-audited at 3.0: the SharedWorker bridge (2.3) rides the same
   relay rule (the engine is the relay parent, a page never becomes
-  one) and the same ws->wss upgrade.
+  one) and the same plaintext passthrough.
+- WebRTC is unavailable by design (#544): RTCPeerConnection is
+  deleted (see Runtime navigation escapes below) because ICE egress
+  bypasses the engine; the zl:ping capability report states this as
+  webrtc: "unavailable" so a host can distinguish designed absence
+  from breakage.
 
 ## Runtime navigation escapes (issue #28)
 
@@ -529,8 +545,10 @@ skipped:body-too-large marker rather than blocking.
 - CSP of the embedding application is the host's job; Zeolite cannot
   fully restore the proxied page's own confinement headers and still
   function. The opt-in deny-only subset (cspTranslation flag, #527)
-  restores what is provably safe and reports every decision; full
-  source-list translation remains open.
+  restores what is provably safe and reports every decision, and the
+  engine-side gate enforces the fetch-directive source lists against
+  decoded upstream URLs; browser-side full source-list translation
+  remains open (no source list is ever served to the browser).
 - The compat-suite policy hatch exists; deployments must verify they
   never export ZL_TEST_ALLOW_PRIVATE_DESTS (or ZL_TEST_EGRESS).
 - Fingerprinting resistance is spoofing, not anonymity: timing,

@@ -18,7 +18,14 @@
    Close parity: onclose fires when the close handshake completes
    (the echoed zl:wsClose or the bounded fallback timer), not when
    close() is called. The conn stays registered while closing, so the
-   late close frame still dispatches exactly once. */
+   late close frame still dispatches exactly once.
+
+   bufferedAmount note (#546): the relay arm exposes no write-
+   acceptance (the embedder hop carries no ack surface), so there is
+   deliberately no zl:wsDrain frame - adding one would be protocol
+   without a producer. Relay sockets stay bridge-queue-accounted: the
+   page counter drains when the bridge's send() returns, exactly like
+   the wisp arm without the optional drainAt() seam. */
 
 import { relaySendWs, relaySubscribe } from "./relayfetch";
 import type { WsFactory } from "./wsbridge";

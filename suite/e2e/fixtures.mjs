@@ -3,7 +3,7 @@
    content can embed both origins byte-stably:
 
    - A = http://127.0.0.1:7101  (the proxied site under test)
-   - B = http://127.0.0.1:7102  (a second origin: cross-origin
+   - B = http://localhost:7102  (a second host and port: cross-origin
      requests, beacons, EventSource, virtual-context isolation)
 
    /api/data deliberately sends NO Access-Control-Allow-Origin: a
@@ -31,7 +31,7 @@ import { gzipSync } from "node:zlib";
 export const PORT_A = 7101;
 export const PORT_B = 7102;
 export const ORIGIN_A = `http://127.0.0.1:${PORT_A}`;
-export const ORIGIN_B = `http://127.0.0.1:${PORT_B}`;
+export const ORIGIN_B = `http://localhost:${PORT_B}`;
 
 /* 1x1 transparent PNG (naturalWidth > 0 asserts the image decoded). */
 const PNG = Buffer.from(
@@ -107,7 +107,7 @@ function send(res, type, body, extra) {
 }
 
 export function startFixture(port) {
-  const origin = `http://127.0.0.1:${port}`;
+  const origin = port === PORT_B ? ORIGIN_B : ORIGIN_A;
   const hits = [];
   const sseStreams = [];
   const server = createServer((req, res) => {
@@ -122,12 +122,43 @@ export function startFixture(port) {
     });
     req.on("end", () => {
       if (path !== "/__hits") {
-        hits.push({ path, method: req.method, referer: req.headers.referer ?? null, body });
+        hits.push({
+          path,
+          method: req.method,
+          referer: req.headers.referer ?? null,
+          body,
+          initiatorHeader: req.headers["x-zl-i"] ?? null,
+        });
       }
       if (path === "/dir/page.html") {
         send(res, "text/html; charset=utf-8", pageHtml(origin));
       } else if (path === "/dir/landing.html") {
         send(res, "text/html; charset=utf-8", `<!doctype html><p id="zl-landing">zl-landing</p>`);
+      } else if (path === "/dir/fragment.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><head><title>fragment fixture</title></head><body>
+          <a id="fragment-anchor" href="#anchor-target">anchor target</a>
+          <div style="height:1200px"></div>
+          <p id="initial-target">initial target</p>
+          <p id="redirect-target">redirect target</p>
+          <p id="meta-target">meta target</p>
+          <p id="form-target">form target</p>
+          <p id="anchor-target">anchor target</p>
+          <p id="history-start">history start</p>
+          <p id="history-target">history target</p>
+        </body></html>`);
+      } else if (path === "/dir/fragment-redirect") {
+        res.writeHead(302, { location: origin + "/dir/fragment.html#redirect-target", "cache-control": "no-store" });
+        res.end();
+      } else if (path === "/dir/fragment-meta.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><head><meta http-equiv="refresh" content="0; url=/dir/fragment.html#meta-target"></head><body>fragment refresh</body></html>`);
+      } else if (path === "/dir/fragment-form.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><body><p id="form-ready">form ready</p><form id="fragment-form" method="get" action="/dir/fragment.html#form-target"><button type="submit">submit fragment navigation</button></form></body></html>`);
+      } else if (path === "/dir/initiator-page.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><body><p id="init-marker">initiator fixture</p><img id="initiator-img" src="/api/initiator-probe.png?kind=parser" alt="probe"></body></html>`);
+      } else if (path === "/dir/initiator-worker.js") {
+        send(res, "text/javascript", `fetch("/api/initiator-probe?kind=worker").then(r => r.text()).then(value => postMessage(value)).catch(e => postMessage("worker-error:" + e));`);
+      } else if (path === "/dir/initiator-nav.html") {
+        send(res, "text/html; charset=utf-8", `<!doctype html><html><body><p id="initiator-nav-marker">navigation initiator</p></body></html>`);
       } else if (path === "/dir/refresh.html") {
         /* #36: the meta refresh target must be rewritten to an engine
            route, otherwise the refresh navigates the proxied frame
@@ -171,14 +202,17 @@ export function startFixture(port) {
           `const dsn = new URL("https://publickey@telemetry.invalid/42");`,
           `const other = new URL("wss://user:pass@settings.invalid/events");`,
           `self.__zlConfig = { dsn: dsn.username === "publickey" && dsn.hostname === "telemetry.invalid" && dsn.pathname === "/42", other: other.username === "user" && other.password === "pass" && other.hostname === "settings.invalid", fetched: "pending" };`,
-          `fetch("http://127.0.0.1:7102/api/data").then(r => r.json()).then(j => { self.__zlConfig.fetched = j.zl; }).catch(() => { self.__zlConfig.fetched = "failed"; });`,
+          `fetch("${ORIGIN_B}/api/data").then(r => r.json()).then(j => { self.__zlConfig.fetched = j.zl; }).catch(() => { self.__zlConfig.fetched = "failed"; });`,
         ].join("\n"));
       } else if (path === "/dir/shared-identity.js") {
-        /* #453: one random ID per actual worker global, returned to each
-           connecting client. The same worker instance reuses its ID. */
+        /* #453/#547: one ID per worker global. The storage probe uses
+           the site's worker-scoped IndexedDB wrapper installed by the
+           prelude, while the fetch observes the worker's cookie jar. */
         send(res, "text/javascript", [
           `const sharedId = Date.now().toString(36) + "." + Math.random().toString(36);`,
-          `self.onconnect = (e) => { const p = e.ports[0]; p.onmessage = (m) => { if (m.data === "id") p.postMessage({ id: sharedId }); }; p.start(); };`,
+          `let connectionCount = 0;`,
+          `function namespaceId() { return new Promise((resolve, reject) => { const q = indexedDB.open("zl-sharedworker-namespace-547", 1); q.onupgradeneeded = () => q.result.createObjectStore("meta"); q.onerror = () => reject(q.error); q.onsuccess = () => { const db = q.result; const tx = db.transaction("meta", "readwrite"); const st = tx.objectStore("meta"); const g = st.get("id"); g.onerror = () => reject(g.error); g.onsuccess = () => { let value = g.result; if (typeof value !== "string") { value = sharedId; st.put(value, "id"); } resolve(value); db.close(); }; }; }); }`,
+          `self.onconnect = (e) => { connectionCount++; const p = e.ports[0]; p.onmessage = async (m) => { if (m.data === "id") { p.postMessage({ id: sharedId }); return; } const d = m.data || {}; if (d.op === "context") { try { const ns = await namespaceId(); const r = await fetch("/api/worker-context?kind=sharedworker", { cache: "no-store" }); const cookie = await r.json(); p.postMessage({ nonce: d.nonce, value: { id: sharedId, connections: connectionCount, namespace: ns, cookie: cookie.cookie } }); } catch (err) { p.postMessage({ nonce: d.nonce, error: String(err) }); } } else if (d.op === "ping") { p.postMessage({ nonce: d.nonce, value: { id: sharedId, connections: connectionCount } }); } }; p.start(); };`,
         ].join("\n"));
       } else if (path === "/dir/pinned.html") {
         /* #449: a page whose loader script pins its generated URLs
@@ -196,7 +230,7 @@ export function startFixture(port) {
           `var va=/^https?:\\/\\/[a-z0-9_.-]+(:[0-9]+)?\\/dir\\/[a-z-]+\\.html$/;`,
           `var u="http://127.0.0.1:7101/dir/anchor-pinned.html";`,
           `self.__zlPinned={hint:va.test(u)?"validated":"bad-hint"};`,
-          `fetch("http://127.0.0.1:7102/api/data").then(function(r){return r.json()}).then(function(j){self.__zlPinnedFetch=j.zl}).catch(function(e){self.__zlPinnedFetch="err:"+e});`,
+          `fetch("${ORIGIN_B}/api/data").then(function(r){return r.json()}).then(function(j){self.__zlPinnedFetch=j.zl}).catch(function(e){self.__zlPinnedFetch="err:"+e});`,
           `self.__zlPinnedPopup="unset";`,
           `var w=window.open("http://127.0.0.1:7101/dir/popup-pinned.html");`,
           `if(w){self.__zlPinnedPopup="opened"}else{self.__zlPinnedPopup="null"}`,
@@ -209,6 +243,21 @@ export function startFixture(port) {
       } else if (path === "/api/data") {
         /* No CORS headers: the #34 canary. Browser-direct = unreadable. */
         send(res, "application/json", `{"zl":"api"}`);
+      } else if (path === "/api/worker-context") {
+        send(res, "application/json", JSON.stringify({ cookie: req.headers.cookie ?? "" }), { "cache-control": "no-store" });
+      } else if (path === "/api/initiator-probe.png") {
+        res.writeHead(200, { "content-type": "image/png", "content-length": PNG.length, "cache-control": "no-store" });
+        res.end(PNG);
+      } else if (path === "/api/initiator-probe") {
+        if ((req.headers.accept ?? "").toLowerCase().includes("text/event-stream")) {
+          res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+          res.end("data: eventsource-ok\n\n");
+        } else if (req.method === "POST") {
+          res.writeHead(204, { "cache-control": "no-store" });
+          res.end();
+        } else {
+          send(res, "text/plain; charset=utf-8", "initiator-ok", { "cache-control": "no-store" });
+        }
       } else if (path === "/api/echohash") {
         /* #556: reads the whole request body and answers its SHA-256
            plus the request facts, so a redirect-replayed upload is
@@ -330,6 +379,36 @@ export function startFixture(port) {
            cache would serve it without an upstream hit, so the jar
            admission the probe needs would never run). */
         send(res, "text/plain", "cookie-set", { "set-cookie": "fx2=1; Path=/" });
+      } else if (path === "/setcookie3") {
+        /* #534: a readable cookie for the cookieStore change-event
+           check; one Set-Cookie per response so the answer never
+           depends on how a multi-header value was joined. */
+        send(res, "text/plain", "cookie-set", { "set-cookie": "fxs=1; Path=/" });
+      } else if (path === "/setcookie4") {
+        /* #534: an HttpOnly cookie the facade and document.cookie must
+           both hide. */
+        send(res, "text/plain", "cookie-set", { "set-cookie": "fxh=1; Path=/; HttpOnly" });
+      } else if (path === "/setsamesite") {
+        /* #534: one SameSite matrix cookie per call (c=strict|lax|none).
+           None carries Secure; loopback origins are trustworthy, so
+           Chromium stores it and so does the jar admission. */
+        const c = (req.url ?? "").split("?")[1]?.split("=")[1];
+        const ck = c === "strict" ? "ssStrict=1; Path=/; SameSite=Strict"
+          : c === "lax" ? "ssLax=1; Path=/; SameSite=Lax"
+          : c === "none" ? "ssNone=1; Path=/; SameSite=None; Secure"
+          : null;
+        if (!ck) { res.writeHead(400).end(); return; }
+        send(res, "text/plain", "cookie-set", { "set-cookie": ck });
+      } else if (path === "/zl-echocookie") {
+        /* #534: the exact Cookie header the request carried. */
+        send(res, "application/json", JSON.stringify({ cookie: req.headers.cookie ?? "" }),
+          { "cache-control": "no-store" });
+      } else if (path === "/nav-cookie.html") {
+        /* #534: top-level navigation attachment proof: the fixture
+           renders the Cookie header of the navigation request itself
+           into the document. */
+        send(res, "text/html; charset=utf-8",
+          `<!doctype html><p id="zl-nav-cookie">${(req.headers.cookie ?? "").replace(/</g, "&lt;")}</p>`);
       } else if (path === "/sw-probe.js") {
         send(res, "text/javascript", "self.addEventListener('install', () => {});\n");
       } else if (path === "/api/methods") {
@@ -538,7 +617,11 @@ document.getElementById("zl-spa-go").addEventListener("click", function () {
     });
   });
   return new Promise((resolve) => {
-    server.listen(port, "127.0.0.1", () => {
+    /* #534: dual-stack loopback. The *.localhost cross-site fixture
+     hostname resolves to ::1 first on glibc (nss myhostname) and to
+     127.0.0.1 inside Chromium; binding "::" serves both without
+     changing the 127.0.0.1 origins every other check uses. */
+  server.listen(port, "::", () => {
       resolve({
         server,
         origin,

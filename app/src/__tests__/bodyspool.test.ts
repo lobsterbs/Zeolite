@@ -167,6 +167,27 @@ describe("spoolBody (#556 replay spool)", () => {
     expect(fake.removed.length).toBe(1);
   });
 
+  it("a source dying mid-spool cleans up and frees the live budget", async () => {
+    /* #556: cancellation/bounded-failure check - the partial file never
+       outlives the failed request and the live budget is returned, so
+       the failure cannot wedge later spools. (The reader cancel is a
+       no-op on an already-errored stream, so only the file and budget
+       bounds are observable here.) */
+    const fake = fakeRoot();
+    setSpoolRootForTests(fake.root);
+    const dying = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc("first"));
+        setTimeout(() => c.error(new Error("source died")), 0);
+      },
+    });
+    await expect(spoolBody(dying, { cap: 100, totalBudget: 20 })).rejects.toThrow("source died");
+    expect(fake.removed.length).toBe(1);
+    /* the budget came back: an equal spool fits again immediately */
+    const h = await spoolBody(streamOf([enc("0123456789abcdef")]), { cap: 100, totalBudget: 20 });
+    await h.release();
+  });
+
   it("rejects cleanly when no storage root exists at all", async () => {
     setSpoolRootForTests(null);
     await expect(spoolBody(streamOf([enc("x")]))).rejects.toBeInstanceOf(SpoolUnavailableError);

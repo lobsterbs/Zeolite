@@ -12,7 +12,7 @@ export type ExperimentalChoices = Record<ExperimentalFlag, boolean>;
 
 const defaults = (): ExperimentalChoices => ({
   adaptiveTransit: false,
-  hybridLocation: false,
+  hybridLocation: true,
   cspTranslation: false,
   virtualSW: false,
 });
@@ -25,22 +25,25 @@ export function experimentalEnabled(key: ExperimentalFlag): boolean {
 }
 
 /** Effective describes shipped behavior, not a promised complete
-    feature: CSP is limited to deny-only policies; adaptive routing
-    has an observational shadow gate only. Full guest execution and
-    hybrid pre-execution rewriting remain inactive. */
+    feature: CSP is deny-only browser-side plus engine-side source-list
+    enforcement (#527); adaptive routing
+    has an observational shadow gate only; hybridLocation wires the
+    #456 hybrid pre-execution pass for otherwise-legacy origins
+    (explicit siteconfig rules still win). Full guest execution
+    remains inactive. */
 export function experimentalSnapshot() {
   return {
     requested: { ...requested },
     effective: {
       adaptiveTransit: false,
-      hybridLocation: false,
+      hybridLocation: requested.hybridLocation,
       cspTranslation: requested.cspTranslation,
       virtualSW: false,
     },
     status: {
       adaptiveTransit: requested.adaptiveTransit ? "shadow-only" : "disabled",
-      hybridLocation: "not-wired",
-      cspTranslation: requested.cspTranslation ? "deny-only" : "disabled",
+      hybridLocation: requested.hybridLocation ? "enabled" : "disabled",
+      cspTranslation: requested.cspTranslation ? "deny-only+engine-source-lists" : "disabled",
       virtualSW: "not-implemented",
     } as const,
   };

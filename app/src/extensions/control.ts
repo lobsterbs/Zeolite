@@ -3,18 +3,22 @@
 
 import { decodeClientUrl } from "../codec";
 import type { ControlMessage } from "../control";
+import { ACTION } from "./action";
+import type { ActionKind } from "./action";
 import { bootInstalled, wakeExtension } from "./background";
 import { contentScriptMatches } from "./content-scripts";
 import { MESSENGER, getExtensionContext } from "./context";
+import { senderOrigin } from "./messaging";
 import { MENUS } from "./contextmenus";
 import { DOWNLOADS } from "./downloads";
 import { extensions } from "./manager";
 import { NOTIFY } from "./notifications";
 import { normalizeExtensionPath } from "./origin";
 import { handleExtPageCall } from "./pageapi";
-import { EXT_ROUTE, mintPageToken, pageClientOf } from "./serve";
+import { EXT_ROUTE, extPageOpenUrl, mintPageToken, pageClientOf } from "./serve";
 import type { ExtensionRecord } from "./types";
 import type { ExtensionStorageArea } from "./storage";
+import { contentScriptMayUseSession } from "./storage";
 import { TABS, tabView } from "./tabs";
 import { WEBNAV } from "./webnavigation";
 
@@ -304,6 +308,47 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
       reply({ ok: true });
       break;
     }
+    case "zl:actionEvent": {
+      /* #519: the host reports a rendered toolbar button click. Same
+         trust shape as zl:notifyEvent: the click kind is the host's
+         (it rendered the button), the tab resolves through the tabs
+         bridge, and an idle MV3 background wakes before delivery. */
+      const ae = msg as { extId?: string; msg?: unknown };
+      const info = ae.msg as {
+        tabId?: unknown;
+        kind?: unknown;
+        button?: unknown;
+        modifiers?: unknown;
+        pageUrl?: unknown;
+      } | undefined;
+      const actExtId = typeof ae.extId === "string" ? ae.extId : "";
+      const kind: ActionKind | null =
+        info?.kind === "action" || info?.kind === "browser_action" || info?.kind === "page_action"
+          ? info.kind
+          : null;
+      if (!actExtId || !kind || typeof info?.tabId !== "number") {
+        reply({ ok: false, error: "bad actionEvent" });
+        break;
+      }
+      const arec = extensions.get(actExtId);
+      if (!arec || !arec.enabled) {
+        reply({ ok: false, error: "no such extension" });
+        break;
+      }
+      const tab = TABS.get(info.tabId) ?? TABS.list().find((t) => t.url === info.pageUrl) ?? null;
+      e.waitUntil(
+        wakeExtension(actExtId).then(() => {
+          ACTION.click(actExtId, kind, {
+            tabId: info.tabId as number,
+            ...(typeof info?.button === "number" ? { button: info.button } : {}),
+            ...(Array.isArray(info?.modifiers) ? { modifiers: info.modifiers.map(String) } : {}),
+            ...(tab ? { tab: tabView(arec, tab) } : {}),
+          });
+        }),
+      );
+      reply({ ok: true });
+      break;
+    }
     case "zl:extPage": {
       /* #40: RPC from an extension-origin page (options/popup). The
          sender must be a client registered as that extension's page:
@@ -315,17 +360,90 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
       const extId = typeof ep.extId === "string" ? ep.extId : "";
       const srcId = src && src.url ? src.id : "";
       const srcUrl = src && src.url ? src.url : null;
+      const safeRpcReply = (payload: unknown) => {
+        try { reply(payload); } catch { /* caller closed its RPC endpoint */ }
+      };
       if (!extId || !srcId || pageClientOf(srcId) !== extId) {
-        reply({ ok: false, error: "not an extension page" });
+        safeRpcReply({ ok: false, error: "not an extension page" });
         break;
       }
       const erec = extensions.get(extId);
       if (!erec || !erec.enabled) {
-        reply({ ok: false, error: "no such extension" });
+        safeRpcReply({ ok: false, error: "no such extension" });
         break;
       }
-      const call = (ep.msg ?? {}) as { path?: unknown; args?: unknown };
+      const call = (ep.msg ?? {}) as { path?: unknown; args?: unknown; port?: unknown; name?: unknown };
       const path = Array.isArray(call.path) ? call.path : [];
+      /* #560: page-world runtime.connect opens a duplex port instead
+         of an RPC: the page transfers one MessageChannel end here and
+         the SW pairs it with a real extension port, so background
+         onConnect listeners receive the far end. The bridge owns
+         e.ports[0] for its lifetime; the RPC reply port is untouched. */
+      if (call.port === "connect") {
+        const chan = (e.ports && e.ports[0]) || null;
+        const pname = typeof call.name === "string" ? call.name : "";
+        if (!chan) {
+          reply({ ok: false, error: "connect needs a transferred port" });
+          break;
+        }
+        e.waitUntil(
+          wakeExtension(extId)
+            .then(() => {
+              const inner = MESSENGER.connect(extId, pname, {
+                extensionId: extId,
+                id: extId,
+                context: "extension-page",
+                /* #560: null for the same TM-class reason as the page
+                   sendMessage sender. */
+                url: null,
+              });
+              inner.onMessage((m) => {
+                try {
+                  chan.postMessage({ t: "m", msg: m });
+                } catch {
+                  /* page end already closed */
+                }
+              });
+              inner.onDisconnect(() => {
+                try {
+                  chan.postMessage({ t: "d" });
+                } catch {
+                  /* page end already closed */
+                }
+                chan.close();
+              });
+              chan.onmessage = (ev: MessageEvent) => {
+                const d = (ev.data ?? {}) as { t?: string; msg?: unknown };
+                if (d.t === "p") {
+                  try {
+                    inner.postMessage(d.msg);
+                  } catch {
+                    /* background port already disconnected */
+                  }
+                } else if (d.t === "d") {
+                  try {
+                    inner.disconnect();
+                  } catch {
+                    /* already disconnected */
+                  }
+                  chan.close();
+                }
+              };
+              chan.start();
+              chan.postMessage({ t: "ok" });
+            })
+            .catch((err: unknown) => {
+              try {
+                chan.postMessage({ t: "err", msg: String(err) });
+              } catch {
+                /* already closed */
+              }
+              chan.close();
+            }),
+        );
+        break;
+      }
+
       /* runtime.sendMessage needs the background booted to have
          listeners; other page calls answer from the shared context. */
       const wake =
@@ -335,28 +453,29 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
       e.waitUntil(
         wake
           .then(() => handleExtPageCall(erec, srcUrl, call))
-          .then(reply)
-          .catch((err: unknown) => reply({ ok: false, error: String(err) })),
+          .then(safeRpcReply)
+          .catch((err: unknown) => safeRpcReply({ ok: false, error: String(err) })),
       );
       break;
     }
     case "zl:openExtPage": {
-      /* #40: host-only. Resolves an extension's options or popup
-         page, mints a 5-minute page token and answers the /zl-ext/
-         URL the host should navigate a tab to. The token is the only
-         way a first navigation gets past the WAR gate for a non-WAR
-         page. */
+      /* #40: host-only. Resolves an extension's options or popup page
+         and mints a 5-minute page token through the shared opener
+         (#518: runtime.openOptionsPage uses the same flow). #560: the
+         URL is ROOTED at the origin root (/options.html?zlExt=...)
+         because extension page worlds dispatch their boot on
+         location.pathname; the token grants the first navigation and
+         registered page clients self-navigate without one. */
       const op = msg as { extId?: unknown; which?: unknown };
       const which = op.which === "popup" ? "popup" : "options";
       const extId = typeof op.extId === "string" ? op.extId : "";
       const orec = extId ? extensions.get(extId) : null;
-      const raw = which === "popup" ? orec?.action?.defaultPopup : orec?.options?.page;
-      const norm = raw ? normalizeExtensionPath(raw.startsWith("/") ? raw : "/" + raw) : null;
-      if (!orec || !orec.enabled || !norm) {
+      const url = orec ? extPageOpenUrl(orec, which) : null;
+      if (!url) {
         reply({ ok: false, error: "no such " + which + " page" });
         break;
       }
-      reply({ ok: true, url: EXT_ROUTE + orec.id + norm + "?zlPageTok=" + mintPageToken(orec.id, norm) });
+      reply({ ok: true, url });
       break;
     }
     default:
@@ -413,6 +532,14 @@ async function handleExtMessage(
     if (!rec.permissions.includes("storage")) {
       return { ok: false, error: "storage permission not granted" };
     }
+    /* #520: storage.session is trusted-contexts-only until
+       setAccessLevel opens it, exactly as in Firefox. The check is
+       engine-side, so a stale bridge config or a hand-rolled message
+       cannot route around it, and a level change takes effect for
+       every already-open page. */
+    if (String(msg.__zlStorage) === "session" && !contentScriptMayUseSession(rec.id)) {
+      return { ok: false, error: "zeolite: storage.session is not available to content scripts" };
+    }
     const ctx = await getExtensionContext(rec);
     const area = (ctx.storage as unknown as Record<string, ExtensionStorageArea>)[
       String(msg.__zlStorage)
@@ -433,8 +560,10 @@ async function handleExtMessage(
   await wakeExtension(rec.id);
   const response = await MESSENGER.sendMessage(rec.id, {
     extensionId: rec.id,
+    id: rec.id,
     context: "content",
     url: dest,
+    origin: senderOrigin(dest),
   }, m.msg);
   return { ok: true, response };
 }
@@ -445,6 +574,6 @@ async function handleExtMessage(
 // labels the switch in dispatchExtControl below handles. control.test.ts
 // pins it against that switch.
 export const EXT_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ext", "zl:tabs", "zl:listExt", "zl:installExt", "zl:installExtFiles", "zl:extEnable", "zl:extInfo", "zl:extUninstall", "zl:menuClick", "zl:listMenus", "zl:notifyEvent", "zl:extPage", "zl:openExtPage", "zl:downloadState",
+  "zl:ext", "zl:tabs", "zl:listExt", "zl:installExt", "zl:installExtFiles", "zl:extEnable", "zl:extInfo", "zl:extUninstall", "zl:menuClick", "zl:listMenus", "zl:notifyEvent", "zl:actionEvent", "zl:extPage", "zl:openExtPage", "zl:downloadState",
 ]);
 

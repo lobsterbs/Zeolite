@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { extensions, ExtensionManager } from "../manager";
 import { buildApi } from "../runtime";
 import { ExtensionMessenger } from "../messaging";
@@ -46,19 +46,30 @@ describe("browser.scripting", () => {
     TABS.setDispatch(() => undefined);
     syncTab(1, "https://example.com/page");
     const { rec, api } = await install("Scripty", ["scripting", "https://example.com/*"], { "inj.js": "// injected" });
-    const sent: unknown[] = [];
-    SCRIPTING.setDispatch((m) => sent.push(m));
+    const sent: Array<{ m: { type: string; extId: string; dest: string; js: string[]; css: string[] }; reply: MessagePort | null }> = [];
+    /* #517: executeScript awaits the page's results reply; the fake
+       dispatch answers once, which is what LISTENER_SOURCE does. */
+    SCRIPTING.setDispatch((m, reply) => sent.push({ m, reply }));
     const scripting = api.browser.scripting as Record<string, unknown>;
-    await (scripting.executeScript as (i: unknown) => Promise<void>)({ target: { tabId: 1 }, files: ["inj.js"] });
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({
+    const p = (scripting.executeScript as (i: unknown) => Promise<unknown>)({ target: { tabId: 1 }, files: ["inj.js"] });
+    await vi.waitFor(() => {
+      if (sent.length !== 1) throw new Error("dispatch pending");
+    });
+    expect(sent[0].m).toMatchObject({
       type: "zl:scripting",
       extId: rec.id,
       dest: "https://example.com/page",
       js: ["// injected"],
     });
-    await (scripting.insertCSS as (i: unknown) => Promise<void>)({ target: { tabId: 1 }, files: ["inj.js"] });
-    expect(sent[1]).toMatchObject({ css: ["// injected"], js: [] });
+    sent[0].reply!.postMessage({ results: [{ result: undefined }] });
+    await p;
+    const p2 = (scripting.insertCSS as (i: unknown) => Promise<void>)({ target: { tabId: 1 }, files: ["inj.js"] });
+    await vi.waitFor(() => {
+      if (sent.length !== 2) throw new Error("css dispatch pending");
+    });
+    expect(sent[1].m).toMatchObject({ css: ["// injected"], js: [] });
+    expect(sent[1].reply).toBeNull();
+    await p2;
     SCRIPTING.setDispatch(null);
   });
 

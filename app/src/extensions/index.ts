@@ -29,7 +29,9 @@ export {
   backgroundIsServiceWorker,
 } from "./background";
 export {
+  rootedPageGrant,
   serveExtensionAsset,
+  serveRootedExtPage,
   parseServePath,
   EXT_ROUTE,
   CS_ROUTE,
@@ -72,6 +74,8 @@ export type { MenuItem, MenuClickInfo, MenuClickedListener } from "./contextmenu
 export { DOWNLOADS, DownloadsHost } from "./downloads";
 export type { DownloadOptions, DownloadOp, DownloadState, DownloadStatus, DownloadChange, DownloadsChangedListener } from "./downloads";
 export { NOTIFY, NotificationsHost } from "./notifications";
+export { ACTION, ActionHost } from "./action";
+export type { ActionKind, ActionState, ActionOp, ActionClick, ActionClickedListener } from "./action";
 export type {
   NotificationButton,
   NotificationRecord,

@@ -7,12 +7,15 @@ import {
   mintPageToken,
   registerPageClient,
   pageClientOf,
+  rootedPageGrant,
+  serveRootedExtPage,
   EXT_ROUTE,
 } from "../serve";
 import { handleExtPageCall, pageCallList, pageNamespaceList } from "../pageapi";
 import { PAGE_BRIDGE_SOURCE } from "../pagebridge";
 import { MESSENGER } from "../context";
 import { dispatchExtControl } from "../control";
+import { idleTerminate } from "../background";
 import type { ExtensionRecord } from "../types";
 
 const enc = new TextEncoder();
@@ -60,6 +63,32 @@ async function pageExt(): Promise<ExtensionRecord> {
     "options.html": PAGE_HTML,
     "secret.js": "var notForTheWeb = 1;",
   });
+}
+
+async function messagePageExt(): Promise<ExtensionRecord> {
+  await extensions.startup();
+  const manifest = {
+    manifest_version: 3,
+    name: "PageMessaging #" + seq++,
+    version: "1.0",
+    permissions: [],
+    options_page: "options.html",
+    background: { service_worker: "sw.js" },
+  };
+  const files = new Map<string, Uint8Array>([
+    ["manifest.json", enc.encode(JSON.stringify(manifest))],
+    ["options.html", enc.encode(PAGE_HTML)],
+    ["sw.js", enc.encode(
+      "browser.runtime.onMessage.addListener(function (m, sender, sendResponse) {" +
+      "if (m.kind === 'none') return undefined;" +
+      "if (m.kind === 'false') return false;" +
+      "setTimeout(function () { sendResponse({ pong: m.kind }); }, 5);" +
+      "return true;" +
+      "});",
+    )],
+  ]);
+  const { id } = await extensions.installFiles(files);
+  return extensions.get(id)!;
 }
 
 function reqUrl(href: string): { req: Request; url: URL } {
@@ -190,6 +219,60 @@ describe("extension pages (#40)", () => {
     expect(badPath.ok).toBe(false);
   });
 
+  it("routes delayed, false and no-reply background responses back through the extension-page RPC (#573)", async () => {
+    const rec = await messagePageExt();
+    const clientId = "page-send-" + seq++;
+    registerPageClient(clientId, rec.id);
+    const pending: Promise<unknown>[] = [];
+    const replies: unknown[] = [];
+    const e = {
+      source: { id: clientId, url: "https://sw.example/options.html" },
+      ports: [],
+      waitUntil(p: Promise<unknown>) { pending.push(p); },
+    } as unknown as ExtendableMessageEvent;
+
+    const send = async (kind: string) => {
+      await dispatchExtControl({
+        type: "zl:extPage",
+        extId: rec.id,
+        msg: { path: ["runtime", "sendMessage"], args: [{ kind }] },
+      } as never, { e, reply: (value) => replies.push(value) });
+      await Promise.all(pending.splice(0));
+      return replies.pop();
+    };
+
+    try {
+      expect(await send("ping")).toEqual({ ok: true, response: { pong: "ping" } });
+      expect(await send("false")).toEqual({ ok: true, response: false });
+      expect(await send("none")).toEqual({ ok: true, response: undefined });
+    } finally {
+      idleTerminate(rec.id);
+    }
+  });
+
+  it("page bridge resolves both the returned promise and trailing callback (#573)", async () => {
+    const page: Record<string, unknown> = {};
+    const controller = {
+      postMessage(_message: unknown, ports: MessagePort[]) {
+        queueMicrotask(() => ports[0].postMessage({ ok: true, response: "pong" }));
+      },
+    };
+    const installBridge = new Function(
+      "ZL_PAGE_CFG", "window", "navigator", "MessageChannel", PAGE_BRIDGE_SOURCE,
+    ) as (cfg: unknown, win: unknown, nav: unknown, channel: typeof MessageChannel) => void;
+    installBridge(
+      { ext: "e".repeat(32), calls: ["runtime.sendMessage"] },
+      page,
+      { serviceWorker: { controller } },
+      MessageChannel,
+    );
+    let callbackReply: unknown = "pending";
+    const chrome = page.chrome as { runtime: { sendMessage: (m: unknown, cb: (value: unknown) => void) => Promise<unknown> } };
+    const result = await chrome.runtime.sendMessage({ method: "ping" }, (value) => { callbackReply = value; });
+    expect(result).toBe("pong");
+    expect(callbackReply).toBe("pong");
+  });
+
   it("mounts page cookies and storage only with their permissions", async () => {
     const noPerms = await install("NoCookiesPage", [], { "options.html": PAGE_HTML });
     const refused = await handleExtPageCall(noPerms, null, {
@@ -222,6 +305,11 @@ describe("extension pages (#40)", () => {
     expect(r.response).toBe("pong");
     expect(seen).not.toBeNull();
     expect((seen as unknown as { sender: { context: string } }).sender.context).toBe("extension-page");
+    /* #560: TM-class dispatchers classify by sender.id and refuse
+       senders whose url is not an internal page scheme: the page
+       sender must carry the id and no URL. */
+    expect((seen as unknown as { sender: { id?: string } }).sender.id).toBe(rec.id);
+    expect((seen as unknown as { sender: { url?: string | null } }).sender.url).toBeNull();
   });
 
   it("enforces MV3 scoped web_accessible_resources against the page destination (#51)", async () => {
@@ -271,14 +359,15 @@ describe("zl:openExtPage dispatch (LB #76 open-options button)", () => {
     const r = replies[0] as { ok: boolean; url?: string; error?: string };
     expect(r.ok).toBe(true);
     expect(r.url).toBeTruthy();
-    expect(r.url!.startsWith(EXT_ROUTE + rec.id + "/options.html?zlPageTok=")).toBe(true);
+    expect(r.url!.startsWith("/options.html?zlExt=" + rec.id + "&zlPageTok=")).toBe(true);
     const u = new URL("https://sw.example" + r.url);
-    const served = await serveExtensionAsset(new Request(u.href), u, {
-      nav: true,
-      resultingClientId: "open1",
-    });
+    const grant = rootedPageGrant(new Request(u.href), u, undefined);
+    const served = grant
+      ? await serveRootedExtPage(grant, "open1")
+      : new Response("zeolite: grant expected");
     expect(served.status).toBe(200);
     expect(await served.text()).toContain("options");
+    expect(pageClientOf("open1")).toBe(rec.id);
   });
 
   it("answers honestly for a missing page or unknown extension", async () => {

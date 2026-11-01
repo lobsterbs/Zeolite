@@ -6,6 +6,7 @@
    are keyed by extension id, so nothing crosses extensions. */
 
 import { buildApi } from "./runtime";
+import { resolvePackageI18n } from "./i18n";
 import { ExtensionStorageArea } from "./storage";
 import { openDb } from "./idb";
 import { ExtensionMessenger } from "./messaging";
@@ -13,6 +14,10 @@ import { extensions } from "./manager";
 import type { ExtensionId, ExtensionRecord } from "./types";
 
 export const MESSENGER = new ExtensionMessenger();
+
+/* #518: the external messaging gate reads the live manager, so a
+   target installed later is admissible without a restart. */
+MESSENGER.setExternallyConnectableProvider((id) => extensions.get(id) ?? null);
 
 export interface ExtensionContext {
   storage: {
@@ -29,16 +34,28 @@ export async function getExtensionContext(ext: ExtensionRecord): Promise<Extensi
   let ctx = contexts.get(ext.id);
   if (ctx) return ctx;
   const db = await openDb();
-  const local = new ExtensionStorageArea(ext.id, "local", "local");
+  /* #520: unlimitedStorage lifts the local-area quota, as Firefox
+     documents it; everything else keeps the engine defaults. */
+  const local = new ExtensionStorageArea(
+    ext.id,
+    "local",
+    "local",
+    ext.permissions.includes("unlimitedStorage") ? Number.POSITIVE_INFINITY : undefined,
+  );
   const sync = new ExtensionStorageArea(ext.id, "sync", "sync");
   const session = new ExtensionStorageArea(ext.id, "session", "session");
   await local.load(db);
   await sync.load(db);
-  const sender = { extensionId: ext.id, context: "background" as const, url: null };
+  const sender = { extensionId: ext.id, id: ext.id, context: "background" as const, url: null };
+  const i18n = await resolvePackageI18n(
+    typeof ext.manifest.default_locale === "string" ? ext.manifest.default_locale : "",
+    (p) => extensions.getResource(ext.id, p, { fromWeb: false }),
+  );
   const api = buildApi(ext, sender, {
     messenger: MESSENGER,
     storage: { local, sync, session },
     manager: extensions,
+    i18n,
   });
   ctx = { storage: { local, sync, session }, api };
   contexts.set(ext.id, ctx);
