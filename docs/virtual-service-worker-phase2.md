@@ -113,7 +113,7 @@ supported, kept honest.
 
 | Feature | Stage | Notes and limits |
 | --- | --- | --- |
-| register / getRegistration(s) / unregister | S1 | Keys the store by (virtual origin, scope); multiple scopes per origin coexist and unregister removes only the exact scope. |
+| register / getRegistration(s) / unregister | S1 | Keys the store by (virtual origin, scope); multiple scopes per origin coexist, the longest scope wins, and unregister removes only the exact scope. A hard cap of 64 active guest registrations per virtual origin bounds worker resources. |
 | registration.update() | S1 | Re-fetches the script URL through the transport and compares stored validators and length; updatefound fires on a real change, never fabricated. |
 | state machine and statechange | S1 | Native-shaped installing / installed / waiting / activating / activated with real waiting periods instead of the microtask settle; statechange events fire on transitions. |
 | ready | S1 | Already resolves; S1 keeps it pending while a registration for the scope is installing, matching native. |
