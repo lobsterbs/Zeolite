@@ -45,41 +45,29 @@
         /* The zl:guestHost control kind is host-only (the engine's
            PAGE_MESSAGES gate excludes it), so only engine-origin pages
            can open this bridge. Proxied pages cannot spawn guests. */
-        var boundWorker = null;
-
-        function connectWith(sw, worker) {
-          if (!worker || boundWorker === worker) return;
-          if (control) {
-            control.onmessage = null;
-            control.close();
-          }
-          var channel = new MessageChannel();
-          control = channel.port1;
-          boundWorker = worker;
-          control.onmessage = function (ev) {
-            var d = ev.data || {};
-            if (d.op === "spawn") spawn(d);
-            else if (d.op === "terminate") terminate(String(d.origin), String(d.scope || ""), d.id);
-          };
-          worker.postMessage({ type: "zl:guestHost" }, [channel.port2]);
-          setStatus("guest host ready");
-        }
-
         function connect() {
           var sw = navigator.serviceWorker;
           if (!sw) {
             setStatus("service workers unavailable");
             return;
           }
-          if (sw.controller) {
-            connectWith(sw, sw.controller);
+          /* Send host-only messages only through controller. Messaging
+             registration.active before this page is controlled makes the
+             worker see a ServiceWorker source, not an authenticated Client.
+             Waiting for controllerchange preserves the existing sender gate. */
+          if (!sw.controller) {
+            setStatus("waiting for engine service worker control");
             return;
           }
-          sw.ready.then(function (registration) {
-            connectWith(sw, sw.controller || registration.active || registration.waiting);
-          }).catch(function () {
-            setStatus("no active engine service worker");
-          });
+          var channel = new MessageChannel();
+          control = channel.port1;
+          control.onmessage = function (ev) {
+            var d = ev.data || {};
+            if (d.op === "spawn") spawn(d);
+            else if (d.op === "terminate") terminate(String(d.origin), String(d.scope || ""), d.id);
+          };
+          sw.controller.postMessage({ type: "zl:guestHost" }, [channel.port2]);
+          setStatus("guest host ready");
         }
         navigator.serviceWorker && navigator.serviceWorker.addEventListener("controllerchange", connect);
 

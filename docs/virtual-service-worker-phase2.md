@@ -96,12 +96,10 @@ registrations can coexist on one virtual origin. Each canonical scope
 resolves against the registering page's virtual URL and clamps to that
 same virtual origin.
 
-Matching rule: a request or a page carries its virtual context
-(site id plus URL); a registration matches only when the site id is
-equal and the canonical scope is a path prefix. Two sites can
-register the same scope path and never see each other, because the
-site id is part of the key: a cross-site URL-prefix match is
-structurally impossible, not merely filtered.
+Matching rule: a registration matches only when the request URL has
+the same verified virtual origin and falls within its canonical scope.
+When multiple scopes match, the longest canonical scope wins. A
+cross-origin URL can never match a registration.
 
 Phase 1's defense in depth (a record that scopes a foreign origin
 is ignored even if it lands in this store) is kept and extended to

@@ -310,7 +310,10 @@ export async function recoverFlagSurgeryScript(
   flagRecoveryTargets.set(pageOrigin, attempted);
   if (flagRecoveryTargets.size > FLAG_RECOVERY_ORIGINS) {
     const oldest = flagRecoveryTargets.keys().next();
-    if (!oldest.done) flagRecoveryTargets.delete(oldest.value);
+    if (!oldest.done) {
+      flagRecoveryTargets.delete(oldest.value);
+      flagRecoveryRequests.delete(oldest.value);
+    }
   }
 
   const safe = new Headers();
@@ -319,8 +322,7 @@ export async function recoverFlagSurgeryScript(
     if (v) safe.set(h, v);
   }
   const tried = new Set<string>();
-  let uMss: GoogleMssPath | null = null;
-  uMss = parseGoogleMssPath(u.pathname);
+  const uMss = parseGoogleMssPath(u.pathname);
 
   /* Google AI Mode's token-prefixed mss route. The upstream token is
      session/page-specific, so reuse only a base observed on this exact
@@ -355,6 +357,13 @@ export async function recoverFlagSurgeryScript(
       const attempts = (flagRecoveryRequests.get(pageOrigin) ?? 0) + 1;
       flagRecoveryRequests.delete(pageOrigin);
       flagRecoveryRequests.set(pageOrigin, attempts);
+      if (flagRecoveryRequests.size > FLAG_RECOVERY_ORIGINS) {
+        const oldest = flagRecoveryRequests.keys().next();
+        if (!oldest.done) {
+          flagRecoveryRequests.delete(oldest.value);
+          flagRecoveryTargets.delete(oldest.value);
+        }
+      }
       try {
         const r = await fetchUpstream(candUrl, { method: "GET", headers: safe });
         if (r.ok && mimeOkFor("script", r.headers.get("content-type") ?? "")) return { url: candUrl, resp: r };
@@ -407,6 +416,13 @@ export async function recoverFlagSurgeryScript(
         const attempts = (flagRecoveryRequests.get(pageOrigin) ?? 0) + 1;
         flagRecoveryRequests.delete(pageOrigin);
         flagRecoveryRequests.set(pageOrigin, attempts);
+        if (flagRecoveryRequests.size > FLAG_RECOVERY_ORIGINS) {
+          const oldest = flagRecoveryRequests.keys().next();
+          if (!oldest.done) {
+            flagRecoveryRequests.delete(oldest.value);
+            flagRecoveryTargets.delete(oldest.value);
+          }
+        }
         try {
           const r = await fetchUpstream(candUrl, { method: "GET", headers: safe });
           if (r.ok && mimeOkFor("script", r.headers.get("content-type") ?? "")) return { url: candUrl, resp: r };
