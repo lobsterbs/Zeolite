@@ -15,8 +15,8 @@ import { TABS, tabView, changeView } from "./tabs";
 import type { TabsEvent } from "./tabs";
 import { SCRIPTING } from "./scripting";
 import type { ScriptingInjection } from "./scripting";
-import { WEBNAV } from "./webnavigation";
-import type { NavigationCommitted, NavigationKind } from "./webnavigation";
+import { WEBNAV, navigationFilterPredicate } from "./webnavigation";
+import type { NavigationCommitted, NavigationKind, NavigationUrlFilter } from "./webnavigation";
 import { WEBREQ } from "./webrequest";
 import type { WrKind } from "./webrequest";
 import { MENUS } from "./contextmenus";
@@ -35,6 +35,7 @@ import { hostPatternsMatch } from "./permissions";
 import { isApiDetached } from "./apis";
 import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
+import { setSessionAccessLevel, SYNC_MAX_ITEMS, SYNC_MAX_WRITE_OPERATIONS_PER_HOUR, SYNC_MAX_WRITE_OPERATIONS_PER_MINUTE, SYNC_QUOTA_BYTES, SYNC_QUOTA_BYTES_PER_ITEM } from "./storage";
 import type { ExtensionStorageArea, StorageValue } from "./storage";
 import type { ExtensionMessenger, MessageListener, ConnectListener, MessageSender, ExtensionPort } from "./messaging";
 import { ALARMS } from "./alarms";
@@ -182,14 +183,16 @@ function makeTabsEvent(
 }
 
 /* webNavigation events gated by the webNavigation permission, exactly
-   as Firefox delivers them. Listener url filters use the webRequest
-   pattern grammar ({ urls: [...] }); Firefox's richer filter object
-   (urlMatches etc.) is not implemented (documented in ./compat). */
+   as Firefox delivers them. Listener filters accept the webRequest
+   pattern grammar ({ urls: [...] }) and Firefox's richer UrlFilter
+   object (urlMatches, hostEquals, queryEquals, ports, ...) (#560
+   residual); an invalid regex throws at addListener, as Firefox
+   throws at the call. */
 function makeWebNavEvent(
   ext: ExtensionRecord,
   kind: NavigationKind,
 ): {
-  addListener: (l: (info: NavigationCommitted) => void, filter?: { urls?: unknown }) => void;
+  addListener: (l: (info: NavigationCommitted) => void, filter?: { urls?: unknown } & NavigationUrlFilter) => void;
   removeListener: (l: (info: NavigationCommitted) => void) => void;
   hasListener: (l: (info: NavigationCommitted) => void) => boolean;
 } {
@@ -197,22 +200,40 @@ function makeWebNavEvent(
   return {
     addListener: (l, filter) => {
       if (offs.has(l)) return;
+      const wrapped = (info: NavigationCommitted): void => {
+        if (!ext.permissions.includes("webNavigation")) return;
+        try {
+          l(info);
+        } catch {
+          /* a broken listener is the extension's own problem */
+        }
+      };
       const urls = (Array.isArray(filter?.urls) ? filter!.urls : []).map(String);
-      offs.set(
-        l,
-        WEBNAV.subscribeKind(
-          kind,
-          (info) => {
-            if (!ext.permissions.includes("webNavigation")) return;
-            try {
-              l(info);
-            } catch {
-              /* a broken listener is the extension's own problem */
-            }
-          },
-          urls.length > 0 ? urls : undefined,
-        ),
-      );
+      const rich: NavigationUrlFilter = {};
+      let hasRich = false;
+      for (const k of [
+        "urlMatches",
+        "originAndPathMatches",
+        "urlPrefix",
+        "urlSuffix",
+        "urlContains",
+        "hostEquals",
+        "queryEquals",
+        "ports",
+      ] as const) {
+        const v = filter?.[k];
+        if (v !== undefined) {
+          rich[k] = v as never;
+          hasRich = true;
+        }
+      }
+      if (hasRich && urls.length > 0) {
+        offs.set(l, WEBNAV.subscribeKindAnd(kind, wrapped, urls, navigationFilterPredicate(rich)));
+      } else if (hasRich) {
+        offs.set(l, WEBNAV.subscribeKind(kind, wrapped, rich));
+      } else {
+        offs.set(l, WEBNAV.subscribeKind(kind, wrapped, urls.length > 0 ? urls : undefined));
+      }
     },
     removeListener: (l) => {
       offs.get(l)?.();
@@ -461,13 +482,59 @@ export function buildApi(
   /* #50: Firefox gates browser.storage on the "storage" permission;
      mounted only when granted - like cookies/notifications/webRequest -
      so feature detection answers honestly and the background/page
-     surface agrees with the content-script storage gate in the SW. */
+     surface agrees with the content-script storage gate in the SW.
+     #520: storage.onChanged is the top-level Firefox event - every
+     area of this extension's own storage reports (changes, areaName)
+     here, in every background context (one context per extension
+     shares the area instances, so cross-surface changes arrive).
+     storage.session gains Firefox's setAccessLevel, enforced at the
+     SW content-script gate from the same registry. The sync surface
+     reports Firefox's real quota constants, and the engine enforces
+     them (102400 total, 8192 per item, 512 items, write-op rates). */
   const storageNs = ext.permissions.includes("storage")
-    ? {
-        local: wrapArea(deps.storage.local),
-        sync: wrapArea(deps.storage.sync),
-        session: wrapArea(deps.storage.session),
-      }
+    ? (() => {
+        const areas = [deps.storage.local, deps.storage.sync, deps.storage.session];
+        const onChanged = {
+          addListener: (l: (changes: Record<string, unknown>, area: string) => void) => {
+            if (offs.has(l)) return;
+            const wrap = (changes: Record<string, unknown>, area: string) => {
+              try {
+                l(changes, area);
+              } catch {
+                /* a broken listener is the extension's own problem */
+              }
+            };
+            for (const a of areas) a.addListener(wrap);
+            offs.set(l, () => {
+              for (const a of areas) a.removeListener(wrap);
+            });
+          },
+          removeListener: (l: unknown) => {
+            offs.get(l)?.();
+            offs.delete(l);
+          },
+          hasListener: (l: unknown) => offs.has(l),
+        };
+        return {
+          local: wrapArea(deps.storage.local),
+          sync: {
+            ...wrapArea(deps.storage.sync),
+            QUOTA_BYTES: SYNC_QUOTA_BYTES,
+            QUOTA_BYTES_PER_ITEM: SYNC_QUOTA_BYTES_PER_ITEM,
+            MAX_ITEMS: SYNC_MAX_ITEMS,
+            MAX_WRITE_OPERATIONS_PER_HOUR: SYNC_MAX_WRITE_OPERATIONS_PER_HOUR,
+            MAX_WRITE_OPERATIONS_PER_MINUTE: SYNC_MAX_WRITE_OPERATIONS_PER_MINUTE,
+          },
+          session: {
+            ...wrapArea(deps.storage.session),
+            /* #520: Firefox documents the plain-string form; Chrome's
+               {accessLevel} object form is accepted too. The level is
+               enforced at the SW content-script gate immediately. */
+            setAccessLevel: (arg: unknown) => setSessionAccessLevel(ext.id, arg),
+          },
+          onChanged,
+        };
+      })()
     : undefined;
   /* tabs: the engine-side mirror of the UI tab model (see ./tabs).
      The tabs permission (or a matching host permission) gates url and
@@ -545,11 +612,19 @@ export function buildApi(
     onCompleted: makeWebNavEvent(ext, "completed"),
     onDOMContentLoaded: makeWebNavEvent(ext, "domcontentloaded"),
   };
-  /* contextMenus + Firefox's menus alias over one registry. */
+  /* contextMenus + Firefox's menus alias over one registry. #519:
+     update/remove follow Firefox's Promise semantics - an unknown id
+     or bad property rejects instead of a silent no-op, update merges
+     properties (parent checks included), and clicks carry Firefox's
+     checkbox/radio state transitions. */
   const contextMenusNs = {
     create: (props: Record<string, unknown> = {}) => MENUS.create(ext, props),
-    update: () => undefined,
-    remove: (id: string | number) => MENUS.remove(ext.id, String(id)),
+    update: async (id: string | number, props: Record<string, unknown> = {}) => {
+      MENUS.update(ext.id, String(id), props);
+    },
+    remove: async (id: string | number) => {
+      MENUS.remove(ext.id, String(id));
+    },
     removeAll: () => MENUS.removeAll(ext.id),
     onClicked: makeMenusEvent(ext.id),
   };

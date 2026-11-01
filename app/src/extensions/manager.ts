@@ -24,6 +24,7 @@ import { globToRegExp } from "./content-scripts";
 import { hostPatternsMatch } from "./permissions";
 import { ALARMS } from "./alarms";
 import { ACTION } from "./action";
+import { dropSessionAccess } from "./storage";
 import type { ExtensionId, ExtensionRecord } from "./types";
 
 export type LifecycleListener = (rec: ExtensionRecord) => void;
@@ -146,6 +147,12 @@ export class ExtensionManager {
       return undefined;
     };
     resolveManifestI18n(raw as Record<string, unknown>, parsed, readPkg, diags);
+    /* #523: the i18n pass can raise Firefox-grade errors of its own
+       (a __MSG_*__ manifest without default_locale); those fail the
+       install exactly like parse errors. */
+    if (diags.errors.length > 0) {
+      throw new Error("zeolite: manifest invalid: " + diags.errors.join("; "));
+    }
     const relOf = (p: string) =>
       loc.root !== "" && p.startsWith(loc.root) ? p.slice(loc.root.length) : p;
     const id = await this.deriveId(files, relOf);
@@ -208,6 +215,9 @@ export class ExtensionManager {
     ALARMS.drop(id);
     /* #519: the toolbar action registry is per-extension state. */
     ACTION.drop(id);
+    /* #520: a fresh install of the same identity starts from the
+       Firefox default session access level (trusted contexts only). */
+    dropSessionAccess(id);
   }
 
   async setEnabled(id: ExtensionId, enabled: boolean): Promise<void> {
@@ -239,6 +249,12 @@ export class ExtensionManager {
     /* #504: stored file keys are root-relative, so both the bare and
        leading-slash forms resolve. */
     resolveManifestI18n(mraw, parsed, (p) => files.get(p) ?? files.get(p.slice(1)), diags);
+    if (diags.errors.length > 0) {
+      rec.state = "error";
+      rec.lastError = "reload failed: " + diags.errors.join("; ");
+      this.changed(id);
+      throw new Error("zeolite: reload failed: " + diags.errors.join("; "));
+    }
     Object.assign(rec, parsed);
     rec.state = "installed";
     rec.lastError = null;
@@ -327,7 +343,16 @@ export class ExtensionManager {
   async getResource(
     id: ExtensionId,
     path: string,
-    opts: { fromWeb: boolean; pageUrl?: string | null }
+    opts: {
+      fromWeb: boolean;
+      pageUrl?: string | null;
+      /* #524: the registered page-client extension id of the
+         requesting client, when the requester is itself an extension
+         page (SW-observed, never page-supplied). MV3 extension_ids
+         entries admit this requester even when the page URL does not
+         match the entry's matches. */
+      fromExtensionId?: string | null;
+    }
   ): Promise<Uint8Array | null> {
     const rec = this.exts.get(id);
     if (!rec || !rec.enabled) return null;
@@ -346,15 +371,23 @@ export class ExtensionManager {
       if (!okWar) {
         /* #51: MV3 web_accessible_resources entries with "matches" are
            scope-bound to the requesting page. The page destination is
-           SW-observed only; without one this fails closed. */
+           SW-observed only; without one this fails closed.
+           #524: an entry's extension_ids admits a registered page
+           client of a listed extension ("*" admits every extension)
+           even when the page URL does not match. An entry with only
+           extension_ids (no matches) is extension-gated only. */
         const pageUrl = opts.pageUrl;
+        const reqExt = opts.fromExtensionId ?? null;
         let okScoped = false;
-        if (pageUrl) {
-          for (const s of rec.webAccessibleScoped ?? []) {
-            if (s.resources.some(warGlobHit) && hostPatternsMatch(s.matches, pageUrl)) {
-              okScoped = true;
-              break;
-            }
+        for (const s of rec.webAccessibleScoped ?? []) {
+          if (!s.resources.some(warGlobHit)) continue;
+          const byPage =
+            pageUrl != null && s.matches.length > 0 && hostPatternsMatch(s.matches, pageUrl);
+          const byExt =
+            reqExt !== null && (s.extensionIds ?? []).some((x) => x === "*" || x === reqExt);
+          if (byPage || byExt) {
+            okScoped = true;
+            break;
           }
         }
         if (!okScoped) return null;

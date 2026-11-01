@@ -175,16 +175,33 @@ function parseWebAccessible(
   v: unknown,
   mv: 2 | 3,
   diags: ManifestDiagnostics
-): { globs: string[]; scoped: Array<{ resources: string[]; matches: string[] }> } {
+): {
+  globs: string[];
+  scoped: Array<{
+    resources: string[];
+    matches: string[];
+    extensionIds?: string[];
+    useDynamicUrl?: boolean;
+  }>;
+} {
   if (Array.isArray(v)) {
     /* MV2: plain string globs. */
     if (mv === 2) return { globs: strArr(v), scoped: [] };
-    /* MV3: array of { resources, matches, extension_ids }. Entries with
-       matches are scope-bound to the requesting page (#51); entries
-       without matches keep the MV2-style open glob exposure, with a
-       warning that they are not destination-scoped. */
+    /* MV3: array of { resources, matches, extension_ids, use_dynamic_url }.
+       Entries with matches are scope-bound to the requesting page (#51);
+       #524: entries with extension_ids are admitted to registered page
+       clients of the listed extensions ("*" admits every extension);
+       an entry with neither matches nor extension_ids keeps the
+       MV2-style open glob exposure, with a warning that it is not
+       destination-scoped. use_dynamic_url is recorded but not
+       enforced (same-origin serving has no dynamic origin to bind). */
     const globs: string[] = [];
-    const scoped: Array<{ resources: string[]; matches: string[] }> = [];
+    const scoped: Array<{
+      resources: string[];
+      matches: string[];
+      extensionIds?: string[];
+      useDynamicUrl?: boolean;
+    }> = [];
     for (const e of objArr(v)) {
       const res = strArr(e.resources);
       if (res.length === 0) {
@@ -192,11 +209,23 @@ function parseWebAccessible(
         continue;
       }
       const matches = strArr(e.matches);
-      if (matches.length === 0) {
+      const extensionIds = strArr(e.extension_ids);
+      const useDynamicUrl = e.use_dynamic_url === true;
+      if (matches.length === 0 && extensionIds.length === 0) {
         diags.warnings.push("web_accessible_resources: MV3 entry without matches exposed by glob only");
         globs.push(...res);
       } else {
-        scoped.push({ resources: res, matches });
+        scoped.push({
+          resources: res,
+          matches,
+          ...(extensionIds.length > 0 ? { extensionIds } : {}),
+          ...(useDynamicUrl ? { useDynamicUrl } : {}),
+        });
+        if (useDynamicUrl) {
+          diags.warnings.push(
+            "web_accessible_resources: use_dynamic_url recorded but not enforced (same-origin serving has no dynamic origin to bind)",
+          );
+        }
       }
     }
     return { globs, scoped };
@@ -387,37 +416,59 @@ export function parseManifest(
    substitution only: $placeholder$ variables inside the message
    text are left as written (extName-class fields do not use them).
    Identity is untouched: the digest is over package bytes, so i18n
-   resolution never changes the extension id. */
+   resolution never changes the extension id.
+
+   #523: the substituted field set now covers the user-visible
+   surface beyond name/description - short_name, the action family's
+   default_title (raw blocks and the parsed precedence winner),
+   sidebar_action.default_title, and commands descriptions. Message
+   names fold case-insensitively, as Chrome folds them at runtime.
+   #523: Firefox rejects a manifest that uses __MSG_*__ without a
+   default_locale; that is a hard install error here too. A missing
+   file or key stays a warning with the literal kept (the engine's
+   documented lenience for real-world packages). */
 export function resolveManifestI18n(
   raw: Record<string, unknown>,
   parsed: ParsedExtension,
   readFile: (path: string) => Uint8Array | undefined,
   diags: ManifestDiagnostics,
 ): void {
+  const locale = typeof raw.default_locale === "string" ? raw.default_locale : "";
+  /* Cached folded view of the default_locale messages: keys lowercase,
+     values kept raw (string shorthand or {message}). */
+  let folded: Record<string, unknown> | null = null;
+  let looked = false;
+  const loadMessages = (): Record<string, unknown> | null => {
+    if (looked) return folded;
+    looked = true;
+    if (!locale) return null;
+    for (const p of ["_locales/" + locale + "/messages.json", "/_locales/" + locale + "/messages.json"]) {
+      const bytes = readFile(p);
+      if (!bytes) continue;
+      try {
+        const v = JSON.parse(new TextDecoder().decode(bytes));
+        if (isObj(v)) {
+          const f: Record<string, unknown> = {};
+          for (const [k, val] of Object.entries(v)) f[k.toLowerCase()] = val;
+          folded = f;
+        }
+      } catch {
+        folded = null;
+      }
+      break;
+    }
+    return folded;
+  };
   const sub = (value: string): { text: string; unresolved: boolean } => {
     if (!value.includes("__MSG_")) return { text: value, unresolved: false };
-    let messages: Record<string, unknown> | null = null;
-    const locale = typeof raw.default_locale === "string" ? raw.default_locale : "";
-    if (locale) {
-      for (const p of ["_locales/" + locale + "/messages.json", "/_locales/" + locale + "/messages.json"]) {
-        const bytes = readFile(p);
-        if (!bytes) continue;
-        try {
-          const v = JSON.parse(new TextDecoder().decode(bytes));
-          if (isObj(v)) messages = v;
-        } catch {
-          messages = null;
-        }
-        break;
-      }
-    }
+    const messages = loadMessages();
     if (!messages) return { text: value, unresolved: true };
     let unresolved = false;
     const text = value.replace(/__MSG_([A-Za-z0-9_@]+)__/g, (full, key: string): string => {
-      const entry = messages![key];
+      const entry = messages[key.toLowerCase()];
       const msg =
-        isObj(entry) && typeof entry.message === "string"
-          ? entry.message
+        isObj(entry) && typeof (entry as Record<string, unknown>).message === "string"
+          ? (entry as Record<string, unknown>).message as string
           : typeof entry === "string"
             ? entry
             : null;
@@ -429,23 +480,75 @@ export function resolveManifestI18n(
     });
     return { text, unresolved };
   };
-  const localeName = typeof raw.default_locale === "string" ? raw.default_locale : "(no default_locale)";
-  const name = sub(parsed.name);
-  if (name.unresolved) {
-    diags.warnings.push(
-      "name: __MSG_*__ placeholder could not be resolved from _locales/" + localeName + "; the literal placeholder is kept"
-    );
-  } else if (name.text !== parsed.name) {
-    parsed.name = name.text;
-  }
-  if (typeof raw.description === "string") {
-    const desc = sub(raw.description);
-    if (desc.unresolved) {
-      diags.warnings.push(
-        "description: __MSG_*__ placeholder could not be resolved from _locales/" + localeName + "; the literal placeholder is kept"
+  const apply = (label: string, value: string, set: (t: string) => void): void => {
+    if (!value.includes("__MSG_")) return;
+    if (!locale) {
+      diags.errors.push(
+        label + ": __MSG_*__ placeholder used without a default_locale (Firefox rejects such manifests)",
       );
-    } else if (desc.text !== raw.description) {
-      raw.description = desc.text;
+      return;
+    }
+    const r = sub(value);
+    if (r.unresolved) {
+      diags.warnings.push(
+        label + ": __MSG_*__ placeholder could not be resolved from _locales/" + locale + "; the literal placeholder is kept",
+      );
+    } else {
+      set(r.text);
+    }
+  };
+  apply("name", parsed.name, (t) => {
+    parsed.name = t;
+  });
+  if (typeof raw.description === "string") {
+    apply("description", raw.description, (t) => {
+      raw.description = t;
+    });
+  }
+  if (typeof raw.short_name === "string") {
+    apply("short_name", raw.short_name, (t) => {
+      raw.short_name = t;
+    });
+  }
+  /* The action family: every raw block is substituted (manifest
+     truth), and the parsed precedence winner so the record surfaces
+     the resolved title. */
+  for (const key of ["action", "browser_action", "page_action"]) {
+    const block = isObj(raw[key]) ? (raw[key] as Record<string, unknown>) : null;
+    if (block && typeof block.default_title === "string") {
+      apply(key + ".default_title", block.default_title, (t) => {
+        block.default_title = t;
+      });
+    }
+  }
+  if (parsed.action?.defaultTitle && parsed.action.defaultTitle.includes("__MSG_")) {
+    apply("action.default_title", parsed.action.defaultTitle, (t) => {
+      parsed.action!.defaultTitle = t;
+    });
+  }
+  const sidebarBlock = isObj(raw.sidebar_action) ? (raw.sidebar_action as Record<string, unknown>) : null;
+  if (sidebarBlock && typeof sidebarBlock.default_title === "string") {
+    apply("sidebar_action.default_title", sidebarBlock.default_title, (t) => {
+      sidebarBlock.default_title = t;
+    });
+  }
+  if (parsed.sidebarAction?.defaultTitle && parsed.sidebarAction.defaultTitle.includes("__MSG_")) {
+    apply("sidebar_action.default_title", parsed.sidebarAction.defaultTitle, (t) => {
+      parsed.sidebarAction!.defaultTitle = t;
+    });
+  }
+  const commands = isObj(raw.commands) ? (raw.commands as Record<string, unknown>) : null;
+  if (commands) {
+    for (const [name, c] of Object.entries(commands)) {
+      if (isObj(c) && typeof (c as Record<string, unknown>).description === "string") {
+        apply(
+          "commands." + name + ".description",
+          (c as Record<string, unknown>).description as string,
+          (t) => {
+            (c as Record<string, unknown>).description = t;
+          },
+        );
+      }
     }
   }
 }

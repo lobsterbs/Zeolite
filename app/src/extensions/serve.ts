@@ -433,13 +433,17 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
     }
   }
 
-  /* web_accessible_resources: WAR globs and MV3 "matches" scopes are
-     checked inside getResource against the SW-observed page
-     destination (#51; the old `from` query param was page-supplied
-     and dead). */
+  /* web_accessible_resources: WAR globs, MV3 "matches" scopes and
+     #524 extension_ids are checked inside getResource against the
+     SW-observed page destination and the registered page-client
+     identity of the requester (#51; the old `from` query param was
+     page-supplied and dead). A page client of another extension
+     carries its identity here; unregistered pages carry none, and
+     the gate then stays page-match-only. */
   const bytes = await extensions.getResource(sr.id, sr.path, {
     fromWeb: true,
     pageUrl: ctx?.pageUrl ?? null,
+    fromExtensionId: pageClientOf(ctx?.clientId),
   });
   return bytes ? assetResponse(bytes, sr.path) : notFound();
 }
