@@ -271,13 +271,18 @@ jobs:
         # zl:decodeRoutes engine-arg oracle, the bounded readyVirtualBase
         # poll and the register forward wiring ride bootstrap.js;
         # measured 47288, baseline 46170.
+        # 47480 -> 47760 for #553: the popup WindowProxy facade rides
+        # bootstrap.js - the synchronous window.open return contract
+        # forbids lazy shipping (finder/dominspect-style), so the
+        # facade factory, its name-reuse registry and the close-report
+        # wiring are bootstrap-resident; measured 47671, baseline 47288.
         # resolves lazily (virtual-origin marker + injected vpath
         # at call time) so a page's relative register() lands on the
         # page's virtual URL; measured 41310, baseline 41025.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 47480 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 47480)"; exit 1; fi
+          if [ "$SIZE" -ge 47760 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 47760)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
