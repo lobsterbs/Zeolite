@@ -31,6 +31,7 @@ import { pageClientOf } from "./extensions/serve";
 import type { UiTab } from "./extensions/tabs";
 import { TABS } from "./extensions/tabs";
 import { netLogCursor, netLogGeneration, netLogSince } from "./netlog";
+import { domInspectAuthorize, domInspectRevoke, domInspectRequest } from "./dom-inspect";
 import { senderVirtualOrigin } from "./origin";
 import type { RecordingState } from "./recording";
 import { beginRecording, finishRecording } from "./recording";
@@ -127,6 +128,7 @@ export interface ControlMessage {
     | "zl:getJars"
     | "zl:clearJar"
     | "zl:transport"
+  | "zl:domInspect"
   | "zl:loadState";
   /** Experimental selections are preferences only, not security bypasses. */
   experimental?: unknown;
@@ -248,6 +250,12 @@ export interface ControlMessage {
   /** zl:decodeRoutes (#180): route strings from the page's own
       markup; the reply's dests array parallels it. */
   routes?: unknown[];
+  /** zl:domInspect (#550): session op. authorize/revoke name a client
+      (clientId); snapshot/styles/console relay an inspection request
+      to that client's bootstrap bridge. Host-page senders only. */
+  op?: "authorize" | "revoke" | "snapshot" | "styles" | "console";
+  /** zl:domInspect styles op: the snapshot node index. */
+  nodeId?: number;
 }
 
 /* #29 (zl:find): the compiled page-side finder ships to the page
@@ -1393,6 +1401,42 @@ case "zl:tracing":
       reply({ ok: true, generation: netLogGeneration(), clientId: clientId ?? null, ...DIAG.snapshot(since, clientId) });
       break;
     }
+    case "zl:domInspect": {
+      /* #550 Tier 2 DOM inspection, first slice. Host-only by the
+         dispatch gate above (not in PAGE_MESSAGES): a proxied page
+         must never open an inspection session, not even for itself.
+         authorize/revoke manage the session; snapshot/styles/console
+         relay one bounded request to the client's bootstrap bridge.
+         Replies carry the page generation the session pinned - the
+         engine discards stale generations, the devtools page also
+         discards replies whose generation no longer matches. */
+      const op = msg.op;
+      const cid = typeof msg.clientId === "string" ? msg.clientId : "";
+      if (!cid || cid.length > 256) {
+        reply({ ok: false, error: "bad zl:domInspect clientId" });
+        break;
+      }
+      if (op === "authorize") {
+        e.waitUntil(
+          domInspectAuthorize(cid).then((r) => reply(r), (err) => reply({ ok: false, error: String(err) })),
+        );
+      } else if (op === "revoke") {
+        reply({ ok: domInspectRevoke(cid) });
+      } else if (op === "snapshot" || op === "styles" || op === "console") {
+        const nodeId = typeof msg.nodeId === "number" && msg.nodeId >= 0 && msg.nodeId <= 100000
+          ? Math.floor(msg.nodeId)
+          : undefined;
+        e.waitUntil(
+          domInspectRequest(cid, op, nodeId).then(
+            (r) => reply(r),
+            (err) => reply({ ok: false, error: String(err) }),
+          ),
+        );
+      } else {
+        reply({ ok: false, error: "bad zl:domInspect op" });
+      }
+      break;
+    }
     default:
       reply({ ok: false, error: "unknown message" });
   }
@@ -1551,7 +1595,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:captchaTrace", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:captchaTrace", "zl:domInspect", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
 ]);
 
 
