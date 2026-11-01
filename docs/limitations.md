@@ -51,6 +51,22 @@ client-binding-free interception host, the same one the about:blank
 parent-written child class needs. The direct-vs-proxied suite pins the bypass notice and never
 runs the opaque children proxied.
 
+## Over-cap raw blocks pass verbatim, unrewritten
+
+A raw script or style body larger than the 2 MiB RAW_PASS_CAP (#526)
+stops retaining and passes through verbatim so the stream stays
+bounded: the block is served complete and fail-open, never truncated
+at the cap and never half-rewritten, and the decision is traced
+(the rewriter raw over-cap verbatim counter). Consequence: construct-
+level rewriting is skipped inside such a block - URL-shaped literals
+in an over-cap inline script or style stay unrewritten (page-context
+relative fetches still resolve through the virtual origin and the
+service worker, but nothing rewrites the bytes). Blocked-element
+swallowing is bounded separately by the 256 KiB DROP_RAW_CAP. The
+streaming bound and the verbatim fallback are browser-gated by
+suite/e2e/raw-caps.mjs (#526), which also carries the measured
+TTFB/completion gate for an unterminated raw block.
+
 ## Content Security Policy is stripped for proxied pages
 
 Both the `Content-Security-Policy` and
