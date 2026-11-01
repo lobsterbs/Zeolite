@@ -1,0 +1,50 @@
+name: w582 merge main
+on:
+  push:
+    branches: [zl-diagnostics-transport-wave-a]
+permissions:
+  contents: write
+jobs:
+  merge-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: zl-diagnostics-transport-wave-a
+      - name: guarded merge of origin/main
+        run: |
+          git config user.name "zeolite-bot"
+          git config user.email "zeolite-bot@users.noreply.github.com"
+          git fetch origin main
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "main already an ancestor; nothing to do"
+            exit 0
+          fi
+          if git merge origin/main -m "Merge main into zl-diagnostics-transport-wave-a (pre-merge resolution for #582)"; then
+            git push origin HEAD:zl-diagnostics-transport-wave-a
+            exit 0
+          fi
+          echo "=== conflicted files ==="
+          git diff --name-only --diff-filter=U
+          UNEXPECTED=0
+          for f in $(git diff --name-only --diff-filter=U); do
+            case "$f" in
+              app/src/request.ts|app/src/transform.ts|app/src/control.ts|app/src/extensions/compat.ts)
+                echo "resolved file, taking branch version: $f"
+                git checkout --ours -- "$f"
+                git add "$f"
+                ;;
+              *)
+                echo "UNEXPECTED CONFLICT: $f"
+                UNEXPECTED=1
+                ;;
+            esac
+          done
+          if [ "$UNEXPECTED" = "1" ]; then
+            echo "aborting: unexpected conflicts present"
+            git merge --abort
+            exit 1
+          fi
+          git commit --no-edit
+          git push origin HEAD:zl-diagnostics-transport-wave-a
