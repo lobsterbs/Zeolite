@@ -27,5 +27,19 @@ jobs:
           fi
           echo "=== conflicted files ==="
           git diff --name-only --diff-filter=U
-          git merge --abort
-          exit 1
+          RESOLVED="app/src/libcurl-transport-vendored.ts app/src/transport.ts"
+          for f in $RESOLVED; do
+            if git diff --name-only --diff-filter=U | grep -qx "$f"; then
+              git checkout --ours -- "$f"
+              git add "$f"
+            fi
+          done
+          LEFT=$(git diff --name-only --diff-filter=U)
+          if [ -n "$LEFT" ]; then
+            echo "=== unexpected conflicts remain ==="
+            echo "$LEFT"
+            git merge --abort
+            exit 1
+          fi
+          git commit --no-edit
+          git push origin HEAD:perf/cold-start-wisp-cache-v2
