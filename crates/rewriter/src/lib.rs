@@ -16,6 +16,7 @@ pub mod config;
 pub mod encode;
 pub mod html;
 pub mod js;
+pub mod trace;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 

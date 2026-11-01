@@ -145,6 +145,27 @@ async function main() {
     await startEngine();
     browser = await chromium.launch({ args: ["--disable-dev-shm-usage"] });
     context = await browser.newContext();
+    /* The pristine default is hybrid ON (#456 operator flip
+       2026-11-01); this harness pins the auto-targeting path, which
+       is observable only with the global flag deselected. The bare
+       engine page registers nothing (main.ts needs ?url=), so the
+       harness registers the SW itself and takes the #121 one-reload
+       claim path, then deselects through the host channel before
+       any proxied load in this context. */
+    const warm = await context.newPage();
+    await warm.goto(ENGINE + "/");
+    const regd = await warm.evaluate(async () => {
+      await navigator.serviceWorker.register("/sw.js", { scope: "/", type: "module" });
+      await navigator.serviceWorker.ready;
+      return true;
+    });
+    assert(regd === true, "warm SW registration failed");
+    await warm.reload();
+    const ctl = await warm.evaluate(() => navigator.serviceWorker.controller !== null);
+    assert(ctl === true, "warm page not controlled after the one-reload claim");
+    const flagOff = await hostControl(warm, { type: "zl:config", experimental: { hybridLocation: false } });
+    assert(flagOff?.ok === true, "hybridLocation deselect refused: " + JSON.stringify(flagOff));
+    await warm.close();
     /* 1st distinct client on the candidate origin: legacy semantics
        (onclick rewritten to the virtualized path) + watcher report. */
     const c1 = await openProxied(CAND + "/spa", context);

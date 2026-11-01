@@ -13,6 +13,7 @@ import { DIAG } from "./diag";
 import { streamAlive, streamDone } from "./streams-alive";
 import { charsetFromHeader, makeDecoder, resolveCharset } from "./headers";
 import { docKind, jsBody } from "./transit";
+import { traceDecision, tracingEnabled } from "./tracing";
 import { initScript, initSplicePoint, vPath } from "./pageload";
 import { currentPrefix } from "./codec";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
@@ -54,6 +55,9 @@ interface JsRewriter {
   add_injection(path: string): void;
   set_blocked_hosts(hosts: string[]): void;
   set_lazy_images(): void;
+  /* #529: opt-in token-level decision tracing (see tracing.ts). */
+  set_trace?(on: boolean): void;
+  take_trace?(): string;
 }
 interface JsCssRewriter {
   process(chunk: string): string;
@@ -223,6 +227,9 @@ export function rewriteStream(
      can serve document.baseURI reads. Fired once per distinct
      folded base, at most a couple of times per document. */
   onVbase?: (vbase: string) => void,
+  /* #529: optional diagnostics trace id; the rewriter's aggregated
+     decisions join the request's trace at stream end. */
+  traceId?: string,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const modP = rewriter();
@@ -268,6 +275,9 @@ export function rewriteStream(
         const mod = await modP;
         const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
         configureLocation(rw, resolveLocationPolicy(base, rule));
+        /* #529: opt-in token-level decision tracing; off by default
+           the wasm instance records and allocates nothing. */
+        if (tracingEnabled()) rw.set_trace?.(true);
         for (const path of rule.inject ?? []) rw.add_injection(path);
         /* #532: drain the folded base per chunk (first base wins,
            the rewriter tracks it); one post per distinct value. */
@@ -332,6 +342,20 @@ export function rewriteStream(
             const tail = rw.finish();
             reportLocation(rw, base);
             drainBase();
+            /* #529: drain the aggregated rewriter decisions into the
+               trace ring; the JSON vocabulary is engine-compiled, so
+               no page data can ride it. A malformed drain never
+               breaks the served stream. */
+            if (tracingEnabled()) {
+              const decisions = rw.take_trace?.();
+              if (decisions && decisions !== "[]") {
+                try {
+                  for (const d of JSON.parse(decisions) as Array<{ pass: string; decision: string; n: number }>) {
+                    traceDecision({ subsystem: "rewriter", rule: d.pass, original: d.decision, result: "count=" + d.n, traceId });
+                  }
+                } catch { /* never break the stream over a trace */ }
+              }
+            }
             if (tail) controller.enqueue(encoder.encode(tail));
             controller.close();
             onDone?.();
