@@ -1,13 +1,15 @@
 /* Zeolite extension subsystem: message passing.
 
    Channels are strictly per-extension. Every message names its target
-   extension id and the router refuses delivery to any other extension;
-   cross-extension messaging is recorded through
-   externally_connectable but external delivery is reported as
-   unsupported rather than silently dropped. Ports are long-lived
-   named duplex channels with the same isolation. */
+   extension id and the router refuses delivery to any other extension
+   unless the target's externally_connectable.ids admit the sender
+   (#518): allowed cross-extension traffic goes to the target's
+   onMessageExternal / onConnectExternal listeners with the real
+   sender id; web-page (matches) senders stay refused because a
+   page-world sender carries no trusted cross-extension identity.
+   Ports are long-lived named duplex channels with the same isolation. */
 
-import type { ExtensionId } from "./types";
+import type { ExtensionId, ExternallyConnectableSpec } from "./types";
 
 export type MessageContext = "background" | "popup" | "options" | "content" | "extension-page";
 
@@ -19,6 +21,19 @@ export interface MessageSender {
   id?: ExtensionId;
   context: MessageContext;
   url: string | null;
+  /* #518: the origin of the sender page when the url is parseable
+     (content-script and page senders); null for background worlds. */
+  origin?: string | null;
+}
+
+/** The origin of a sender URL, or null when absent/unparseable. */
+export function senderOrigin(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
 }
 
 export type SendResponse = (response?: unknown) => void;
@@ -82,6 +97,37 @@ interface PortPair {
 export class ExtensionMessenger {
   private readonly listeners = new Map<ExtensionId, Set<MessageListener>>();
   private readonly connectListeners = new Map<ExtensionId, Set<ConnectListener>>();
+  /* #518: external messaging. The externally_connectable gate is
+     provided by the caller (the context wiring reads the live
+     manager), keeping this module free of manager imports. */
+  private externallyConnectableOf: ((id: ExtensionId) => { externallyConnectable: ExternallyConnectableSpec | null } | null) | null = null;
+  private readonly externalListeners = new Map<ExtensionId, Set<MessageListener>>();
+  private readonly externalConnectListeners = new Map<ExtensionId, Set<ConnectListener>>();
+
+  setExternallyConnectableProvider(
+    p: ((id: ExtensionId) => { externallyConnectable: ExternallyConnectableSpec | null } | null) | null,
+  ): void {
+    this.externallyConnectableOf = p;
+  }
+
+  /** The target's externally_connectable.ids gate: an exact id or a
+     glob with `*` wildcards (Chrome-shaped, e.g. "*@vendor.example").
+     matches governs web pages, which stay refused here (a page-world
+     sender has no trusted cross-extension identity), so ids decide. */
+  private externallyAllowed(targetId: ExtensionId, senderId: ExtensionId): boolean {
+    const ec = this.externallyConnectableOf?.(targetId)?.externallyConnectable ?? null;
+    if (!ec || ec.ids.length === 0) return false;
+    for (const raw of ec.ids) {
+      const pattern = typeof raw === "string" ? raw : "";
+      if (!pattern) continue;
+      if (pattern === "*") return true;
+      const rx = new RegExp(
+        "^" + pattern.split("*").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$",
+      );
+      if (rx.test(senderId)) return true;
+    }
+    return false;
+  }
 
   onMessage(id: ExtensionId, l: MessageListener): () => void {
     let set = this.listeners.get(id);
@@ -110,6 +156,8 @@ export class ExtensionMessenger {
   clear(id: ExtensionId): void {
     this.listeners.delete(id);
     this.connectListeners.delete(id);
+    this.externalListeners.delete(id);
+    this.externalConnectListeners.delete(id);
   }
 
   /* Fire-and-response messaging within one extension. Returns a
@@ -133,6 +181,123 @@ export class ExtensionMessenger {
     if (!set || set.size === 0) {
       throw new Error("zeolite: could not establish connection. Receiving end does not exist");
     }
+    return this.deliver(set, from, msg);
+  }
+
+  /* Long-lived duplex channel within one extension. Returns the
+     caller's end; the receiving end is handed to onConnect listeners. */
+  connect(id: ExtensionId, name: string, from: MessageSender): ExtensionPort {
+    if (from.extensionId !== id) {
+      throw new Error("zeolite: cross-extension port connection is not supported yet");
+    }
+    let caller: ExtensionPort | null = null;
+    let receiver: ExtensionPort | null = null;
+    caller = new ExtensionPort(
+      name,
+      from,
+      (m) => receiver?.receive(m),
+      () => receiver?.notifyDisconnect()
+    );
+    receiver = new ExtensionPort(
+      name,
+      { extensionId: id, id, context: "background", url: null },
+      (m) => caller?.receive(m),
+      () => caller?.notifyDisconnect()
+    );
+    const set = this.connectListeners.get(id);
+    if (set) for (const l of set) l(receiver);
+    return caller;
+  }
+
+  /* ---- #518: extension-to-extension external messaging ------------- */
+
+  /** runtime.onMessageExternal listener registration. */
+  onMessageExternal(id: ExtensionId, l: MessageListener): () => void {
+    let set = this.externalListeners.get(id);
+    if (!set) {
+      set = new Set();
+      this.externalListeners.set(id, set);
+    }
+    set.add(l);
+    return () => set?.delete(l);
+  }
+
+  /** runtime.onConnectExternal listener registration. */
+  onConnectExternal(id: ExtensionId, l: ConnectListener): () => void {
+    let set = this.externalConnectListeners.get(id);
+    if (!set) {
+      set = new Set();
+      this.externalConnectListeners.set(id, set);
+    }
+    set.add(l);
+    return () => set?.delete(l);
+  }
+
+  /** Cross-extension sendMessage: Firefox delivers to the target's
+      onMessageExternal listeners when the target's
+      externally_connectable.ids admit the sender, and rejects with the
+      receiving-end error otherwise (the disallowed case is not
+      distinguishable from no listener, matching Gecko). */
+  async sendMessageExternal(
+    targetId: ExtensionId,
+    from: MessageSender,
+    msg: unknown
+  ): Promise<unknown> {
+    if (from.extensionId === targetId) {
+      return this.sendMessage(targetId, from, msg);
+    }
+    if (!this.externallyAllowed(targetId, from.extensionId)) {
+      throw new Error("zeolite: could not establish connection. Receiving end does not exist");
+    }
+    const set = this.externalListeners.get(targetId);
+    if (!set || set.size === 0) {
+      throw new Error("zeolite: could not establish connection. Receiving end does not exist");
+    }
+    const sender: MessageSender = {
+      extensionId: from.extensionId,
+      id: from.extensionId,
+      context: from.context,
+      url: from.url,
+      origin: senderOrigin(from.url),
+    };
+    return this.deliver(set, sender, msg);
+  }
+
+  /** Cross-extension connect: same gate, receiver end handed to the
+      target's onConnectExternal listeners. */
+  connectExternal(targetId: ExtensionId, name: string, from: MessageSender): ExtensionPort {
+    if (from.extensionId === targetId) {
+      return this.connect(targetId, name, from);
+    }
+    if (!this.externallyAllowed(targetId, from.extensionId)) {
+      throw new Error("zeolite: could not establish connection. Receiving end does not exist");
+    }
+    let caller: ExtensionPort | null = null;
+    let receiver: ExtensionPort | null = null;
+    caller = new ExtensionPort(
+      name,
+      { ...from, origin: senderOrigin(from.url) },
+      (m) => receiver?.receive(m),
+      () => receiver?.notifyDisconnect()
+    );
+    receiver = new ExtensionPort(
+      name,
+      /* The port the target sees carries the caller's identity, the
+         same "sender is the other end" rule the internal connect
+         follows. */
+      { ...from, origin: senderOrigin(from.url) },
+      (m) => caller?.receive(m),
+      () => caller?.notifyDisconnect()
+    );
+    const set = this.externalConnectListeners.get(targetId);
+    if (set) for (const l of set) l(receiver);
+    return caller;
+  }
+
+  /** Shared Gecko response contract for one listener set (see
+      sendMessage). Extracted so internal and external sends keep
+      identical reply semantics. */
+  private deliver(set: Set<MessageListener>, from: MessageSender, msg: unknown): Promise<unknown> {
     let settled = false;
     const reply = new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -175,30 +340,5 @@ export class ExtensionMessenger {
       if (!settled && pending === 0 && !keptOpen) respond(undefined);
     });
     return reply;
-  }
-
-  /* Long-lived duplex channel within one extension. Returns the
-     caller's end; the receiving end is handed to onConnect listeners. */
-  connect(id: ExtensionId, name: string, from: MessageSender): ExtensionPort {
-    if (from.extensionId !== id) {
-      throw new Error("zeolite: cross-extension port connection is not supported yet");
-    }
-    let caller: ExtensionPort | null = null;
-    let receiver: ExtensionPort | null = null;
-    caller = new ExtensionPort(
-      name,
-      from,
-      (m) => receiver?.receive(m),
-      () => receiver?.notifyDisconnect()
-    );
-    receiver = new ExtensionPort(
-      name,
-      { extensionId: id, id, context: "background", url: null },
-      (m) => caller?.receive(m),
-      () => caller?.notifyDisconnect()
-    );
-    const set = this.connectListeners.get(id);
-    if (set) for (const l of set) l(receiver);
-    return caller;
   }
 }
