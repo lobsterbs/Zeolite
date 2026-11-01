@@ -784,30 +784,45 @@ function admitCookie(
   }
 
   const now = Date.now();
-  /* Deletion: max-age<=0 or an already-past Expires. A session cookie
-     (neither attribute) is expiry 0 and never expires. */
-  const isDeletion = (maxAge !== null && maxAge <= 0) || (hasExpires && expires <= now);
+  /* RFC 6265 5.3: when Max-Age is present it alone fixes the
+     expiry-time; a stale Expires must not turn a live Max-Age cookie
+     into a deletion (browsers keep it for delta-seconds). Deletion is
+     max-age<=0, or an already-past Expires when there is no Max-Age.
+     A session cookie (neither attribute) is expiry 0 and never
+     expires. */
+  const isDeletion = maxAge !== null ? maxAge <= 0 : hasExpires && expires <= now;
   const expiry = maxAge !== null ? now + maxAge * 1000 : expires;
 
   const key = jarKey(registerOrigin(u.origin).id, namespace);
-  const jar = jars.get(key) ?? [];
   const sameCookie = (c: Cookie) => c.name === name && c.domain === domain && c.hostOnly === hostOnly && c.path === path;
 
   if (isDeletion) {
-    const before = jar.length;
     /* #337: a document.cookie write never deletes an HttpOnly
-       cookie; only a server response retires one. */
+       cookie; only a server response retires one. RFC 6265 5.3
+       step 11: cookie identity is name + domain + host-only + path,
+       so the deletion must retire every copy of that identity in
+       the active profile - which origin bucket a copy sits in
+       (scheme, port, admitting subdomain) is not part of the
+       identity, and a sibling-bucket copy would otherwise survive
+       as a zombie that keeps attaching. */
     let removedCookie: Cookie | null = null;
-    const kept = jar.filter((c) => {
-      if (sameCookie(c) && !(fromScript && c.httpOnly)) {
-        removedCookie = c;
-        return false;
+    let removedAny = false;
+    for (const [k, list] of jars) {
+      if (!inProfile(k, namespace)) continue;
+      const kept = list.filter((c) => {
+        if (sameCookie(c) && !(fromScript && c.httpOnly)) {
+          if (removedCookie === null || c.created < removedCookie.created) removedCookie = c;
+          removedAny = true;
+          return false;
+        }
+        return true;
+      });
+      if (kept.length !== list.length) {
+        if (kept.length) jars.set(k, kept);
+        else jars.delete(k);
       }
-      return true;
-    });
-    if (kept.length !== before) {
-      if (kept.length) jars.set(key, kept);
-      else jars.delete(key);
+    }
+    if (removedAny) {
       schedulePersist();
       traceDecision({ subsystem: "cookies", original: responseUrl, result: "deleted " + name });
       const result: SetCookieResult = {
@@ -824,11 +839,28 @@ function admitCookie(
     return { name, stored: false, deleted: false };
   }
 
-  const idx = jar.findIndex(sameCookie);
+  /* Replacement: find the identity wherever it lives in the active
+     profile (same rule as deletion above) and replace it in place,
+     keeping the original creation-time (RFC 6265 5.3.11). Only a
+     genuinely new identity lands in the response-origin bucket. */
+  let targetKey: string | null = null;
+  let targetIdx = -1;
+  let existing: Cookie | null = null;
+  for (const [k, list] of jars) {
+    if (!inProfile(k, namespace)) continue;
+    for (let i = 0; i < list.length; i++) {
+      if (!sameCookie(list[i])) continue;
+      if (existing === null || list[i].created < existing.created) {
+        targetKey = k;
+        targetIdx = i;
+        existing = list[i];
+      }
+    }
+  }
   /* #337: a document.cookie write never replaces an HttpOnly cookie
      (RFC 6265 5.5: the storage step ignores a script write over an
      HttpOnly cookie of the same identity). */
-  if (fromScript && idx >= 0 && jar[idx].httpOnly) {
+  if (fromScript && existing && existing.httpOnly) {
     DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "document.cookie write refused: HttpOnly cookie" });
     return { name, stored: false, deleted: false, rejected: "httponly" };
   }
@@ -842,16 +874,30 @@ function admitCookie(
     httpOnly,
     sameSite,
     expires: expiry,
-    /* RFC 6265 5.3.11: replacing a cookie keeps the original
-       creation-time; only a genuinely new identity gets now. */
-    created: idx >= 0 ? jar[idx].created : now,
+    created: existing ? existing.created : now,
   };
-  if (idx >= 0) jar[idx] = fresh;
-  else jar.push(fresh);
-  jars.set(key, jar);
+  if (existing && targetKey !== null) {
+    /* Collapse duplicate copies of the identity (pre-fix admissions,
+     imports): the earliest-created occurrence is the canonical home. */
+    for (const [k, list] of jars) {
+      if (!inProfile(k, namespace) || k === targetKey) continue;
+      const kept = list.filter((c) => !sameCookie(c));
+      if (kept.length !== list.length) {
+        if (kept.length) jars.set(k, kept);
+        else jars.delete(k);
+      }
+    }
+    const jar = jars.get(targetKey)!;
+    jar[targetIdx] = fresh;
+    jars.set(targetKey, jar);
+  } else {
+    const jar = jars.get(key) ?? [];
+    jar.push(fresh);
+    jars.set(key, jar);
+  }
   schedulePersist();
   traceDecision({ subsystem: "cookies", original: responseUrl, result: "stored " + name });
-  const result: SetCookieResult = { name, stored: true, deleted: false, cookie: fresh, replaced: idx >= 0, namespace };
+  const result: SetCookieResult = { name, stored: true, deleted: false, cookie: fresh, replaced: existing !== null, namespace };
   noteJarChange(result, responseUrl, fromScript);
   return result;
 }
@@ -1322,10 +1368,21 @@ export async function jarLoad(): Promise<void> {
       }
     }
     /* #465: legacy hash keys migrate through the persisted origin map.
-       Unattributed legacy records retain their unreachable old keys. */
+       Unattributed legacy records retain their unreachable old keys.
+       The record is untrusted storage: a single malformed origin row
+       must not abort the whole restore - the jar would come back empty
+       and the next persist would then overwrite the durable record,
+       losing every cookie permanently. Corrupt rows are dropped;
+       jar entries that referenced them keep their stored keys. */
     const oldOrigins = new Map(originById);
     const migrated = new Map<string, string>();
-    for (const [id, o] of oldOrigins) migrated.set(originJarId(o), new URL(o).origin);
+    for (const [id, o] of oldOrigins) {
+      try {
+        migrated.set(originJarId(o), new URL(o).origin);
+      } catch {
+        /* drop the corrupt row */
+      }
+    }
     originById.clear();
     for (const [k, v] of migrated) originById.set(k, v);
     if (Array.isArray(rec)) {
@@ -1340,7 +1397,14 @@ export async function jarLoad(): Promise<void> {
           const pid = sep < 0 ? "" : entry[0].slice(0, sep);
           const id = sep < 0 ? entry[0] : entry[0].slice(sep + SEP.length);
           const origin = oldOrigins.get(id);
-          const newId = origin ? originJarId(origin) : id;
+          let newId = id;
+          if (origin) {
+            try {
+              newId = originJarId(origin);
+            } catch {
+              /* corrupt origin row: keep the stored key as-is */
+            }
+          }
           if (pid === "") {
             /* default-profile records are bare origin ids, predating
                profiles; they keep that shape. */
@@ -1369,6 +1433,14 @@ export async function jarLoad(): Promise<void> {
   }
 }
 
+/** Import keys are host-supplied: a key carrying the profile separator
+    would forge a namespaced record - unreachable by header assembly
+    and never persisted, but it would pollute jarEnumeration with a
+    phantom profile no zl:clearJar can remove. Bare origin ids only. */
+function validImportKey(k: unknown): k is string {
+  return typeof k === "string" && k.length > 0 && !k.includes(SEP);
+}
+
 /** Session import seam (1.7 Sulfide): replace the active profile's jar
     with the given records after shape checks (other profiles are
     untouched). Malformed records are dropped, never admitted. The jar
@@ -1377,7 +1449,7 @@ export function jarReplace(entries: Array<[string, unknown[]]>, clientId?: strin
   const namespace = namespaceForClient(clientId);
   for (const key of [...jars.keys()]) if (inProfile(key, namespace)) jars.delete(key);
   for (const entry of entries) {
-    if (Array.isArray(entry) && typeof entry[0] === "string" && Array.isArray(entry[1])) {
+    if (Array.isArray(entry) && validImportKey(entry[0]) && Array.isArray(entry[1])) {
       /* The doc comment says malformed records are dropped: hold that
          promise per cookie, the same shape check jarLoad uses. */
       const list = entry[1].filter(isStoredCookie);
@@ -1402,7 +1474,7 @@ export function jarMerge(
   let conflicts = 0;
   const namespace = namespaceForClient(clientId);
   for (const entry of entries) {
-    if (!Array.isArray(entry) || typeof entry[0] !== "string" || !Array.isArray(entry[1])) continue;
+    if (!Array.isArray(entry) || !validImportKey(entry[0]) || !Array.isArray(entry[1])) continue;
     const key = entry[0];
     const jar = jars.get(jarKey(key, namespace)) ?? [];
     let touched = false;
