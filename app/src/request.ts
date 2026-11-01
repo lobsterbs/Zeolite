@@ -3879,14 +3879,23 @@ export function handleFetch(e: FetchEvent): void {
                  anyway, so materialize the one proven body shape from
                  the spool once per chain, bounded by the measured
                  transport ceiling; over it the request fails honestly
-                 instead of crashing the renderer. */
-              hopBody = await spoolTransportCopy(buffered.spool);
-              /* The spool file is dead weight once the final hop's
-                 request body was sent; the fetch event settles only
-                 after the response stream reaches the page, so
-                 releasing there never races a live hop. A failed
-                 release only leaks a file the orphan sweep reclaims. */
-              e.waitUntil(buffered.spool.release().catch(() => {}));
+                 instead of crashing the renderer. #514 audit: the
+                 release rides the same finally as the copy, so a copy
+                 over the transport bound frees the spool file and its
+                 live budget immediately instead of stranding up to
+                 256 MiB against the 512 MiB budget until the ten-minute
+                 orphan sweep. */
+              try {
+                hopBody = await spoolTransportCopy(buffered.spool);
+              } finally {
+                /* The spool file is dead weight once the body is
+                   materialized (the hops replay the ArrayBuffer, never
+                   the File); the fetch event settles only after the
+                   response stream reaches the page, so releasing here
+                   never races a live hop. A failed release only leaks
+                   a file the orphan sweep reclaims. */
+                e.waitUntil(buffered.spool.release().catch(() => {}));
+              }
             }
           }
           /* The navigation TTFB deadline must abort the upstream fetch,
@@ -4039,12 +4048,37 @@ export function handleFetch(e: FetchEvent): void {
                hop; the 10ms bound is invisible next to a redirect
                round trip. */
             await new Promise((r) => setTimeout(r, 10));
-            resp = await withDeadline(
-              upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
-              reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
-              "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
-              navAbort ?? undefined,
-            );
+            /* #514: a re-issue hop that fails upstream becomes a
+               bounded, attributable diagnostic - the CI torture probe's
+               "zeolite: upstream fetch failed" class used to reach the
+               probe with no hop context at all. The message names the
+               hop index and the status that redirected here, never a
+               body and never a URL (DIAG redacts the technical reason
+               on entry; the failed hop URL lives in the netlog row the
+               outer catch already records). One event per failed hop,
+               bounded by the 10-hop cap. */
+            const reIssueHop = hops + 1;
+            const redirectedBy = resp.status;
+            try {
+              resp = await withDeadline(
+                upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
+                reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
+                "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
+                navAbort ?? undefined,
+              );
+            } catch (err) {
+              DIAG.emit({
+                category: "UPSTREAM",
+                cause: "upstream",
+                severity: "warning",
+                stage: "REDIRECT_HOP",
+                traceId,
+                requestId: traceId,
+                message: "redirect re-issue hop " + reIssueHop + " failed upstream (redirected by " + redirectedBy + ")",
+                technicalReason: String(err),
+              });
+              throw err;
+            }
           }
           /* #140/#200: every response settles - an idle-stalled upstream
              body errors instead of pending forever. The TTFB deadline
