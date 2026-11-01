@@ -113,9 +113,20 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
      and without an anchor nothing changes. */
   const relRoute = makeRel(parentRoutePath, loc.origin);
 
-  /* fetch(): string/URL inputs re-emit through the minted route;
-     Request objects carry one-shot bodies (native, documented
-     residual); engine-local inputs stay native. */
+  /* API initiator labels are diagnostics-only. Attach them only to
+     engine-routed requests so a missing controller/mint never changes
+     cross-origin CORS behavior or leaks an internal header upstream. */
+  const hasController = !!(w.navigator as { serviceWorker?: { controller?: unknown } } | undefined)
+    ?.serviceWorker?.controller;
+  const mark = (init: RequestInit | undefined, kind: string): RequestInit => {
+    if (!hasController) return init ?? {};
+    const headers = new Headers(init?.headers);
+    headers.set("x-zl-initiator", kind);
+    return { ...init, headers };
+  };
+
+  /* Request-object inputs keep their one-shot/native semantics; URL
+     inputs can be labeled after an engine route is known. */
   const OF = w.fetch as typeof fetch | undefined;
   if (typeof OF === "function") {
     w.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
@@ -123,15 +134,12 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
       if (url === null) return OF(input, init);
       const rel = relRoute(url);
       const d = rel ? null : crossDest(url);
-      /* #77 runtime half, minted and #101 marker routes alike: the
-         SW returns a rewritten body that never matches the upstream
-         hash, so SRI in the init would fail the re-emitted fetch as
-         a network error. Request objects stay native (documented
-         one-shot-body residual). */
       if ((rel || d) && init?.integrity) init = { ...init, integrity: undefined };
-      if (rel) return OF(rel, init);
-      if (!d) return OF(input, init);
-      return mintRoute(d).then((route) => OF((route ?? url) as RequestInfo, init));
+      if (rel) return OF(rel, mark(init, "fetch"));
+      if (!d) return OF(input, mark(init, "fetch"));
+      return mintRoute(d).then((route) =>
+        OF((route ?? url) as RequestInfo, route ? mark(init, "fetch") : init),
+      );
     };
   }
 
@@ -169,7 +177,12 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
          path: optimistic true, native fallback on a refused POST */
       const post = (t: string): boolean => {
         if (!OF) return false;
-        OF(t, { method: "POST", body: d ?? null, keepalive: true }).catch(() => {
+        OF(t, {
+          method: "POST",
+          body: d ?? null,
+          keepalive: true,
+          ...(hasController ? { headers: { "x-zl-initiator": "send-beacon" } } : {}),
+        }).catch(() => {
           /* #457: a rejected POST may already be accepted upstream;
              replaying a non-idempotent beacon natively risks a double
              write. One attempt: the beacon is honestly lost on
@@ -217,15 +230,18 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
            no mint, no deferred re-open - the SW decodes the parent
            route. Sync opens stay native (the async flag is a[2]). */
         const rel = isAsync ? relRoute(s) : null;
-        if (rel) return OOpen.call(this, a[0], rel, a[2], a[3], a[4]);
-        return OOpen.apply(this, a);
+        const result = rel
+          ? OOpen.call(this, a[0], rel, a[2], a[3], a[4])
+          : OOpen.apply(this, a);
+        if (isAsync && hasController) OHdr.call(this, "x-zl-initiator", "xhr");
+        return result;
       }
       pend.set(this, {
         method: String(a[0]),
         url: dest,
         user: a[3] == null ? null : String(a[3]),
         pw: a[4] == null ? null : String(a[4]),
-        headers: [],
+        headers: hasController ? [["x-zl-initiator", "xhr"]] : [],
       });
       /* Native open() reports OPENED synchronously; the deferred
          re-open would leave readyState at UNSENT until the mint

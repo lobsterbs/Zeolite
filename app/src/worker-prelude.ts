@@ -320,9 +320,14 @@ export function installWorkerPrelude(route: string): void {
          workers, the engine origin for engine-served ones). */
       const absRoute = (r: string | null): string | null =>
         r && r.startsWith("/") ? engineOrigin + r : r;
-      return mintUrlViaRelay(post, abs.href).then((route) =>
-        OF(absRoute(route) ?? routeWorkerUrl(prefix, workerUrl, engineOrigin, url), init),
-      );
+      return mintUrlViaRelay(post, abs.href).then((route) => {
+        const headers = new Headers(init?.headers);
+        headers.set("x-zl-initiator", "worker-fetch");
+        return OF(
+          absRoute(route) ?? routeWorkerUrl(prefix, workerUrl, engineOrigin, url),
+          { ...init, headers },
+        );
+      });
     };
   }
 
