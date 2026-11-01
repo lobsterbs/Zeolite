@@ -19,6 +19,7 @@ import { b64uDecode, b64uEncode, buildNavHandleUrl, buildQueryHandleUrl, decodeC
 import { decodeBody, mapLocationHeader, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
 import { applyExperimentalCsp } from "./csp-translation";
+import { cspClearClient, cspGate, cspSetClient, engineCspMarker, newCspRegistry, planEngineCsp } from "./csp-enforce";
 import { experimentalEnabled } from "./experimental-flags";
 import { loadRouteHistory, saveRouteKey } from "./routekey";
 import { classifyForeign, preflightHeaders } from "./foreign";
@@ -81,6 +82,10 @@ import { newImportmapRegistry, importmapNote, resolveBareImport, pageKeyOf } fro
    integrity attributes its HTML carried, and a worker restart
    simply forgets them (page reload repopulates). */
 const SRI = newSriRegistry();
+/* #527: per-client engine-side CSP plans. The same memory-only
+   lifecycle as SRI: plans exist solely in the live worker and are
+   rebuilt from the upstream CSP header on every navigation. */
+const CSPREG = newCspRegistry();
 /* #554: per-page import maps recorded from served documents (see
    importmaps.ts); module-worker serve seams resolve bare specifiers
    through the recorded map of the owning page. */
@@ -3210,7 +3215,13 @@ export function handleFetch(e: FetchEvent): void {
         if (newClient && establishContext(VCTX, newClient, target)) capContexts(VCTX, VCTX_CAP);
         /* #531: the stale page's expectations must not gate the next
            document's subresources. */
-        if (e.request.mode === "navigate") sriClearClient(SRI, newClient);
+        if (e.request.mode === "navigate") {
+          sriClearClient(SRI, newClient);
+          /* #527: the new document never inherits the previous page's
+             CSP plan. Until the served document installs a fresh
+             plan, its client is honestly unenforced. */
+          cspClearClient(CSPREG, newClient);
+        }
       }
 
       /* #477 P3: fetch bridging into the guest realm. The request has
@@ -3467,6 +3478,49 @@ export function handleFetch(e: FetchEvent): void {
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
         }
         if (ruleDec.url || ic.url) target = destUpgraded(ic.url ?? ruleDec.url ?? target);
+
+        /* #527: engine-side CSP enforcement at the fetch seam. The
+           requesting client's document carried an upstream
+           source-list policy the browser cannot be handed safely
+           (shared engine origin), so the engine enforces it against
+           the decoded upstream URL - the same truth a direct browser
+           matches its policy against. Blocked loads answer a network
+           error, the exact shape a direct CSP violation produces.
+           Pre-cache and pre-transport: a blocked load never reaches
+           upstream or the page cache. Directives whose lists carry
+           nonce/hash/strict-dynamic tokens stay unenforced (the
+           engine cannot verify an element nonce at this seam); the
+           degrade is a false allow, never a false block. */
+        if (e.request.mode !== "navigate" && !isWorkerDestination(e.request.destination)) {
+          const cspDec = cspGate(CSPREG, e.clientId, dest, target);
+          if (cspDec.blocked) {
+            DIAG.emit({
+              category: "BLOCKED",
+              cause: "blocked",
+              severity: "info",
+              stage: "REQUEST_INTERCEPTED",
+              message: "request blocked by upstream CSP (" + cspDec.directive + ")",
+              url: target,
+              traceId,
+              requestId: traceId,
+            });
+            const cspDecision: TransitDecision = { mode: "Blocked", reason: "BLOCKED_CSP" };
+            netLogPush({
+              method: e.request.method,
+              traceId,
+              path: internalUrl,
+              dest: target,
+              status: 0,
+              rtype: rtype.toUpperCase(),
+              ms: Date.now() - t0,
+              bytes: -1,
+              verdict: "blocked:csp",
+              transport: cspDecision.mode,
+              fallbackReason: reasonOf(cspDecision),
+            });
+            return Response.error();
+          }
+        }
 
         /* Cache-first for proxied GETs. #179: a credential-bearing
            request (Authorization or a jar cookie for the target)
@@ -4186,7 +4240,11 @@ export function handleFetch(e: FetchEvent): void {
               const navClient = e.resultingClientId || e.clientId;
               if (navClient && establishContext(VCTX, navClient, finalDest))
                 capContexts(VCTX, VCTX_CAP);
-              if (e.request.mode === "navigate") sriClearClient(SRI, navClient);
+              if (e.request.mode === "navigate") {
+                sriClearClient(SRI, navClient);
+                /* #527: same lifecycle note as the pre-transport clear. */
+                cspClearClient(CSPREG, navClient);
+              }
             }
           }
           /* 1.4 Boride: capture Set-Cookie into the per-origin jar before
@@ -4235,9 +4293,37 @@ export function handleFetch(e: FetchEvent): void {
           /* #452: opt-in, strictly deny-only CSP on HTML documents.
              The live response carries original headers; every
              unsupported policy is left stripped (not passed through). */
-          if (experimentalEnabled("cspTranslation"))
+          if (experimentalEnabled("cspTranslation")) {
+            const cspDoc = DOC_DESTS.has(dest.toLowerCase());
+            const docClient = e.resultingClientId || e.clientId;
             applyExperimentalCsp(outHeaders, resp.headers,
-              resp.headers.get("content-type") ?? "", DOC_DESTS.has(dest.toLowerCase()));
+              resp.headers.get("content-type") ?? "", cspDoc);
+            /* #527: source-list directives have no safe browser-side
+               translation onto the shared engine origin, so the
+               engine enforces them itself at the fetch seam. The
+               plan belongs to the navigating client (its subresource
+               fetches carry that clientId) and installs from the
+               same HTML document shape the browser-side seam
+               accepts. Every navigation rebuilds the plan from the
+               upstream header; nothing persists across pages. */
+            if (
+              cspDoc &&
+              docClient &&
+              /^(?:text\/html|application\/xhtml\+xml)(?:\s*;|\s*$)/i.test(
+                (resp.headers.get("content-type") ?? "").trim())
+            ) {
+              const rawCsp = resp.headers.get("content-security-policy");
+              if (rawCsp && (finalDest ?? target)) {
+                const eng = planEngineCsp(rawCsp, finalDest ?? target);
+                cspSetClient(CSPREG, docClient, eng);
+                const seg = engineCspMarker(eng);
+                if (seg) {
+                  const cur = outHeaders.get("x-zl-csp");
+                  outHeaders.set("x-zl-csp", cur ? cur + "; " + seg : seg);
+                }
+              }
+            }
+          }
           outHeaders.set("x-zl-proxy", "1");
           /* Finding 1: a 3xx that reached the page (hop cap reached, no
              Location, or a hop whose one-shot body cannot replay) must not
