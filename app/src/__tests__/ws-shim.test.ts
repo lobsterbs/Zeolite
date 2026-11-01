@@ -266,6 +266,83 @@ describe("page WebSocket shim relative URLs (#279)", () => {
   });
 });
 
+/* #546: the url property is the URL the constructor resolved,
+   serialized per the native rules - base resolution, the scheme-less
+   http(s)->ws(s) switch, explicit ws/wss kept, fragments refused. The
+   shim tests run without a DOM: the fake realm supplies baseURI and
+   the controller seam is mocked like the #279 cases above. */
+describe("page WebSocket shim url parity (#546)", () => {
+  const mkEnv = (base: string) => {
+    const Real = globalThis.WebSocket;
+    if (!Real) return null;
+    vi.stubGlobal("CloseEvent", FakeCloseEvent);
+    const posted: unknown[] = [];
+    ctlState.ctl = { postMessage(msg: unknown) { posted.push(msg); } };
+    const w: Record<string, unknown> = {
+      WebSocket: Real,
+      document: { baseURI: base },
+      location: { href: base },
+    };
+    applyWs(w);
+    const WS = w.WebSocket as new (u: string) => WebSocket;
+    return { WS, posted };
+  };
+
+  it("serializes the constructor-resolved URL for relative and absolute inputs", () => {
+    const env = mkEnv("https://engine.example/dir/page.html");
+    if (!env) return;
+    const root = new env.WS("/socket");
+    expect(root.url).toBe("wss://engine.example/socket");
+    expect((env.posted[0] as { url: string }).url).toBe("wss://engine.example/socket");
+    const rel = new env.WS("api/ws");
+    expect(rel.url).toBe("wss://engine.example/dir/api/ws");
+    /* explicit ws/wss are kept exactly as written (no re-scheme) */
+    const plain = new env.WS("ws://relay.example/chat");
+    expect(plain.url).toBe("ws://relay.example/chat");
+    const tls = new env.WS("wss://relay.example/chat");
+    expect(tls.url).toBe("wss://relay.example/chat");
+  });
+
+  it("maps scheme-less references off http and https bases (http->ws, https->wss)", () => {
+    const onHttp = mkEnv("http://engine.example/page.html");
+    if (!onHttp) return;
+    expect(new onHttp.WS("/s").url).toBe("ws://engine.example/s");
+    const onHttps = mkEnv("https://engine.example/page.html");
+    if (!onHttps) return;
+    expect(new onHttps.WS("/s").url).toBe("wss://engine.example/s");
+  });
+
+  it("refuses fragments, so the serialized url can never carry one", () => {
+    const env = mkEnv("https://engine.example/page.html");
+    if (!env) return;
+    for (const bad of ["/socket#frag", "wss://relay.example/ws#f"]) {
+      let err: unknown = null;
+      try {
+        new env.WS(bad);
+      } catch (e) {
+        err = e;
+      }
+      expect((err as DOMException).name).toBe("SyntaxError");
+    }
+  });
+
+  it("never re-mints the page URL: the property and the bridge message agree verbatim", () => {
+    const env = mkEnv("https://engine.example/dir/page.html");
+    if (!env) return;
+    /* A cross-origin ws literal stays the page's own string (no route,
+       no re-encoding, no destination swap on the page surface). */
+    const abs = new env.WS("wss://relay.example/ws");
+    expect(abs.url).toBe("wss://relay.example/ws");
+    expect((env.posted.at(-1) as { url: string }).url).toBe("wss://relay.example/ws");
+    /* For a relative reference the only engine-origin string on the
+       property is the base the page itself lives on, resolved - the
+       SW decodes the destination from its own virtual context. */
+    const rel = new env.WS("/socket");
+    expect(rel.url).toBe("wss://engine.example/socket");
+    expect((env.posted.at(-1) as { url: string }).url).toBe(rel.url);
+  });
+});
+
 /* #493: native BufferSource conversion rejects SharedArrayBuffer-backed
    views before the state check. The shim must throw TypeError for them
    without posting to the bridge or counting bufferedAmount, and must
