@@ -124,7 +124,7 @@ supported, kept honest.
 | page to worker messaging | S2 | A MessageChannel relay to the sandbox. Without executed code there is no receiver, so S1 ships no fake message events. |
 | fetch event routing | S2 | Longest-prefix match over (site id, scope) inside the sandbox request path; a virtual fetch handler sees only requests of its own site. |
 | install / activate / skipWaiting / clients | S2 | Emulated with hard budgets: waitUntil is bounded, clients.claim reaches only pages of its own site. |
-| Cache API (caches) | S2 | Per (site, scope) partition inside the site storage partition, quota-bounded, separate from the engine page cache. |
+| Cache API (caches) | S2 | Origin-scoped and quota-bounded, shared by registrations on that virtual origin, separate from the engine page cache. |
 | push / BackgroundSync / PeriodicSync | N | Requires real browser infrastructure the engine cannot emulate honestly. |
 
 ## Execution sandbox model (stage 2)
