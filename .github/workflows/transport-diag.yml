@@ -3,7 +3,7 @@ name: transport-gate
 # CI gate for the vendored libcurl transport seam (issue #11 and its
 # fix). CI runs no browser by design, so this is the only place the
 # wasm transport is exercised end to end: the real
-# @mercuryworkshop/libcurl-transport 2.0.5 bundle connects to a local
+# @mercuryworkshop/libcurl-transport 2.0.6 bundle connects to a local
 # zeolite-server wisp endpoint. Unpatched, craigslist's close-delimited
 # empty-body 302 dies with curl error 56 before any response object
 # exists; with the engine's runtime patch
@@ -60,7 +60,7 @@ jobs:
         with:
           node-version: "22"
       - name: Install transport
-        run: npm i @mercuryworkshop/libcurl-transport@2.0.5 ws
+        run: npm i @mercuryworkshop/libcurl-transport@2.0.6 ws
       - name: Run transport gate
         run: node suite/transport-diag.mjs
       - name: Install epoxy transport (#64)
