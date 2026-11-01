@@ -1094,14 +1094,27 @@ export class GuestKernel {
   }
 
   /** #477 wave 2: dispatch one synthetic fetch event to the running
-      guest realm under the hard fail-closed budget. Every uncertain
-      path (no guest, not running, no handler, malformed or oversize
-      response, script error, timeout, termination) resolves
-      handled:false and the engine request path serves the request
-      exactly as with no guest. */
-  dispatchFetch(key: string, request: GuestFetchRequest): Promise<GuestFetchOutcome> {
+      guest realm under the hard fail-closed budget. An exact registration
+      key selects one scope; origin-only callers keep the old API shape and
+      resolve to the most-specific scope containing request.url. */
+  dispatchFetch(keyOrOrigin: string, request: GuestFetchRequest): Promise<GuestFetchOutcome> {
     this.tick();
-    const g = this.guests.get(key);
+    let key = keyOrOrigin;
+    let g = this.guests.get(key);
+    if (!g) {
+      let best: GuestRecord | null = null;
+      let bestKey = "";
+      for (const [candidateKey, candidate] of this.guests) {
+        if (candidate.origin !== keyOrOrigin || candidate.state !== "running" || !candidate.guest) continue;
+        if (!guestScopeMatches(candidate.scope, request.url)) continue;
+        if (!best || candidate.scope.length > best.scope.length) {
+          best = candidate;
+          bestKey = candidateKey;
+        }
+      }
+      key = bestKey;
+      g = best ?? undefined;
+    }
     if (!g || g.state !== "running" || !g.guest) return Promise.resolve({ handled: false });
     const guest = g.guest;
     const id = ++this.fetchSeq;
