@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 /* Issue #86 acceptance: focused tests for the streamed and
    non-streamed response paths of the extracted transform module. The
@@ -7,7 +7,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
    orchestration contract: init splice placement, the lazy dep seam,
    onDone, passthrough and degradation reporting. */
 
-const mockState = vi.hoisted(() => ({ initFails: false, base: undefined as string | undefined }));
+const mockState = vi.hoisted(() => ({ initFails: false, base: undefined as string | undefined, trace: false, traceDecisions: undefined as string | undefined }));
 
 vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
   class JsRewriter {
@@ -25,6 +25,9 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
     add_injection(_p: string) {}
     set_blocked_hosts(_h: string[]) {}
     set_lazy_images() {}
+    /* #529: tests feed the drained decision JSON through mockState. */
+    set_trace(on: boolean) { mockState.trace = on; }
+    take_trace() { return mockState.trace ? (mockState.traceDecisions ?? "[]") : "[]"; }
   }
   class JsCssRewriter {
     process(s: string) {
@@ -51,6 +54,7 @@ import { cssRewriteStream, initTransform, isCss, isHtml, isJs, rawFrom, rewriteS
 import { activeStreams } from "../streams-alive";
 import type { TransformDeps } from "../transform";
 import { initScript, vPath } from "../pageload";
+import { setTracing, tracingSnapshot, tracingResetForTests } from "../tracing";
 
 const BASE = "https://target.example/page";
 const enc = new TextEncoder();
@@ -105,6 +109,8 @@ async function freshTransform() {
 beforeEach(() => {
   mockState.initFails = false;
   mockState.base = undefined;
+  mockState.trace = false;
+  mockState.traceDecisions = undefined;
   setDegraded.mockClear();
   siteScript.mockClear();
   (globalThis as unknown as { self: unknown }).self = {
@@ -387,6 +393,49 @@ describe("effective base delivery (#532)", () => {
   });
 });
 
+/* ---- #529: token-level rewriter decision tracing ------------------- */
+
+describe("rewrite tracing (#529)", () => {
+  const DOC = '<!DOCTYPE html><html><head><title>t</title></head><body>hi</body></html>';
+  afterEach(() => tracingResetForTests());
+
+  it("drains wasm rewriter decisions into the trace ring", async () => {
+    setTracing(true);
+    mockState.traceDecisions =
+      '[{"pass":"html-url","decision":"routed","n":3},{"pass":"js-literal","decision":"rewritten","n":1}]';
+    const out = await readAll(
+      rewriteStream(
+        streamOf([DOC]), BASE, {}, [], "text/html",
+        undefined, true, undefined, undefined, undefined,
+        "zl-t-trace-1",
+      ),
+    );
+    expect(out).toContain("<body>hi</body>"); /* the stream itself is unaffected */
+    const s = tracingSnapshot(0);
+    expect(s.entries.filter((x) => x.subsystem === "rewriter")).toEqual([
+      { seq: expect.any(Number), ts: expect.any(Number), subsystem: "rewriter",
+        rule: "html-url", original: "routed", result: "count=3", traceId: "zl-t-trace-1" },
+      { seq: expect.any(Number), ts: expect.any(Number), subsystem: "rewriter",
+        rule: "js-literal", original: "rewritten", result: "count=1", traceId: "zl-t-trace-1" },
+    ]);
+    tracingResetForTests();
+  });
+
+  it("does not drain while tracing is off", async () => {
+    mockState.traceDecisions = '[{"pass":"html-url","decision":"routed","n":9}]';
+    await readAll(
+      rewriteStream(
+        streamOf([DOC]), BASE, {}, [], "text/html",
+        undefined, true, undefined, undefined, undefined,
+        "zl-t-trace-2",
+      ),
+    );
+    const s = tracingSnapshot(0);
+    expect(s.entries.filter((x) => x.subsystem === "rewriter")).toEqual([]);
+    expect(mockState.trace).toBe(false); /* set_trace never called */
+    tracingResetForTests();
+  });
+});
 describe("cosmetic style splice (#551)", () => {
   const DOC = "<!doctype html><html><head><title>t</title></head><body></body></html>";
   const TAG = '<style data-zl-cosmetic>.banner-ad{display:none!important}</style>';
@@ -394,7 +443,7 @@ describe("cosmetic style splice (#551)", () => {
   it("the cosmetic <style> rides the init splice after the doctype", async () => {
     const out = await readAll(
       rewriteStream(streamOf([DOC]), BASE, {}, [], "text/html",
-        undefined, true, undefined, undefined, undefined, TAG),
+        undefined, true, undefined, undefined, undefined, undefined, TAG),
     );
     expect(out).toContain(TAG);
     /* After the doctype, ahead of the rewritten document markup. */
@@ -405,7 +454,7 @@ describe("cosmetic style splice (#551)", () => {
   it("injectInit=false (fetch/XHR HTML) never receives cosmetics", async () => {
     const out = await readAll(
       rewriteStream(streamOf([DOC]), BASE, {}, [], "text/html",
-        undefined, false, undefined, undefined, undefined, TAG),
+        undefined, false, undefined, undefined, undefined, undefined, TAG),
     );
     expect(out).not.toContain("data-zl-cosmetic");
   });
@@ -418,3 +467,4 @@ describe("cosmetic style splice (#551)", () => {
     expect(out).toContain("<!doctype html>");
   });
 });
+
