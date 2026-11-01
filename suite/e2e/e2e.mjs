@@ -966,7 +966,7 @@ async function main() {
   await check("api: network inspector distinguishes fetch, XHR, EventSource, beacon, worker, parser and navigation initiators (#545)", async () => {
     const { page, frame } = await openProxied(ORIGIN_A + "/dir/initiator-page.html", "#init-marker");
     await frame.locator("#initiator-img").evaluate((img) => img.decode());
-    const fetchValue = await evalIn(frame, "fetch initiator", `() => fetch("/api/initiator-probe?kind=fetch", { cache: "no-store" }).then(r => r.text())`);
+    const fetchValue = await evalIn(frame, "fetch initiator", `() => fetch("${ORIGIN_B}/api/initiator-probe?kind=fetch", { cache: "no-store" }).then(r => r.text())`);
     eq(fetchValue, "initiator-ok", "fetch initiator fixture");
     const xhrValue = await evalIn(frame, "XHR initiator", `() => new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
@@ -977,13 +977,13 @@ async function main() {
     })`);
     eq(xhrValue, "initiator-ok", "XHR initiator fixture");
     const eventValue = await evalIn(frame, "EventSource initiator", `() => new Promise((resolve, reject) => {
-      const es = new EventSource("/api/initiator-probe?kind=eventsource");
+      const es = new EventSource("${ORIGIN_B}/api/initiator-probe?kind=eventsource");
       const timer = setTimeout(() => { es.close(); reject(new Error("EventSource initiator timeout")); }, 10000);
       es.onmessage = (e) => { clearTimeout(timer); es.close(); resolve(e.data); };
       es.onerror = () => { clearTimeout(timer); es.close(); reject(new Error("EventSource initiator failed")); };
     })`);
     eq(eventValue, "eventsource-ok", "EventSource initiator fixture");
-    const beacon = await evalIn(frame, "sendBeacon initiator", `() => navigator.sendBeacon("/api/initiator-probe?kind=beacon", "body-never-record-this-547")`);
+    const beacon = await evalIn(frame, "sendBeacon initiator", `() => navigator.sendBeacon("${ORIGIN_B}/api/initiator-probe?kind=beacon", "body-never-record-this-547")`);
     eq(beacon, true, "sendBeacon accepted");
     const workerValue = await evalIn(frame, "worker fetch initiator", `() => new Promise((resolve, reject) => {
       const w = new Worker("/dir/initiator-worker.js");
