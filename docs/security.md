@@ -121,7 +121,13 @@ app/src/__tests__/leak.test.ts):
     exists behind the cspTranslation experimental flag (#527): the
     audited 'none' directives are served on proxied documents with a
     visible x-zl-csp decision marker, every unsupported policy stays
-    stripped and never widened. See docs/limitations.md.
+    stripped and never widened; origin/path source lists, 'self' and
+    the default-src fallback - directives with no safe browser-side
+    translation onto the shared engine origin - are enforced by the
+    engine itself at the fetch seam against the decoded upstream URL
+    (app/src/csp-enforce.ts), so a blocked load answers a network
+    error before cache or transport and no broadened grant is
+    possible. See docs/limitations.md.
   - Set-Cookie is captured into the per-origin jar before being
     stripped, so the page never sees raw Set-Cookie headers; cookies
     only flow through jar-controlled Cookie headers.
@@ -529,8 +535,10 @@ skipped:body-too-large marker rather than blocking.
 - CSP of the embedding application is the host's job; Zeolite cannot
   fully restore the proxied page's own confinement headers and still
   function. The opt-in deny-only subset (cspTranslation flag, #527)
-  restores what is provably safe and reports every decision; full
-  source-list translation remains open.
+  restores what is provably safe and reports every decision, and the
+  engine-side gate enforces the fetch-directive source lists against
+  decoded upstream URLs; browser-side full source-list translation
+  remains open (no source list is ever served to the browser).
 - The compat-suite policy hatch exists; deployments must verify they
   never export ZL_TEST_ALLOW_PRIVATE_DESTS (or ZL_TEST_EGRESS).
 - Fingerprinting resistance is spoofing, not anonymity: timing,

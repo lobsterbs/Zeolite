@@ -27,7 +27,7 @@ describe("experimental flag selection (host preferences, not unsafe runtime feat
     });
     expect(experimentalSnapshot().status.adaptiveTransit).toBe("shadow-only");
     expect(experimentalSnapshot().status.hybridLocation).toBe("enabled");
-    expect(experimentalSnapshot().status.cspTranslation).toBe("deny-only");
+    expect(experimentalSnapshot().status.cspTranslation).toBe("deny-only+engine-source-lists");
     expect(experimentalEnabled("cspTranslation")).toBe(true);
     expect(experimentalSnapshot().status.virtualSW).toBe("not-implemented");
   });
