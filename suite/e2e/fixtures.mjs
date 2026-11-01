@@ -3,7 +3,7 @@
    content can embed both origins byte-stably:
 
    - A = http://127.0.0.1:7101  (the proxied site under test)
-   - B = http://127.0.0.1:7102  (a second origin: cross-origin
+   - B = http://localhost:7102  (a second host and port: cross-origin
      requests, beacons, EventSource, virtual-context isolation)
 
    /api/data deliberately sends NO Access-Control-Allow-Origin: a
@@ -202,7 +202,7 @@ export function startFixture(port) {
           `const dsn = new URL("https://publickey@telemetry.invalid/42");`,
           `const other = new URL("wss://user:pass@settings.invalid/events");`,
           `self.__zlConfig = { dsn: dsn.username === "publickey" && dsn.hostname === "telemetry.invalid" && dsn.pathname === "/42", other: other.username === "user" && other.password === "pass" && other.hostname === "settings.invalid", fetched: "pending" };`,
-          `fetch("http://127.0.0.1:7102/api/data").then(r => r.json()).then(j => { self.__zlConfig.fetched = j.zl; }).catch(() => { self.__zlConfig.fetched = "failed"; });`,
+          `fetch("${ORIGIN_B}/api/data").then(r => r.json()).then(j => { self.__zlConfig.fetched = j.zl; }).catch(() => { self.__zlConfig.fetched = "failed"; });`,
         ].join("\n"));
       } else if (path === "/dir/shared-identity.js") {
         /* #453/#547: one ID per worker global. The storage probe uses
@@ -230,7 +230,7 @@ export function startFixture(port) {
           `var va=/^https?:\\/\\/[a-z0-9_.-]+(:[0-9]+)?\\/dir\\/[a-z-]+\\.html$/;`,
           `var u="http://127.0.0.1:7101/dir/anchor-pinned.html";`,
           `self.__zlPinned={hint:va.test(u)?"validated":"bad-hint"};`,
-          `fetch("http://127.0.0.1:7102/api/data").then(function(r){return r.json()}).then(function(j){self.__zlPinnedFetch=j.zl}).catch(function(e){self.__zlPinnedFetch="err:"+e});`,
+          `fetch("${ORIGIN_B}/api/data").then(function(r){return r.json()}).then(function(j){self.__zlPinnedFetch=j.zl}).catch(function(e){self.__zlPinnedFetch="err:"+e});`,
           `self.__zlPinnedPopup="unset";`,
           `var w=window.open("http://127.0.0.1:7101/dir/popup-pinned.html");`,
           `if(w){self.__zlPinnedPopup="opened"}else{self.__zlPinnedPopup="null"}`,
