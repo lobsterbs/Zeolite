@@ -2,13 +2,11 @@
 /* #556: OPFS-backed bounded spool for replaying large streamed request
    bodies across redirect hops. The hop chain buffers a stream body
    once (32 MiB cap) so 307/308 POSTs follow like a real browser; an
-   announced body over that cap used to stream one-shot and the
-   redirect surfaced to the page. When the host explicitly authorizes
-   the protected spool (zl:config spoolUploads, engine.ts), an
    over-cap body rides Origin Private File System storage instead of
-   memory: the stream is written once to a per-request file and the
-   File handle replays on every hop with no full in-memory copy (the
-   vendored transport accepts Blob bodies).
+   memory (default since the #556 follow-up, zl:config spoolUploads
+   false is the opt-out): the stream is written once to a per-request
+   file and the File handle replays on every hop with no full in-memory
+   copy (the vendored transport accepts Blob bodies).
 
    Hard budgets, fail-honest:
    - per request: REPLAY_SPOOL_CAP (256 MiB). Overflow deletes the
@@ -25,9 +23,10 @@
    Storage failure BEFORE the first byte is read surfaces as
    SpoolUnavailableError so the caller keeps the documented one-shot
    streaming behavior for a body it still owns intact; every failure
-   after the first byte is fatal for the request. Upload bytes never
-   reach persistent storage unless the host opted in (request.ts
-   gates on spoolUploadsEnabled()). Unit-gated in
+   after the first byte is fatal for the request. Upload bytes reach
+   persistent storage only through this spool path; a deployment that
+   refuses it turns it off worker-side (request.ts gates on
+   spoolUploadsEnabled(), default on). Unit-gated in
    __tests__/bodyspool.test.ts through the injected root; the
    real-Chromium acceptance is suite/e2e/replay-spool.mjs. */
 

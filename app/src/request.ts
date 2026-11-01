@@ -788,7 +788,11 @@ export function replayCapTrips(): number {
     retry is honestly unavailable for it. Non-stream bodies and
     oversized announced bodies pass through untouched; an overflow
     mid-read throws so the caller serves the honest error strand,
-    never a corrupted body. */
+    never a corrupted body. #556: with hopReplay and the spool
+    authorized (default-on; zl:config spoolUploads is the opt-out),
+    the body is staged to the bounded OPFS spool instead of memory -
+    spoolUnavailable before the first byte keeps the documented
+    one-shot/memory paths with an explicit DIAG event. */
 export async function replayableInit(
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
   opts: { relayPossible?: boolean; hopReplay?: boolean; spoolAuthorized?: boolean } = {},
@@ -824,8 +828,8 @@ export async function replayableInit(
   if (/^\d+$/.test(clRaw)) {
     if (Number(clRaw) > replayBodyCap()) {
       /* #556: the hop chain replays an over-cap streamed body through
-         the host-authorized OPFS spool instead of surfacing the
-         redirect to the page. */
+         the OPFS spool (default-on; zl:config spoolUploads false
+         opts out) instead of surfacing the redirect to the page. */
       const spool = await trySpool();
       if (spool) {
         /* The announced length is replaced by the spooled truth,
@@ -848,9 +852,10 @@ export async function replayableInit(
     return init;
   } else {
     /* #556: an unannounced body with a live replay path spools when
-       the host authorized it: even a chunked upload becomes
-       replayable without a memory copy, and the spool cap (not the
-       32 MiB memory cap) bounds it. */
+       the spool is authorized (default-on since the #556 follow-up;
+       zl:config spoolUploads false opts out): even a chunked upload
+       becomes replayable without a memory copy, and the spool cap (not
+       the 32 MiB memory cap) bounds it. */
     const spool = await trySpool();
     if (spool) return { ...init, body: spool.file, spool };
   }
@@ -3839,9 +3844,10 @@ export function handleFetch(e: FetchEvent): void {
              method AND the body, which replayableInit buffers once
              (cap zl:config replayCapMb, default 32 MiB); a cross-origin
              hop drops Authorization
-             per spec. Only an announced body over the cap without the authorized
-             replay spool streams one-shot and surfaces with a mapped
-             Location (#556). */
+             per spec. With the OPFS replay spool unavailable (storage
+             refused, or the deployment opted out via zl:config
+             spoolUploads false) an announced body over the cap streams
+             one-shot and surfaces with a mapped Location (#556). */
           let hopUrl = target;
           let hopMethod = e.request.method;
           let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
@@ -3855,11 +3861,14 @@ export function handleFetch(e: FetchEvent): void {
           if (hopBody != null) {
             const buffered = await replayableInit(
               { method: hopMethod, headers: sendHeaders, body: hopBody, signal: e.request.signal },
-              /* #556: the host-authorized OPFS spool turns an
-                 over-cap streamed body into a replayable File so the
-                 hop chain follows 307/308 (and body-preserving
-                 301/302 on non-POST methods) instead of surfacing
-                 the redirect to the page. */
+              /* #556: the OPFS spool turns an over-cap streamed body
+                 into a replayable File so the hop chain follows
+                 307/308 (and body-preserving 301/302 on non-POST
+                 methods) instead of surfacing the redirect to the
+                 page. Default-on since the #556 follow-up; the
+                 spoolUploads:false opt-out keeps upload bytes out of
+                 persistent storage and restores the surfaced
+                 one-shot. */
               { hopReplay: true, spoolAuthorized: spoolUploadsEnabled() },
             );
             hopBody = buffered.body ?? null;
