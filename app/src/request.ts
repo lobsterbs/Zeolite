@@ -1277,6 +1277,38 @@ async function revalidateBeforeUse(req: Request, hit: Response, context: CookieR
 
 /* ---- Fetch interception -------------------------------------------- */
 
+/** Fixed-vocabulary page/worker instrumentation header. It is diagnostic
+    metadata only, never an authorization or routing signal. The request
+    engine strips it before the upstream hop. */
+export const REQUEST_INITIATOR_HEADER = "x-zl-i";
+
+/** Classify browser evidence or the diagnostic marker inserted by our
+    wrappers. A page can forge that header, so it is never a trust
+    boundary and only changes the inspector label. Empty/unproven
+    requests stay UNKNOWN. */
+export function requestInitiator(req: Request): string {
+  const marked = req.headers.get(REQUEST_INITIATOR_HEADER);
+  if (marked === "fetch") return "FETCH";
+  if (marked === "xhr") return "XHR";
+  if (marked === "beacon") return "SEND_BEACON";
+  if (marked === "worker") return "WORKER_FETCH";
+  if (req.mode === "navigate") return "NAVIGATION";
+  if ((req.headers.get("accept") ?? "").toLowerCase().includes("text/event-stream")) return "EVENTSOURCE";
+  if (req.destination) return "RESOURCE";
+  return "UNKNOWN";
+}
+
+/** Request headers shared with extension interception APIs.
+    Internal attribution metadata is never part of the extension-facing
+    WebRequest surface. */
+export function extensionRequestHeaders(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    if (name.toLowerCase() !== REQUEST_INITIATOR_HEADER) out[name] = value;
+  });
+  return out;
+}
+
 /** The request destination from the spec source of truth first:
     sec-fetch-* are forbidden headers the browser's network layer
     adds, and SW-visible requests can lack them entirely (Firefox;
@@ -3286,11 +3318,13 @@ export function handleFetch(e: FetchEvent): void {
         /* Issue #34: a foreign-origin request has no engine-local path;
            the full URL is its internal identity (and the netLog path). */
         const internalUrl = foreign ? url.href : url.pathname + url.search;
+        const initiatorType = requestInitiator(e.request);
         const mkDetail = (resp?: Response): NetDetail => {
           const d: NetDetail = {
             internalUrl,
             ttfb: Date.now() - t0,
             initiator,
+            initiatorType,
             reqHeaders: flatRed(e.request.headers),
           };
           if (foreign) d.crossOrigin = true;
@@ -3395,8 +3429,7 @@ export function handleFetch(e: FetchEvent): void {
         if (rtype === "worker") kinds.push("worker");
         if (rtype === "websocket") kinds.push("websocket");
         if (rtype === "fetch") kinds.push("fetch");
-        const flatReq: Record<string, string> = {};
-        e.request.headers.forEach((v, k) => (flatReq[k] = v));
+        const flatReq = extensionRequestHeaders(e.request.headers);
         const ic = runRequestInterception(kinds, {
           url: ruleDec.url ?? target,
           method: e.request.method,
@@ -5698,6 +5731,8 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     "referer",
     "origin",
     "cookie",
+    /* Internal API attribution is consumed here and never reaches origin servers. */
+    "x-zl-i",
     "sec-fetch-site",
     "sec-fetch-mode",
     "sec-fetch-dest",
