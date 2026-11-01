@@ -75,8 +75,24 @@ export const SPA404_WATCHER =
     splice (1.8). #236 adds the hostless vpath the virtual location
     seeds from. #456 gate 4 adds the own-404 watcher. */
 export function initScript(dest: string, fpScript: string | null): string {
+  const virtualPath = vPath(dest);
+  let hash = "";
+  try {
+    hash = new URL(dest).hash;
+  } catch {
+    /* opaque destinations have no page fragment */
+  }
+  /* #543: redirects followed inside the SW can change the virtual
+     document fragment without changing the browser's committed
+     engine-route URL. Restore only the fragment with replaceState:
+     same-document, no second fetch, no target host in page-visible
+     data. The parser scroll runs after the target elements exist. */
+  const fragmentFix = hash
+    ? `<script>(function(h){try{if(location.hash!==h){history.replaceState(history.state,"",location.pathname+location.search+h);var scroll=function(){var id=h.slice(1);try{id=decodeURIComponent(id)}catch(e){}var target=document.getElementById(id);if(!target){var named=document.getElementsByName(id);target=named&&named[0]}if(target&&typeof target.scrollIntoView==="function")target.scrollIntoView()};if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",scroll,{once:true});else scroll()}}catch(e){}})(${JSON.stringify(hash)});</script>`
+    : "";
   return (
-    `<script>window.__ZL=${JSON.stringify({ site: siteToken(dest), vpath: vPath(dest) })};</script>` +
+    `<script>window.__ZL=${JSON.stringify({ site: siteToken(dest), vpath: virtualPath })};</script>` +
+    fragmentFix +
     `<script>${SPA404_WATCHER}</script>` +
     (fpScript ? `<script>${fpScript}</script>` : "")
   );
