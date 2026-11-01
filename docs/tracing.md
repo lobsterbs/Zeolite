@@ -23,8 +23,13 @@ transport decisions (NativeTransit / RewriteFallback with the fallback
 reason, redirect final destinations) and the html/css rewrite
 boundaries.
 
-Known limit: token-level decisions inside the wasm rewriter are not
-surfaced; the seams above are the traced boundary.
+Since #529 the token-level decisions inside the wasm rewriter are
+surfaced through the same opt-in: rewriteStream enables the
+per-instance wasm trace and drains the aggregated fixed-vocabulary
+(pass, decision, count) pairs into the ring at stream end. No source
+text, URL or host ever enters a trace entry. Standalone CSS streams
+and the one-shot JS body rewrite stay untraced (those paths do not
+carry a per-request rewriter instance).
 
 ## Diagnostics feed (app/src/diag.ts)
 

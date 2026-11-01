@@ -1694,20 +1694,21 @@ async function main() {
     }
     /* The rewriter half of #36 is assertable: the srcdoc body IS
        rewritten, so the img src must be an engine route and never
-       the fixture origin. The decode half is a documented Chromium
-       platform limitation: about:srcdoc frames are not service-worker
-       clients (crbug.com/41411856; the revert CL e1d141d72688), so
-       their subresource requests bypass the SW, hit the engine
-       static server and 404. The extension host has no such gap
-       (declarativeNetRequest covers frame-initiated loads). Pass
-       when the rewrite is proven and the frame shows exactly the
-       documented uncontrolled-404 state; fail on anything else. */
+       the fixture origin. The decode half follows the platform:
+       current Chromium (verified at 156) makes about:srcdoc frames
+       service-worker clients, so the image decodes through the
+       engine SW decode pipeline; the 404 branch stays for an older
+       Chromium that still bypasses (the crbug.com/41411856 era).
+       The extension host has no such gap either way
+       (declarativeNetRequest covers frame-initiated loads).
+       suite/e2e/srcdoc-clients.mjs (#528) pins both arms class by
+       class; this check stays tolerant of the platform version. */
     assert(String(o.src).startsWith(ENGINE + "/j/"), "srcdoc img was not rewritten to an engine route: " + o.src);
     assert(!String(o.src).includes("7101"), "srcdoc img src leaks the fixture origin: " + o.src);
     if (o.w > 0) return "decoded " + o.src.slice(0, 44);
     assert(o.ctrl === false && Array.isArray(o.probe) && o.probe[0] === 404,
       "srcdoc image did not decode and the frame is not in the documented uncontrolled-404 state (crbug 41411856): " + out);
-    return "rewritten; srcdoc frame not an SW client (crbug 41411856), probe 404 confirms the documented state";
+    return "rewritten; srcdoc frame not an SW client on this Chromium (legacy crbug 41411856-era state)";
   });
 
   await check("rewriter: base href folds later relative URLs (#36)", async () => {
