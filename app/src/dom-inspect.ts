@@ -11,7 +11,10 @@
    Authorization: default OFF. A session exists only after
    zl:domInspect {op:"authorize"} from a host-page sender names a live
    proxied client AND the client's bridge answers the authorize
-   handshake. Teardown: explicit revoke, navigation (a new document
+   handshake. The bridge itself is not part of the bootstrap: the
+   authorize message carries the compiled dominspect.js source (the
+   finder.js shipping pattern), the page's loader evaluates it once,
+   and the handshake reply pins the generation. Teardown: explicit revoke, navigation (a new document
    realm starts unauthorized and its generation differs), client
    death (the next request fails the live check) and worker restart
    (memory-only state).
@@ -51,6 +54,20 @@ const sessions = new Map<string, DomInspectSession>();
 const CONSOLE_ENTRIES_CAP = 128;
 /** Longest string forwarded per reply field. */
 const FIELD_CAP = 2000;
+
+/* The compiled page-side bridge ships on demand (the finder.js
+   pattern, #29): fetched once per SW instance - worker-own fetches
+   never re-enter this fetch handler - and attached to the authorize
+   ctl message, because the loader evaluates code only when a message
+   carries it. An unavailable bundle answers authorize honestly
+   instead of pretending the bridge exists. */
+let inspectorSource: Promise<string | null> | null = null;
+function loadInspectorSource(): Promise<string | null> {
+  inspectorSource ??= fetch(new URL("dominspect.js", self.location.href))
+    .then((r) => (r.ok ? r.text() : null))
+    .catch(() => null);
+  return inspectorSource;
+}
 
 export function domInspectSession(clientId: string): DomInspectSession | null {
   return sessions.get(clientId) ?? null;
@@ -123,7 +140,9 @@ export async function domInspectAuthorize(
 }> {
   const client = await liveProxiedClient(clientId);
   if (!client) return { ok: false, error: "no live proxied client for clientId" };
-  const handshake = await relayOnce(client, { on: true, ctl: true }, timeoutMs);
+  const code = await loadInspectorSource();
+  if (code === null) return { ok: false, error: "inspector bundle unavailable" };
+  const handshake = await relayOnce(client, { on: true, ctl: true, code }, timeoutMs);
   if (!handshake || handshake.ok !== true || typeof handshake.gen !== "number") {
     /* The page answered nothing: no bootstrap bridge (old document,
        guest realm, or a page that never loaded the new bundle). */
@@ -215,7 +234,8 @@ export async function domInspectRequest(
   return gateReply(raw);
 }
 
-/** Tests only: drop every session. */
+/** Tests only: drop every session and the cached bundle source. */
 export function domInspectResetForTests(): void {
   sessions.clear();
+  inspectorSource = null;
 }
