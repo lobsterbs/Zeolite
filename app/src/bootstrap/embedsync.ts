@@ -17,7 +17,44 @@ import { NativeURL } from "./anchorshim";
 
 type Popup = { href: string; fallback: () => void };
 const popups = new WeakMap<object, (p: Popup) => void>();
-/** #416: a handled popup has no WindowProxy: window.open returns null. */
+/** #553: pages that keep the return value of window.open get a
+    limited facade instead of null - but only when the popup was
+    really routed to the embedder. A swallowed popup (unknown
+    embedder, fail closed) still answers null, the same as a natively
+    blocked popup. The facade carries no destination: the plaintext
+    href rides the existing navigate channel to the host only. */
+const facadeRouted = new WeakSet<object>();
+const closeReports = new WeakMap<object, (name: string) => void>();
+const namedFacades = new Map<string, object>();
+export function popupFacade(w: object, name: string | undefined): object | null {
+  if (!facadeRouted.has(w)) return null;
+  const n = typeof name === "string" ? name : "";
+  let f = n ? namedFacades.get(n) : undefined;
+  if (!f) {
+    f = {
+      name: n,
+      /* Host state reports arrive in a later slice; closed stays
+         honestly false until then. */
+      get closed() {
+        return false;
+      },
+      focus() {},
+      /* A close request rides the embedder channel; the host owns
+         the real window. */
+      close() {
+        closeReports.get(w)?.(n);
+      },
+      postMessage() {
+        throw new Error("zeolite: popup postMessage relay not wired (see compat)");
+      },
+    };
+    if (n) namedFacades.set(n, f);
+  }
+  return f;
+}
+/** #416/#553: a handled popup has a routing target. The synchronous
+    return contract is kept by popupFacade; a fail-closed embedder
+    still swallows and window.open answers null. */
 export function embedPopup(w: object, href: string, fallback: () => void): boolean {
   const open = popups.get(w);
   if (!open) return false;
@@ -44,6 +81,8 @@ export function applyEmbedSync(w: Record<string, unknown>): void {
     if (settled) return;
     settled = true;
     cancel();
+    facadeRouted.delete(w);
+    closeReports.delete(w);
     if (standalone) popups.delete(w);
     else popups.set(w, () => {}); // unknown embedder fails closed
     for (const p of pending.splice(0)) {
@@ -51,6 +90,11 @@ export function applyEmbedSync(w: Record<string, unknown>): void {
     }
   };
   popups.set(w, (p) => { if (pending.length < 32) pending.push(p); });
+  /* #553: from the first queued popup on, this document routes
+     popups through the embedder and window.open answers a facade.
+     A terminal fail-closed handshake un-marks (below), so a
+     swallowed popup answers null, native-blocked semantics. */
+  facadeRouted.add(w);
   const post = (m: unknown): void => {
     try { (parent as { postMessage(m: unknown, o: string): void }).postMessage(m, origin); }
     catch { /* embedder gone */ }
@@ -105,6 +149,8 @@ export function applyEmbedSync(w: Record<string, unknown>): void {
         });
       };
       popups.set(w, open);
+      facadeRouted.add(w);
+      closeReports.set(w, (n: string) => post({ lb: "popupClose", data: { name: n } }));
       for (const p of pending.splice(0)) open(p);
       emit();
       onVlocChange((virt: string) => { if (base) { cur = base + virt; emit(); } });
