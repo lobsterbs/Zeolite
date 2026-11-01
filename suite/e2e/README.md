@@ -37,8 +37,9 @@ fixture pages through `/?url=<target>` and asserts:
   srcdoc, base href folding, meta refresh navigation, module-script
   import specifiers.
 - Network inspector (#545): fetch, XHR, EventSource, sendBeacon, worker
-  fetch, parser resource and navigation fixtures are classified by
-  observed request evidence; internal marker headers are absent from
+  fetch, resource destination and navigation fixtures are classified by
+  observed request evidence; Request.destination does not prove parser
+  versus script creation. Internal marker headers are absent from
   the fixture's upstream request and inspector header detail, while
   request bodies and cookie values are not recorded.
 - Privacy (#32/#34): window.__ZL carries no plaintext destination, page

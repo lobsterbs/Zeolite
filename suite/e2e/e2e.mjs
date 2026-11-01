@@ -1002,7 +1002,7 @@ async function main() {
       ["eventsource", "EVENTSOURCE"],
       ["beacon", "SEND_BEACON"],
       ["worker", "WORKER_FETCH"],
-      ["parser", "PARSER_RESOURCE"],
+      ["parser", "RESOURCE"],
       ["navigation", "NAVIGATION"],
     ];
     const missing = [];
