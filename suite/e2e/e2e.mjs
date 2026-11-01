@@ -931,6 +931,7 @@ async function main() {
     const a2Info = await requestContext(a2.frame, "proxied shared worker A2");
     assert(a1Info.id === a2Info.id, "same virtual site across tabs did not share the worker global");
     assert(a1Info.namespace === a2Info.namespace, "same virtual site worker storage namespace diverged");
+    assert(a2Info.connections >= 2, "the worker did not observe connections from both tabs: " + JSON.stringify(a2Info));
     assert(String(a1Info.cookie).includes("shared547=proxy-a"), "worker did not inherit the virtual site's cookie profile: " + JSON.stringify(a1Info.cookie));
     const a2Alive = await pingContext(a2.frame);
     assert(a2Alive.id === a1Info.id, "second tab's worker port did not remain live");
@@ -991,7 +992,7 @@ async function main() {
       w.onerror = () => { clearTimeout(timer); w.terminate(); reject(new Error("worker fetch initiator failed")); };
     })`);
     eq(workerValue, "initiator-ok", "worker fetch initiator fixture");
-    const nav = await openProxied(ORIGIN_A + "/dir/initiator-nav.html?kind=navigation", "#initiator-nav-marker");
+    await openProxied(ORIGIN_A + "/dir/initiator-nav.html?kind=navigation", "#initiator-nav-marker");
     await sleep(700);
     const logs = await hostControl(page, { type: "zl:getNetLog", since: 0 });
     assert(Array.isArray(logs?.entries), "network inspector snapshot unavailable");
