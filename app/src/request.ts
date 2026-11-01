@@ -37,8 +37,12 @@ import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, siteUaFor, type GhosteryRedirect, type ResourceType } from "./rules";
 import { ghosteryLoadInProgress } from "./ghostery";
+import { ghosteryCosmeticsForDocument } from "./cosmetics";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
 import { DIAG, classifyStageFailure, type DiagStage } from "./diag";
+/* #451: per-attempt CAPTCHA tracing rides the existing CHALLENGE emit
+   points below; no new interception logic. */
+import { CAPTCHA_TRACE, outcomeOf } from "./captcha-trace";
 /* #90: the adoptResponse seam lives in ./downloads; the downloads
    subsystem owns its own state and the request engine stays unaware
    of download tracking internals. */
@@ -793,7 +797,11 @@ export function replayCapTrips(): number {
     retry is honestly unavailable for it. Non-stream bodies and
     oversized announced bodies pass through untouched; an overflow
     mid-read throws so the caller serves the honest error strand,
-    never a corrupted body. */
+    never a corrupted body. #556: with hopReplay and the spool
+    authorized (default-on; zl:config spoolUploads is the opt-out),
+    the body is staged to the bounded OPFS spool instead of memory -
+    spoolUnavailable before the first byte keeps the documented
+    one-shot/memory paths with an explicit DIAG event. */
 export async function replayableInit(
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
   opts: { relayPossible?: boolean; hopReplay?: boolean; spoolAuthorized?: boolean } = {},
@@ -829,8 +837,8 @@ export async function replayableInit(
   if (/^\d+$/.test(clRaw)) {
     if (Number(clRaw) > replayBodyCap()) {
       /* #556: the hop chain replays an over-cap streamed body through
-         the host-authorized OPFS spool instead of surfacing the
-         redirect to the page. */
+         the OPFS spool (default-on; zl:config spoolUploads false
+         opts out) instead of surfacing the redirect to the page. */
       const spool = await trySpool();
       if (spool) {
         /* The announced length is replaced by the spooled truth,
@@ -853,9 +861,10 @@ export async function replayableInit(
     return init;
   } else {
     /* #556: an unannounced body with a live replay path spools when
-       the host authorized it: even a chunked upload becomes
-       replayable without a memory copy, and the spool cap (not the
-       32 MiB memory cap) bounds it. */
+       the spool is authorized (default-on since the #556 follow-up;
+       zl:config spoolUploads false opts out): even a chunked upload
+       becomes replayable without a memory copy, and the spool cap (not
+       the 32 MiB memory cap) bounds it. */
     const spool = await trySpool();
     if (spool) return { ...init, body: spool.file, spool };
   }
@@ -2975,6 +2984,8 @@ export function handleFetch(e: FetchEvent): void {
             message: "pass-challenge redir rewritten to the upstream page URL",
             url: target,
           });
+          /* #451: the challenge URL itself was fetched; feed the trace. */
+          CAPTCHA_TRACE.observe({ attemptId: ctid, clientId: e.resultingClientId || e.clientId, stage: "BOOTSTRAP_SEEN", url: target, note: "pass-challenge redir rewritten" });
           target = fixed;
           /* #492-class re-anchor: a GET navigation must not park on
              the challenge URL once the handoff is repaired. The
@@ -3050,6 +3061,8 @@ export function handleFetch(e: FetchEvent): void {
           message: "recaptcha co= virtualized to the page origin",
           url: target,
         });
+        /* #451: frame navigations are the handshake, other shapes are assets. */
+        CAPTCHA_TRACE.observe({ attemptId: ctid, clientId: e.resultingClientId || e.clientId, stage: e.request.destination === "iframe" || e.request.destination === "frame" ? "FRAME_HANDSHAKE" : "ASSET_LOAD", url: target, note: "recaptcha co= virtualized" });
         target = coFixed;
       }
 
@@ -3111,6 +3124,8 @@ export function handleFetch(e: FetchEvent): void {
           message: "hcaptcha host= virtualized to the page origin",
           url: target,
         });
+        /* #451: frame navigations are the handshake, other shapes are assets. */
+        CAPTCHA_TRACE.observe({ attemptId: htid, clientId: e.resultingClientId || e.clientId, stage: e.request.destination === "iframe" || e.request.destination === "frame" ? "FRAME_HANDSHAKE" : "ASSET_LOAD", url: target, note: "hcaptcha host= virtualized" });
         target = hcFixed;
       }
 
@@ -3233,6 +3248,8 @@ export function handleFetch(e: FetchEvent): void {
           message: "challenge widget frame engine-routed (#129)",
           url: target,
         });
+        /* #451: the challenge iframe/frame navigation was observed. */
+        CAPTCHA_TRACE.observe({ attemptId: rtid, clientId: e.resultingClientId || e.clientId, stage: "FRAME_HANDSHAKE", url: target, note: "challenge widget frame engine-routed" });
       }
 
       if (siteDisabled(target)) {
@@ -3690,6 +3707,10 @@ export function handleFetch(e: FetchEvent): void {
               const chRules = await siteRules();
               const chRule = ruleFor(chRules, target);
               const csInject = csInjectUrls(target, e.request, e.request.referrer);
+              /* #551: cosmetic styles for the cached document, gated
+                 exactly like the fresh path below (toggle, per-site
+                 override, captcha allowlist, loaded engine). */
+              const cosmeticStyle = await ghosteryCosmeticsForDocument(engineRules, target, dest, traceId);
               const hitCt = hit.headers.get("content-type") ?? "text/html";
               /* Issue B: the served copy is re-encoded UTF-8. */
               hitHeaders.set("content-type", utf8ContentType(hitCt));
@@ -3701,7 +3722,8 @@ export function handleFetch(e: FetchEvent): void {
                    base; the message rides the served stream. */
                 /* #529: join the rewriter's aggregated decisions
                    to the request trace. */
-                (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb), traceId),
+                (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb), traceId,
+                cosmeticStyle),
                 { status: hit.status, headers: hitHeaders },
               );
             }
@@ -3952,9 +3974,10 @@ export function handleFetch(e: FetchEvent): void {
              method AND the body, which replayableInit buffers once
              (cap zl:config replayCapMb, default 32 MiB); a cross-origin
              hop drops Authorization
-             per spec. Only an announced body over the cap without the authorized
-             replay spool streams one-shot and surfaces with a mapped
-             Location (#556). */
+             per spec. With the OPFS replay spool unavailable (storage
+             refused, or the deployment opted out via zl:config
+             spoolUploads false) an announced body over the cap streams
+             one-shot and surfaces with a mapped Location (#556). */
           let hopUrl = target;
           let hopMethod = e.request.method;
           let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
@@ -3968,11 +3991,14 @@ export function handleFetch(e: FetchEvent): void {
           if (hopBody != null) {
             const buffered = await replayableInit(
               { method: hopMethod, headers: sendHeaders, body: hopBody, signal: e.request.signal },
-              /* #556: the host-authorized OPFS spool turns an
-                 over-cap streamed body into a replayable File so the
-                 hop chain follows 307/308 (and body-preserving
-                 301/302 on non-POST methods) instead of surfacing
-                 the redirect to the page. */
+              /* #556: the OPFS spool turns an over-cap streamed body
+                 into a replayable File so the hop chain follows
+                 307/308 (and body-preserving 301/302 on non-POST
+                 methods) instead of surfacing the redirect to the
+                 page. Default-on since the #556 follow-up; the
+                 spoolUploads:false opt-out keeps upload bytes out of
+                 persistent storage and restores the surfaced
+                 one-shot. */
               { hopReplay: true, spoolAuthorized: spoolUploadsEnabled() },
             );
             hopBody = buffered.body ?? null;
@@ -3983,14 +4009,23 @@ export function handleFetch(e: FetchEvent): void {
                  anyway, so materialize the one proven body shape from
                  the spool once per chain, bounded by the measured
                  transport ceiling; over it the request fails honestly
-                 instead of crashing the renderer. */
-              hopBody = await spoolTransportCopy(buffered.spool);
-              /* The spool file is dead weight once the final hop's
-                 request body was sent; the fetch event settles only
-                 after the response stream reaches the page, so
-                 releasing there never races a live hop. A failed
-                 release only leaks a file the orphan sweep reclaims. */
-              e.waitUntil(buffered.spool.release().catch(() => {}));
+                 instead of crashing the renderer. #514 audit: the
+                 release rides the same finally as the copy, so a copy
+                 over the transport bound frees the spool file and its
+                 live budget immediately instead of stranding up to
+                 256 MiB against the 512 MiB budget until the ten-minute
+                 orphan sweep. */
+              try {
+                hopBody = await spoolTransportCopy(buffered.spool);
+              } finally {
+                /* The spool file is dead weight once the body is
+                   materialized (the hops replay the ArrayBuffer, never
+                   the File); the fetch event settles only after the
+                   response stream reaches the page, so releasing here
+                   never races a live hop. A failed release only leaks
+                   a file the orphan sweep reclaims. */
+                e.waitUntil(buffered.spool.release().catch(() => {}));
+              }
             }
           }
           /* The navigation TTFB deadline must abort the upstream fetch,
@@ -4143,12 +4178,37 @@ export function handleFetch(e: FetchEvent): void {
                hop; the 10ms bound is invisible next to a redirect
                round trip. */
             await new Promise((r) => setTimeout(r, 10));
-            resp = await withDeadline(
-              upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
-              reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
-              "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
-              navAbort ?? undefined,
-            );
+            /* #514: a re-issue hop that fails upstream becomes a
+               bounded, attributable diagnostic - the CI torture probe's
+               "zeolite: upstream fetch failed" class used to reach the
+               probe with no hop context at all. The message names the
+               hop index and the status that redirected here, never a
+               body and never a URL (DIAG redacts the technical reason
+               on entry; the failed hop URL lives in the netlog row the
+               outer catch already records). One event per failed hop,
+               bounded by the 10-hop cap. */
+            const reIssueHop = hops + 1;
+            const redirectedBy = resp.status;
+            try {
+              resp = await withDeadline(
+                upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
+                reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
+                "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
+                navAbort ?? undefined,
+              );
+            } catch (err) {
+              DIAG.emit({
+                category: "UPSTREAM",
+                cause: "upstream",
+                severity: "warning",
+                stage: "REDIRECT_HOP",
+                traceId,
+                requestId: traceId,
+                message: "redirect re-issue hop " + reIssueHop + " failed upstream (redirected by " + redirectedBy + ")",
+                technicalReason: String(err),
+              });
+              throw err;
+            }
           }
           /* #140/#200: every response settles - an idle-stalled upstream
              body errors instead of pending forever. The TTFB deadline
@@ -4360,6 +4420,9 @@ export function handleFetch(e: FetchEvent): void {
               message: "challenge pass-through: cookies captured for " + target,
               url: target,
             });
+          if (isPassChallenge(target) || (hopUrl !== target && isPassChallenge(hopUrl)))
+            /* #451: the pass-challenge response outcome, status class only. */
+            CAPTCHA_TRACE.observe({ attemptId: traceId, stage: "VERIFY_OUTCOME", outcome: outcomeOf(resp.status), url: target, note: "challenge pass-through response" });
           const headers = stripHostile(resp.headers);
           /* Issue #2: engine routes serve their own origin. The preserved
              target ACAO (e.g. "https://excalidraw.com") fails the CORS
@@ -4635,6 +4698,8 @@ export function handleFetch(e: FetchEvent): void {
               message: "pass-challenge navigation re-anchored to the page handle",
               url: challengeReanchor,
             });
+            /* #451: the re-anchored pass-challenge response outcome. */
+            CAPTCHA_TRACE.observe({ attemptId: ratid, stage: "VERIFY_OUTCOME", outcome: outcomeOf(resp.status), url: target, note: "pass-challenge re-anchored" });
             return new Response(null, { status: 302, headers: { location: challengeReanchor } });
           }
           if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body && !cdnCgiNative) {
@@ -4645,6 +4710,12 @@ export function handleFetch(e: FetchEvent): void {
                subresource fetches do not arrive in navigate mode. */
             if (e.request.mode === "navigate") WEBNAV.committed(target);
             const csInject = csInjectUrls(target, e.request, e.request.referrer);
+            /* #551: cosmetic styles for this document, from the same
+               engine the network matcher answers from. Gated on the
+               zl:adblock toggle, the per-site zl:rules override and
+               the captcha/anti-bot allowlist exactly like network
+               blocking (rules.ts); "" when they do not apply. */
+            const cosmeticStyle = await ghosteryCosmeticsForDocument(engineRules, target, dest, traceId);
             const rewriteDone = () => {
               /* webNavigation.onCompleted + webRequest.onCompleted:
                  the document stream (and with it the navigation) is
@@ -4663,6 +4734,8 @@ export function handleFetch(e: FetchEvent): void {
                   /* #532: the effective-base delivery seam. */
                   (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
                   traceId,
+                  /* #551: the cosmetic <style> rides the init splice. */
+                  cosmeticStyle,
                 ),
                 {
                   status: resp.status,
@@ -4686,6 +4759,8 @@ export function handleFetch(e: FetchEvent): void {
                   /* #532: the sniffed document folds the same. */
                   (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
                   traceId,
+                  /* #551: same splice for the sniffed document. */
+                  cosmeticStyle,
                 ),
                 {
                   status: resp.status,
@@ -5928,5 +6003,6 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
   }
   return out;
 }
+
 
 
