@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { requestInitiator } from "../request";
+import { extensionRequestHeaders, requestInitiator } from "../request";
 
 function request(init: {
   headers?: HeadersInit;
@@ -27,5 +27,16 @@ describe("request initiator attribution (#545)", () => {
     expect(requestInitiator(request({ destination: "image" }))).toBe("PARSER_RESOURCE");
     expect(requestInitiator(request())).toBe("UNKNOWN");
     expect(requestInitiator(request({ headers: { "x-zl-initiator": "spoofed" } }))).toBe("UNKNOWN");
+  });
+});
+
+describe("extension request-header projection (#545)", () => {
+  it("does not expose the internal initiator marker to extension APIs", () => {
+    const out = extensionRequestHeaders(new Headers({
+      "x-zl-initiator": "xhr",
+      "x-extension-visible": "normal",
+    }));
+    expect(out["x-zl-initiator"]).toBeUndefined();
+    expect(out["x-extension-visible"]).toBe("normal");
   });
 });
