@@ -218,13 +218,14 @@ export class ContextMenusHost {
         out.wasChecked = wasChecked;
       }
     }
+    const raw = info as unknown as Record<string, unknown>;
     if (Array.isArray(info.modifiers)) {
       const mods = info.modifiers.filter((m) => typeof m === "string" && MENU_MODIFIERS.has(m));
       if (mods.length > 0) out.modifiers = mods;
     }
     for (const f of MENU_STRING_FIELDS) {
-      const v = (info as Record<string, unknown>)[f];
-      if (typeof v === "string") (out as Record<string, unknown>)[f] = v;
+      const v = raw[f];
+      if (typeof v === "string") (out as unknown as Record<string, unknown>)[f] = v;
     }
     if (typeof info.frameId === "number" && Number.isInteger(info.frameId) && info.frameId >= 0) {
       out.frameId = info.frameId;
