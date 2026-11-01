@@ -640,6 +640,24 @@ jobs:
             grep -E "^\\[FAIL\\]|HARNESS-ERROR" srcdocc.out | head -20 | while IFS= read -r l; do echo "::error::SRCDCC $l"; done
             exit 1
           fi
+      - name: Raw-block buffering suite (#526)
+        # Real-Chromium acceptance for the bounded raw-block
+        # buffering contract: normal inline styles are rewritten
+        # (engine routes, no fixture-origin leak) and apply, an
+        # over-cap (RAW_PASS_CAP + 64 KiB) inline style and script
+        # are served verbatim, complete and fail-open (tail rule
+        # applies, tail line executes, exact served lengths), and
+        # the measurable TTFB gate proves a marker before an
+        # unterminated 6 MiB raw block becomes visible while the
+        # bulk still streams, with bounded completion. Ports
+        # 6043/7143 never collide with the other suites.
+        run: |
+          node suite/e2e/raw-caps.mjs 2>&1 | tee rawcaps.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\\[FAIL\\]|HARNESS-ERROR" rawcaps.out | head -20 | while IFS= read -r l; do echo "::error::RAWCAPS $l"; done
+            exit 1
+          fi
       - name: Virtual context restart suite (#535)
         # Real-Chromium restart acceptance: two tabs on two virtual
         # sites lose the in-memory context map when the engine worker
