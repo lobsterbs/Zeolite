@@ -12,7 +12,7 @@ export type ExperimentalChoices = Record<ExperimentalFlag, boolean>;
 
 const defaults = (): ExperimentalChoices => ({
   adaptiveTransit: false,
-  hybridLocation: false,
+  hybridLocation: true,
   cspTranslation: false,
   virtualSW: false,
 });
