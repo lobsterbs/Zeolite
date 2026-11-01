@@ -75,7 +75,7 @@ import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersi
    control plane are call sites. */
 import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setAdaptiveTransit, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
 import { newSriRegistry, SRI_VERIFY_BYTE_CAP, sriBlockedResponse, sriClearClient, sriExpectation, sriNote, sriVerifyBytes } from "./sri";
-import { newImportmapRegistry, importmapNote, resolveBareImport, pageKeyOf } from "./importmaps";
+import { newImportmapRegistry, importmapNote, importmapReset, resolveBareImportFor, pageKeyOf } from "./importmaps";
 
 /* #531 SRI: engine-side subresource integrity registry. Memory-only by
    design (like VCTX): expectations bind a document client to the
@@ -3221,6 +3221,13 @@ export function handleFetch(e: FetchEvent): void {
              CSP plan. Until the served document installs a fresh
              plan, its client is honestly unenforced. */
           cspClearClient(CSPREG, newClient);
+          /* #554: a fresh document owns fresh import maps. Drop the
+             previous document's merged state for this page key now;
+             the response phase re-records this document's maps in
+             order. Without the reset, a re-served page would merge
+             with its predecessor's leftovers, which no browser does. */
+          const navMapKey = pageKeyOf(e.request.url, self.location.origin);
+          if (navMapKey) importmapReset(MAPS, navMapKey);
         }
       }
 
@@ -3730,9 +3737,15 @@ export function handleFetch(e: FetchEvent): void {
                 );
               }
               /* #554: resolve bare specifiers through the owning page recorded
-                 import map (referrer recovery; same key space as docMap). */
+                 import map (referrer recovery; same key space as docMap).
+                 The importing module for the worker body's top-level imports
+                 is the worker script itself, so scopes match against the
+                 page-space worker URL the cache entry serves from. */
               const wrPk = pageKeyOf(e.request.referrer, self.location.origin);
-              const wrBare = wrPk ? (spec: string) => resolveBareImport(MAPS, wrPk, spec) : undefined;
+              const wrImportBase = cacheRewriteBase(hit, target);
+              const wrBare = wrPk
+                ? (spec: string) => resolveBareImportFor(MAPS, wrPk, wrImportBase, spec)
+                : undefined;
               const raw0 = decodeBody(hitBuf, jsCt);
               let src = rewriteModuleWorkerImports(
                 currentPrefix(),
@@ -4658,7 +4671,11 @@ export function handleFetch(e: FetchEvent): void {
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude + specifier pass" });
             traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
             const wrPk = pageKeyOf(e.request.referrer, self.location.origin);
-            const wrBare = wrPk ? (spec: string) => resolveBareImport(MAPS, wrPk, spec) : undefined;
+            /* The importer for the body's top-level imports is the worker
+               script itself; scopes match against its page-space URL. */
+            const wrBare = wrPk
+              ? (spec: string) => resolveBareImportFor(MAPS, wrPk, target, spec)
+              : undefined;
             /* #456: total candidate buffering bound. An over-cap worker
                body streams through byte-identical: the prelude still
                prepends (the runtime seams must hold) but the specifier,
