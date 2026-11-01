@@ -113,8 +113,10 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
      and without an anchor nothing changes. */
   const relRoute = makeRel(parentRoutePath, loc.origin);
 
-  /* Internal diagnostic label, only on engine-routed requests. */
+  /* Internal diagnostic label, only on controlled engine routes. */
+  const hasController = !!(w.navigator as AnyRecord)?.serviceWorker?.controller;
   const mark = (init: RequestInit | undefined, kind: string): RequestInit => {
+    if (!hasController) return init ?? {};
     const headers = new Headers(init?.headers);
     headers.set("x-zl-init", kind);
     return { ...init, headers };
@@ -263,7 +265,7 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
         pend.delete(self);
         delete self.readyState;
         OOpen.call(self, st.method, route ?? st.url, true, st.user, st.pw);
-        if (route) OHdr.call(self, "x-zl-init", "xhr");
+        if (route && hasController) OHdr.call(self, "x-zl-init", "xhr");
         for (const h of st.headers) OHdr.call(self, h[0], h[1]);
         OSend.apply(self, a);
       });
