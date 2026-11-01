@@ -3588,7 +3588,9 @@ export function handleFetch(e: FetchEvent): void {
                 }, true, docSri, docMap,
                 /* #532: the cache-hit rewrite folds the same first
                    base; the message rides the served stream. */
-                (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb)),
+                /* #529: join the rewriter's aggregated decisions
+                   to the request trace. */
+                (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb), traceId),
                 { status: hit.status, headers: hitHeaders },
               );
             }
@@ -4492,6 +4494,7 @@ export function handleFetch(e: FetchEvent): void {
                   resp.body, finalDest ?? target, rule, csInject, respCt, rewriteDone, true, docSri, docMap,
                   /* #532: the effective-base delivery seam. */
                   (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
+                  traceId,
                 ),
                 {
                   status: resp.status,
@@ -4514,6 +4517,7 @@ export function handleFetch(e: FetchEvent): void {
                   true, docSri, docMap,
                   /* #532: the sniffed document folds the same. */
                   (vb) => pushVbase(e.clientId ?? "", e.resultingClientId ?? "", vb),
+                  traceId,
                 ),
                 {
                   status: resp.status,

@@ -104,6 +104,22 @@ impl JsRewriter {
     pub fn set_lazy_images(&mut self) {
         self.inner.set_lazy_images();
     }
+
+    /// #529: opt-in token-level decision tracing for this instance
+    /// (see trace.rs). Off by default: nothing is recorded and
+    /// nothing allocated.
+    #[wasm_bindgen(js_name = "set_trace")]
+    pub fn set_trace(&mut self, on: bool) {
+        self.inner.set_trace(on);
+    }
+
+    /// #529: drain this instance's aggregated (pass, decision)
+    /// counters as a deterministic JSON array and reset them. Fixed
+    /// vocabulary only - no source text or URL ever appears.
+    #[wasm_bindgen(js_name = "take_trace")]
+    pub fn take_trace(&self) -> String {
+        self.inner.take_trace()
+    }
 }
 
 /// The CSS url() encoder shared by the one-shot pass and the streaming
