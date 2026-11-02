@@ -167,3 +167,20 @@ deterministic; only its firing is intermittent. Tracked in #514.
   timeout-minutes: 12, so a wedged replay-spool ends its step (124,
   absorbed by continue-on-error) instead of the whole job. The pin
   gate stands: all five jobs green or no LobsterBrowse pin.
+- Run 41456829858 (13:53Z 2026-11-02, head 0406d4d4, CI-only on the
+  same engine bytes): the main e2e suite PASSED (66/66) again; the
+  wedge struck the torture suite with a NEW first victim - the
+  interception methods probe ("torture probe: page evaluate timed
+  out", the stall variant) - followed by the cascade: the 700 ms TTFB
+  probe stuck at "Starting engine...", the hardened #514 per-code
+  diagnostics firing for the first time in a red run ("proxied
+  redirect probe failed on code 301: Timeout 8000ms exceeded (fetch
+  never settled)"), then 30 s goto timeouts across routing/
+  rewriting/isolation; 7 passed / 13 failed. The browser job
+  COMPLETED normally (no cancellation; ~14.7 min) - the RSPOOL
+  kill-after fix from the previous commit was not reached because a
+  torture failure skips the later steps. Seventh consecutive
+  position-random strike on identical engine bytes; rust/wasm/app/
+  compat all green. This docs-only commit is the recorded bounded
+  retrigger; the pin gate stands: all five jobs green or no
+  LobsterBrowse pin.
