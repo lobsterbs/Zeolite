@@ -99,6 +99,29 @@ describe("cookieStore facade (#534)", () => {
     expect(sent[1].cs?.init).toEqual({ name: "n", path: "/" });
   });
 
+  it("set and delete reject with TypeError on an ok:false facade reply (#599)", async () => {
+    const { store, jarPort } = install();
+    jarPort!.onmessage = (ev) => {
+      const d = ev.data as { cs?: { op?: string; rid?: number }; rid?: number };
+      /* the control plane answers exactly like the docCookie handler
+         does for a facade op the jar refuses */
+      jarPort!.postMessage({
+        ok: false,
+        error: "cookieStore.set: invalid cookie value",
+        rid: d.cs?.rid,
+      });
+    };
+    await expect((store.set as (a: unknown, b?: unknown) => Promise<void>)("n", "1; Domain=x")).rejects.toThrow(TypeError);
+    await expect((store.delete as (a: unknown) => Promise<void>)("k; Path=/wrong")).rejects.toThrow(TypeError);
+    /* a good op still resolves when the jar answers ok */
+    jarPort!.onmessage = (ev) => {
+      const d = ev.data as { cs?: { rid?: number }; rid?: number };
+      jarPort!.postMessage({ ok: true, cookie: "", items: [], rid: d.cs?.rid });
+    };
+    await expect((store.set as (a: unknown, b?: unknown) => Promise<void>)("n", "v")).resolves.toBeUndefined();
+    await expect((store.delete as (a: unknown) => Promise<void>)("n")).resolves.toBeUndefined();
+  });
+
   it("onchange fires a diff on jar pushes and removeEventListener clears it", async () => {
     const { store, jarPort } = install();
     jarPort!.onmessage = null;
