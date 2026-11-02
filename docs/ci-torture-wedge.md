@@ -312,3 +312,14 @@ deterministic; only its firing is intermittent. Tracked in #514.
   operational notes. The pin gate stands: all five jobs green or no
   LobsterBrowse pin; the LobsterBrowse pin stays at 150 (dist
   8223b1ff from green run 41483811807) until a green run lands.
+
+## Run 41537416248 (22:31Z 2026-11-02, head 5b13c5dc, docs-only retrigger)
+
+- Browser job red again (tenth consecutive evening strike; see the
+  entries above for the position-random signatures). rust/wasm/app/
+  compat green. Same engine bytes, same first-victim rotation.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes, queued into the overnight window where the
+  2026-11-01 contention cleared. The pin gate stands: all five jobs
+  green or no LobsterBrowse pin. Pin 150 (dist 8223b1ff, green run
+  41483811807) remains the deployed pin on all three LB services.
