@@ -114,3 +114,19 @@ deterministic; only its firing is intermittent. Tracked in #514.
   operational notes. The LobsterBrowse pin stays blocked until a
   full green run per the stricter ship gate; pinning a red-browser
   dist is not taken here.
+- Run 41409567468 (07:56Z 2026-11-02, head 32947584, docs-only on the
+  same engine bytes): the wedge did NOT strike the main e2e suite (it
+  passed); the red is the #528 srcdoc-clients harness bug fixed at
+  48d9c5c9 (the suite's own probe fetch contaminated the leak
+  assertion, so it could never pass on Chromium 131), plus the known
+  non-blocking RSPOOL failure (continue-on-error, tracked in #556).
+- Run 41412551947 (08:22Z 2026-11-02, head 48d9c5c9, test-only on the
+  same engine bytes): the wedge struck the torture suite with a
+  DIFFERENT first-failure pair, the position-random signature: the
+  ~2 MB streamed-document probe ("first marker never rendered in
+  60s") and the 700 ms TTFB probe ("timeout waiting for proxied
+  frame", embedder stuck at "Starting engine..."), while the main
+  e2e suite PASSED in the same run and rust/wasm/app/compat are all
+  green. This docs-only commit is the recorded bounded retrigger per
+  the operational notes. The pin gate stands: all five jobs green or
+  no LobsterBrowse pin.
