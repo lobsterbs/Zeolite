@@ -9,7 +9,7 @@
    the same seam; WS bridging stays in sw.ts (#88). */
 import { attemptDelivery, deliveryResponse, deliveryState, prepareDelivery, deliveryFailure, type DeliveryTransport, TransportDeliveryError } from "./delivery";
 import { DIAG } from "./diag";
-import { loadEnter, loadLeave } from "./loadstate";
+import { loadEnter, loadInflight, loadLeave } from "./loadstate";
 import { transportState, waitForTransportState } from "./transport-lifecycle";
 import {
   normalizeWispUrl,
@@ -148,6 +148,35 @@ async function sharedCurlReset(gen: number): Promise<void> {
   await p;
 }
 
+/* #514: a connect-class or stall failure that is not retried - an
+   isolated list load (#577) or a non-idempotent request (#251) -
+   used to leave the wedged singleton serving every later request
+   (the redirect/RSPOOL cascades: after one such failure every
+   following POST answered "Failed to fetch"). An immediate reset is
+   not safe there - it would kill every in-flight page request -
+   so the reset is deferred to the moment the last in-flight request
+   leaves; with none in flight it runs now. */
+let deferredCurlResetGen: number | null = null;
+function scheduleCurlResetWhenIdle(gen: number): void {
+  deferredCurlResetGen = gen;
+  if (loadInflight() === 0) {
+    deferredCurlResetGen = null;
+    void sharedCurlReset(gen).catch(() => {});
+    return;
+  }
+  DIAG.emit({
+    category: "TRANSPORT",
+    severity: "info",
+    message: "deferred transport reset scheduled: failed request was not retried, in-flight requests still ride the client",
+  });
+}
+function runDeferredCurlResetIfIdle(): void {
+  if (deferredCurlResetGen === null || loadInflight() > 0) return;
+  const gen = deferredCurlResetGen;
+  deferredCurlResetGen = null;
+  void sharedCurlReset(gen).catch(() => {});
+}
+
 let curlReady: Promise<void> | null = null;
 async function ensureCurl(): Promise<void> {
   await engineReady(); // #390: replay the persisted choice before the first init
@@ -273,7 +302,9 @@ export function transportResetForTests(deadlineMs: number): void {
   /* #415: zero the reset generations and any pending shared reset */
   curlGeneration = 0;
   curlResetInflight = null;
+  deferredCurlResetGen = null;
   altGeneration = 0;
+  deferredAltResetGen = null;
 }
 
 export function wispCoolingForTests(): boolean {
@@ -500,7 +531,10 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string, opt
          list origin is unreachable (SSL/connect failures), and its
          stall would feed the page-storm detector: neither is page
          evidence. The list load owns its own backoff. */
-      if (opts?.isolated) throw err;
+      if (opts?.isolated) {
+        scheduleCurlResetWhenIdle(curlGen);
+        throw err;
+      }
       /* #251: a non-idempotent method or a one-shot body must not
          ride the reset+retry: the side effect may already have
          happened upstream. Record the stall for the storm detector
@@ -514,6 +548,7 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string, opt
           technicalReason: String(err),
           url: dest,
         });
+        scheduleCurlResetWhenIdle(curlGen);
         throw err;
       }
       if (deliveryCause(err) instanceof WispStallError) recordStall();
@@ -549,6 +584,7 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string, opt
     }
   } finally {
     loadLeave(dest);
+    runDeferredCurlResetIfIdle();
   }
 }
 
@@ -579,6 +615,30 @@ async function sharedAltReset(gen: number): Promise<void> {
   zlAltReset();
 }
 
+/* #514 (policy wisp route): the same deferred reset for the alt
+   client. A non-idempotent failure on the alt route must not leave
+   the wedged alt singleton serving later policy requests. */
+let deferredAltResetGen: number | null = null;
+function scheduleAltResetWhenIdle(gen: number): void {
+  deferredAltResetGen = gen;
+  if (loadInflight() === 0) {
+    deferredAltResetGen = null;
+    void sharedAltReset(gen).catch(() => {});
+    return;
+  }
+  DIAG.emit({
+    category: "TRANSPORT",
+    severity: "info",
+    message: "deferred wisp-route reset scheduled: failed request was not retried, in-flight requests still ride the client",
+  });
+}
+function runDeferredAltResetIfIdle(): void {
+  if (deferredAltResetGen === null || loadInflight() > 0) return;
+  const gen = deferredAltResetGen;
+  deferredAltResetGen = null;
+  void sharedAltReset(gen).catch(() => {});
+}
+
 export async function altWispFetch(dest: string, init?: RequestInit, traceId?: string): Promise<Response> {
   loadEnter(dest);
   /* #415: remember which alt client generation serves this request */
@@ -597,6 +657,7 @@ export async function altWispFetch(dest: string, init?: RequestInit, traceId?: s
           technicalReason: String(err),
           url: dest,
         });
+        scheduleAltResetWhenIdle(altGen);
         throw err;
       }
       DIAG.emit({
@@ -614,5 +675,6 @@ export async function altWispFetch(dest: string, init?: RequestInit, traceId?: s
     }
   } finally {
     loadLeave(dest);
+    runDeferredAltResetIfIdle();
   }
 }
