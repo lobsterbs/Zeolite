@@ -228,3 +228,19 @@ deterministic; only its firing is intermittent. Tracked in #514.
   strict decode contract. The fixture itself serves the PNG 200/68
   bytes (verified locally against startFixture).
 - The pin gate stands: all five jobs green or no LobsterBrowse pin.
+
+## Run 41524458112 (21:01Z 2026-11-02, head b002d0ff, e2e harness-only)
+
+- The img#uni decode-skip fix held: no torture-page failure this run
+  and the torture battery ran past the torture-page probe. The wedge
+  instead struck the MAIN e2e suite with the #545 worker-initiator
+  timeout ("worker fetch initiator timeout") as the first failure,
+  then the familiar page.goto 30 s cascade (shared-worker relay,
+  #453 identities, storage round-trip, jar-backed document.cookie,
+  Set-Cookie capture) and the passthrough #96 HUNG marks (range/
+  cond/setcookie/cookie/stream/redir at 6000 ms, get/post ok) - the
+  position-random signature again, a different first victim on each
+  of the last three heads. rust/wasm/app/compat green.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin.
