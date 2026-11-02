@@ -2,7 +2,7 @@
  * Extracted from sw.ts (issues #85, #90, #91). Core zl: handling lives here;
  * extension-facing zl: messages are forwarded to ./extensions/control. */
 
-import { buildNavHandleUrl, buildQueryHandleUrl, currentPrefix, decodeClientUrl, encodeDest, mintableDest, setScheme } from "./codec";
+import { buildNavHandleUrl, buildQueryHandleUrl, currentPrefix, decodeClientUrl, encodeDest, mintableDest, setScheme, validSchemePrefix } from "./codec";
 import type { JarConflictRule } from "./cookies";
 import { cookieStoreOp, documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
 import type { FacadeCookie } from "./cookies";
@@ -303,6 +303,28 @@ function senderOrigin(e: ExtendableMessageEvent): string | null {
     return senderVirtualOrigin(client.url, self.location.origin);
   }
   return null;
+}
+
+/* Control-plane torture fix: zl:wsOpen forwarded msg.protocols to the
+   transport handshake verbatim. The elements are page-controlled,
+   and a CRLF-bearing or otherwise non-token string is
+   header-injection-shaped input for the vendored ws client; native
+   WebSocket throws SyntaxError for exactly these inputs (invalid
+   tokens, duplicates). The control seam now enforces the same token
+   grammar before the bridge is ever touched. */
+const WS_PROTOCOL_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,255}$/;
+function wsProtocolsValid(protocols: unknown): boolean {
+  if (protocols === undefined || protocols === null) return true;
+  /* Non-array values keep the documented empty coercion (they can
+     never carry an element into the handshake). */
+  if (!Array.isArray(protocols)) return true;
+  const seen = new Set<string>();
+  for (const p of protocols) {
+    if (typeof p !== "string" || !WS_PROTOCOL_TOKEN.test(p)) return false;
+    if (seen.has(p)) return false;
+    seen.add(p);
+  }
+  return true;
 }
 
 /* #35 (browser E2E): docCookie port registry. The page's synchronous
@@ -645,6 +667,20 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         reply({ ok: false, error: "scheme removed: routes are b64u only (#32)" });
         break;
       }
+      /* Control-plane torture fix: the prefix was applied unvalidated.
+         "" and "/" collapse isEnginePath onto every same-origin path
+         (the host locks itself out of the control plane, zl:doctor
+         included, and the poisoned shape persists across restarts);
+         reserved roots collide with navguard/NAVH/extension routing.
+         Refuse atomically - no other knob moves on a bad prefix. */
+      if (!validSchemePrefix(msg.prefix ?? "/j/")) {
+        reply({
+          ok: false,
+          error:
+            'bad prefix: expected "/<segment>/" (letters, digits, _ or -, up to 32 chars, no engine-reserved root)',
+        });
+        break;
+      }
       /* Validate all experimental selections atomically before changing
          existing settings. Selections never activate unfinished code. */
       if (msg.experimental !== undefined) {
@@ -915,7 +951,12 @@ case "zl:tracing":
     case "zl:wsOpen": {
       /* 1.3 Carbide: the port IS the connection: events flow back on
          it, send/close flow forward on it. */
-      if (!port || typeof msg.url !== "string" || !/^wss?:/i.test(msg.url)) {
+      if (
+        !port ||
+        typeof msg.url !== "string" ||
+        !/^wss?:/i.test(msg.url) ||
+        !wsProtocolsValid(msg.protocols)
+      ) {
         port?.postMessage({ ev: "error", error: "bad zl:wsOpen" });
         port?.postMessage({ ev: "close", code: 1006, clean: false });
         port?.close();
@@ -1399,7 +1440,24 @@ case "zl:tracing":
           const names = await caches.keys();
           await Promise.all(names.map((n) => caches.delete(n)));
           reply({ ok: true });
-          await self.registration.unregister();
+          /* Control-plane torture fix: the reply already said ok:true,
+             so an unregister rejection here used to escape the
+             waitUntil promise as an unhandled rejection the browser
+             logs after the event lifetime ended. It stays a bounded
+             diagnostic instead: the caches are dropped, the jar is
+             cleared and durable, and the operator sees why the
+             registration survived. */
+          try {
+            await self.registration.unregister();
+          } catch (err) {
+            DIAG.emit({
+              category: "SERVICE_WORKER",
+              severity: "warning",
+              cause: "failure",
+              message: "teardown unregister failed",
+              technicalReason: String(err).slice(0, 160),
+            });
+          }
         })(),
       );
       break;
