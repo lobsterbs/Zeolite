@@ -119,6 +119,12 @@ let preludeCache: string | null = null;
 export async function workerPrelude(): Promise<string> {
   if (preludeCache === null) {
     const r = await fetch(new URL("worker-prelude.js", self.location.href).href);
+    /* Only a real body may become THE prelude: a non-2xx asset (a
+       stale deploy's 404 page) used to be cached for the whole worker
+       lifetime and prepended to every worker script. A failed fetch
+       stays uncached, so the next request retries and a later success
+       heals the worker lifetime. */
+    if (!r.ok) throw new Error("worker prelude asset unavailable: HTTP " + r.status);
     preludeCache = await r.text();
   }
   return preludeCache;

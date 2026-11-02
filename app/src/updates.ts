@@ -87,8 +87,18 @@ export function startUpdateChecks(): void {
   } catch {
     /* no registration object: nothing to poll */
   }
+  /* The poll itself must degrade the same way the updatefound wiring
+     above does: a worker world without a usable registration used to
+     throw at this exact module-scope call, killing the whole sw.ts
+     evaluation - every listener in the worker with it. */
+  const reg = self.registration;
+  if (!reg || typeof reg.update !== "function") return;
   const check = (): void => {
-    void self.registration.update().catch(() => {});
+    try {
+      void reg.update().catch(() => {});
+    } catch {
+      /* registration vanished mid-life: nothing to poll */
+    }
   };
   check();
   setInterval(check, CHECK_MS);
