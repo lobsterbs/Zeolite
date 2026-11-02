@@ -44,10 +44,21 @@ of a response and admits each cookie with:
   is enforced as a hard gate regardless of the knob.
 - host-only cookies (no Domain attribute) attach only to the exact
   response host, never to subdomains.
-- `Max-Age` / `Expires`: `max-age<=0` or a past `Expires` deletes the
-  matching cookie (same name, domain, host-only flag and path);
+- `Max-Age` / `Expires`: when `Max-Age` is present it alone fixes
+  the expiry (RFC 6265 5.3) - a stale `Expires` never turns a live
+  `Max-Age` into a deletion; browsers keep the cookie for
+  delta-seconds. Otherwise `max-age<=0` or a past `Expires` deletes
+  the matching cookie (same name, domain, host-only flag and path);
   a session cookie has neither attribute and never expires.
-- Re-admission of the same name + domain + path overwrites.
+- Cookie identity is name + domain + host-only flag + path (RFC 6265
+  5.3 step 11) - which origin bucket a copy physically sits in (the
+  scheme, port or admitting subdomain it arrived through) is not part
+  of it. Re-admission replaces the identity wherever it lives in the
+  profile (keeping the original creation time), and a deletion
+  retires every copy: a `Max-Age=0` arriving via the other scheme, a
+  different port or a sibling subdomain still kills the cookie, so no
+  zombie copy survives a logout. Host-only and Domain cookies of the
+  same name stay distinct identities and both attach.
 
 ## Request assembly
 
@@ -152,8 +163,12 @@ behavior) or `mode: "merge"` with `rule: "import-wins" |
 "keep-existing" | "keep-newest"`. Merge mode adds imported cookies
 into the live jars; a conflict (same name + domain + hostOnly + path)
 is resolved by the rule, `keep-newest` comparing the `created`
-timestamps. Malformed records are dropped, never admitted. The reply
-carries honest counts: `{ jars, cookies, conflicts }`.
+timestamps. Malformed records are dropped, never admitted. Import
+keys must be bare origin ids: a key carrying the profile separator is
+refused outright, because it would forge a namespaced record no
+request can reach but `zl:getJars` would show as a phantom profile no
+`zl:clearJar` can remove. The reply carries honest counts:
+`{ jars, cookies, conflicts }`.
 
 ## Jar enumeration + scoped clear (#41)
 
@@ -217,8 +232,12 @@ isolated by construction.
 The whole jar is one record in IndexedDB (service workers have no
 localStorage; the extension subsystem's idb helper is reused, DB
 version 3 carries the `cookies` and `downloads` stores). Writes are
-debounced; the SW restores the jar on activate. `zl:teardown` clears
-it: cookies do not survive an engine switch.
+debounced; the SW restores the jar on activate. The persisted records
+are untrusted storage: a malformed cookie record is dropped, and a
+malformed origin row is skipped without aborting the rest of the
+restore (one corrupt row must not empty the jar - the next persist
+would then overwrite the durable record and lose every cookie).
+`zl:teardown` clears it: cookies do not survive an engine switch.
 
 ## Extension cookies API (#42)
 
@@ -272,6 +291,19 @@ repair only fixes where the challenge redirects.
 
 ## Honest limits
 
+- The jar has no capacity limits or eviction: no per-cookie byte cap,
+  no per-domain or total cookie count caps (RFC 6265 6.1 /
+  6265bis 5.6 recommend ~4096 bytes and 50/3000 with eviction). A
+  hostile origin can bloat the single persisted record and slow every
+  matching walk; pinned in `cookies-torture.test.ts` until an
+  eviction policy lands.
+- The cookieStore facade (`cookieStoreOp`) serializes `name` and
+  `value` into a `document.cookie` write without escaping: a crafted
+  `value` can smuggle attributes (`Domain`, `Secure`, `Path`,
+  `Max-Age`) past the facade's documented host-only promise, and a
+  crafted `name` makes a `delete` silently no-op (the `;` eats the
+  `=` separator, so the pair parses as malformed). Self-origin reach
+  only; pinned in the torture suite as a hardening residual.
 - The challenge interstitial itself is not detected: there is no
   body-marker scanning, so a challenge whose solve never reaches the
   pass-challenge endpoint produces no CHALLENGE event.
@@ -300,8 +332,13 @@ deep-integration line; enumeration and scoped clear in #41; the
 extension cookies bridge in #42). Tested in
 `app/src/__tests__/cookies.test.ts` (admission, matching, deletion,
 isolation, ordering, persistence, SameSite knob, merge mode),
-`app/src/__tests__/jar-profiles.test.ts` (profile isolation,
-persistence, document.cookie, import scoping) and
+`app/src/__tests__/cookies-oracle.test.ts` and
+`app/src/__tests__/cookies-torture.test.ts` (seeded differential
+fuzz against tough-cookie with every deviation classified, plus
+deterministic edge cases: identity across origin buckets, expiry
+precedence, persistence corruption, import-key injection, capacity
+residuals), `app/src/__tests__/jar-profiles.test.ts` (profile
+isolation, persistence, document.cookie, import scoping) and
 `app/src/extensions/__tests__/cookies.test.ts` (bridge semantics).
 
 
