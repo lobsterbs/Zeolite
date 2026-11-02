@@ -282,3 +282,19 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes. The pin gate stands: all five jobs green or no
   LobsterBrowse pin.
+
+## Run 41530582931 (21:41Z 2026-11-02, head c741ca6c, docs-only retrigger)
+
+- Third consecutive run with the identical pair: the 700 ms TTFB
+  probe wedged (embedder "Starting engine...") and the torture-page
+  img#uni direct assertion then failed through the serve fallback.
+  Across the evening window (21:0x-21:5xZ) the wedge fires every
+  gate attempt; the first-victim position still varies across heads
+  (main e2e #545 on b002d0ff, the TTFB probe on the three others),
+  so the engine bytes stay exonerated and the strike rate is the
+  runner-contention variable, as on 2026-11-01 when the same evening
+  window burned fifteen-plus consecutive runs and cleared overnight.
+- rust/wasm/app/compat green again (browser the only red).
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin.
