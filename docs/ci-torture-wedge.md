@@ -147,3 +147,23 @@ deterministic; only its firing is intermittent. Tracked in #514.
   green. Sixth consecutive position-random strike on identical
   engine bytes. This docs-only commit is the recorded bounded
   retrigger; the pin gate stands.
+- Run 41437602567 (11:32Z 2026-11-02, head 284d0dd0, docs-only on the
+  same engine bytes): every earlier suite PASSED (main e2e, torture,
+  reload-count, guest-SW, computed-URL); inside the replay-spool step
+  the suite's Chromium died mid-run at 11:42:14 ("Target page, context
+  or browser has been closed"), the harness churned its remaining
+  probes to the 480 s bound and printed "1 passed, 16 failed" at
+  11:48:36, then its SIGTERM teardown DEADLOCKED: node never exited,
+  tee never saw EOF, the step hung for 15 more minutes and the browser
+  job's own timeout-minutes: 30 cancelled the whole run at 12:03:40
+  (job conclusion "cancelled", "##[error]The operation was canceled",
+  orphans timeout/tee/node still alive at cleanup). No external actor:
+  the same job-start-plus-30-minutes signature matches every other
+  cancelled run in this window (41352261666, 41352325842 and the
+  cookies-torture-jar runs 41409321130/41409326844). The
+  investigation is closed as CI mechanics, not sabotage. Fix shipped
+  in this commit (CI-only, engine bytes unchanged): the RSPOOL step
+  gains -k 30 (force-kill 30 s after TERM) and a step-level
+  timeout-minutes: 12, so a wedged replay-spool ends its step (124,
+  absorbed by continue-on-error) instead of the whole job. The pin
+  gate stands: all five jobs green or no LobsterBrowse pin.
