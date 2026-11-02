@@ -298,3 +298,17 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes. The pin gate stands: all five jobs green or no
   LobsterBrowse pin.
+
+## Run 41532533219 (21:54Z 2026-11-02, head 4fe492a0, docs-only retrigger)
+
+- The browser job hung past its own 30-minute cap with ZERO failed
+  jobs (the failed-jobs oracle reported 0/5 the whole run) and the
+  run concluded "cancelled" at the job-start-plus-30-minutes mark -
+  the documented wedge-hang signature (a step wedged without
+  producing a failure verdict; the same signature as the 41437602567
+  record). Ninth consecutive evening-window strike; rust/wasm/app/
+  compat green.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin; the LobsterBrowse pin stays at 150 (dist
+  8223b1ff from green run 41483811807) until a green run lands.
