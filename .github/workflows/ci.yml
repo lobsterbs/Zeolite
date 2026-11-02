@@ -606,9 +606,19 @@ jobs:
         # timeout on each push. Keep the failure loud (annotations) but
         # bounded and non-blocking so the #527/#533/#535/#537 suites still
         # execute. Restore the hard gate when the #556 fix lands.
+        # 2026-11-02 (run 41437602567): TERM alone is not enough. When
+        # the suite's Chromium dies mid-run the harness prints its
+        # summary but its own SIGTERM teardown deadlocks, so timeout's
+        # TERM never reaps node, tee never sees EOF and the step hangs
+        # until the job's own timeout-minutes: 30 cancels the whole run
+        # (conclusion "cancelled"; orphans timeout/tee/node at cleanup).
+        # -k 30 force-kills 30 s after TERM; the step-level 12-minute
+        # bound below is the second line of defense so a wedged RSPOOL
+        # can never burn the whole job again.
+        timeout-minutes: 12
         continue-on-error: true
         run: |
-          timeout 480 node suite/e2e/replay-spool.mjs 2>&1 | tee rspool.out
+          timeout -k 30 480 node suite/e2e/replay-spool.mjs 2>&1 | tee rspool.out
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
             grep -E "^\[FAIL\]|HARNESS-ERROR" rspool.out | head -20 | while IFS= read -r l; do echo "::error::RSPOOL $l"; done
