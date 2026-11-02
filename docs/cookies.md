@@ -357,6 +357,12 @@ clients receive no cookies and cannot write into the durable jar. A trusted
 host must rebind their root first. The uncertainty marker survives later
 saves and restarts; rebinding one host never authorizes unrelated clients.
 
+A hung profile-store read (a Cache Storage open or match that never
+settles) cannot wedge the fetch gate: the profile restore rides the same
+pre-engine deadline as the legacy-cache discard and client-root recovery
+steps, so past the bound the fetch proceeds on the identical fail-closed
+default an unreadable snapshot already uses.
+
 Cache refreshes and blocking revalidation use the normal transport policy.
 Redirect and final response cookies are admitted through the requesting
 client's profile, subject to Request.credentials. Background refreshes from

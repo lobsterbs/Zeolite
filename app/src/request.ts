@@ -2438,7 +2438,18 @@ export function handleFetch(e: FetchEvent): void {
         : Promise.resolve(undefined);
       await Promise.all([
         timeBoot("route", routeReady),
-        timeBoot("jar-profiles", jarProfilesReady()),
+        /* #249 class (sw torture): the jar-profile restore was the one
+           pre-engine boot step without a bound - a hung Cache Storage
+           open or match wedged every proxied fetch past the embedder
+           timeout while every sibling step (legacy-cache, jar-root,
+           engine, route) already rode raceBoot. Past the pre-engine
+           deadline the fetch proceeds on the same fail-closed default
+           an unreadable snapshot already uses: profiles unrestored,
+           cookies off until the host rebinds. */
+        timeBoot(
+          "jar-profiles",
+          raceBoot(jarProfilesReady(), "jar profile restore", PRE_DEADLINE_BOUND_MS),
+        ),
       ]);
       cookieClientId = inheritJarClient(
         e.clientId || undefined,
