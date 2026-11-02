@@ -107,7 +107,13 @@ function send(res, type, body, extra) {
 }
 
 export function startFixture(port) {
-  const origin = port === PORT_B ? ORIGIN_B : ORIGIN_A;
+  /* #556 harness bug: the redirect endpoints must stamp the fixture's
+     ACTUAL serving origin, not the shared 7101/7102 defaults - replay-spool
+     starts its fixtures on 7125/7126 to avoid colliding with the other
+     suites, so every /api/redirbody Location pointed at a dead 7101 and the
+     direct oracle fetch rejected with ERR_CONNECTION_REFUSED ("Failed to
+     fetch", 6/6 in CI whenever no leftover 7101 listener was still up). */
+  const origin = "http://" + (port === PORT_B ? "localhost:" : "127.0.0.1:") + port;
   const hits = [];
   const sseStreams = [];
   const server = createServer((req, res) => {
@@ -559,7 +565,7 @@ export function startFixture(port) {
 <img id="crlf"${"\r\n"} src="img.png" alt="c">
 <img id="unq" src=img.png alt="u">
 <img id="spaced"    src   =   "img.png" alt="s">
-<img id="uni" src="unicode/å.png" alt="n">
+<img id="uni" src="unicode/Ã¥.png" alt="n">
 <img id="ss" srcset="img.png 1x, img.png 2x" alt="x">
 <iframe id="fru" src="inner.html"></iframe>
 <a id="relimg" href="./img.png">m</a>
