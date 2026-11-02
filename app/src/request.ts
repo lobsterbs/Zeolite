@@ -2259,7 +2259,16 @@ export function handleFetch(e: FetchEvent): void {
           status: resp.status,
           headers: { "content-type": utf8ContentType(ct) },
         });
-      })(),
+      })().catch(
+        (err: unknown) =>
+          /* the prelude/asset seam must answer honestly like the
+             extension branches: a rejected respondWith is a hard
+             network error for the worker script */
+          new Response("zeolite: worker prelude failed: " + String(err), {
+            status: 502,
+            headers: { "content-type": "text/plain" },
+          }),
+      ),
     );
     return;
   }
@@ -2308,7 +2317,16 @@ export function handleFetch(e: FetchEvent): void {
               ");\n",
             { status: 200, headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" } },
           );
-        })(),
+        })().catch(
+          (err: unknown) =>
+            /* same honesty as the opaque-worker branch above: a failed
+               prelude asset answers the worker script with an error
+               response, never a rejected respondWith */
+            new Response("zeolite: blob-worker prelude failed: " + String(err), {
+              status: 502,
+              headers: { "content-type": "text/plain" },
+            }),
+        ),
       );
       return;
     }
@@ -5287,7 +5305,42 @@ export function handleFetch(e: FetchEvent): void {
         }
       })();
   })();
-  e.respondWith(responsePromise);
+  /* The route-decode body above (boot gates, handle decoding, the
+     virtual-context resolution) has no try/catch of its own: a
+     rejection there used to arm respondWith with a rejected promise,
+     which the browser answers with a bare net::ERR_FAILED instead of
+     the engine's honest error page. The same honest shape the
+     pipeline's own catch produces now closes that seam, and the
+     failure is recorded rather than swallowed. */
+  e.respondWith(
+    responsePromise.catch((err: unknown) => {
+      DIAG.failure({
+        category: "SERVICE_WORKER",
+        cause: "failure",
+        message: "request orchestration failed before the engine pipeline",
+        technicalReason: String(err),
+        url: url.href,
+      });
+      if (e.request.mode === "navigate") {
+        return new Response(
+          errorPage({
+            route: url.pathname + url.search,
+            category: classifyFailure(String(err)),
+            engineVersion: ZEOLITE_VERSION,
+            reason: String(err),
+            status: 502,
+            attribution: "engine",
+            httpProceed: httpProceedHref(url) ?? undefined,
+          }),
+          { status: 502, headers: { "content-type": "text/html; charset=utf-8" } },
+        );
+      }
+      return new Response(`zeolite: request failed: ${String(err)}`, {
+        status: 502,
+        headers: { "content-type": "text/plain" },
+      });
+    }),
+  );
   void responsePromise.then(finishGhosteryHold, finishGhosteryHold);
 }
 
