@@ -56,6 +56,10 @@ import { getFpScript, getRouteKey, isImageLazy, setEngineDegraded, siteProfileFo
 import { ALARMS, MGMT, TABS, SCRIPTING, DOWNLOADS, NOTIFY, ACTION, PERMS, bootEnabled, extensions, wakeExtension } from "./extensions";
 
 import { messageListener } from "./control";
+/* sw torture: the respondWith seam records an escaped engine rejection
+   as a RUNTIME diagnostic (#250's mirror at the fetch plane) instead
+   of letting it vanish as a silent browser network error. */
+import { DIAG } from "./diag";
 /* #82: the request engine (route decode, page cache, upstream hop
    chain, header surgery, rewrite branches, navigation strands) lives
    in ./request.ts; this module is the entrypoint and composition
@@ -203,7 +207,13 @@ initEngine(initReady);
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     (async () => {
-      await self.clients.claim();
+      try {
+        await self.clients.claim();
+      } catch {
+        /* claim refused (rare environment races): the broadcast and the
+           transport warm-up do not depend on claim succeeding - skip
+           neither. matchAll simply sees the clients visible now. */
+      }
       /* #121: the freshly-activated worker announces itself to every
          window client (proxied pages get a console note + window
          CustomEvent once per engine sha, never a reload; the
@@ -241,7 +251,23 @@ self.addEventListener("fetch", (e) => {
       get(target, prop) {
         if (prop === "respondWith") {
           return (r: Response | Promise<Response>) => {
-            void target.respondWith(Promise.resolve(r).then(withCorp));
+            void target.respondWith(
+              Promise.resolve(r).then(withCorp, (err: unknown) => {
+                /* The engine contract is "every failure becomes an honest
+                   Response" (error pages, 502 strands). A rejection that
+                   escapes anyway is an engine contract violation: record
+                   it, then rethrow - the browser still sees the network
+                   error, nothing is fabricated on the engine's behalf. */
+                DIAG.emit({
+                  category: "RUNTIME",
+                  severity: "error",
+                  cause: "failure",
+                  message: "respondWith rejection escaped the request engine",
+                  technicalReason: String(err),
+                });
+                throw err;
+              }),
+            );
           };
         }
         const v = target[prop as keyof FetchEvent] as unknown;

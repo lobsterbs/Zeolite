@@ -49,7 +49,10 @@ describe("withCorp", () => {
    embedding, so a silent rewiring in sw.ts is a regression. */
 describe("sw fetch wiring", () => {
   it("routes the fetch listener through withCorp", () => {
-    expect(swSource).toContain('Promise.resolve(r).then(withCorp)');
+    /* sw torture: withCorp stays the fulfillment handler; the second
+       .then argument is the escaped-rejection observer and must not
+       displace it. */
+    expect(swSource).toContain("Promise.resolve(r).then(withCorp,");
     expect(swSource).toContain('addEventListener("fetch"');
     expect(swSource.indexOf("withCorp")).toBeLessThan(
       swSource.indexOf('addEventListener("fetch"'),
