@@ -184,3 +184,22 @@ deterministic; only its firing is intermittent. Tracked in #514.
   compat all green. This docs-only commit is the recorded bounded
   retrigger; the pin gate stands: all five jobs green or no
   LobsterBrowse pin.
+
+## Run 41520211250 (20:32Z 2026-11-02, head 228518a7, the #514
+
+- First run with the #556 fixture redirect-origin fix in: the
+  replay-spool suite PASSED for the first time in this window - the
+  direct oracle no longer chased a dead 7101 Location and the suite
+  completed inside its step bound.
+- The wedge then struck the torture suite with the ~2 MB streamed-
+  document probe again ("first marker never rendered in 60s",
+  embedder "Starting engine..."), followed by the torture-page
+  img#uni direct-model assertion. The "fixture regression" label is
+  the harness wording for a direct-oracle miss, not a fixture
+  fault: the unicode fixture path is untouched by the origin change
+  and the same assertion is green on these engine bytes in the
+  earlier torture greens (e.g. 41483811807). Ninth consecutive
+  position-random strike; rust/wasm/app/compat all green.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin.
