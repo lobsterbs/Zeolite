@@ -403,20 +403,15 @@ async function main() {
         if (!f) return { missing: true };
         const cw = f.contentWindow;
         const im = cw.document.querySelector("img");
-        let probe = null;
-        try {
-          const r = await fetch(im.src);
-          probe = [r.status, (await r.text()).length];
-        } catch (e) {
-          probe = "FETCH-ERR " + String(e);
-        }
+        /* No fetch of a child route here: a parent-frame fetch runs
+           through the engine SW, decodes upstream, and contaminates the
+           fixture hits the leak assertion below inspects (#528). */
         return {
           attr: f.getAttribute("srcdoc"),
           cls: cw.__CLS,
           childCtrl: !!cw.navigator.serviceWorker.controller,
           sheets: cw.document.styleSheets.length,
           imgDecoded: im ? im.naturalWidth > 0 : false,
-          probe,
         };
       });
       await check("proxied: the parent page's own subresource loads through the engine", async () => {
