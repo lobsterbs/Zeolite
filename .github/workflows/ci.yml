@@ -487,6 +487,13 @@ jobs:
     # sites) on purpose; the harness fails loudly with the engine
     # server's output tail. Run on PRs as well: rewrite and security
     # changes need Chromium acceptance before merge.
+    # 2026-11-01: the merge-wave cleanup window ran five-plus ci runs
+    # concurrently; runs 41351728517 (700 ms TTFB torture), 41352289075
+    # (#545 worker initiator + navigation cascade) and 41352245827
+    # (redirect probe fetch never settled + cascade) each failed a
+    # different timing suite on identical engine content - recorded as
+    # runner-load flakes like the 1279 blob-worker class. This comment
+    # commit retriggers a contention-free run on the same tree.
 
     runs-on: ubuntu-latest
     timeout-minutes: 30
