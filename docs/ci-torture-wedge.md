@@ -138,3 +138,12 @@ deterministic; only its firing is intermittent. Tracked in #514.
   41407727247, while rust/wasm/app/compat are all green. This
   docs-only commit is the recorded bounded retrigger; the pin gate
   stands.
+- Run 41415629378 (08:47Z 2026-11-02, head 78b4f57d, docs-only on the
+  same engine bytes): the wedge struck the torture suite with yet
+  another first-failure pair - the interception methods probe
+  ("torture probe: page evaluate timed out") and the status
+  preservation probe (page.goto 30s timeout) - while the MAIN e2e
+  suite PASSED in the same run and rust/wasm/app/compat are all
+  green. Sixth consecutive position-random strike on identical
+  engine bytes. This docs-only commit is the recorded bounded
+  retrigger; the pin gate stands.
