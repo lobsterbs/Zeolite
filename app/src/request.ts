@@ -5322,9 +5322,7 @@ export function handleFetch(e: FetchEvent): void {
      which the browser answers with a bare net::ERR_FAILED instead of
      the engine's honest error page. The same honest shape the
      pipeline's own catch produces now closes that seam, and the
-     failure is recorded rather than swallowed (an escaped rejection
-     still hits the respondWith proxy's RUNTIME row in sw.ts, but the
-     browser now sees the honest Response first). */
+     failure is recorded rather than swallowed. */
   e.respondWith(
     responsePromise.catch((err: unknown) => {
       DIAG.failure({
