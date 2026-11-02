@@ -108,12 +108,20 @@ export function installLifecycle(
   void self.skipWaiting();
   /* #249: bounded - a hung prewarm must never stall install past
      activation (the update would wedge the old session forever). */
+  const start = (): Promise<void> => {
+    try {
+      return prewarm();
+    } catch {
+      /* sw torture: a SYNC-throwing prewarm seam converts to the same
+         settled-undefined path a rejection already takes - a sync
+         throw used to escape installLifecycle, kill the install
+         listener and leave waitUntil unarmed. */
+      return Promise.resolve();
+    }
+  };
   e.waitUntil(
     raceBoot(
-      prewarm().then(
-        () => undefined,
-        () => undefined,
-      ),
+      start().then(() => undefined, () => undefined),
       "rewriter prewarm",
       ms,
     ),
