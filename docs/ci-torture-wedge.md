@@ -78,3 +78,39 @@ deterministic; only its firing is intermittent. Tracked in #514.
   untouched by both waves.
 - This docs-only commit is the recorded bounded retrigger; if the
   browser job greens, the wedge stands as the sole cause of the red.
+
+
+## Merge-window occurrences (2026-11-01 through 2026-11-02)
+
+- The seventeen-PR merge wave (engine bytes of dist 5a03ec34, main
+  content 0973b219 plus comment-only heads) hit the wedge in four
+  consecutive gate attempts, each with a DIFFERENT first-failure
+  probe, the position-random signature:
+  - Run 41351728517: the 700 ms TTFB torture probe, embedder still
+    "Starting engine...", no cascade beyond it.
+  - Run 41352245827: the documented trigger probe itself, redirect
+    semantics 301 "fetch never settled", then the page.goto cascade.
+  - Run 41352289075: #545 worker-initiator timeout, then the
+    page.goto cascade.
+  - Run 41407727247 (uncontended, 07:39Z 2026-11-02): passthrough #96
+    marks range/cond/setcookie/cookie/stream/redir HUNG at 6000 ms
+    with get/post/abort ok, then the page.goto cascade.
+- Exoneration evidence for the wave content: passthrough #96 is
+  GREEN on the same engine bytes in the other three runs (12 probe
+  groups matched, all marks ok), the redirect probe is green in
+  41407727247, and a deterministic wave regression would fail the
+  same probe every run. The wave bytes have no green run yet; a
+  green retrigger completes the exoneration the same way the #511
+  and storage-wave comparisons did.
+- Firing-rate note: green runs occur until 16:21Z 2026-11-01, red
+  from about 20:00Z onward, fifteen-plus consecutive, including the
+  single uncontended morning run. The 41407727247 engine log tail
+  again shows upstream streams that opened and never closed
+  (raw.githubusercontent.com:443 streams with no relay-ended lines
+  on an egress-blocked runner), the documented wedge signature.
+- The live probe measurement is report-only since #587 (play2048
+  unreachable verdicts are egress-class and do not gate).
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The LobsterBrowse pin stays blocked until a
+  full green run per the stricter ship gate; pinning a red-browser
+  dist is not taken here.
