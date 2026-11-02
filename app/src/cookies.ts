@@ -112,6 +112,38 @@ export interface SetCookieResult {
   namespace?: string;
 }
 
+/* ---- RFC 6265 4.1.1 grammar gates (#599) -----------------------------
+
+   The cookieStore facade validates page-supplied names and values at
+   the boundary: `name` against the cookie-name token grammar,
+   `value` against cookie-octets. `;` is neither a token char nor a
+   cookie-octet, so validation alone makes attribute smuggling
+   impossible through the facade serializer (tested invariant, not an
+   accident). document.cookie keeps the platform's silent-drop
+   behavior; the promise-based facade rejects with TypeError, the
+   platform behavior for invalid cookieStore names/values. */
+
+const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+/* %x21 / %x23-2B / %x2D-3A / %x3C-5B / %x5D-7E: US-ASCII minus CTLs,
+   SP, DQUOTE, comma, semicolon, backslash. */
+const COOKIE_OCTET_RE = /^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]*$/;
+
+export function isValidCookieName(s: string): boolean {
+  return COOKIE_NAME_RE.test(s);
+}
+
+export function isValidCookieValue(s: string): boolean {
+  return COOKIE_OCTET_RE.test(s);
+}
+
+/* The facade re-serializes structured init into a header string, so a
+   path that carries ";" or a control character would smuggle
+   attributes the facade contract never documents. Same gate for set
+   and delete. */
+function isValidFacadePath(p: string): boolean {
+  return !/[\x00-\x1F\x7F;]/.test(p);
+}
+
 /* ---- #520: jar merge observation ------------------------------------
 
    One hook, fired from admitCookie after every real admission (an
@@ -647,6 +679,132 @@ export function parseCookieDate(s: string): number | null {
   return Date.UTC(year, month, day, hour, minute, second);
 }
 
+/* ---- RFC 6265 6.1 / 6265bis 5.6 storage limits (#598) ----------------
+
+   Caps are per jar profile: the durable "default" profile and each
+   in-memory session profile enforce their own budget, so a hostile
+   origin in one profile can never consume another profile's pool.
+   "Per domain" counts by the cookie's stored Domain (host for
+   host-only cookies, the Domain attribute otherwise) - the exact
+   granularity a page's own write power reaches, since one origin can
+   only scope cookies to its own host or a parent domain.
+
+   Eviction order (documented policy, deterministic):
+   1. expired cookies first (dead weight),
+   2. then soonest expiry-time first; session cookies (no expiry)
+      count as expiry +infinity and go last,
+   3. ties broken by earliest creation-time first.
+
+   An admission never evicts the identity it just stored; if the jar
+   is over a cap after that store, the next-best candidates go. Per
+   -domain overflow therefore never drops another domain's cookies,
+   and the per-domain cap bounds what one origin can contribute to
+   the total pool before global enforcement ever runs. */
+
+/** Maximum serialized name+value size, UTF-8 bytes, per cookie.
+    An oversized cookie is refused outright (browsers refuse the
+    whole Set-Cookie); deletions are never size-gated. */
+export const COOKIE_MAX_BYTES = 4096;
+/** Maximum live cookies per stored Domain, per profile. */
+export const COOKIE_MAX_PER_DOMAIN = 50;
+/** Maximum live cookies per profile across all domains. */
+export const COOKIE_MAX_TOTAL = 3000;
+
+function cookieByteSize(name: string, value: string): number {
+  const enc = new TextEncoder();
+  return enc.encode(name).length + enc.encode(value).length;
+}
+
+/** Evict cookies of one profile until every cap holds. Returns the
+    evicted cookies (the caller notifies and persists). Pure over the
+    jars map: scoped to the profile, expired cookies first, then the
+    documented expiry/creation order. `protect` shields identities
+    from their own admission's pass. */
+function sweepJarLimits(namespace: string, protect?: (c: Cookie) => boolean): Cookie[] {
+  const now = Date.now();
+  const live = (c: Cookie): boolean => c.expires === 0 || c.expires > now;
+  const order = (a: Cookie, b: Cookie): number => {
+    const ea = a.expires === 0 ? Number.MAX_SAFE_INTEGER : a.expires;
+    const eb = b.expires === 0 ? Number.MAX_SAFE_INTEGER : b.expires;
+    return ea - eb || a.created - b.created;
+  };
+  const removed: Cookie[] = [];
+  const dropFrom = (bucket: string, doomed: Cookie[]): void => {
+    if (!doomed.length) return;
+    const dead = new Set(doomed);
+    const keep = (jars.get(bucket) ?? []).filter((c) => !dead.has(c));
+    if (keep.length) jars.set(bucket, keep);
+    else jars.delete(bucket);
+  };
+  /* Pass 1: expired cookies never count toward a cap. */
+  for (const [k, list] of jars) {
+    if (!inProfile(k, namespace)) continue;
+    const dead = list.filter((c) => !live(c));
+    if (dead.length) {
+      dropFrom(k, dead);
+      removed.push(...dead);
+    }
+  }
+  /* Live cookies of the profile grouped by stored Domain, with their
+     bucket keys so removal reaches sibling origin buckets. */
+  const collect = (): Map<string, Array<{ k: string; c: Cookie }>> => {
+    const byDomain = new Map<string, Array<{ k: string; c: Cookie }>>();
+    for (const [k, list] of jars) {
+      if (!inProfile(k, namespace)) continue;
+      for (const c of list) {
+        if (!live(c)) continue;
+        let arr = byDomain.get(c.domain);
+        if (!arr) byDomain.set(c.domain, (arr = []));
+        arr.push({ k, c });
+      }
+    }
+    return byDomain;
+  };
+  const evict = (entries: Array<{ k: string; c: Cookie }>, excess: number): void => {
+    const candidates = entries.filter((e) => !protect || !protect(e.c));
+    candidates.sort((x, y) => order(x.c, y.c));
+    const perBucket = new Map<string, Cookie[]>();
+    for (const e of candidates.slice(0, excess)) {
+      let arr = perBucket.get(e.k);
+      if (!arr) perBucket.set(e.k, (arr = []));
+      arr.push(e.c);
+      removed.push(e.c);
+    }
+    for (const [k, doomed] of perBucket) dropFrom(k, doomed);
+  };
+  /* Pass 2: per-domain overflow evicts inside that domain only. */
+  for (const entries of collect().values()) {
+    if (entries.length > COOKIE_MAX_PER_DOMAIN) evict(entries, entries.length - COOKIE_MAX_PER_DOMAIN);
+  }
+  /* Pass 3: total cap across the profile. With per-domain caps in
+     place this is only reachable by many distinct domains, so the
+     shared order never exists to satisfy one origin's overflow. */
+  const all = [...collect().values()].flat();
+  if (all.length > COOKIE_MAX_TOTAL) evict(all, all.length - COOKIE_MAX_TOTAL);
+  return removed;
+}
+
+/** Surface evictions the same way the admission seam reports real
+    deletions: one jar-change record per cookie (the extensions bridge
+    maps that onto a cookies.onChanged removed event) plus one diag
+    event for the session log. */
+function noteEvictions(removed: Cookie[], namespace: string): void {
+  if (!removed.length) return;
+  for (const c of removed) {
+    noteJarChange(
+      { name: c.name, stored: false, deleted: true, cookie: c, replaced: true, namespace },
+      "",
+      false,
+    );
+  }
+  DIAG.emit({
+    category: "COOKIE",
+    cause: "browser_limit",
+    severity: "info",
+    message: "jar limit enforcement removed " + removed.length + " cookie(s)",
+  });
+}
+
 /** Parse and admit one Set-Cookie header for a response URL.
     Rejects (hard gate) any cookie whose Domain does not scope the
     response host. Deletion follows max-age<=0 or an already-past
@@ -793,6 +951,15 @@ function admitCookie(
   const isDeletion = maxAge !== null ? maxAge <= 0 : hasExpires && expires <= now;
   const expiry = maxAge !== null ? now + maxAge * 1000 : expires;
 
+  /* #598: RFC 6265 6.1 byte cap - refuse the whole oversized cookie
+     (browsers refuse the whole Set-Cookie). Deletions are never
+     size-gated: retiring an identity must not depend on its size. */
+  if (!isDeletion && cookieByteSize(name, value) > COOKIE_MAX_BYTES) {
+    DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: name+value exceed the 4096-byte limit" });
+    traceDecision({ subsystem: "cookies", original: responseUrl, result: "rejected:size " + name });
+    return { name, stored: false, deleted: false, rejected: "size" };
+  }
+
   const key = jarKey(registerOrigin(u.origin).id, namespace);
   const sameCookie = (c: Cookie) => c.name === name && c.domain === domain && c.hostOnly === hostOnly && c.path === path;
 
@@ -895,6 +1062,10 @@ function admitCookie(
     jar.push(fresh);
     jars.set(key, jar);
   }
+  /* #598: enforce the caps after the store so the in-memory jar never
+     exceeds them. The identity just stored is protected from its own
+     admission's pass; a later admission may evict it normally. */
+  noteEvictions(sweepJarLimits(namespace, (c) => c === fresh), namespace);
   schedulePersist();
   traceDecision({ subsystem: "cookies", original: responseUrl, result: "stored " + name });
   const result: SetCookieResult = { name, stored: true, deleted: false, cookie: fresh, replaced: existing !== null, namespace };
@@ -1051,8 +1222,21 @@ export function cookieStoreOp(
   clientId?: string,
 ): { items: FacadeCookie[]; view: string } {
   if (init) {
+    /* #599: the facade validates page-supplied fields at the boundary
+       and rejects with TypeError (the platform behavior for invalid
+       cookieStore names/values), so it can never serialize a pair
+       that smuggles attributes past its documented host-only promise
+       or silently no-op a delete. `;` is illegal in both grammars,
+       which is the tested invariant that makes smuggling impossible. */
     if (op === "set") {
-      const parts: string[] = [String(init.name ?? "") + "=" + String(init.value ?? "")];
+      const name = String(init.name ?? "");
+      const value = String(init.value ?? "");
+      if (!isValidCookieName(name)) throw new TypeError("cookieStore.set: invalid cookie name");
+      if (!isValidCookieValue(value)) throw new TypeError("cookieStore.set: invalid cookie value");
+      if (typeof init.path === "string" && init.path.startsWith("/") && !isValidFacadePath(init.path)) {
+        throw new TypeError("cookieStore.set: invalid cookie path");
+      }
+      const parts: string[] = [name + "=" + value];
       if (typeof init.path === "string" && init.path.startsWith("/")) parts.push("Path=" + init.path);
       if (typeof init.expires === "number" && init.expires > 0) parts.push("Expires=" + new Date(init.expires).toUTCString());
       const ss = init.sameSite;
@@ -1060,7 +1244,12 @@ export function cookieStoreOp(
       if (init.secure === true) parts.push("Secure");
       documentCookieWrite(pageUrl, parts.join("; "), clientId);
     } else if (op === "delete") {
-      const parts: string[] = [String(init.name ?? "") + "="];
+      const name = String(init.name ?? "");
+      if (!isValidCookieName(name)) throw new TypeError("cookieStore.delete: invalid cookie name");
+      if (typeof init.path === "string" && init.path.startsWith("/") && !isValidFacadePath(init.path)) {
+        throw new TypeError("cookieStore.delete: invalid cookie path");
+      }
+      const parts: string[] = [name + "="];
       if (typeof init.path === "string" && init.path.startsWith("/")) parts.push("Path=" + init.path);
       parts.push("Max-Age=0");
       documentCookieWrite(pageUrl, parts.join("; "), clientId);
@@ -1316,6 +1505,10 @@ function schedulePersist(): void {
     exported for hosts and tests that want a forced flush). Session
     profiles are in-memory only: they never touch IndexedDB. */
 export async function jarPersist(): Promise<void> {
+  /* #598: persist-time enforcement bounds the durable record even when
+     an over-cap jar reached memory through a host import or an older
+     engine's restore. Evictions ride the same write (no re-schedule). */
+  noteEvictions(sweepJarLimits(PROFILE_DEFAULT), PROFILE_DEFAULT);
   const db = await openDb();
   const entries: Array<[string, Cookie[]]> = [];
   for (const [k, v] of jars) if (!k.includes(SEP)) entries.push([k, v]);

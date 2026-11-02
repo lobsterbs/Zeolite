@@ -27,7 +27,8 @@ import {
    Three layers:
    - deterministic edge cases for the seams the reading found risky
      (identity across origin buckets, expiry precedence, corrupt
-     persistence, import-key injection, capacity residuals);
+     persistence, import-key injection, capacity policy #598 and
+     facade grammar #599);
    - a seeded fuzz of the date parser and the admission/assembly path
      differentially tested against tough-cookie, with every deviation
      classified: the suite fails on any UNCLASSIFIED deviation;
@@ -295,25 +296,107 @@ describe("import seam torture (zl:importSession keys)", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* deterministic: capacity + misc pins                                  */
+/* deterministic: capacity policy + boundary behavior                   */
 /* ------------------------------------------------------------------ */
 
 describe("capacity and boundary pins", () => {
-  it("PIN (known limitation): no per-domain or total cookie caps, no size cap", () => {
-    /* RFC 6265 6.1 / 6265bis 5.6 require eviction above ~50 cookies
-       per domain / 3000 total / 4096 bytes per cookie. This jar has
-       no caps: a hostile origin can bloat the single persisted record
-       and every request's matching walk. Pinned so a future eviction
-       policy flips this deliberately; see the tracking issue. */
+  it("per-domain cap: the 51st admission evicts the oldest of that domain, siblings untouched", () => {
+    admit("https://a.example/", "old=1");
     const headers: string[] = [];
-    for (let i = 0; i < 300; i++) headers.push(`c${i}=v`);
-    applySetCookie("https://bulk.example/", resp(headers));
-    applySetCookie("https://bulk.example/", resp(["big=" + "x".repeat(65536)]));
-    const hdr = ours("https://bulk.example/");
+    for (let i = 0; i < 50; i++) headers.push(`c${i}=v`);
+    applySetCookie("https://a.example/", resp(headers));
+    expect(ours("https://a.example/")).not.toContain("old=1");
     let total = 0;
     for (const [, l] of jarSnapshot()) total += l.length;
-    expect(total).toBe(301);
-    expect(hdr.length).toBeGreaterThan(65000);
+    expect(total).toBe(50);
+    /* a.example's overflow never drops another domain's cookies */
+    admit("https://b.example/", "sib=1");
+    expect(ours("https://b.example/")).toBe("sib=1");
+  });
+
+  it("eviction order: expired first, then soonest expiry, session last, ties by age", () => {
+    const headers: string[] = [];
+    headers.push("soon=1; Max-Age=60");
+    for (let i = 0; i < 49; i++) headers.push(`s${i}=v`);
+    applySetCookie("https://a.example/", resp(headers));
+    /* the just-stored identity is protected from its own admission's
+       pass, so the soonest-expiring EXISTING cookie goes first */
+    admit("https://a.example/", "extra=1");
+    expect(ours("https://a.example/")).not.toContain("soon=1");
+    expect(ours("https://a.example/")).toContain("s0=");
+    expect(ours("https://a.example/")).toContain("extra=1");
+    /* one more admission evicts the oldest session cookie */
+    admit("https://a.example/", "extra2=1");
+    expect(ours("https://a.example/")).not.toContain("s0=");
+    expect(ours("https://a.example/")).toContain("s1=");
+  });
+
+  it("byte cap: an oversized cookie is refused whole; exactly at cap is admitted", () => {
+    expect(admit("https://a.example/", "k=" + "x".repeat(4095))[0].stored).toBe(true);
+    const r = admit("https://a.example/", "big=" + "x".repeat(4096));
+    expect(r[0]).toMatchObject({ stored: false, rejected: "size" });
+    expect(ours("https://a.example/")).toBe("k=" + "x".repeat(4095));
+    expect(jarSnapshot().size).toBe(1);
+  });
+
+  it("deletions are never size-gated", () => {
+    const r = admit("https://a.example/", "big=" + "x".repeat(5000) + "; Max-Age=0");
+    expect(r[0]).toMatchObject({ stored: false, deleted: false });
+    expect(r[0].rejected).toBeUndefined();
+  });
+
+  it("total cap: 3000 per profile, oldest creations go; per-domain caps bound one origin's share", () => {
+    const entries: Array<[string, unknown[]]> = [];
+    let created = 1;
+    for (let d = 0; d < 61; d++) {
+      const id = registerOrigin(`https://h${d}.example`).id;
+      const list: unknown[] = [];
+      for (let i = 0; i < 50; i++) {
+        list.push({
+          name: `d${d}c${i}`, value: "v", domain: `h${d}.example`, hostOnly: true, path: "/",
+          secure: false, httpOnly: false, sameSite: null, expires: 0, created: created++,
+        });
+      }
+      entries.push([id, list]);
+    }
+    jarReplace(entries);
+    /* one admission over the 3050-cookie import triggers the sweep */
+    admit("https://h60.example/", "trigger=1");
+    let total = 0;
+    for (const [, l] of jarSnapshot()) total += l.length;
+    expect(total).toBe(3000);
+    expect(ours("https://h0.example/")).toBe("");
+    /* h60 was already at its per-domain cap: the protected trigger
+       stays, the domain's oldest cookie pays for it */
+    expect(ours("https://h60.example/")).toContain("trigger=1");
+    expect(ours("https://h60.example/")).not.toContain("d60c0=");
+  });
+
+  it("persist-time enforcement bounds the durable record", async () => {
+    const id = registerOrigin("https://a.example").id;
+    const list: unknown[] = [];
+    for (let i = 0; i < 60; i++) {
+      list.push({
+        name: `p${i}`, value: "v", domain: "a.example", hostOnly: true, path: "/",
+        secure: false, httpOnly: false, sameSite: null, expires: 0, created: i + 1,
+      });
+    }
+    jarReplace([[id, list]]);
+    await jarPersist();
+    let total = 0;
+    for (const [, l] of jarSnapshot()) total += l.length;
+    expect(total).toBe(50);
+  });
+
+  it("evictions surface as jar change records (cookies.onChanged consistency)", () => {
+    const seen: Array<{ result: { name: string; stored: boolean; deleted: boolean } }> = [];
+    onCookieJarChange((c) => seen.push(c));
+    admit("https://a.example/", "old=1");
+    const headers: string[] = [];
+    for (let i = 0; i < 50; i++) headers.push(`c${i}=v`);
+    applySetCookie("https://a.example/", resp(headers));
+    const evicted = seen.find((c) => c.result.deleted && c.result.name === "old");
+    expect(evicted).toBeTruthy();
   });
 
   it("control characters are refused in names and values (page seam)", () => {
@@ -389,28 +472,42 @@ describe("capacity and boundary pins", () => {
     expect(ours("https://a.example/")).toBe("__Host-k=1");
   });
 
-  it("PIN (residual): cookieStore set values are not attribute-escaped", () => {
-    /* A crafted init.value smuggles attributes into the serialized
-       cookie: the facade contract ("a page-supplied Domain is IGNORED,
-       host-only admission") is bypassed, and the cookie scopes across
-       subdomains. Self-origin reach only (document.cookie allows the
-       page the same attributes directly), so pinned as a contract
-       hardening residual; the SameSite=None smuggle below still dies on
-       the admission hard gate. */
-    cookieStoreOp("set", { name: "inj", value: "1; Domain=example.com; Secure" }, "https://sub.example.com/");
-    expect(ours("https://www.example.com/")).toBe("inj=1");
-    expect(documentCookieItems("https://sub.example.com/")[0].secure).toBe(true);
-    cookieStoreOp("set", { name: "sn", value: "1; SameSite=None" }, "https://sub.example.com/");
-    expect(ours("https://sub.example.com/")).toBe("inj=1"); /* None smuggle rejected */
+  it("cookieStore.set rejects names/values that could smuggle attributes (#599)", () => {
+    /* the crafted value that used to land a cross-subdomain Secure
+       cookie now dies at the facade boundary with TypeError */
+    expect(() =>
+      cookieStoreOp("set", { name: "inj", value: "1; Domain=example.com; Secure" }, "https://sub.example.com/"),
+    ).toThrow(TypeError);
+    expect(ours("https://www.example.com/")).toBe("");
+    expect(() =>
+      cookieStoreOp("set", { name: "sn", value: "1; SameSite=None" }, "https://sub.example.com/"),
+    ).toThrow(TypeError);
+    /* the grammar invariant: ';' is neither a token char nor a
+       cookie-octet, so no smuggle string can pass validation */
+    for (const bad of ["1; Domain=x", "1; Secure", "a,b", 'q"q', "a\\b", " v", "v ", "x\x00y", "x\x7f"]) {
+      expect(() => cookieStoreOp("set", { name: "n", value: bad }, "https://a.example/")).toThrow(TypeError);
+    }
+    for (const badName of ["k; Path=/wrong", "a b", "k=v", "", "x\x00y", "(k)", "k@l"]) {
+      expect(() => cookieStoreOp("set", { name: badName, value: "1" }, "https://a.example/")).toThrow(TypeError);
+    }
+    /* a crafted path is the same smuggle vector: refused */
+    expect(() =>
+      cookieStoreOp("set", { name: "p", value: "1", path: "/x; Domain=example.com" }, "https://sub.example.com/"),
+    ).toThrow(TypeError);
+    /* legal cookie-octets still round-trip, including '=' */
+    cookieStoreOp("set", { name: "ok", value: "a=b?c[d]e{f}g:h" }, "https://a.example/");
+    expect(ours("https://a.example/")).toContain("ok=a=b?c[d]e{f}g:h");
   });
 
-  it("PIN (residual): a crafted cookieStore delete name silently no-ops", () => {
+  it("cookieStore.delete with an unround-trippable name rejects loudly (#599)", () => {
     cookieStoreOp("set", { name: "k", value: "1", path: "/d" }, "https://a.example/d/p");
-    /* the ";" inside the crafted name eats the "=" separator, so the
-       pair parses as nameless and the deletion is dropped as malformed;
-       confusing, but fails closed */
-    cookieStoreOp("delete", { name: "k; Path=/wrong" }, "https://a.example/d/p");
+    /* the crafted name used to serialize into a malformed pair and
+       silently drop the deletion; now it rejects */
+    expect(() => cookieStoreOp("delete", { name: "k; Path=/wrong" }, "https://a.example/d/p")).toThrow(TypeError);
     expect(ours("https://a.example/d/q")).toBe("k=1");
+    /* a valid delete still deletes */
+    cookieStoreOp("delete", { name: "k", path: "/d" }, "https://a.example/d/p");
+    expect(ours("https://a.example/d/q")).toBe("");
   });
 
   it("clearJar on garbage is refused, not coerced", () => {
