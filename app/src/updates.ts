@@ -88,7 +88,16 @@ export function startUpdateChecks(): void {
     /* no registration object: nothing to poll */
   }
   const check = (): void => {
-    void self.registration.update().catch(() => {});
+    /* sw torture: the updatefound listener above is guarded against a
+       registration-less context; the poll must be too, or one sync
+       TypeError at module scope kills the whole sw.ts evaluation (no
+       listeners wired at all). In a real service worker registration
+       always exists; this guard is for non-SW evaluation contexts. */
+    try {
+      void self.registration.update().catch(() => {});
+    } catch {
+      /* no registration object: nothing to poll */
+    }
   };
   check();
   setInterval(check, CHECK_MS);
