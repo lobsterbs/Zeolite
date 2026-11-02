@@ -1074,11 +1074,20 @@ case "zl:tracing":
         const cid = (e.source as { id?: string } | null)?.id;
         if (typeof set === "string") documentCookieWrite(origin, set, cid);
         let items: FacadeCookie[] | undefined;
+        let facadeError: string | undefined;
         if (cs && typeof cs === "object" && typeof cs.rid === "number") {
           const init = cs.init && typeof cs.init === "object" ? (cs.init as Record<string, unknown>) : undefined;
-          items = cookieStoreOp(typeof cs.op === "string" ? cs.op : undefined, init, origin, cid).items;
+          /* #599: facade validation rejects with TypeError. The reply
+             carries the error so the page promise rejects - a silent
+             no-op is never an outcome. */
+          try {
+            items = cookieStoreOp(typeof cs.op === "string" ? cs.op : undefined, init, origin, cid).items;
+          } catch (err) {
+            facadeError = err instanceof Error ? err.message : String(err);
+          }
         }
-        port.postMessage({ ok: true, cookie: documentCookieRead(origin, cid), items, rid: cs?.rid });
+        if (facadeError !== undefined) port.postMessage({ ok: false, error: facadeError, rid: cs?.rid });
+        else port.postMessage({ ok: true, cookie: documentCookieRead(origin, cid), items, rid: cs?.rid });
       };
       handle(msg.set, (msg as { cs?: CsMsg }).cs);
       port.onmessage = (ev: MessageEvent) => {

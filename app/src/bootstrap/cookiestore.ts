@@ -71,7 +71,7 @@ export function applyCookieStore(
     if (changed.length || deleted.length) onchg({ type: "change", changed, deleted });
   };
   ch.port1.onmessage = (ev) => {
-    const d = ev.data as { cookie?: string; items?: FacadeRecord[]; rid?: number };
+    const d = ev.data as { cookie?: string; items?: FacadeRecord[]; rid?: number; ok?: boolean; error?: string };
     if (typeof d.cookie === "string") fire(d.cookie);
     if (typeof d.rid === "number") {
       const res = waiting.get(d.rid);
@@ -84,12 +84,20 @@ export function applyCookieStore(
   /* The SW-side docCookie handler expects the op rid INSIDE the cs
      payload ({ cs: { op, init, rid } }) and echoes it in the reply
      envelope; a rid on the outer message would never be answered. */
-  const send = (cs: Record<string, unknown>): Promise<{ items?: FacadeRecord[] }> =>
+  const send = (cs: Record<string, unknown>): Promise<{ ok?: boolean; error?: string; items?: FacadeRecord[] }> =>
     new Promise((res) => {
       const rid = ++seq;
       waiting.set(rid, res);
       ch.port1.postMessage({ cs: { ...cs, rid } });
     });
+  /* #599: a facade op that the jar refuses (invalid name/value/path
+     grammar) rejects the page promise with TypeError, the platform
+     behavior for invalid cookieStore names/values - silence is never
+     an outcome. The control plane always sets error; the short
+     fallback keeps the bootstrap size budget honest. */
+  const expectOk = (r: { ok?: boolean; error?: string }): void => {
+    if (r.ok === false) throw new TypeError(r.error || "rejected");
+  };
   const norm = (i: FacadeRecord): FacadeRecord => ({
     name: i.name,
     value: i.value,
@@ -114,11 +122,11 @@ export function applyCookieStore(
             ? { name: a }
             : { name: a, value: String(b) }
           : ((a as Record<string, unknown>) ?? {});
-      await send({ op: "set", init });
+      expectOk(await send({ op: "set", init }));
     },
     async delete(a: unknown): Promise<void> {
       const init = typeof a === "string" ? { name: a } : ((a as Record<string, unknown>) ?? {});
-      await send({ op: "delete", init });
+      expectOk(await send({ op: "delete", init }));
     },
     get onchange(): ChangeHandler | null {
       return onchg;
