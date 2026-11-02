@@ -239,6 +239,57 @@ restore (one corrupt row must not empty the jar - the next persist
 would then overwrite the durable record and lose every cookie).
 `zl:teardown` clears it: cookies do not survive an engine switch.
 
+## Storage limits (RFC 6265 6.1) (#598)
+
+The jar enforces the classic browser storage budgets, per jar profile
+(the durable `default` record and each in-memory session profile
+enforce their own budget; a hostile origin in one profile can never
+consume another profile's pool):
+
+- **4096 bytes per cookie** (name + value, UTF-8). An oversized
+  cookie is refused whole (`rejected: "size"`), the browser behavior
+  for a too-large Set-Cookie; deletions are never size-gated.
+- **50 live cookies per stored Domain.** "Per domain" counts by the
+  cookie's stored Domain (the host for host-only cookies, the Domain
+  attribute otherwise) - exactly the granularity one origin's write
+  power reaches, since a page can only scope cookies to its own host
+  or a parent domain.
+- **3000 live cookies per profile** across all domains.
+
+Eviction order (deterministic, documented): expired cookies first,
+then soonest expiry-time first with session cookies (no expiry)
+last, ties broken by earliest creation-time first. An admission
+never evicts the identity it just stored; if the profile is over a
+cap after that store, the next-best candidates go. Per-domain
+overflow therefore never drops another domain's cookies, and the
+per-domain cap bounds what one origin can contribute before global
+enforcement ever runs.
+
+Enforcement runs after every admission and again at persist time, so
+the durable record stays bounded even when an over-cap jar reached
+memory through a host import or an older engine's restore.
+Evictions surface exactly like real deletions: one jar-change record
+per cookie (the extensions bridge maps that onto a
+`cookies.onChanged` removed event) and one `COOKIE` diag event
+(`browser_limit`).
+
+## cookieStore facade grammar (#599)
+
+The cookieStore facade (the `zl:docCookie` control channel's
+structured ops) validates page-supplied fields at the boundary:
+`name` against the RFC 6265 cookie-name token grammar, `value`
+against cookie-octets, and a supplied `path` against `;`/control
+characters (the same attribute-smuggle vector). Invalid input
+rejects the page promise with `TypeError`, the platform behavior for
+invalid cookieStore names/values - a crafted value can no longer
+smuggle `Domain`/`Secure`/`Path`/`Max-Age` attributes past the
+facade's documented host-only promise, and a `delete` with a name
+that cannot round-trip rejects loudly instead of silently no-oping.
+`;` is neither a token char nor a cookie-octet, which is the tested
+invariant that makes attribute smuggling impossible through the
+serializer. `document.cookie` keeps the platform's silent-drop
+behavior for the same inputs.
+
 ## Extension cookies API (#42)
 
 `browser.cookies.*` inside an extension (get/getAll/set/remove) reads
@@ -291,19 +342,6 @@ repair only fixes where the challenge redirects.
 
 ## Honest limits
 
-- The jar has no capacity limits or eviction: no per-cookie byte cap,
-  no per-domain or total cookie count caps (RFC 6265 6.1 /
-  6265bis 5.6 recommend ~4096 bytes and 50/3000 with eviction). A
-  hostile origin can bloat the single persisted record and slow every
-  matching walk; pinned in `cookies-torture.test.ts` until an
-  eviction policy lands.
-- The cookieStore facade (`cookieStoreOp`) serializes `name` and
-  `value` into a `document.cookie` write without escaping: a crafted
-  `value` can smuggle attributes (`Domain`, `Secure`, `Path`,
-  `Max-Age`) past the facade's documented host-only promise, and a
-  crafted `name` makes a `delete` silently no-op (the `;` eats the
-  `=` separator, so the pair parses as malformed). Self-origin reach
-  only; pinned in the torture suite as a hardening residual.
 - The challenge interstitial itself is not detected: there is no
   body-marker scanning, so a challenge whose solve never reaches the
   pass-challenge endpoint produces no CHALLENGE event.
@@ -337,7 +375,7 @@ isolation, ordering, persistence, SameSite knob, merge mode),
 fuzz against tough-cookie with every deviation classified, plus
 deterministic edge cases: identity across origin buckets, expiry
 precedence, persistence corruption, import-key injection, capacity
-residuals), `app/src/__tests__/jar-profiles.test.ts` (profile
+policy (#598) and facade grammar (#599)), `app/src/__tests__/jar-profiles.test.ts` (profile
 isolation, persistence, document.cookie, import scoping) and
 `app/src/extensions/__tests__/cookies.test.ts` (bridge semantics).
 
