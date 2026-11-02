@@ -130,3 +130,11 @@ deterministic; only its firing is intermittent. Tracked in #514.
   green. This docs-only commit is the recorded bounded retrigger per
   the operational notes. The pin gate stands: all five jobs green or
   no LobsterBrowse pin.
+- Run 41413856957 (08:32Z 2026-11-02, head 7d14fbe9, docs-only on the
+  same engine bytes): the wedge struck the MAIN e2e suite with the
+  passthrough #96 signature again (range/cond/setcookie/cookie/
+  stream/redir HUNG at 6000 ms, get/post/abort ok, then the
+  page.goto cascade), the same first-failure signature as
+  41407727247, while rust/wasm/app/compat are all green. This
+  docs-only commit is the recorded bounded retrigger; the pin gate
+  stands.
