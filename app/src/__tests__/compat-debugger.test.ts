@@ -29,7 +29,7 @@ const create = (args: {
   clientId?: string;
   traceId?: string;
 } = {}) => buildCompatibilityReport({
-  engineVersion: "3.0 Diamond", generation: 12345, now: 12346,
+  engineVersion: "3.0.1 Diamond", generation: 12345, now: 12346,
   clientId: args.clientId ?? clientId, traceId: args.traceId ?? traceId,
   diagnostics: args.diagnostics ?? [], network: args.network ?? [],
   tracing: args.tracing ?? [],

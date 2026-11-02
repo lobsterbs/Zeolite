@@ -6,7 +6,7 @@ import {
 import { parseKdl } from "../kdl";
 
 const evidence = (overrides: Partial<DoctorEvidence> = {}): DoctorEvidence => ({
-  engineVersion: "3.0 Diamond",
+  engineVersion: "3.0.1 Diamond",
   boot: "ready",
   scriptUrl: "https://engine.example/zlsw/sw.js",
   registrationScope: "https://engine.example/",
@@ -91,7 +91,7 @@ describe("Zeolite Doctor passive evidence model (#495)", () => {
   });
 
   it("only verifies host version and scope when supplied with comparable observations", () => {
-    let r = buildDoctor(evidence({ expectedScope: "https://engine.example/", expectedVersion: "3.0 Diamond" }));
+    let r = buildDoctor(evidence({ expectedScope: "https://engine.example/", expectedVersion: "3.0.1 Diamond" }));
     expect(check(r, "worker.scope").status).toBe("pass");
     expect(check(r, "bundle.version").status).toBe("pass");
     r = buildDoctor(evidence({ expectedScope: "https://engine.example/zlsw/", expectedVersion: "older" }));
