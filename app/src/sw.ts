@@ -207,12 +207,14 @@ initEngine(initReady);
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     (async () => {
+      /* claim is best-effort too: a rejection (the registration is
+         replaced mid-claim, embedder churn) used to reject the whole
+         waitUntil and skip the broadcast and the transport warm below
+         it. Every step here runs regardless of the previous one. */
       try {
         await self.clients.claim();
       } catch {
-        /* claim refused (rare environment races): the broadcast and the
-           transport warm-up do not depend on claim succeeding - skip
-           neither. matchAll simply sees the clients visible now. */
+        /* the next activation cycle retries the claim */
       }
       /* #121: the freshly-activated worker announces itself to every
          window client (proxied pages get a console note + window

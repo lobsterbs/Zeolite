@@ -1,877 +1,728 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-/* Node runtime provides setImmediate; the app tsconfig deliberately
-   ships no node types, so the ambient declaration lives here. Used as
-   the macrotask flush because raceBoot's fake timers fake setTimeout
-   only (the PR #597 fake-indexeddb/setImmediate lesson, inverted). */
-declare function setImmediate(cb: () => void): void;
+/* Torture round for the service-worker entrypoint and composition
+   root (app/src/sw.ts). Every earlier round tested the modules the
+   entrypoint composes; this file imports the REAL sw.ts under a
+   stubbed worker world and drives the four listeners it wires -
+   install, activate, fetch (the withCorp respondWith funnel) and
+   message (the control plane) - plus the boot seams the composition
+   root owns:
 
-/* Service-worker composition-root torture suite.
+   - arming guarantee: every request that is engine work gets
+     respondWith armed synchronously and exactly once;
+   - never-rejecting respondWith: the armed promise always settles to
+     a Response the browser can serve, never a rejection (a rejected
+     respondWith is a hard net::ERR_FAILED for the page);
+   - lifecycle blast radius: a failed activate step must not skip the
+     steps after it (each activate step is best-effort by design);
+   - control plane: the real wiring answers every message and never
+     leaves an unhandled rejection;
+   - worker prelude hygiene: the prelude asset cache never poisons
+     itself with a non-2xx body.
 
-   Target: app/src/sw.ts - the entrypoint that boots the runtime and
-   wires install/activate/fetch/message events to the engine. The file
-   is 90% wiring, so the torture is of the WIRING: every seam a close
-   reading flagged (boot-fault propagation, event-listener lifetime,
-   the respondWith proxy, the ready-gate ordering, module-evaluation
-   survival) is driven with fault injection at the leaf modules and
-   real behavior at everything sw.ts actually composes.
+   The transport module is mocked like control.test.ts mocks it: the
+   vendored libcurl bundle is a browser/wasm artifact. The rewriter
+   wasm resolves through the vite config's throwing stub, which is
+   exactly the degradation the entrypoint must survive. */
 
-   Layered like cookies-torture.test.ts:
+/* ---- transport mock (full surface used by sw/request/control) ---- */
+const transportSpy = vi.hoisted(() => ({ readyCalls: 0, fetchCalls: 0 }));
 
-   - deterministic fault injection: each boot step (jar restore,
-     download registries, extension phases, prewarm, transport warm,
-     claim, route shape) resolves / rejects / hangs / throws sync, and
-     the suite asserts the composition survives with the documented
-     degraded default and an honest diagnostic - never silently, never
-     by killing the worker;
-   - wiring invariants: one listener per event, the seams sw.ts hands
-     out (ghostery dest coercion, transform deps, perms backend,
-     dispatcher delivery) behave as documented;
-   - the respondWith proxy: CORP funneling for every response shape,
-     passthrough for the honest withCorp limits, and observability of
-     an escaped engine rejection (#250's mirror at the fetch seam);
-   - pinned deltas: the control-plane ready gate is SEQUENTIAL
-     (routeReady, then the bounded initReady race), so its worst-case
-     open time is the sum of the two bounds, not the max. Deliberate
-     composition, pinned here; the fetch gate runs the same promises
-     concurrently.
+vi.mock("../transport", () => ({
+  /* The complete export surface of ./transport, mocked benignly: the
+     vendored libcurl bundle is a browser/wasm artifact. */
+  currentEngine: () => "libcurl",
+  openWebSocket: () => {
+    throw new Error("torture: no transport socket");
+  },
+  altRegister: () => undefined,
+  altConfigured: () => false,
+  altEndpoint: () => null,
+  initTransport: () => undefined,
+  setPrimaryWisp: () => true,
+  engineReady: async () => undefined,
+  parseTtfbDeadline: () => undefined,
+  transportResetForTests: () => undefined,
+  wispCoolingForTests: () => false,
+  canReplayAfterFailure: () => false,
+  wispTransport: {
+    ready: async () => {
+      transportSpy.readyCalls++;
+    },
+    fetch: async () => {
+      transportSpy.fetchCalls++;
+      return new Response("<html><body>up</body></html>", {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    },
+    switchEngine: () => undefined,
+  },
+  altWispFetch: async () => new Response("up"),
+}));
 
-   The heavy leaves are mocked (cookies, downloads, extensions,
-   transport, ghostery, transform, request, control, swstate) because
-   they have their own suites; lifecycle, corp, updates, netlog, diag,
-   codec and cpgate are REAL - they are what sw.ts composes. */
+/* ---- the stubbed worker world ------------------------------------ */
+const ORIGIN = "https://engine.test";
 
-/* ---- scenario bag (hoisted: the mock factories read it at call time) */
-
-type Mode = "resolve" | "reject" | "hang" | "throw";
-
-const bag = vi.hoisted(() => {
-  const state = {
-    jarLoad: "resolve" as Mode,
-    dlLoad: "resolve" as Mode,
-    extDownloadsLoad: "resolve" as Mode,
-    extStartup: "resolve" as Mode,
-    extBoot: "resolve" as Mode,
-    prewarm: "resolve" as Mode,
-    transportReady: "resolve" as Mode,
-    claim: "resolve" as "resolve" | "reject",
-    matchAllError: false,
-    hasRegistration: true,
-    routeReadyHang: false,
-    fpScript: "fp-script",
-    routeKey: "route-key",
-    lazyImages: false,
-    siteProfile: null as { script: string } | null,
-    handleFetch: null as null | ((e: { respondWith(r: Response | Promise<Response>): void; waitUntil(p: Promise<unknown>): void; [k: string]: unknown }) => void),
-    settleRoute: null as null | (() => void),
+const workerWorld = vi.hoisted(() => {
+  return {
+    listeners: new Map<string, Array<(e: unknown) => void>>(),
+    clientsById: new Map<string, { url: string; id: string }>(),
+    windows: [] as Array<{ url: string; id: string; messages: unknown[] }>,
+    registrationUpdateCalls: 0,
+    intervals: Array.of<() => void>(),
+    claimError: null as Error | null,
   };
-  const calls = {
-    jarLoad: 0,
-    dlLoad: 0,
-    extDownloadsLoad: 0,
-    setResumeFetch: [] as unknown[],
-    initTransport: [] as unknown[],
-    initTransform: [] as unknown[],
-    ghosteryFetch: [] as unknown[],
-    controlDeps: [] as { ready: Promise<unknown>; persistRoute: unknown }[],
-    messageEvents: [] as unknown[],
-    initEngine: [] as unknown[],
-    handleFetchEvents: [] as unknown[],
-    extStartup: 0,
-    extBoot: 0,
-    alarmWake: [] as unknown[],
-    mgmtWire: [] as unknown[],
-    tabsDispatch: [] as unknown[],
-    tabsMessageDispatch: [] as unknown[],
-    scriptingDispatch: [] as unknown[],
-    extDownloadsDispatch: [] as unknown[],
-    notifyDispatch: [] as unknown[],
-    actionDispatch: [] as unknown[],
-    permsBackend: [] as unknown[],
-    transportReady: 0,
-    grantOptional: 0,
-    revokeOptional: 0,
-  };
-  const drive = (mode: Mode): Promise<void> => {
-    if (mode === "resolve") return Promise.resolve();
-    if (mode === "reject") return Promise.reject(new Error("torture: " + mode));
-    if (mode === "hang") return new Promise<void>(() => {});
-    throw new Error("torture: sync throw");
-  };
-  return { state, calls, drive };
 });
 
-vi.mock("../cookies", () => ({
-  jarLoad: () => {
-    bag.calls.jarLoad++;
-    return bag.drive(bag.state.jarLoad);
+const selfStub = {
+  location: { origin: ORIGIN, href: ORIGIN + "/sw.js" },
+  addEventListener(type: string, fn: (e: unknown) => void) {
+    const arr = workerWorld.listeners.get(type) ?? [];
+    arr.push(fn);
+    workerWorld.listeners.set(type, arr);
   },
-}));
-vi.mock("../downloads", () => ({
-  DL: {
-    load: () => {
-      bag.calls.dlLoad++;
-      return bag.drive(bag.state.dlLoad);
+  registration: {
+    addEventListener: () => undefined,
+    update: async () => {
+      workerWorld.registrationUpdateCalls++;
     },
-    setResumeFetch: (f: unknown) => {
-      bag.calls.setResumeFetch.push(f);
-    },
+    active: { scriptURL: ORIGIN + "/sw.js" },
+    scope: ORIGIN + "/",
   },
-}));
-vi.mock("../extensions", () => ({
-  ALARMS: { setWake: (f: unknown) => bag.calls.alarmWake.push(f) },
-  MGMT: { wire: (x: unknown) => bag.calls.mgmtWire.push(x) },
-  TABS: {
-    setDispatch: (f: unknown) => bag.calls.tabsDispatch.push(f),
-    setMessageDispatch: (f: unknown) => bag.calls.tabsMessageDispatch.push(f),
-  },
-  SCRIPTING: { setDispatch: (f: unknown) => bag.calls.scriptingDispatch.push(f) },
-  DOWNLOADS: {
-    load: () => {
-      bag.calls.extDownloadsLoad++;
-      return bag.drive(bag.state.extDownloadsLoad);
+  skipWaiting: async () => undefined,
+  clients: {
+    matchAll: async (opts?: { type?: string }) => {
+      if (opts?.type === "window") return workerWorld.windows;
+      return [...workerWorld.clientsById.values()];
     },
-    setDispatch: (f: unknown) => bag.calls.extDownloadsDispatch.push(f),
-  },
-  NOTIFY: { setDispatch: (f: unknown) => bag.calls.notifyDispatch.push(f) },
-  ACTION: { setDispatch: (f: unknown) => bag.calls.actionDispatch.push(f) },
-  PERMS: { setBackend: (f: unknown) => bag.calls.permsBackend.push(f) },
-  bootEnabled: () => {
-    bag.calls.extBoot++;
-    return bag.drive(bag.state.extBoot);
-  },
-  extensions: {
-    startup: () => {
-      bag.calls.extStartup++;
-      return bag.drive(bag.state.extStartup);
-    },
-    grantOptional: async () => {
-      bag.calls.grantOptional++;
-      return { permissions: ["tabs"], hostPermissions: ["*://granted/*"] };
-    },
-    revokeOptional: async () => {
-      bag.calls.revokeOptional++;
-      return null;
+    get: async (id: string) => workerWorld.clientsById.get(id) ?? null,
+    claim: async () => {
+      if (workerWorld.claimError) throw workerWorld.claimError;
+      return [...workerWorld.clientsById.values()];
     },
   },
-  wakeExtension: () => {},
-}));
-vi.mock("../transport", () => ({
-  initTransport: (d: unknown) => {
-    bag.calls.initTransport.push(d);
-  },
-  wispTransport: {
-    fetch: (u: unknown, i: unknown) => {
-      void u;
-      void i;
-      return Promise.resolve(new Response(""));
-    },
-    ready: () => {
-      bag.calls.transportReady++;
-      return bag.drive(bag.state.transportReady);
-    },
-  },
-}));
-vi.mock("../ghostery", () => ({
-  configureGhostery: (f: unknown) => {
-    (bag.state as { ghosterySeam?: unknown }).ghosterySeam = f;
-  },
-}));
-vi.mock("../transform", () => ({
-  initTransform: (d: unknown) => {
-    bag.calls.initTransform.push(d);
-  },
-  prewarmRewriter: () => bag.drive(bag.state.prewarm),
-}));
-vi.mock("../swstate", () => ({
-  ZEOLITE_VERSION: "torture-9.9.9",
-  getFpScript: () => bag.state.fpScript,
-  getRouteKey: () => bag.state.routeKey,
-  isImageLazy: () => bag.state.lazyImages,
-  setEngineDegraded: () => {},
-  siteProfileFor: async () => bag.state.siteProfile,
-}));
-vi.mock("../request", () => ({
-  /* a getter, not a factory-time value: vi.resetModules() re-evaluates
-     sw.ts but REUSES the mocked module instance, so anything computed
-     once in the factory is frozen by whichever test imported first.
-     The getter runs at sw.ts's messageListener wiring - per boot. */
-  get routeReady() {
-    if (!bag.state.routeReadyHang) return Promise.resolve();
-    return new Promise<void>((res) => {
-      (bag.state as { settleRoute?: () => void }).settleRoute = res;
-    });
-  },
-  initEngine: (p: unknown) => {
-    bag.calls.initEngine.push(p);
-  },
-  handleFetch: (e: unknown) => {
-    bag.calls.handleFetchEvents.push(e);
-    if (bag.state.handleFetch) bag.state.handleFetch(e as never);
-  },
-  ghosteryListFetch: (dest: unknown, init: unknown) => {
-    bag.calls.ghosteryFetch.push([dest, init]);
-    return Promise.resolve(new Response(""));
-  },
-  persistRoute: () => {},
-}));
-vi.mock("../control", () => ({
-  messageListener: (deps: { ready: Promise<unknown>; persistRoute: unknown }) => {
-    bag.calls.controlDeps.push(deps);
-    return (e: unknown) => {
-      bag.calls.messageEvents.push(e);
-    };
-  },
-}));
+};
 
-/* ---- fake ServiceWorkerGlobalScope --------------------------------- */
+vi.stubGlobal("self", selfStub);
+vi.stubGlobal(
+  "caches",
+  {
+    open: async () => ({
+      match: async () => undefined,
+      put: async () => undefined,
+      delete: async () => true,
+      keys: async () => [],
+    }),
+    delete: async () => true,
+    keys: async () => [],
+  },
+);
+/* The update poll must not leave a live 5-minute interval in the
+   test process. */
+vi.stubGlobal("setInterval", (fn: () => void) => {
+  workerWorld.intervals.push(fn);
+  return workerWorld.intervals.length;
+});
 
-const ORIGIN = "https://engine.example";
+/* The mutable global fetch impl: engineSha (activate broadcast), the
+   worker-prelude asset fetch, host passthrough arms and the ghostery
+   list fetch all ride it. Per-test swap, never a live network. */
+const fetchState = vi.hoisted(() => ({ impl: null as null | ((...a: unknown[]) => unknown) }));
+vi.stubGlobal("fetch", (...a: unknown[]) => {
+  const impl =
+    fetchState.impl ??
+    (async () => new Response("console.log('sw');", { status: 200, headers: { "content-type": "text/javascript" } }));
+  return (impl as (...a: unknown[]) => unknown)(...a);
+});
 
-interface FakeCtx {
-  swself: Record<string, unknown>;
-  listeners: Map<string, Array<(e: unknown) => void>>;
-  errors: unknown[];
-  posted: Array<{ client: string; msg: unknown }>;
-  claimCalls: number;
-  skipWaiting: number;
-  updateCalls: number;
-  updateFoundListeners: Array<[string, unknown]>;
-  dispatch(type: string, ev: unknown): void;
+import { handleFetch } from "../request";
+import { workerPrelude } from "../transform";
+import * as cookiesMod from "../cookies";
+
+import { b64uEncode, setRouteKey, setScheme } from "../codec";
+/* A hand-rolled request stub for the branches that only read
+   url/method/destination/headers before answering (the opaque-scheme
+   arms): undici's Request constructor rejects blob:/about: URLs, but
+   a real browser fetch event carries them. */
+const stubRequest = (url: string, opts: { destination?: string; method?: string } = {}): Request =>
+  ({
+    url,
+    method: opts.method ?? "GET",
+    destination: opts.destination ?? "",
+    mode: "cors",
+    headers: new Headers(),
+    referrer: "about:client",
+    signal: new AbortController().signal,
+  }) as unknown as Request;
+
+/* The composition root itself - imported once, after the worker
+   world exists, exactly the way a real worker evaluates it. */
+const sw = await import("../sw");
+
+const listener = (type: string): ((e: unknown) => void) => {
+  const arr = workerWorld.listeners.get(type);
+  if (!arr || arr.length !== 1) throw new Error("expected exactly one " + type + " listener, got " + (arr?.length ?? 0));
+  return arr[0]!;
+};
+
+/* ---- event stubs -------------------------------------------------- */
+interface FiredFetch {
+  armed: Promise<Response>[];
+  held: Promise<unknown>[];
+  fire(): void;
 }
 
-function makeFakeSelf(opts: { claim?: "resolve" | "reject"; clients?: Array<{ url: string; postMessage(msg: unknown, transfer?: unknown[]): void }>; hasRegistration?: boolean; matchAllError?: boolean }): FakeCtx {
-  const listeners = new Map<string, Array<(e: unknown) => void>>();
-  const errors: unknown[] = [];
-  const posted: Array<{ client: string; msg: unknown }> = [];
-  const clients = (opts.clients ?? []).map((c, i) => ({
-    url: c.url,
-    postMessage: (msg: unknown, transfer?: unknown[]) => {
-      void transfer;
-      posted.push({ client: "c" + i, msg });
-    },
-  }));
-  const ctx: FakeCtx = {
-    swself: {},
-    listeners,
-    errors,
-    posted,
-    claimCalls: 0,
-    skipWaiting: 0,
-    updateCalls: 0,
-    updateFoundListeners: [],
-    dispatch(type, ev) {
-      for (const fn of listeners.get(type) ?? []) {
-        try {
-          fn(ev);
-        } catch (err) {
-          errors.push(err);
-        }
-      }
-    },
+const fireFetch = (req: Request, extra: Record<string, unknown> = {}): FiredFetch => {
+  const armed: Promise<Response>[] = [];
+  const held: Promise<unknown>[] = [];
+  const ev = {
+    request: req,
+    respondWith: (p: Promise<Response>) => void armed.push(p),
+    waitUntil: (p: Promise<unknown>) => void held.push(p),
+    clientId: "",
+    resultingClientId: "",
+    replacesClientId: "",
+    ...extra,
   };
-  ctx.swself = {
-    location: { origin: ORIGIN },
-    addEventListener(type: string, fn: (e: unknown) => void) {
-      const arr = listeners.get(type) ?? [];
-      arr.push(fn);
-      listeners.set(type, arr);
-    },
-    skipWaiting() {
-      ctx.skipWaiting++;
-    },
-    clients: {
-      claim: () => {
-        ctx.claimCalls++;
-        if ((opts.claim ?? "resolve") === "reject") return Promise.reject(new Error("claim refused"));
-        return Promise.resolve();
-      },
-      matchAll: () => {
-        if (opts.matchAllError) return Promise.reject(new Error("matchAll refused"));
-        return Promise.resolve(clients);
-      },
-      get: () => Promise.resolve(null),
-    },
-    registration:
-      opts.hasRegistration === false
-        ? undefined
-        : {
-            scope: ORIGIN + "/",
-            active: { scriptURL: ORIGIN + "/sw.js" },
-            addEventListener: (t: string, fn: unknown) => {
-              ctx.updateFoundListeners.push([t, fn]);
-            },
-            update: () => {
-              ctx.updateCalls++;
-              return Promise.resolve();
-            },
-          },
-  };
-  return ctx;
-}
-
-/** A fresh worker evaluation: reset the module graph, stub self/fetch,
-    import the real entrypoint, hand back the wiring handles. */
-async function bootSW(opts: {
-  jarLoad?: Mode;
-  dlLoad?: Mode;
-  extDownloadsLoad?: Mode;
-  extStartup?: Mode;
-  extBoot?: Mode;
-  prewarm?: Mode;
-  transportReady?: Mode;
-  claim?: "resolve" | "reject";
-  clients?: Array<{ url: string; postMessage(msg: unknown, transfer?: unknown[]): void }>;
-  hasRegistration?: boolean;
-  matchAllError?: boolean;
-  routeReadyHang?: boolean;
-  handleFetch?: null | ((e: { respondWith(r: Response | Promise<Response>): void; waitUntil(p: Promise<unknown>): void; [k: string]: unknown }) => void);
-} = {}): Promise<{ ctx: FakeCtx; hooks: typeof bag; DIAG: typeof import("../diag")["DIAG"]; flush(): Promise<void> }> {
-  vi.resetModules();
-  /* per-boot counters: a fresh worker evaluation's calls read clean
-     even when several boots happen inside one test */
-  for (const k of Object.keys(bag.calls)) {
-    const v = (bag.calls as unknown as Record<string, unknown>)[k];
-    if (Array.isArray(v)) v.length = 0;
-    else (bag.calls as unknown as Record<string, number>)[k] = 0;
-  }
-  bag.state.jarLoad = opts.jarLoad ?? "resolve";
-  bag.state.dlLoad = opts.dlLoad ?? "resolve";
-  bag.state.extDownloadsLoad = opts.extDownloadsLoad ?? "resolve";
-  bag.state.extStartup = opts.extStartup ?? "resolve";
-  bag.state.extBoot = opts.extBoot ?? "resolve";
-  bag.state.prewarm = opts.prewarm ?? "resolve";
-  bag.state.transportReady = opts.transportReady ?? "resolve";
-  bag.state.claim = opts.claim ?? "resolve";
-  bag.state.hasRegistration = opts.hasRegistration ?? true;
-  bag.state.matchAllError = opts.matchAllError ?? false;
-  bag.state.routeReadyHang = opts.routeReadyHang ?? false;
-  bag.state.settleRoute = null;
-  bag.state.handleFetch = opts.handleFetch ?? null;
-  const ctx = makeFakeSelf({ claim: opts.claim, clients: opts.clients, hasRegistration: opts.hasRegistration, matchAllError: opts.matchAllError });
-  vi.stubGlobal("self", ctx.swself);
-  /* engineSha (update broadcast) fetches the worker script: stubbed to
-     a 404 so sha resolves null without network and without crypto. */
-  vi.stubGlobal("fetch", async () => new Response("", { status: 404 }));
-  await import("../sw");
-  const { DIAG } = await import("../diag");
-  const flush = () => new Promise<void>((r) => setImmediate(r));
-  await flush();
-  return { ctx, hooks: bag, DIAG, flush };
-}
-
-/** Extendable-event fake whose waitUntil records what it was handed
-    (and observes rejections so the suite never trips unhandled
-    rejection on a behavior it is asserting about). */
-function mkExtendable() {
-  const held: Array<Promise<unknown>> = [];
   return {
-    ev: {
-      waitUntil: (p: Promise<unknown>) => {
-        held.push(p);
-        void p.catch(() => {});
-      },
-    } as unknown as ExtendableEvent,
+    armed,
     held,
+    fire: () => listener("fetch")(ev),
   };
-}
+};
 
-/** Fetch-event fake: respondWith records the armed promise (with a
-    no-op catch attached purely for unhandled-rejection hygiene). */
-function mkFetchEvent() {
-  const armed: Array<Promise<Response>> = [];
-  const waitUntil: Array<Promise<unknown>> = [];
-  const preventDefault = vi.fn();
-  const request = { url: ORIGIN + "/j/route", method: "GET", headers: new Headers() };
-  const target = {
-    request,
-    clientId: "c-fetch",
-    resultingClientId: "c-new",
-    respondWith: (p: Promise<Response>) => {
-      armed.push(p);
-      void p.catch(() => {});
-    },
-    waitUntil: (p: Promise<unknown>) => {
-      waitUntil.push(p);
-    },
-    preventDefault,
+const fireMessage = (
+  data: unknown,
+  opts: { senderUrl?: string; ports?: unknown[] } = {},
+): { replies: unknown[]; held: Promise<unknown>[] } => {
+  const replies: unknown[] = [];
+  const held: Promise<unknown>[] = [];
+  const port = { postMessage: (m: unknown) => void replies.push(m) };
+  const ev = {
+    data,
+    ports: opts.ports ?? [port],
+    source: opts.senderUrl === undefined ? null : { url: opts.senderUrl, id: "sender-1" },
+    waitUntil: (p: Promise<unknown>) => void held.push(p),
+    lastEventId: "",
+    origin: ORIGIN,
   };
-  return { target: target as unknown as Record<string, unknown>, armed, waitUntil, preventDefault, request };
-}
+  listener("message")(ev);
+  return { replies, held };
+};
 
-const BOOT_DEADLINE = 10_000;
-const tick = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
+const drain = async (ps: Promise<unknown>[], ms = 4000): Promise<PromiseSettledResult<unknown>[]> => {
+  const all = Promise.allSettled(ps);
+  const t = new Promise<PromiseSettledResult<unknown>[]>((r) => setTimeout(() => r([]), ms));
+  const res = await Promise.race([all, t]);
+  if (res.length === 0 && ps.length > 0) throw new Error("held promise(s) never settled within " + ms + "ms");
+  return res;
+};
+
+const KEY = b64uEncode(new Uint8Array(16).map((_, i) => i));
 
 beforeEach(() => {
-  for (const k of Object.keys(bag.calls)) {
-    const v = (bag.calls as unknown as Record<string, unknown>)[k];
-    if (Array.isArray(v)) v.length = 0;
-    else (bag.calls as unknown as Record<string, number>)[k] = 0;
-  }
-  bag.state.siteProfile = null;
-  (bag.state as { ghosterySeam?: unknown }).ghosterySeam = undefined;
+  setScheme("/j/");
+  setRouteKey(KEY);
+  workerWorld.clientsById.clear();
+  workerWorld.windows = [];
+  workerWorld.claimError = null;
+  fetchState.impl = null;
 });
 
 afterEach(() => {
-  vi.useRealTimers();
-  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
-/* ------------------------------------------------------------------ */
-/* composition invariants                                              */
-/* ------------------------------------------------------------------ */
-
-describe("composition invariants", () => {
-  it("wires exactly one listener per event and survives evaluation", async () => {
-    const { ctx } = await bootSW();
-    expect([...ctx.listeners.keys()].sort()).toEqual(["activate", "fetch", "install", "message"]);
-    for (const arr of ctx.listeners.values()) expect(arr).toHaveLength(1);
-    expect(ctx.errors).toHaveLength(0);
-  });
-
-  it("module evaluation survives a self without a registration object", async () => {
-    /* updates.ts guards the updatefound listener but used to poll
-       registration.update() unguarded: one sync TypeError killed the
-       entire sw.ts evaluation - no listeners wired at all. In a real
-       service worker registration always exists; the guard is for
-       non-SW evaluation contexts (tests, tooling, harnesses). */
-    const { ctx } = await bootSW({ hasRegistration: false });
-    expect(ctx.errors).toHaveLength(0);
-    expect([...ctx.listeners.keys()].sort()).toEqual(["activate", "fetch", "install", "message"]);
-  });
-
-  it("hands the transport the degraded-flag seam and ghostery a coercing fetcher", async () => {
-    const { hooks } = await bootSW();
-    const seam = hooks.calls.initTransport[0] as { setDegraded: unknown };
-    expect(typeof seam.setDegraded).toBe("function");
-    const ghosterySeam = (hooks.state as { ghosterySeam?: (input: unknown, init: unknown) => unknown }).ghosterySeam as (input: unknown, init: unknown) => unknown;
-    expect(typeof ghosterySeam).toBe("function");
-    /* the dest coercion table sw.ts owns */
-    ghosterySeam("https://g.example/list", { cache: "no-store" });
-    ghosterySeam(new URL("https://g.example/u"), undefined);
-    ghosterySeam({ url: "https://g.example/req" }, undefined);
-    expect((hooks.calls.ghosteryFetch as unknown[]).map((entry) => (entry as unknown[])[0])).toEqual([
-      "https://g.example/list",
-      "https://g.example/u",
-      "https://g.example/req",
-    ]);
-  });
-
-  it("hands transform the live seams it documented", async () => {
-    const { hooks } = await bootSW();
-    const d = hooks.calls.initTransform[0] as {
-      routeReady(): unknown;
-      routeKey(): unknown;
-      fpScript(): unknown;
-      siteScript(base: string): Promise<unknown>;
-      setDegraded(v: unknown): void;
-      lazyImages(): unknown;
-    };
-    expect(d.routeReady()).toBeInstanceOf(Promise);
-    expect(d.routeKey()).toBe("route-key");
-    expect(d.fpScript()).toBe("fp-script");
-    expect(d.lazyImages()).toBe(false);
-    await expect(d.siteScript("https://a.example/")).resolves.toBeNull();
-    hooks.state.siteProfile = { script: "site-script" };
-    await expect(d.siteScript("https://a.example/")).resolves.toBe("site-script");
-  });
-
-  it("injects its boot promise into the engine and the control plane", async () => {
-    const { hooks } = await bootSW();
-    expect(hooks.calls.initEngine).toHaveLength(1);
-    const boot = hooks.calls.initEngine[0] as Promise<void>;
-    expect(boot).toBeInstanceOf(Promise);
-    await expect(boot).resolves.toBeUndefined();
-    const deps = hooks.calls.controlDeps[0]!;
-    expect(deps.ready).toBeInstanceOf(Promise);
-    await expect(deps.ready).resolves.toBeUndefined();
-    expect(deps.persistRoute).toBeInstanceOf(Function);
-  });
-
-  it("wires every dispatcher and the permissions backend during boot", async () => {
-    const { hooks } = await bootSW();
-    for (const key of ["tabsDispatch", "tabsMessageDispatch", "scriptingDispatch", "extDownloadsDispatch", "notifyDispatch", "actionDispatch", "permsBackend", "alarmWake", "mgmtWire"] as const) {
-      expect(hooks.calls[key].length).toBeGreaterThanOrEqual(1);
+/* ==================================================================
+   A. Import-time wiring of the real composition root
+   ================================================================== */
+describe("composition root wiring (real sw.ts import)", () => {
+  it("registers exactly one install/activate/fetch/message listener each", () => {
+    for (const t of ["install", "activate", "fetch", "message"]) {
+      expect(workerWorld.listeners.get(t)?.length).toBe(1);
     }
-    /* resume fetch rides the wisp transport */
-    expect(hooks.calls.setResumeFetch).toHaveLength(1);
+  });
 
-    const backend = hooks.calls.permsBackend[0] as (id: string, op: string, perms: string[]) => Promise<unknown>;
-    await expect(backend("ext1", "grant", ["tabs"])).resolves.toEqual({
-      permissions: ["tabs"],
-      origins: ["*://granted/*"],
-    });
-    await expect(backend("ext1", "revoke", ["tabs"])).resolves.toBeNull();
+  it("the update poll ran once at module evaluation and left no live interval", () => {
+    expect(workerWorld.registrationUpdateCalls).toBe(1);
+    expect(workerWorld.intervals.length).toBe(1);
   });
 });
 
-/* ------------------------------------------------------------------ */
-/* install lifecycle                                                   */
-/* ------------------------------------------------------------------ */
-
-describe("install lifecycle (prewarm seam)", () => {
-  it("skipWaiting stays and a resolved prewarm settles install", async () => {
-    const { ctx, hooks } = await bootSW({ prewarm: "resolve" });
-    const { ev, held } = mkExtendable();
-    ctx.dispatch("install", ev);
-    expect(ctx.skipWaiting).toBe(1);
-    expect(held).toHaveLength(1);
-    await expect(held[0]!).resolves.toBeUndefined();
-    expect(ctx.errors).toHaveLength(0);
-    expect(hooks.calls.jarLoad).toBe(1);
-  });
-
-  it("a rejecting prewarm settles install undefined, never fails it", async () => {
-    const { ctx } = await bootSW({ prewarm: "reject" });
-    const { ev, held } = mkExtendable();
-    ctx.dispatch("install", ev);
-    await expect(held[0]!).resolves.toBeUndefined();
-    expect(ctx.errors).toHaveLength(0);
-  });
-
-  it("a hanging prewarm is bounded by the boot deadline", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const { ctx, DIAG } = await bootSW({ prewarm: "hang" });
-    const { ev, held } = mkExtendable();
-    ctx.dispatch("install", ev);
-    let settled = false;
-    void held[0]!.then(() => {
-      settled = true;
-    });
-    await vi.advanceTimersByTimeAsync(BOOT_DEADLINE - 1);
-    expect(settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(settled).toBe(true);
-    const rows = DIAG.snapshot(0).events.filter((e) => e.message.includes("rewriter prewarm"));
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.category).toBe("SERVICE_WORKER");
-  });
-
-  it("a sync-throwing prewarm seam still arms waitUntil (no listener death)", async () => {
-    /* installLifecycle called prewarm() outside any guard: a sync
-       throw escaped the listener, waitUntil was never armed, and the
-       install event died. */
-    const { ctx } = await bootSW({ prewarm: "throw" });
-    const { ev, held } = mkExtendable();
-    ctx.dispatch("install", ev);
-    expect(ctx.errors).toHaveLength(0);
-    expect(held).toHaveLength(1);
-    await expect(held[0]!).resolves.toBeUndefined();
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/* activate lifecycle                                                  */
-/* ------------------------------------------------------------------ */
-
-describe("activate lifecycle (claim, broadcast, transport warm)", () => {
-  const hostClient = { url: ORIGIN + "/", postMessage: () => {} };
-
-  it("claims, broadcasts the engine update, warms the transport", async () => {
-    const { ctx, hooks } = await bootSW({ clients: [hostClient] });
-    const { ev, held } = mkExtendable();
-    ctx.dispatch("activate", ev);
-    await expect(held[0]!).resolves.toBeUndefined();
-    expect(ctx.claimCalls).toBe(1);
-    expect(ctx.posted.length).toBe(1);
-    expect((ctx.posted[0]!.msg as { type: string }).type).toBe("zl:engineUpdate");
-    expect(hooks.calls.transportReady).toBe(1);
-  });
-
-  it("a refused claim still broadcasts to the visible clients and warms the transport", async () => {
-    /* clients.claim() rejection used to skip the update broadcast AND
-       the transport warm-up silently, and reject waitUntil. Neither
-       depends on claim succeeding. */
-    const { ctx, hooks } = await bootSW({ claim: "reject", clients: [hostClient] });
-    const { ev, held } = mkExtendable();
-    ctx.dispatch("activate", ev);
-    await expect(held[0]!).resolves.toBeUndefined();
-    expect(ctx.claimCalls).toBe(1);
-    expect(ctx.posted.length).toBe(1);
-    expect(hooks.calls.transportReady).toBe(1);
-  });
-
-  it("a failing update broadcast costs one cycle, not the warm-up", async () => {
-    const { ctx, hooks } = await bootSW({ matchAllError: true });
-    const { ev, held } = mkExtendable();
-    ctx.dispatch("activate", ev);
-    await expect(held[0]!).resolves.toBeUndefined();
-    expect(hooks.calls.transportReady).toBe(1);
-  });
-
-  it("a transport that cannot warm settles activate anyway (suite records transport-missing)", async () => {
-    const { ctx, hooks } = await bootSW({ transportReady: "reject", clients: [hostClient] });
-    const { ev, held } = mkExtendable();
-    ctx.dispatch("activate", ev);
-    await expect(held[0]!).resolves.toBeUndefined();
-    expect(hooks.calls.transportReady).toBe(1);
-    expect(ctx.posted.length).toBe(1);
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/* boot fault injection (the initReady composition)                    */
-/* ------------------------------------------------------------------ */
-
-describe("boot fault injection", () => {
-  it("a rejecting jar restore degrades to the in-memory jar, boot still completes", async () => {
-    const { hooks } = await bootSW({ jarLoad: "reject" });
-    await expect(hooks.calls.initEngine[0] as Promise<void>).resolves.toBeUndefined();
-    await expect(hooks.calls.controlDeps[0]!.ready).resolves.toBeUndefined();
-  });
-
-  it("a hanging jar restore is bounded for the control plane and named in DIAG", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const { hooks, DIAG } = await bootSW({ jarLoad: "hang" });
-    const ready = hooks.calls.controlDeps[0]!.ready;
-    let open = false;
-    void ready.then(() => {
-      open = true;
-    });
-    await vi.advanceTimersByTimeAsync(BOOT_DEADLINE - 1);
-    expect(open).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(open).toBe(true);
-    const rows = DIAG.snapshot(0).events.filter((e) => e.message.includes("control-plane boot"));
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.category).toBe("SERVICE_WORKER");
-    expect(rows[0]!.severity).toBe("error");
-  });
-
-  it("rejecting download registries never fail boot", async () => {
-    const { hooks } = await bootSW({ dlLoad: "reject", extDownloadsLoad: "reject" });
-    await expect(hooks.calls.controlDeps[0]!.ready).resolves.toBeUndefined();
-    expect(hooks.calls.setResumeFetch).toHaveLength(1);
-  });
-
-  it("extension phases fail independently: a dead registry restore does not skip the wiring", async () => {
-    const { hooks, DIAG } = await bootSW({ extStartup: "reject" });
-    await expect(hooks.calls.controlDeps[0]!.ready).resolves.toBeUndefined();
-    expect(hooks.calls.extBoot).toBe(1);
-    expect(hooks.calls.alarmWake.length).toBe(1);
-    expect(hooks.calls.mgmtWire.length).toBe(1);
-    const rows = DIAG.snapshot(0).events.filter((e) => e.category === "EXTENSION" && e.message.includes("registry restore"));
-    expect(rows).toHaveLength(1);
-  });
-
-  it("a sync-throwing extension phase is contained the same as a rejection", async () => {
-    const { hooks, DIAG } = await bootSW({ extStartup: "throw" });
-    await expect(hooks.calls.controlDeps[0]!.ready).resolves.toBeUndefined();
-    expect(hooks.calls.extBoot).toBe(1);
-    expect(DIAG.snapshot(0).events.some((e) => e.category === "EXTENSION")).toBe(true);
-  });
-
-  it("a failed enabled-extension boot still wires alarms and management", async () => {
-    const { hooks } = await bootSW({ extBoot: "reject" });
-    await expect(hooks.calls.controlDeps[0]!.ready).resolves.toBeUndefined();
-    expect(hooks.calls.alarmWake.length).toBe(1);
-    expect(hooks.calls.mgmtWire.length).toBe(1);
-  });
-
-  it("PIN (delta): the control-plane ready gate is sequential - a hung route shape blocks the initReady race from arming", async () => {
-    /* Deliberate composition: routeReady is awaited first, then
-       raceBoot(initReady). Both are individually bounded (the route
-       restore rides raceBoot in request.ts), so the gate is
-       wedged-but-bounded: worst-case open time is the SUM of the two
-       deadlines, not the max. Pinned, not changed: sequential gating
-       is the documented order, and the fetch gate runs the same
-       promises concurrently. */
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const { hooks, DIAG } = await bootSW({ routeReadyHang: true, jarLoad: "hang" });
-    const ready = hooks.calls.controlDeps[0]!.ready;
-    let open = false;
-    void ready.then(() => {
-      open = true;
-    });
-    /* the full engine-boot deadline passes with the route shape hung:
-       the gate has not even armed the initReady race */
-    await vi.advanceTimersByTimeAsync(BOOT_DEADLINE);
-    expect(open).toBe(false);
-    expect(DIAG.snapshot(0).events.filter((e) => e.message.includes("control-plane boot"))).toHaveLength(0);
-    /* the route shape settles; now the initReady bound counts */
-    bag.state.settleRoute?.();
-    await vi.advanceTimersByTimeAsync(BOOT_DEADLINE);
-    expect(open).toBe(true);
-    expect(DIAG.snapshot(0).events.filter((e) => e.message.includes("control-plane boot"))).toHaveLength(1);
-  });
-
-  it("a fresh worker evaluation re-runs the restores (restart-safe init)", async () => {
-    const first = await bootSW();
-    expect(first.hooks.calls.jarLoad).toBe(1);
-    const second = await bootSW();
-    expect(second.hooks.calls.jarLoad).toBe(1);
-    expect(second.ctx.listeners.get("fetch")).toHaveLength(1);
-    expect(second.hooks.calls.initEngine).toHaveLength(1);
-  });
-});
-
-/* ------------------------------------------------------------------ */
-/* the fetch seam: proxy + withCorp                                    */
-/* ------------------------------------------------------------------ */
-
-describe("fetch seam (respondWith proxy + withCorp funnel)", () => {
-  const drive = async (
-    respond: (e: { respondWith(r: Response | Promise<Response>): void; waitUntil(p: Promise<unknown>): void; [k: string]: unknown }) => void,
-  ) => {
-    const { ctx } = await bootSW({ handleFetch: (e) => respond(e) });
-    const fe = mkFetchEvent();
-    ctx.dispatch("fetch", fe.target);
-    return fe;
+/* ==================================================================
+   B. Activate composition: every step is best-effort
+   ================================================================== */
+describe("activate composition", () => {
+  const mkActivate = (): { held: Promise<unknown>[] } => {
+    const held: Promise<unknown>[] = [];
+    listener("activate")({ waitUntil: (p: Promise<unknown>) => void held.push(p) });
+    return { held };
   };
 
-  it("funnels a plain Response through withCorp", async () => {
-    const fe = await drive((e) => {
-      e.respondWith(new Response("body", { status: 201, headers: { "x-t": "1" } }));
-    });
-    const served = await fe.armed[0]!;
-    expect(served.headers.get("cross-origin-resource-policy")).toBe("cross-origin");
-    expect(served.status).toBe(201);
-    expect(served.headers.get("x-t")).toBe("1");
-    await expect(served.text()).resolves.toBe("body");
+  it("claims, broadcasts the engine update to window clients, then warms the transport", async () => {
+    transportSpy.readyCalls = 0;
+    const messages: unknown[] = [];
+    const win = { url: ORIGIN + "/", id: "w1", messages, postMessage: (m: unknown) => void messages.push(m) };
+    workerWorld.windows = [win as never];
+    const { held } = mkActivate();
+    await drain(held);
+    /* broadcast: engineSha fetches the worker script (stubbed fetch),
+       then posts zl:engineUpdate to every window client */
+    expect(messages.length).toBe(1);
+    expect((messages[0] as { type?: string }).type).toBe("zl:engineUpdate");
+    expect(transportSpy.readyCalls).toBe(1);
   });
 
-  it("funnels a promised Response the same way", async () => {
-    const fe = await drive((e) => {
-      e.respondWith(Promise.resolve(new Response("late")));
-    });
-    const served = await fe.armed[0]!;
-    expect(served.headers.get("cross-origin-resource-policy")).toBe("cross-origin");
-    await expect(served.text()).resolves.toBe("late");
+  it("a claim rejection does not skip the broadcast or the transport warm (blast radius)", async () => {
+    transportSpy.readyCalls = 0;
+    workerWorld.claimError = new Error("registration replaced mid-claim");
+    const messages: unknown[] = [];
+    const win = { url: ORIGIN + "/", id: "w2", messages, postMessage: (m: unknown) => void messages.push(m) };
+    workerWorld.windows = [win as never];
+    const { held } = mkActivate();
+    await drain(held);
+    expect(messages.length).toBe(1);
+    expect(transportSpy.readyCalls).toBe(1);
   });
 
-  it("a null-body 204 still carries CORP", async () => {
-    const fe = await drive((e) => {
-      e.respondWith(new Response(null, { status: 204 }));
-    });
-    const served = await fe.armed[0]!;
-    expect(served.status).toBe(204);
-    expect(served.headers.get("cross-origin-resource-policy")).toBe("cross-origin");
-  });
-
-  it("PIN: an error Response and a locked-body Response pass through unrebuilt (withCorp honest limits)", async () => {
-    const errResp = Response.error();
-    const fe1 = await drive((e) => {
-      e.respondWith(errResp);
-    });
-    await expect(fe1.armed[0]!).resolves.toBe(errResp);
-
-    const stream = new ReadableStream<Uint8Array>({
-      start(c) {
-        c.enqueue(new TextEncoder().encode("z"));
-        c.close();
-      },
-    });
-    const locked = new Response(stream);
-    void locked.body!.getReader(); /* lock the body: rebuild must throw */
-    const fe2 = await drive((e) => {
-      e.respondWith(locked);
-    });
-    const served = await fe2.armed[0]!;
-    expect(served).toBe(locked);
-    expect(served.headers.get("cross-origin-resource-policy")).toBeNull();
-  });
-
-  it("an escaped engine rejection is observable in DIAG, not silently swallowed", async () => {
-    /* #250's mirror at the fetch seam: the engine contract is "every
-       failure becomes an honest Response", but a rejection that
-       escapes anyway used to reach the browser as a silent network
-       error with no diagnostic anywhere. The seam now records a RUNTIME
-       row and still rethrows - nothing is fabricated. */
-    const { ctx, hooks } = await bootSW({
-      handleFetch: (e) => {
-        e.respondWith(Promise.reject(new Error("engine escape")));
-      },
-    });
-    const fe = mkFetchEvent();
-    ctx.dispatch("fetch", fe.target);
-    await expect(fe.armed[0]!).rejects.toThrow("engine escape");
-    const { DIAG } = await import("../diag");
-    const rows = DIAG.snapshot(0).events.filter((e) => e.message.includes("respondWith rejection escaped"));
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.category).toBe("RUNTIME");
-    expect(rows[0]!.technicalReason).toContain("engine escape");
-    void hooks;
-  });
-
-  it("waitUntil, property reads and method binding pass through the proxy", async () => {
-    const waitP = Promise.resolve();
-    let seenRequest: unknown;
-    let seenClientId: unknown;
-    const fe = await drive((e) => {
-      seenRequest = e.request;
-      seenClientId = e.clientId;
-      e.waitUntil(waitP);
-      (e.preventDefault as () => void)();
-      e.respondWith(new Response("ok"));
-    });
-    expect(seenRequest).toBe(fe.request);
-    expect(seenClientId).toBe("c-fetch");
-    expect(fe.waitUntil).toContain(waitP);
-    expect(fe.preventDefault).toHaveBeenCalled();
-    await expect(fe.armed[0]!).resolves.toBeInstanceOf(Response);
+  it("a broadcast rejection does not skip the transport warm", async () => {
+    transportSpy.readyCalls = 0;
+    fetchState.impl = async () => {
+      throw new Error("sw.js unreachable");
+    };
+    const { held } = mkActivate();
+    await drain(held);
+    expect(transportSpy.readyCalls).toBe(1);
   });
 });
 
-/* ------------------------------------------------------------------ */
-/* dispatcher delivery (real wireDispatchers + real cpgate gate)        */
-/* ------------------------------------------------------------------ */
+/* ==================================================================
+   C. Install composition: the real prewarm settles, never fails
+   ================================================================== */
+describe("install composition", () => {
+  it("skipWaiting stays and the real (throwing wasm stub) prewarm settles to undefined", async () => {
+    const held: Promise<unknown>[] = [];
+    const skip = vi.fn(async () => undefined);
+    const selfWithSkip = { ...selfStub, skipWaiting: skip };
+    const origSelf = globalThis.self;
+    vi.stubGlobal("self", selfWithSkip);
+    try {
+      listener("install")({ waitUntil: (p: Promise<unknown>) => void held.push(p) });
+      expect(skip).toHaveBeenCalledTimes(1);
+      expect(held.length).toBe(1);
+      await drain(held);
+      await expect(held[0]).resolves.toBeUndefined();
+    } finally {
+      vi.stubGlobal("self", origSelf);
+    }
+  });
+});
 
-describe("dispatcher delivery through the sw boot wiring", () => {
-  it("host-only ops reach host pages only", async () => {
-    const clients = [
-      { url: ORIGIN + "/", postMessage: () => {} },
-      { url: ORIGIN + "/j/some-route", postMessage: () => {} },
-      { url: "not a url", postMessage: () => {} },
-    ];
-    const { ctx, hooks } = await bootSW({ clients });
-    const tabsDispatch = hooks.calls.tabsDispatch[0] as (op: unknown) => void;
-    tabsDispatch({ op: "query" });
-    await tick();
-    expect(ctx.posted).toHaveLength(1);
-    expect((ctx.posted[0]!.msg as { type: string }).type).toBe("zl:tabsOp");
+/* ==================================================================
+   D2. Honest failure for the worker-script branches
+   ================================================================== */
+describe("worker script branches answer honestly instead of rejecting", () => {
+  it("/zl-bw/ with a failing prelude asset answers a Response, never a rejection", async () => {
+    /* runs before the battery warmed the prelude cache: the asset
+       fetch itself fails, which used to reject the respondWith promise */
+    fetchState.impl = async () => {
+      throw new Error("asset store unreachable");
+    };
+    const f = fireFetch(new Request(zlBwUrl()));
+    f.fire();
+    expect(f.armed.length).toBe(1);
+    const resp = await f.armed[0];
+    expect(resp).toBeInstanceOf(Response);
+    expect(resp.status).toBeGreaterThanOrEqual(400);
   });
 
-  it("a scripting reply port transfers to exactly one matching client and closes when unmatched", async () => {
-    const codec = await import("../codec");
-    codec.setScheme("/j/");
-    codec.setRouteKey(codec.b64uEncode(new Uint8Array(16).map((_, i) => i + 32)));
-    const route = ORIGIN + codec.encodeDestLegacy("https://site.example/page");
-    const clients = [
-      { url: route, postMessage: () => {} },
-      { url: ORIGIN + "/", postMessage: () => {} },
-    ];
-    const { ctx, hooks } = await bootSW({ clients });
-    const scripting = hooks.calls.scriptingDispatch[0] as (msg: { dest: string }, reply: { close(): void } | null) => void;
+  it("a blob: worker script whose own fetch fails answers a Response, never a rejection", async () => {
+    fetchState.impl = async () => {
+      throw new Error("blob store gone");
+    };
+    const f = fireFetch(stubRequest("blob:" + ORIGIN + "/worker-2", { destination: "worker" }));
+    f.fire();
+    expect(f.armed.length).toBe(1);
+    const resp = await f.armed[0];
+    expect(resp).toBeInstanceOf(Response);
+    expect(resp.status).toBeGreaterThanOrEqual(400);
+  });
+});
 
-    const port = { close: vi.fn() };
-    scripting({ dest: "https://site.example/page" }, port);
-    await tick();
-    expect(ctx.posted).toHaveLength(1);
-    expect((ctx.posted[0]!.msg as { dest: string }).dest).toBe("https://site.example/page");
+/* ==================================================================
+   D3. Worker prelude hygiene (runs AFTER the failure pins: the module-level
+   prelude cache is process state, and the success case warms it)
+   ================================================================== */
+describe("workerPrelude asset hygiene", () => {
+  it("a non-2xx asset body is never cached as the prelude; the next call retries", async () => {
+    let calls = 0;
+    fetchState.impl = async () => {
+      calls++;
+      return new Response("<html>404 page</html>", { status: 404 });
+    };
+    await expect(workerPrelude()).rejects.toThrow();
+    expect(calls).toBe(1);
+    fetchState.impl = async () => {
+      calls++;
+      return new Response("PRELUDE-OK", { status: 200, headers: { "content-type": "text/javascript" } });
+    };
+    await expect(workerPrelude()).resolves.toBe("PRELUDE-OK");
+    await expect(workerPrelude()).resolves.toBe("PRELUDE-OK");
+    expect(calls).toBe(2); /* cached only on success */
+  });
+});
 
-    ctx.posted.length = 0;
-    const dead = { close: vi.fn() };
-    scripting({ dest: "https://other.example/no-match" }, dead);
-    await tick();
-    expect(ctx.posted).toHaveLength(0);
-    expect(dead.close).toHaveBeenCalled();
+/* ==================================================================
+   D. The respondWith funnel: every engine response rides withCorp
+   ================================================================== */
+describe("respondWith funnel (withCorp at the composition root)", () => {
+  it("a foreign host-traffic passthrough gains CORP and keeps its body", async () => {
+    fetchState.impl = async () =>
+      new Response("host asset", { status: 200, headers: { "content-type": "text/plain" } });
+    const f = fireFetch(new Request("https://other.example/asset.txt"));
+    f.fire();
+    expect(f.armed.length).toBe(1);
+    const resp = await f.armed[0];
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get("cross-origin-resource-policy")).toBe("cross-origin");
+    await expect(resp.text()).resolves.toBe("host asset");
   });
 
-  it("tab messages deliver only to the client whose decoded destination matches", async () => {
-    const codec = await import("../codec");
-    codec.setScheme("/j/");
-    codec.setRouteKey(codec.b64uEncode(new Uint8Array(16).map((_, i) => i + 48)));
-    const route = ORIGIN + codec.encodeDestLegacy("https://site.example/inbox");
-    const clients = [
-      { url: route, postMessage: () => {} },
-      { url: ORIGIN + "/j/other", postMessage: () => {} },
+  it("a redirect passthrough keeps its Location and gains CORP", async () => {
+    fetchState.impl = async () =>
+      new Response(null, { status: 302, headers: { location: "https://other.example/next" } });
+    const f = fireFetch(new Request("https://other.example/jump"));
+    f.fire();
+    const resp = await f.armed[0];
+    expect(resp.status).toBe(302);
+    expect(resp.headers.get("location")).toBe("https://other.example/next");
+    expect(resp.headers.get("cross-origin-resource-policy")).toBe("cross-origin");
+  });
+
+  it("a streamed passthrough body survives the funnel intact (re-wrap, not tee)", async () => {
+    fetchState.impl = async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new TextEncoder().encode("str"));
+            c.enqueue(new TextEncoder().encode("eam"));
+            c.close();
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/plain" } },
+      );
+    const f = fireFetch(new Request("https://other.example/stream"));
+    f.fire();
+    const resp = await f.armed[0];
+    expect(resp.body).not.toBeNull();
+    await expect(resp.text()).resolves.toBe("stream");
+    expect(resp.headers.get("cross-origin-resource-policy")).toBe("cross-origin");
+  });
+
+  it("the proxy forwards waitUntil: the ghostery hold extends the real event", async () => {
+    fetchState.impl = async () => new Response("x", { headers: { "content-type": "text/plain" } });
+    const f = fireFetch(new Request("https://other.example/x"));
+    f.fire();
+    await f.armed[0];
+    await drain(f.held);
+    expect(f.held.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("a passthrough of Response.error() stays the native object (no CORP on errors)", async () => {
+    fetchState.impl = async () => Response.error();
+    const f = fireFetch(new Request("https://other.example/err"));
+    f.fire();
+    const resp = await f.armed[0];
+    expect(resp.type).toBe("error");
+    expect(resp.headers.get("cross-origin-resource-policy")).toBeNull();
+  });
+});
+
+/* ==================================================================
+   E. The message plane: the real wiring answers everything
+   ================================================================== */
+describe("control plane through the composition root", () => {
+  it("zl:ping from a host page answers the live shape", async () => {
+    const { replies, held } = fireMessage({ type: "zl:ping" }, { senderUrl: ORIGIN + "/" });
+    await drain(held);
+    const r = replies[0] as Record<string, unknown>;
+    expect(r.ok).toBe(true);
+    expect(typeof r.version).toBe("string");
+    expect(r.scheme).toBe("b64u");
+    expect(typeof r.prefix).toBe("string");
+  });
+
+  it("a host-only message from a proxied (NAVH) sender is refused", async () => {
+    const navh = ORIGIN + "/__zl_navh__/AAAAgarbageAAAA";
+    const { replies, held } = fireMessage({ type: "zl:getJars" }, { senderUrl: navh });
+    await drain(held);
+    expect(replies[0]).toMatchObject({ ok: false, error: "host-only control message" });
+  });
+
+  it("garbage payloads settle the event without crashing the plane", async () => {
+    const payloads: unknown[] = [null, 42, "a string", {}, { type: 123 as unknown as string }, { type: "" }, { type: "zl:unknownShape" }];
+    for (const data of payloads) {
+      const { held } = fireMessage(data, { senderUrl: ORIGIN + "/" });
+      const settled = await drain(held);
+      /* every event resolved (the #250 catch keeps rejections from
+         surfacing) */
+      for (const s of settled) expect(s.status).toBe("fulfilled");
+    }
+  });
+
+  it("a handler failure is answered with the structured error (#250)", async () => {
+    const spy = vi.spyOn(cookiesMod, "jarEnumeration").mockImplementation(() => {
+      throw new Error("torture: jar ring broken");
+    });
+    const { replies, held } = fireMessage({ type: "zl:getJars" }, { senderUrl: ORIGIN + "/" });
+    let settled: PromiseSettledResult<unknown>[] = [];
+    try {
+      settled = await drain(held);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(replies[0]).toMatchObject({ ok: false, error: "control handler failed" });
+    for (const s of settled) expect(s.status).toBe("fulfilled");
+  });
+
+  it("an empty ports array never crashes the reply seam", async () => {
+    const { held } = fireMessage({ type: "zl:ping" }, { senderUrl: ORIGIN + "/", ports: [] });
+    const settled = await drain(held);
+    for (const s of settled) expect(s.status).toBe("fulfilled");
+  });
+});
+
+/* ==================================================================
+   E2. The orchestration body never arms a rejected respondWith
+   ================================================================== */
+describe("orchestration failure answers honestly (outer catch)", () => {
+  it("a rejected boot gate lands as the engine's honest 502, never net::ERR_FAILED", async () => {
+    const spy = vi
+      .spyOn(cookiesMod, "jarProfilesReady")
+      .mockImplementation(() => Promise.reject(new Error("torture: boot gate rejected")));
+    let f: ReturnType<typeof fireFetch>;
+    try {
+      fetchState.impl = async () => new Response("x", { headers: { "content-type": "text/plain" } });
+      f = fireFetch(new Request("https://target.example/asset"));
+      f.fire();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(f!.armed.length).toBe(1);
+    const resp = await f!.armed[0];
+    expect(resp).toBeInstanceOf(Response);
+    expect(resp.status).toBe(502);
+    await drain(f!.held);
+  });
+
+  it("a rejected boot gate on a navigation lands as the honest error page", async () => {
+    const spy = vi
+      .spyOn(cookiesMod, "jarProfilesReady")
+      .mockImplementation(() => Promise.reject(new Error("torture: boot gate rejected")));
+    let f: ReturnType<typeof fireFetch>;
+    try {
+      /* a real navigation carries mode "navigate" (undici honors it in
+         the constructor); the outer catch branches on the mode */
+      const nav = new Request("https://target.example/doc", { headers: { "sec-fetch-dest": "document" } });
+      Object.defineProperty(nav, "mode", { value: "navigate" });
+      f = fireFetch(nav);
+      f.fire();
+    } finally {
+      spy.mockRestore();
+    }
+    const resp = await f!.armed[0];
+    expect(resp.status).toBe(502);
+    expect(resp.headers.get("content-type")).toContain("text/html");
+    await drain(f!.held);
+  });
+});
+
+/* ==================================================================
+   F. Arming guarantee + never-rejecting respondWith
+   ================================================================== */
+/* The classes that are INTENTIONALLY browser-owned (respondWith must
+   stay unarmed): opaque schemes whose destination is not a worker
+   script, and the /wisp/ transport endpoint. */
+const UNARMED_CASES: Array<{ name: string; req: Request }> = [
+  { name: "data: url", req: stubRequest("data:text/plain,hi") },
+  { name: "blob: url (non-worker destination)", req: stubRequest("blob:" + ORIGIN + "/9ab") },
+  { name: "blob: url (POST)", req: stubRequest("blob:" + ORIGIN + "/9ac", { method: "POST" }) },
+  { name: "about:blank", req: stubRequest("about:blank") },
+  { name: "wisp transport endpoint", req: new Request(ORIGIN + "/wisp/") },
+  { name: "wisp transport endpoint (deep)", req: new Request(ORIGIN + "/wisp/deep/path?x=1") },
+];
+
+/* A valid /zl-bw/ token: the blob-worker prelude route. */
+const zlBwUrl = (site = "site.example", base = "https://site.example/"): string =>
+  ORIGIN + "/zl-bw/?c=" + encodeURIComponent(JSON.stringify({ s: site, b: base }));
+
+type Case = { name: string; make: () => Request; opts?: Record<string, unknown> };
+
+const deterministicCases = (): Case[] => {
+  const cases: Case[] = [];
+  const req = (url: string, init?: RequestInit): Request => new Request(url, init);
+  /* Same-origin shapes */
+  cases.push({ name: "host page path", make: () => req(ORIGIN + "/index.html") });
+  cases.push({ name: "host asset", make: () => req(ORIGIN + "/assets/app.js", { headers: { "sec-fetch-dest": "script" } }) });
+  cases.push({ name: "engine route garbage token", make: () => req(ORIGIN + "/j/!!!not-base64url!!!") });
+  cases.push({ name: "engine route empty", make: () => req(ORIGIN + "/j/") });
+  cases.push({ name: "navh garbage token", make: () => req(ORIGIN + "/__zl_navh__/garbage-garbage") });
+  cases.push({ name: "navh empty", make: () => req(ORIGIN + "/__zl_navh__/") });
+  cases.push({ name: "query handle garbage", make: () => req(ORIGIN + "/x?zlNavh=%00%01garbage") });
+  cases.push({ name: "query handle empty value", make: () => req(ORIGIN + "/?zlNavh=") });
+  cases.push({ name: "navp marker garbage", make: () => req(ORIGIN + "/a/__zlprel__/b/c") });
+  cases.push({ name: "nav marker garbage", make: () => req(ORIGIN + "/__zl_nav__/!!") });
+  cases.push({ name: "zl-bw bad token", make: () => req(ORIGIN + "/zl-bw/?c=garbage") });
+  cases.push({ name: "zl-bw missing token", make: () => req(ORIGIN + "/zl-bw/") });
+  cases.push({ name: "zl-bw valid token (prelude ok)", make: () => req(zlBwUrl()) });
+  cases.push({ name: "ext route garbage", make: () => req(ORIGIN + "/zl-ext/!!!/popup.html") });
+  cases.push({ name: "cs route garbage", make: () => req(ORIGIN + "/zl-cs/???") });
+  cases.push({ name: "rooted zlExt no grant", make: () => req(ORIGIN + "/?zlExt=nope") });
+  cases.push({ name: "deeply nested unknown path", make: () => req(ORIGIN + "/" + "a/".repeat(120) + "leaf") });
+  cases.push({ name: "unicode path", make: () => req(ORIGIN + "/日本語/נְתִיב/x") });
+  cases.push({ name: "null byte query", make: () => req(ORIGIN + "/x?q=%00&y=%01") });
+  cases.push({ name: "huge query", make: () => req(ORIGIN + "/x?q=" + "z".repeat(8000)) });
+  /* Foreign shapes (no client context: host-traffic passthrough) */
+  cases.push({ name: "foreign simple", make: () => req("https://target.example/") });
+  cases.push({ name: "foreign post", make: () => req("https://target.example/api", { method: "POST", body: "k=v" }) });
+  cases.push({ name: "foreign preflight", make: () => req("https://target.example/api", { method: "OPTIONS", headers: { "access-control-request-method": "POST" } }) });
+  cases.push({ name: "foreign opaque port", make: () => req("https://target.example:8642/x") });
+  /* Blob worker script (engine-owned prelude branch). The battery
+     runs after the hygiene section, so the prelude asset cache is
+     warm and the branch answers from it. */
+  cases.push({ name: "blob worker script GET (prelude cached)", make: () => stubRequest("blob:" + ORIGIN + "/worker-1", { destination: "worker" }) });
+  return cases;
+};
+
+describe("arming + never-rejecting respondWith (deterministic battery)", () => {
+  for (const c of deterministicCases()) {
+    it("arms exactly once and answers with a Response: " + c.name, async () => {
+      const f = fireFetch(c.make(), c.opts);
+      f.fire();
+      /* arming is synchronous: no await before this point */
+      expect(f.armed.length).toBe(1);
+      const resp = await f.armed[0];
+      expect(resp).toBeInstanceOf(Response);
+      expect(resp.status).toBeGreaterThanOrEqual(200);
+      expect(resp.status).toBeLessThanOrEqual(599);
+      await drain(f.held);
+    });
+  }
+
+  for (const c of UNARMED_CASES) {
+    it("stays browser-owned without arming: " + c.name, async () => {
+      const f = fireFetch(c.req);
+      f.fire();
+      expect(f.armed.length).toBe(0);
+    });
+  }
+});
+
+/* Seeded LCG fuzz over hostile URL/request space. Every deviation from
+   the two invariants is a finding: arming class violated, armed promise
+   rejected, or a non-Response answer. */
+describe("arming + never-rejecting respondWith (seeded fuzz)", () => {
+  const mulberry32 = (seed: number) => () => {
+    seed |= 0;
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+
+  const garbage = (rnd: () => number, n: number): string => {
+    const alphabet = "ABCabc012-_!#$%&()*+,:;=?@[]^`{|}~Äöü\u00e9\u4e2d";
+    let s = "";
+    for (let i = 0; i < n; i++) s += alphabet[Math.floor(rnd() * alphabet.length)];
+    return s;
+  };
+
+  const iters = 80;
+  const seed = 0x5efe11;
+
+  it("every seeded request arms its class and never rejects respondWith", async () => {
+    const rnd = mulberry32(seed);
+    const deviations: string[] = [];
+    for (let i = 0; i < iters; i++) {
+      const pick = rnd();
+      let url: string;
+      if (pick < 0.3) {
+        url = ORIGIN + "/" + garbage(rnd, 1 + Math.floor(rnd() * 60));
+      } else if (pick < 0.5) {
+        url = ORIGIN + "/j/" + garbage(rnd, 1 + Math.floor(rnd() * 40));
+      } else if (pick < 0.65) {
+        url = ORIGIN + "/__zl_navh__/" + garbage(rnd, 1 + Math.floor(rnd() * 40));
+      } else if (pick < 0.8) {
+        url = "https://f" + Math.floor(rnd() * 9) + ".example/" + garbage(rnd, 1 + Math.floor(rnd() * 40)) + "?q=" + encodeURIComponent(garbage(rnd, 1 + Math.floor(rnd() * 20)));
+      } else if (pick < 0.9) {
+        url = zlBwUrl(garbage(rnd, 8), "https://" + garbage(rnd, 6) + ".example/");
+      } else {
+        url = ORIGIN + "/?zlNavh=" + encodeURIComponent(garbage(rnd, 1 + Math.floor(rnd() * 30)));
+      }
+      const method = pick < 0.8 ? "GET" : rnd() < 0.5 ? "POST" : "OPTIONS";
+      const dest = ["document", "script", "style", "image", "empty", "worker"][Math.floor(rnd() * 6)];
+      let request: Request;
+      try {
+        request = new Request(url, { method, headers: { "sec-fetch-dest": dest } });
+      } catch {
+        continue; /* Request constructor rejected: not an engine case */
+      }
+      if (method === "OPTIONS") request.headers.set("access-control-request-method", "POST");
+      /* every fuzz template is http(s) engine work: /wisp/ and the
+         opaque schemes are covered by the deterministic battery */
+      const f = fireFetch(request);
+      try {
+        f.fire();
+        const armedShould = true;
+        if (armedShould && f.armed.length !== 1) {
+          deviations.push(`case ${i} (${method} ${url}): armed ${f.armed.length}`);
+          continue;
+        }
+        if (!armedShould) {
+          if (f.armed.length !== 0) deviations.push(`case ${i} (${method} ${url}): expected unarmed, got ${f.armed.length}`);
+          continue;
+        }
+        const resp = await Promise.race([
+          f.armed[0].then(
+            (r) => r,
+            (err: unknown) => err,
+          ),
+          new Promise<string>((r) => setTimeout(() => r("TIMEOUT"), 8000)),
+        ]);
+        if (resp === "TIMEOUT") {
+          deviations.push(`case ${i} (${method} ${url}): respondWith never settled`);
+        } else if (resp instanceof Response) {
+          if (resp.status < 200 || resp.status > 599) deviations.push(`case ${i} (${method} ${url}): status ${resp.status}`);
+        } else {
+          deviations.push(`case ${i} (${method} ${url}): respondWith REJECTED with ${String(resp)}`);
+        }
+        await drain(f.held);
+      } catch (err) {
+        deviations.push(`case ${i} (${method} ${url}): threw ${String(err)}`);
+      }
+    }
+    if (deviations.length > 0) {
+      throw new Error(`UNCLASSIFIED DEVIATIONS (${deviations.length}/${iters}):\n` + deviations.slice(0, 10).join("\n"));
+    }
+    expect(deviations.length).toBe(0);
+  });
+});
+
+/* ==================================================================
+   I. The update poll degrades without a usable registration
+   ================================================================== */
+describe("startUpdateChecks registration degradation", () => {
+  it("a worker world without registration.update() must not throw at module scope", async () => {
+    vi.resetModules();
+    const brokenWorlds: unknown[] = [
+      { location: { origin: ORIGIN, href: ORIGIN + "/sw.js" } }, /* no registration at all */
+      { location: { origin: ORIGIN, href: ORIGIN + "/sw.js" }, registration: { addEventListener: () => undefined } }, /* no update() */
     ];
-    const { ctx, hooks } = await bootSW({ clients });
-    const msgDispatch = hooks.calls.tabsMessageDispatch[0] as (tabId: number, tabUrl: string, extId: string, payload: unknown) => void;
-    msgDispatch(1, "https://site.example/inbox", "ext1", { hello: true });
-    await tick();
-    expect(ctx.posted).toHaveLength(1);
-    expect((ctx.posted[0]!.msg as { type: string }).type).toBe("zl:tabMessage");
+    for (const w of brokenWorlds) {
+      vi.stubGlobal("self", w);
+      const upd = await import("../updates");
+      expect(() => upd.startUpdateChecks()).not.toThrow();
+    }
   });
 });

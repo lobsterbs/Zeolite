@@ -87,16 +87,17 @@ export function startUpdateChecks(): void {
   } catch {
     /* no registration object: nothing to poll */
   }
+  /* The poll itself must degrade the same way the updatefound wiring
+     above does: a worker world without a usable registration used to
+     throw at this exact module-scope call, killing the whole sw.ts
+     evaluation - every listener in the worker with it. */
+  const reg = self.registration;
+  if (!reg || typeof reg.update !== "function") return;
   const check = (): void => {
-    /* sw torture: the updatefound listener above is guarded against a
-       registration-less context; the poll must be too, or one sync
-       TypeError at module scope kills the whole sw.ts evaluation (no
-       listeners wired at all). In a real service worker registration
-       always exists; this guard is for non-SW evaluation contexts. */
     try {
-      void self.registration.update().catch(() => {});
+      void reg.update().catch(() => {});
     } catch {
-      /* no registration object: nothing to poll */
+      /* registration vanished mid-life: nothing to poll */
     }
   };
   check();
