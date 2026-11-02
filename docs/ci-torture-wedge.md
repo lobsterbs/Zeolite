@@ -264,3 +264,21 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes. The pin gate stands: all five jobs green or no
   LobsterBrowse pin.
+
+## Run 41528599862 (21:28Z 2026-11-02, head 492cf9ce, docs-only retrigger)
+
+- The same deterministic cascade pair as 41526555150: the 700 ms TTFB
+  probe wedged first (embedder "Starting engine..."), then the
+  torture-page img#uni direct assertion failed through the serve
+  fallback - the direct page's own fetch of the element URL errored,
+  consistent with fixture-connection starvation by the wedged
+  engine's never-closed streams (the documented #514 signature;
+  the fixture itself serves the URL 200/68 bytes locally and the
+  unicode routing probe passed again this run).
+- rust/wasm/app/compat green; browser the only red. The wedge root
+  cause remains #514; the harness fallback is the right contract and
+  held on the one run the wedge did not strike (41524458112 had no
+  torture failure at all).
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin.
