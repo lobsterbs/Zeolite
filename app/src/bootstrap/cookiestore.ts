@@ -93,9 +93,10 @@ export function applyCookieStore(
   /* #599: a facade op that the jar refuses (invalid name/value/path
      grammar) rejects the page promise with TypeError, the platform
      behavior for invalid cookieStore names/values - silence is never
-     an outcome. */
+     an outcome. The control plane always sets error; the short
+     fallback keeps the bootstrap size budget honest. */
   const expectOk = (r: { ok?: boolean; error?: string }): void => {
-    if (r.ok === false) throw new TypeError(r.error || "cookieStore: operation rejected");
+    if (r.ok === false) throw new TypeError(r.error || "rejected");
   };
   const norm = (i: FacadeRecord): FacadeRecord => ({
     name: i.name,
