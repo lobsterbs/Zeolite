@@ -203,3 +203,28 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes. The pin gate stands: all five jobs green or no
   LobsterBrowse pin.
+
+## Runs 41520211250 and 41522301881: the img#uni decode-skip flake
+
+- Run 41520211250 (head 228518a7): replay-spool PASSED for the first
+  time in this window (the #556 fixture redirect-origin fix verified
+  in CI); the wedge struck torture with the ~2 MB streamed-document
+  probe ("first marker never rendered in 60s", embedder "Starting
+  engine...") and the torture-page img#uni direct assertion followed.
+- Run 41522301881 (head e9ac6c8e, docs-only retrigger): every earlier
+  torture probe passed, including large document #99 (end 2595 ms)
+  and the unicode routing probe that fetches the SAME
+  /dir/unicode/%C3%A5.png in the SAME direct page 0.3 s before the
+  torture-page probe - yet img#uni stayed complete-but-undecoded
+  past its 10 s poll. That is the documented #ss decode-skip flake
+  ("the renderer can leave an image undecoded via its in-process
+  image cache - CI hit it on the direct oracle twice"), now hitting
+  the decode-based direct sanity of img#uni.
+- Fix shipped in this commit (harness-only, engine bytes unchanged):
+  the torture-page imgState forces the element's own decode once and
+  then falls back to the same deterministic serve contract the #ss
+  candidate already uses (element URL serves 200 with bytes); the
+  direct oracle asserts decode OR serve, the proxied arm keeps the
+  strict decode contract. The fixture itself serves the PNG 200/68
+  bytes (verified locally against startFixture).
+- The pin gate stands: all five jobs green or no LobsterBrowse pin.
