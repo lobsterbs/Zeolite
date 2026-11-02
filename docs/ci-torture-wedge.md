@@ -244,3 +244,23 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes. The pin gate stands: all five jobs green or no
   LobsterBrowse pin.
+
+## Run 41526555150 (21:14Z 2026-11-02, head 8125e9c1, docs-only retrigger)
+
+- The wedge struck the torture suite with the 700 ms TTFB probe first
+  ("timeout waiting for proxied frame", embedder "Starting engine..."),
+  and the torture-page img#uni direct assertion failed again in the
+  cascade: with the serve fallback now in place this run shows the
+  direct page itself could not fetch the element URL (the collect
+  returned, so the fetch threw or answered non-200), which places the
+  failure in the wedged-context cascade, not the fixture: the same
+  URL serves 200/68 bytes against startFixture locally and the
+  unicode routing probe in the same battery fetches the same path
+  in the same direct page.
+- Position-random first victims across the last three heads: #99
+  large document, img#uni, #545 worker initiator, 700 ms TTFB - the
+  intermittent transport wedge, not wave content; rust/wasm/app/
+  compat green again.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin.
