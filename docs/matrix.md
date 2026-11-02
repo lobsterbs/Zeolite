@@ -1,4 +1,4 @@
-# Support and limitation matrix (3.0 Diamond)
+# Support and limitation matrix (3.0.1 Diamond)
 
 Every row states what actually ships, verified against the code and
 the test suite, not what would be nice to have. Statuses:

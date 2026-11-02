@@ -30,7 +30,7 @@ import { ruleFor, ruleProfile, siteRules } from "./siteconfig";
 import { httpsUpgraded } from "./config";
 import { currentEngine } from "./transport";
 
-export const ZEOLITE_VERSION = "3.0 Diamond";
+export const ZEOLITE_VERSION = "3.0.1 Diamond";
 
 /* ---- Per-client virtual contexts (issue #33) ------------------------ */
 

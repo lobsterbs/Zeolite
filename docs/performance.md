@@ -1,4 +1,4 @@
-# Performance audit (3.0 Diamond re-audit)
+# Performance audit (3.0.1 Diamond re-audit)
 
 Facts from the codebase and CI run 36530935953 (artifact sizes
 measured at the 2.5 cut; the 3.0 release changes only version

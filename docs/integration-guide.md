@@ -1,7 +1,7 @@
 # How to correctly integrate Zeolite
 
 This document is the integration guide for hosts that embed the Zeolite
-engine (current release: 3.0 Diamond). It defines the full integration
+engine (current release: 3.0.1 Diamond). It defines the full integration
 contract: what the host must provide, what the engine expects, what the
 host must never do, and a verification checklist to run after wiring
 everything together. LobsterBrowse is the reference host; every rule below

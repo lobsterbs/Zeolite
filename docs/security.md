@@ -1,4 +1,4 @@
-# Security self-review (3.0 Diamond re-audit)
+# Security self-review (3.0.1 Diamond re-audit)
 
 This is an internal self-review by the project author, not an
 external audit: no third party has reviewed this surface, and the

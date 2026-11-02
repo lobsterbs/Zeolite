@@ -33,7 +33,7 @@ channel.port1.onmessage = (event) => {
 worker.postMessage({
   type: "zl:doctor",
   expectedScope: new URL("/", location.href).href,
-  expectedVersion: "3.0 Diamond", // OPTIONAL; host-supplied *served* bundle version
+  expectedVersion: "3.0.1 Diamond", // OPTIONAL; host-supplied *served* bundle version
   probeAssets: false,           // passive is the default
   format: "kdl",                // optional; includes `kdl` string in reply
 }, [channel.port2]);
