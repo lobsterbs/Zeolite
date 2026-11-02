@@ -1592,7 +1592,17 @@ const routeRestore: Promise<void> = (async () => {
       /* KDL shape: route-config prefix "/j/" https-upgrade #true nav-handles #false adaptive-transit #false */
       const [node] = parseKdl(await hit.text());
       if (node && node.name === "route-config") {
-        setScheme(typeof node.props.prefix === "string" ? node.props.prefix : "/j/");
+        /* Control-plane torture fix: a poisoned persisted prefix ("",
+           "/", a reserved root) restored verbatim on every boot kept
+           the engine wedged across restarts; an invalid shape falls
+           back to the default instead. */
+        if (
+          !setScheme(
+            typeof node.props.prefix === "string" ? node.props.prefix : "/j/",
+          )
+        ) {
+          setScheme("/j/");
+        }
         if (typeof node.props["https-upgrade"] === "boolean") setHttpsUpgrade(node.props["https-upgrade"]);
         if (typeof node.props["nav-handles"] === "boolean") setNavHandles(node.props["nav-handles"]);
         /* #539: the learned-transit kill switch persists with the route
@@ -1617,7 +1627,9 @@ const routeRestore: Promise<void> = (async () => {
       const legacy = await cache.match(routeKeyUrlLegacy());
       if (legacy) {
         const cfg = (await legacy.json()) as { prefix?: string; httpsUpgrade?: boolean; navHandles?: boolean };
-        setScheme(cfg.prefix ?? "/j/");
+        /* Same torture fix as the KDL arm: a poisoned legacy shape
+           falls back to the default instead of restoring the wedge. */
+        if (!setScheme(cfg.prefix ?? "/j/")) setScheme("/j/");
         if (typeof cfg.httpsUpgrade === "boolean") setHttpsUpgrade(cfg.httpsUpgrade);
         if (typeof cfg.navHandles === "boolean") setNavHandles(cfg.navHandles);
       }

@@ -34,8 +34,47 @@ const B64URL =
    crates/rewriter/src/config.rs (RewriteConfig::default). */
 let prefix = "/j/";
 
-export function setScheme(p: string): void {
-  prefix = p.endsWith("/") || p === "" ? p : p + "/";
+/* Control-plane torture fix: the prefix is the engine's most
+   privileged knob - isEnginePath (route classification), decodePath
+   and every minted route hang off it - yet setScheme accepted any
+   string. A poisoned value did not just break routing: "" and "/"
+   collapse isEnginePath to true for EVERY same-origin path, so the
+   host's own pages classify as proxied pages and the host-only gate
+   refuses zl:config and even zl:doctor - a self-lockout the
+   persisted route-config then survives every restart with. The
+   grammar is one segment of engine-safe charset, and the reserved
+   roots (navguard marker, NAVH handles, extension routes, the
+   zlsw-register boot page) can never become the engine prefix. */
+const SCHEME_PREFIX_RE = /^\/[A-Za-z0-9_-]{1,32}\/$/;
+const RESERVED_SCHEME_SEGMENTS = new Set([
+  "__zl_nav__",
+  "__zl_navh__",
+  "zl-ext",
+  "zl-cs",
+  "zlsw-register",
+]);
+
+/** True when p is a safe route prefix ("/segment/" form, engine-safe
+    charset, not a reserved engine root). The zl:config seam refuses
+    anything else honestly; the persisted-route restore falls back to
+    the default shape for anything else. */
+export function validSchemePrefix(p: unknown): p is string {
+  if (typeof p !== "string" || !SCHEME_PREFIX_RE.test(p)) return false;
+  const seg = p.slice(1, -1);
+  /* The "__zl" namespace is engine-internal by convention (navguard
+     marker, NAVH handles); refusing it wholesale also covers roots
+     that do not exist yet. */
+  if (seg.startsWith("__zl") || RESERVED_SCHEME_SEGMENTS.has(seg)) return false;
+  return true;
+}
+
+/** Applies the route prefix; returns false (unchanged) for a value
+    validSchemePrefix rejects. Callers that owe the sender an answer
+    must refuse honestly on false instead of applying silently. */
+export function setScheme(p: string): boolean {
+  if (!validSchemePrefix(p)) return false;
+  prefix = p;
+  return true;
 }
 
 export function currentPrefix(): string {
