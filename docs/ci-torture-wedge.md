@@ -382,3 +382,28 @@ deterministic; only its firing is intermittent. Tracked in #514.
   operational notes. The pin gate stands: all five jobs green or no
   LobsterBrowse pin. Pin 150 (dist 8223b1ff, green run 41483811807)
   remains the deployed pin on all three LB services.
+
+
+## Run 41607524709 (09:00Z 2026-11-03, head 50bae0da, docs-only retrigger)
+
+- Fourth consecutive strike today, rotating back to the MAIN e2e
+  suite: the #545 worker-initiator timeout first ("worker fetch
+  initiator timeout"), then the standard page.goto 30 s cascade
+  (shared-worker relay, #453 identities, storage round-trip, jar
+  document.cookie, Set-Cookie capture, cookieStore facade), 58
+  passed / 8 failed; rust/wasm/app/compat green; the app job
+  published dist normally again. The torture suite was never
+  reached (main-suite red skips it).
+- Exoneration across the four strikes of this wave is now complete:
+  on identical engine bytes the main e2e suite PASSED in
+  41604559271 and 41606184413 while torture carried the red, and
+  torture passed 19/20 in 41606184413 with the single failure on
+  the non-engine direct-oracle arm. No deterministic content
+  regression can produce that rotation; the strike rate is the
+  documented runner-contention variable (#514).
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes and the LAST retrigger of this session: if it
+  is red, the pin gate holds at pin 150 and the f.txt ad-artefact
+  filter waits on main (dist 08fd43cd is published) until a green
+  run lands. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin.
