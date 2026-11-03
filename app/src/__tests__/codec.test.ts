@@ -123,8 +123,6 @@ describe("isEngineAsset", () => {
       "/index.html",
       "/rewriter_wasm.js",
       "/rewriter_wasm_bg.wasm",
-      "/wisp_wasm.js",
-      "/wisp_wasm_bg.wasm",
     ]) {
       expect(isEngineAsset(p)).toBe(true);
     }
@@ -135,6 +133,9 @@ describe("isEngineAsset", () => {
     expect(isEngineAsset("/")).toBe(false);
     expect(isEngineAsset("/rules.json")).toBe(false);
     expect(isEngineAsset("/sw.js.bak")).toBe(false);
+    /* #595: the unwired wisp-wasm crate is no longer a served asset. */
+    expect(isEngineAsset("/wisp_wasm.js")).toBe(false);
+    expect(isEngineAsset("/wisp_wasm_bg.wasm")).toBe(false);
   });
 });
 
