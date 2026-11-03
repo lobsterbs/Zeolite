@@ -38,6 +38,10 @@ export interface VirtualContext {
   targetOrigin: string;
   /** The full upstream URL that established the context (with query). */
   currentUrl: string;
+  /** #596: client shape for the guest clients facade - "window" for
+      document navigations, "worker"/"sharedworker" for worker-script
+      destinations. Absent means the pre-#596 window default. */
+  clientKind?: "window" | "worker" | "sharedworker";
 }
 
 /** Default cap for the context map. Client ids are never reused, so a
@@ -54,6 +58,7 @@ export function establishContext(
   map: Map<string, VirtualContext>,
   clientId: string,
   target: string,
+  kind: "window" | "worker" | "sharedworker" = "window",
 ): VirtualContext | null {
   let u: URL;
   try {
@@ -67,6 +72,7 @@ export function establishContext(
     clientId,
     targetOrigin: u.origin,
     currentUrl: target,
+    clientKind: kind,
   };
   map.set(clientId, ctx);
   return ctx;

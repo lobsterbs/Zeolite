@@ -302,3 +302,122 @@ describe("guest host page contract", () => {
     expect(html).toContain('d.op === "terminate"');
   });
 });
+
+describe("guest clients facade (#596)", () => {
+  it("kernel answers matchAll from the wired provider and [] unwired", () => {
+    const k = new GuestKernel(() => 0);
+    const host = new FakePort();
+    k.registerHost(host);
+    k.spawn(spawnMsg(), () => {});
+    const frame = host.sent[0] as { origin: string };
+    const guest = new FakePort();
+    host.deliver({ kind: "zl:guestSpawned", origin: frame.origin, port: guest });
+    /* Unwired: honest empty list, never a hang. */
+    guest.deliver({ zl: "guestControl", op: "matchAll", id: 1 });
+    expect(guest.sent.find((m) => (m as { zl?: string; id?: number }).zl === "guestClientsResult")).toEqual({
+      zl: "guestClientsResult",
+      id: 1,
+      clients: [],
+    });
+    /* Wired: the engine's live virtual contexts enumerate. */
+    k.wireClients(() => [
+      { id: "c1", url: "https://a.example/", kind: "window" },
+      { id: "w1", url: "https://a.example/w.js", kind: "worker" },
+    ]);
+    guest.deliver({ zl: "guestControl", op: "matchAll", id: 2 });
+    expect(guest.sent.filter((m) => (m as { id?: number }).id === 2)[0]).toEqual({
+      zl: "guestClientsResult",
+      id: 2,
+      clients: [
+        { id: "c1", url: "https://a.example/", kind: "window" },
+        { id: "w1", url: "https://a.example/w.js", kind: "worker" },
+      ],
+    });
+  });
+
+  it("kernel drops a matchAll from a realm that is not running", () => {
+    const k = new GuestKernel(() => 0);
+    const host = new FakePort();
+    k.registerHost(host);
+    k.spawn(spawnMsg(), () => {});
+    const guest = new FakePort();
+    /* Pre-spawn: the record is still in the handshake, so no reply. */
+    guest.deliver({ zl: "guestControl", op: "matchAll", id: 1 });
+    expect(guest.sent.some((m) => (m as { zl?: string }).zl === "guestClientsResult")).toBe(false);
+  });
+
+  it("realm facade maps matchAll/get clients and filters by type", async () => {
+    const h = guestHarness("https://a.example/", "https://a.example/sw.js");
+    const listeners: Record<string, Array<(ev: { data: unknown; ports?: unknown[] }) => void>> = {};
+    const proto: Record<string, unknown> = {
+      addEventListener(t: string, f: (ev: { data: unknown; ports?: unknown[] }) => void) {
+        (listeners[t] ??= []).push(f);
+      },
+    };
+    Object.defineProperty(proto, "caches", { get() { return { native: true }; } });
+    const fakeSelf = Object.create(proto) as Record<string, unknown>;
+    const run = new Function("self", h) as (s: unknown) => void;
+    expect(() => run(fakeSelf)).not.toThrow();
+    const guestPort = new FakePort();
+    listeners["message"][0]({ data: { zl: "harnessPort" }, ports: [guestPort] });
+    const clients = fakeSelf.clients as {
+      matchAll(o?: { type?: string }): Promise<unknown[]>;
+      get(id: string): Promise<unknown>;
+    };
+    const asks = () =>
+      guestPort.sent.filter((m) => (m as { zl?: string; op?: string }).op === "matchAll") as Array<{ id: number }>;
+    /* window filter drops the worker-kind client; frameType maps by kind. */
+    const winP = clients.matchAll({ type: "window" });
+    guestPort.deliver({
+      zl: "guestClientsResult",
+      id: asks()[asks().length - 1].id,
+      clients: [
+        { id: "c1", url: "https://a.example/", kind: "window" },
+        { id: "w1", url: "https://a.example/w.js", kind: "worker" },
+      ],
+    });
+    expect(await winP).toEqual([{ id: "c1", url: "https://a.example/", frameType: "top-level", type: "window" }]);
+    /* all returns the worker-kind client with the honest none frameType. */
+    const allP = clients.matchAll({ type: "all" });
+    guestPort.deliver({
+      zl: "guestClientsResult",
+      id: asks()[asks().length - 1].id,
+      clients: [{ id: "w1", url: "https://a.example/w.js", kind: "worker" }],
+    });
+    expect(await allP).toEqual([{ id: "w1", url: "https://a.example/w.js", frameType: "none", type: "worker" }]);
+    /* get resolves a snapshot entry by id. */
+    const getP = clients.get("c1");
+    guestPort.deliver({
+      zl: "guestClientsResult",
+      id: asks()[asks().length - 1].id,
+      clients: [{ id: "c1", url: "https://a.example/", kind: "window" }],
+    });
+    expect(await getP).toEqual({ id: "c1", url: "https://a.example/", frameType: "top-level", type: "window" });
+  });
+
+  it("registration.unregister is truthful end to end and openWindow stays rejected", async () => {
+    const h = guestHarness("https://a.example/", "https://a.example/sw.js");
+    const listeners: Record<string, Array<(ev: { data: unknown; ports?: unknown[] }) => void>> = {};
+    const proto: Record<string, unknown> = {
+      addEventListener(t: string, f: (ev: { data: unknown; ports?: unknown[] }) => void) {
+        (listeners[t] ??= []).push(f);
+      },
+    };
+    Object.defineProperty(proto, "caches", { get() { return { native: true }; } });
+    const fakeSelf = Object.create(proto) as Record<string, unknown>;
+    const run = new Function("self", h) as (s: unknown) => void;
+    run(fakeSelf);
+    /* Without a port the realm is not ready: the honest answer is false. */
+    const reg0 = fakeSelf.registration as { unregister(): Promise<boolean> };
+    await expect(reg0.unregister()).resolves.toBe(false);
+    const guestPort = new FakePort();
+    listeners["message"][0]({ data: { zl: "harnessPort" }, ports: [guestPort] });
+    /* With the port up the kernel terminate arm owns the realm: the
+       round-trip fires and the promise resolves true. */
+    const reg = fakeSelf.registration as { unregister(): Promise<boolean> };
+    await expect(reg.unregister()).resolves.toBe(true);
+    expect(guestPort.sent).toContainEqual({ zl: "guestControl", op: "unregister" });
+    const clients = fakeSelf.clients as { openWindow(u: string): Promise<unknown> };
+    await expect(clients.openWindow("https://a.example/")).rejects.toThrow("unsupported");
+  });
+});
