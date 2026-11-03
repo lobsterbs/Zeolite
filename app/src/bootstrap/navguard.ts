@@ -35,7 +35,7 @@ import { applyIsolation } from "./isolation";
 import { applyStorage } from "./storage";
 import { applySenderShim } from "./postmsg";
 import { anchorVirtual, NativeURL } from "./anchorshim";
-import { embedPopup, popupFacade } from "./embedsync";
+import { embedTopNav, embedPopup, popupFacade } from "./embedsync";
 
 export const NAV = "/__zl_nav__";
 /* #101: parent-relative marker. A same-origin child realm (an
@@ -594,22 +594,35 @@ export function applyNavGuard(
         setTimeout(() => driven.delete(n));
         return;
       }
-      mintRoute(d, true).then((route) => {
-        const r = route ?? navEncode(d);
-        try {
-          driven.delete(n);
-          const tw =
-            tgt === "_top"
-              ? (w.top as AnyRecord | undefined)
-              : tgt === "_parent"
-                ? (w.parent as AnyRecord | undefined)
-                : w;
-          const l = tw && (tw.location as { href: string } | undefined);
-          if (l) l.href = r;
-        } catch {
-          /* a closed or cross-origin window cannot be driven */
-        }
-      });
+      const driveNative = (): void => {
+        mintRoute(d, true).then((route) => {
+          const r = route ?? navEncode(d);
+          try {
+            driven.delete(n);
+            const tw =
+              tgt === "_top"
+                ? (w.top as AnyRecord | undefined)
+                : tgt === "_parent"
+                  ? (w.parent as AnyRecord | undefined)
+                  : w;
+            const l = tw && (tw.location as { href: string } | undefined);
+            if (l) l.href = r;
+          } catch {
+            /* a closed or cross-origin window cannot be driven */
+          }
+        });
+      };
+      /* #558: in an embedded realm the top document is not this
+         realm's to commit. On a split-origin embedder the top
+         navigation is served by the first-party worker partition,
+         which holds a different route key and no transport
+         config: the minted route strands there and the host
+         fallback shell renders (the Google sign-in strand). The
+         embedder owns the real top: hand the destination over
+         with a bounded ack; the native drive stays the fallback
+         for standalone realms and silent hosts. */
+      if (embedTopNav(w, d, driveNative)) return;
+      driveNative();
     };
     safe(() => AE.call(w, "click", drivePopup, true));
     safe(() => AE.call(w, "auxclick", drivePopup, true));
