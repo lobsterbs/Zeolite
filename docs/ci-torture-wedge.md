@@ -450,3 +450,29 @@ deterministic; only its firing is intermittent. Tracked in #514.
   log. The stricter all-five-green gate returns for the next pin.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes.
+
+
+## Run 41635594824 (12:25Z 2026-11-03, head e3d0cebf, app-TS engine change #546)
+
+- The #546 wave's first CI run. Every engine-side gate is green in
+  this run: the new WebSocket negotiation/close-order/slow-drain
+  differential vs Chromium (#546) PASSED, the #462 buffered-bytes
+  differential PASSED, and the MAIN e2e suite PASSED; rust/wasm/app/
+  compat green; the app job published dist 8f331f1 normally.
+- The red is the torture suite only, and the single failing probe is
+  the torture-page img#uni DIRECT-oracle assertion ("direct model
+  failed to load img#uni (fixture regression)") - the same
+  decode-or-serve direct-arm flake family that struck runs
+  41606184413 and 41609016244 this morning on pre-#546 engine bytes.
+  The failing arm does not traverse the engine and touches no
+  WebSocket code; the head's change (the ws shim constructor
+  mapping and error-after-close ordering) is exonerated by the two
+  identical prior strikes on bytes it never touched.
+- Third identical img#uni direct-oracle strike of the day: twice on
+  pre-#546 bytes, once on #546 bytes, with every engine-side probe
+  green all three times. The direct-oracle serve contract remains
+  the open harness question (see the 41609016244 entry); the engine
+  bytes stay exonerated.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. Pin 151 (dist 9866c5e8) remains the deployed
+  pin on all three LB services; the #546 wave waits on the pin gate.
