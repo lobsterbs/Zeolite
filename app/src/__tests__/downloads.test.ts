@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DL, DownloadTracker, adoptResponse, downloadFilename, ZL_DL_RESUME_MAX } from "../downloads";
+import { DL, DownloadTracker, adoptResponse, downloadFilename, isAdArtefact, ZL_DL_RESUME_MAX } from "../downloads";
 import { openDb, idbClear, idbGetAllKeys, idbPut, idbDelete, STORE_DOWNLOADS, STORE_PARTIALS } from "../extensions/idb";
 
 function headers(h: Record<string, string>): Headers {
@@ -358,6 +358,48 @@ describe("adoptResponse seam (#90)", () => {
     }
     expect(severed).toBe(true);
     expect(DL.snapshot()[0].status).toBe("cancelled");
+    DL.reset();
+  });
+});
+
+/* Ad artefact filter: DoubleClick's f.txt attachments are upstream ad
+   responses, not user downloads; the stream is served untouched and
+   only the registration is skipped. */
+describe("ad artefact filter (f.txt)", () => {
+  it("matches f.txt from doubleclick.net and its subdomains only", () => {
+    expect(isAdArtefact("https://googleads.g.doubleclick.net/pagead/x", "f.txt")).toBe(true);
+    expect(isAdArtefact("https://doubleclick.net/x", "f.txt")).toBe(true);
+    expect(isAdArtefact("https://doubleclick.net/x", "F.TXT")).toBe(true);
+  });
+  it("leaves other filenames, other hosts, and malformed sources alone", () => {
+    expect(isAdArtefact("https://googleads.g.doubleclick.net/x", "report.pdf")).toBe(false);
+    expect(isAdArtefact("https://x.test/x", "f.txt")).toBe(false);
+    expect(isAdArtefact("not a url", "f.txt")).toBe(false);
+  });
+  it("adoptResponse declines a doubleclick f.txt attachment: normal path, no registration", async () => {
+    DL.reset();
+    const resp = new Response(streamOf([new Uint8Array(3)]), {
+      status: 200,
+      headers: headers({ "content-disposition": 'attachment; filename="f.txt"' }),
+    });
+    const outHeaders = new Headers({ "content-disposition": 'attachment; filename="f.txt"', "content-type": "text/plain" });
+    const adopted = adoptResponse("https://googleads.g.doubleclick.net/pagead/idle", resp, outHeaders, 200);
+    expect(adopted).toBeNull();
+    expect(DL.snapshot()).toHaveLength(0);
+    DL.reset();
+  });
+  it("still registers an f.txt attachment from a non-ad host", async () => {
+    DL.reset();
+    const resp = new Response(streamOf([new Uint8Array(3)]), {
+      status: 200,
+      headers: headers({ "content-disposition": 'attachment; filename="f.txt"' }),
+    });
+    const outHeaders = new Headers({ "content-disposition": 'attachment; filename="f.txt"', "content-type": "text/plain" });
+    const adopted = adoptResponse("https://files.example.org/notes", resp, outHeaders, 200);
+    expect(adopted).not.toBeNull();
+    await drain(adopted!.body as ReadableStream<Uint8Array>);
+    expect(DL.snapshot()).toHaveLength(1);
+    expect(DL.snapshot()[0].filename).toBe("f.txt");
     DL.reset();
   });
 });

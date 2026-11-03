@@ -16,6 +16,9 @@
      Content-Disposition: attachment. Anchor downloads without it are
      served as ordinary responses; the browser may still save them,
      but the engine honestly does not classify them.
+   - DoubleClick ad artefacts (f.txt) are an upstream convention,
+     not a user download: they are served untouched but not
+     registered (isAdArtefact).
    - Speed is a whole-lifetime average, not a rolling window.
    - 2.2 Arsenide: the ring persists to site-scoped IndexedDB (keyed
      by the source origin) so entries survive a service-worker
@@ -89,6 +92,25 @@ export function downloadFilename(source: string, headers: Headers): string {
   return "download";
 }
 
+/** Ad artefact filter: Google's DoubleClick ad endpoints answer with
+    Content-Disposition: attachment; filename="f.txt" (an upstream
+    anti-clickjacking convention, verified 2026-11-03), so the registry
+    filled with f.txt rows no user asked for. Such a response is served
+    to the browser byte for byte; only the registration is skipped, so
+    a same-named attachment from any other host stays a tracked
+    download. */
+const AD_HOST_SUFFIX = "doubleclick.net";
+
+export function isAdArtefact(source: string, filename: string): boolean {
+  if (filename.toLowerCase() !== "f.txt") return false;
+  let host: string;
+  try {
+    host = new URL(source).hostname;
+  } catch {
+    return false;
+  }
+  return host === AD_HOST_SUFFIX || host.endsWith("." + AD_HOST_SUFFIX);
+}
 /** #26: a record straight out of IndexedDB is untrusted. One corrupted
     field would poison snapshot()'s speed math or the UI's status
     rendering, so every field is checked before an entry is restored. */
@@ -751,6 +773,9 @@ export function adoptResponse(
 ): Response | null {
   if (!resp.body) return null;
   if (!(outHeaders.get("content-disposition") ?? "").toLowerCase().includes("attachment")) return null;
+  /* The ad artefact is served untouched (the stream keeps flowing to
+     the browser); only the registration is skipped. */
+  if (isAdArtefact(target, downloadFilename(target, resp.headers))) return null;
   const id = DL.begin(
     target,
     resp.headers,
