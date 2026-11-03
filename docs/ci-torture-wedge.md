@@ -323,3 +323,23 @@ deterministic; only its firing is intermittent. Tracked in #514.
   2026-11-01 contention cleared. The pin gate stands: all five jobs
   green or no LobsterBrowse pin. Pin 150 (dist 8223b1ff, green run
   41483811807) remains the deployed pin on all three LB services.
+
+
+## Run 41603234425 (08:24Z 2026-11-03, head c3268850, app-TS engine change)
+
+- Browser job red with the passthrough #96 signature: after the cookie
+  jar and cookieStore facade probes all PASSED, the NativeTransit
+  passthrough suite hung (range/cond/setcookie/cookie/stream/redir
+  HUNG at 6000 ms, get/post/abort ok) and the page.goto cascade
+  followed; rust/wasm/app/compat are all green. Eleventh strike, now
+  in the morning window.
+- The head is the first engine-bytes change since pin 150's wave
+  (app TS only: the download registry DoubleClick f.txt ad artefact
+  filter, isAdArtefact, with unit tests; no crates touched). The
+  failing suite exercises none of it; the same wedge struck six
+  docs-only heads on identical engine bytes on 2026-11-02.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin. Pin 150 (dist 8223b1ff, green run 41483811807)
+  remains the deployed pin on all three LB services.
+
