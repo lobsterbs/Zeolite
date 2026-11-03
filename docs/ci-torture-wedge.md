@@ -407,3 +407,26 @@ deterministic; only its firing is intermittent. Tracked in #514.
   filter waits on main (dist 08fd43cd is published) until a green
   run lands. The pin gate stands: all five jobs green or no
   LobsterBrowse pin.
+
+
+## Run 41609016244 (09:11Z 2026-11-03, head 730d8413, docs-only retrigger)
+
+- Fifth strike of the morning window and the SECOND identical
+  img#uni direct-oracle failure (same signature as 41606184413):
+  the MAIN e2e suite PASSED this run, and the torture battery
+  failed only the torture-page probe's direct arm ("direct model
+  failed to load img#uni (fixture regression)"); rust/wasm/app/
+  compat green; the app job published dist normally again.
+- Two identical img#uni-direct strikes with every engine-side
+  probe green both times, plus one main-e2e wedge strike between
+  them, keeps the exoneration intact but makes the direct-oracle
+  serve contract the open question for the next harness pass; the
+  engine bytes are untouched by all three heads since c3268850.
+- Session close: this docs-only commit queues the next attempt
+  into the overnight window where the 2026-11-01 and 2026-11-02
+  contention cleared. The pin gate stands: all five jobs green or
+  no LobsterBrowse pin. Pin 150 (dist 8223b1ff, green run
+  41483811807) remains the deployed pin on all three LB services;
+  the f.txt ad-artefact filter (c3268850) waits on Zeolite main
+  with its dist bundle published by the green app job of every
+  affected run.
