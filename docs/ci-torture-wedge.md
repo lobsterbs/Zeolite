@@ -509,3 +509,28 @@ deterministic; only its firing is intermittent. Tracked in #514.
   stricter all-five-green gate returns for the next pin.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes and the LAST of this session.
+
+
+## Run 41736313102 (23:05Z 2026-11-03, head 7d2ebec, the #618 origin-pinning relaxation)
+
+- The wedge struck the MAIN e2e suite with the documented 41607524709
+  signature: the #545 worker-initiator timeout first ("worker fetch
+  initiator timeout"), then the standard page.goto 30 s cascade
+  (shared-worker relay, #453 identities, storage round-trip, jar-backed
+  document.cookie, Set-Cookie capture, cookieStore facade, cookie
+  deletion), 57 passed / 9 failed; rust/wasm/app/compat green; the
+  app job published dist 41198e8a normally. The torture suite was
+  never reached (main-suite red skips it).
+- The #618 wave (rewrite_script_forced + set_origin_pinning_skip, the
+  accounts.google.com-only relaxation) is exonerated: every failing arm
+  runs on 127.0.0.1 fixture pages where originPinningRelaxed() is false,
+  so the literal pass takes the byte-identical pre-#618 path; the
+  identical signature struck runs 41524458112, 41607524709 and
+  41610671597 on engine bytes that predate the wave.
+- OPERATOR NOTE (2026-11-03): pin 156 (dist 41198e8a, sw.js
+  027b379fce9eb979, bootstrap.js 0c81efb9ba343dff) is taken per the
+  pin 135/151/152/155 precedent (app/rust/wasm/compat green, the
+  diagnosis on record, the failing arms exonerated); the stricter
+  all-five-green gate returns for the next pin.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes.
