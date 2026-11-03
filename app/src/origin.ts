@@ -148,6 +148,7 @@ export function secFetchHeaders(
   method: string,
   mode: string,
   destination: string,
+  mainSurface = false,
 ): SecFetchHeaderSet {
   const vo = virtualOriginHeaders(initiator, target, method, mode);
   const dest = destination ? destination.toLowerCase() : "empty";
@@ -164,6 +165,25 @@ export function secFetchHeaders(
         mode: "navigate",
         dest: "document",
         user: "?1",
+        upgradeInsecureRequests: true,
+      };
+    }
+    /* #611: the browsing pane's own navigation. The physical fetch is
+       the engine iframe's (dest "iframe"), but a main-surface tab
+       navigation is what a real browser serves a top-level document
+       load for, and Google's ServiceLogin answers dest "iframe"
+       with a hard 401 (the live LobsterBrowse sign-in failure).
+       The pane's client was served from a minted navigation handle,
+       so its own navigations claim the top-level destination.
+       No Sec-Fetch-User: the SW cannot tell a click from a script
+       write and redirect hops drop it anyway, and the
+       proven-working set (a script-initiated top navigation in a
+       real browser) carries none. */
+    if (mainSurface) {
+      return {
+        site: vo.secFetchSite,
+        mode: "navigate",
+        dest: "document",
         upgradeInsecureRequests: true,
       };
     }

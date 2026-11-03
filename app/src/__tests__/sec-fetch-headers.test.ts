@@ -44,6 +44,35 @@ describe("secFetchHeaders", () => {
     expect(sf.upgradeInsecureRequests).toBe(true);
   });
 
+  it("#611: a main-surface navigation claims the top-level destination without Sec-Fetch-User", () => {
+    const sf = secFetchHeaders(
+      "https://www.google.com/",
+      "https://accounts.google.com/ServiceLogin",
+      "GET",
+      "navigate",
+      "iframe",
+      true,
+    );
+    expect(sf.site).toBe("cross-site");
+    expect(sf.mode).toBe("navigate");
+    expect(sf.dest).toBe("document");
+    expect(sf.user).toBeUndefined();
+    expect(sf.upgradeInsecureRequests).toBe(true);
+  });
+
+  it("#611: the surface flag off keeps the physical iframe destination (fail closed)", () => {
+    const sf = secFetchHeaders(
+      "https://www.google.com/",
+      "https://accounts.google.com/ServiceLogin",
+      "GET",
+      "navigate",
+      "iframe",
+      false,
+    );
+    expect(sf.dest).toBe("iframe");
+    expect(sf.user).toBeUndefined();
+  });
+
   it("navigation with a cross-site initiator reports cross-site", () => {
     const sf = secFetchHeaders(
       "https://a.example/page",

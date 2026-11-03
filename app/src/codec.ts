@@ -817,6 +817,23 @@ export function decodeQueryHandle(u: URL): { destination: string; rootClientId?:
   };
 }
 
+/** #611: the minted browsing-context handle shapes. True only for the
+    two shapes the engine's own navigation machinery commits for a
+    browsing-context navigation: a NAVH handle route (the host-minted
+    initial navigation) or a committed query route (a MAC-verified
+    zlNavh token; the navguard re-drive and the #385 re-mint land
+    here). False for every genuine subframe serve: the rewriter
+    commits subframe srcs to prefix routes and decodeQueryHandle
+    fails closed on route-shaped pathnames. The legacy marker fallback
+    and the prel tail stay excluded on purpose: their committed
+    clients are ambiguous between a mint-failed pane navigation and
+    a runtime subframe assignment, and the surface stamp fails
+    closed. */
+export function handleRouteShaped(u: URL): boolean {
+  if (u.pathname.startsWith(NAVH + "/")) return true;
+  return decodeQueryHandle(u) !== null;
+}
+
 /** #410 (#202 parity): a committed query-route path escapes a surplus
     leading-slash run into "%2F" bytes so it never opens "//" (a host
     assignment would resolve it protocol-relative); the decode is the
