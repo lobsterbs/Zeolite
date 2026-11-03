@@ -343,3 +343,22 @@ deterministic; only its firing is intermittent. Tracked in #514.
   LobsterBrowse pin. Pin 150 (dist 8223b1ff, green run 41483811807)
   remains the deployed pin on all three LB services.
 
+
+## Run 41604559271 (08:36Z 2026-11-03, head 7e7b044, docs-only retrigger)
+
+- The wedge rotated victims again: the MAIN e2e suite PASSED this run
+  and the browser red moved to the torture suite step; rust/wasm/
+  compat green.
+- NEW: the app job also flaked this run - ws-shim.test.ts "rejects
+  SAB-backed views" failed with "TypeError: WebAssembly response
+  has unsupported MIME type 'text/javascript'" - a MIME mismatch in
+  a wasm-mocking test unrelated to the head: the app job was green
+  on the parent head c3268850 (run 41603234425), and the full app
+  suite (256 files, 2784 tests) is green on the same tree locally
+  in a clean worktree. Recorded as the first observed app-job strike
+  of this wedge family.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin. Pin 150 (dist 8223b1ff, green run 41483811807)
+  remains the deployed pin on all three LB services.
+
