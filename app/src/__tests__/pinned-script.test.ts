@@ -41,7 +41,7 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
   };
 });
 
-import { scriptPinsOrigins } from "../transform";
+import { originPinningRelaxed, scriptPinsOrigins } from "../transform";
 import { netLog, netLogAnnotateRewrite, netLogPush } from "../netlog";
 
 const PINNED = "var va=/^https?:\\/x/;";
@@ -87,5 +87,19 @@ describe("#449 origin-pinning seam", () => {
     expect(netLog.find((e) => e.traceId === "t1")?.rewritten).toBe("js");
     netLogAnnotateRewrite("unknown", "js-pinned");
     expect(netLog.filter((e) => e.rewritten === "js-pinned")).toHaveLength(1);
+  });
+});
+
+describe("#618 origin-pinning relaxation", () => {
+  it("originPinningRelaxed matches only the owner page host, failing closed", () => {
+    expect(originPinningRelaxed("https://accounts.google.com/lifecycle/flows/signup")).toBe(true);
+    expect(originPinningRelaxed("https://accounts.google.com")).toBe(true);
+    expect(originPinningRelaxed("https://www.google.com/")).toBe(false);
+    expect(originPinningRelaxed("https://evil.example/accounts.google.com")).toBe(false);
+    expect(originPinningRelaxed("https://accounts.google.com.evil.example/")).toBe(false);
+    expect(originPinningRelaxed(undefined)).toBe(false);
+    expect(originPinningRelaxed(null)).toBe(false);
+    expect(originPinningRelaxed("")).toBe(false);
+    expect(originPinningRelaxed("not a url")).toBe(false);
   });
 });

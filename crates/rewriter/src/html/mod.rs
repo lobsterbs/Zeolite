@@ -105,6 +105,10 @@ pub struct Rewriter {
     /// (the default): record() checks this first and allocates
     /// nothing. RefCell because the encode helpers take &self.
     trace: std::cell::RefCell<Option<crate::trace::TraceAgg>>,
+    /// #618: when false, the URL-literal pass runs even on
+    /// origin-pinning bodies (the caller decided the owner page
+    /// needs it). Default true = the #449 skip.
+    origin_pinning_skip: bool,
 }
 
 impl Rewriter {
@@ -128,6 +132,7 @@ impl Rewriter {
             raw_pass_double: false,
             raw_pass_closing: false,
             trace: std::cell::RefCell::new(None),
+            origin_pinning_skip: true,
         }
     }
 
@@ -139,6 +144,13 @@ impl Rewriter {
         self.cfg.rewrite_globals = mode != "off";
         self.cfg.location_event_attributes = mode == "legacy";
         self.cfg.location_max_bytes = max_bytes.clamp(1, crate::js::globals::MAX_BYTES);
+    }
+
+    /// #618: opt out of the #449 origin-pinning literal skip for this
+    /// instance. The caller decides (the owner page host, never a
+    /// third-party CDN's); see app/src/transform.ts.
+    pub fn set_origin_pinning_skip(&mut self, on: bool) {
+        self.origin_pinning_skip = on;
     }
 
     /// #529: opt-in token-level decision tracing for this instance.
@@ -647,7 +659,13 @@ impl Rewriter {
         if !self.cfg.rewrite_js_literals {
             return js.to_string();
         }
-        let rewritten = crate::js::rewrite_script(js, &|u| self.enc_literal(u));
+        let rewritten = if self.origin_pinning_skip {
+            crate::js::rewrite_script(js, &|u| self.enc_literal(u))
+        } else {
+            /* #618: relaxed instance - the literal pass runs even on
+            a pinned body. */
+            crate::js::rewrite_script_forced(js, &|u| self.enc_literal(u))
+        };
         let neutral = crate::js::antiframe(&rewritten);
         // #525: import.meta.url reads see the module's virtual URL.
         let with_meta = self.meta_body(&neutral);
@@ -966,14 +984,20 @@ impl Rewriter {
                             // URL-literal pass (same order as the server
                             // engine's pipeline) so folded guards and
                             // navigation sinks apply to the final body.
-                            let rewritten =
-                                crate::js::rewrite_script(&raw, &|u| self.enc_literal(u));
+                            let rewritten = if self.origin_pinning_skip {
+                                crate::js::rewrite_script(&raw, &|u| self.enc_literal(u))
+                            } else {
+                                /* #618: relaxed instance. */
+                                crate::js::rewrite_script_forced(&raw, &|u| self.enc_literal(u))
+                            };
                             /* #529: fixed-vocabulary decisions; the
                             origin-pin recheck is gated on tracing. */
                             if self.tracing() {
                                 if rewritten != raw {
                                     self.trace_rec("js-literal", "rewritten");
-                                } else if crate::js::has_origin_pinning_regex(&raw) {
+                                } else if self.origin_pinning_skip
+                                    && crate::js::has_origin_pinning_regex(&raw)
+                                {
                                     self.trace_rec("js-literal", "origin-pin-skip");
                                 } else {
                                     self.trace_rec("js-literal", "unchanged");
@@ -2092,6 +2116,26 @@ mod tests {
             r.rewrite_js_body("location.href");
         }
         assert!(r.take_location_events().split(',').count() <= 32);
+    }
+
+    /// #618: the relaxation arm - set_origin_pinning_skip(false) makes
+    /// rewrite_js_body run the URL-literal pass even on an
+    /// origin-pinning body; the default still skips it.
+    #[test]
+    fn origin_pinning_relaxation_rewrites_pinned_body() {
+        let mut r = Rewriter::new(cfg());
+        let pinned = "var va=/^https?:/;var u=\"https://plain.example.com/x\";fetch(u);";
+        assert!(
+            !r.rewrite_js_body(pinned).contains("/j/"),
+            "default must skip"
+        );
+        r.set_origin_pinning_skip(false);
+        let out = r.rewrite_js_body(pinned);
+        let route = format!(
+            "/j/{}",
+            crate::encode::b64u_encode(b"https://plain.example.com/x")
+        );
+        assert!(out.contains(&route), "{out}");
     }
 
     #[test]

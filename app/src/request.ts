@@ -32,7 +32,7 @@ import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, isChallengeMitigated, type TransitDecision } from "./transit";
 import { loadPolicy, behaviorMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
-import { boundedBody, cssRewriteStream, isCss, isHtml, isJs, passthroughStream, rawFrom, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
+import { boundedBody, cssRewriteStream, isCss, isHtml, isJs, originPinningRelaxed, passthroughStream, rawFrom, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, siteUaFor, type GhosteryRedirect, type ResourceType } from "./rules";
@@ -4136,15 +4136,21 @@ export function handleFetch(e: FetchEvent): void {
               );
               /* #449: origin-pinning skip telemetry for the cached
                  copy (the fresh path's twin). */
+              /* #618: the fresh path's twin relaxation. */
+              const pinRelaxed = originPinningRelaxed(initiator);
               let pinnedScript = false;
-              try {
-                pinnedScript = await scriptPinsOrigins(src);
-              } catch {
-                pinnedScript = false;
+              if (!pinRelaxed) {
+                try {
+                  pinnedScript = await scriptPinsOrigins(src);
+                } catch {
+                  pinnedScript = false;
+                }
               }
               if (pinnedScript) {
                 netLogAnnotateRewrite(traceId, "js-pinned");
                 DIAG.stage(traceId, "PINNED_SCRIPT", { url: target, message: "literal pass skipped: anchored origin-pinning regex (#449)" });
+              } else if (pinRelaxed) {
+                netLogAnnotateRewrite(traceId, "js-pin-relaxed");
               }
               /* #487 phase 4: the fresh path's twin recovery gate. */
               const afterSpecifiers = src;
@@ -5238,16 +5244,25 @@ export function handleFetch(e: FetchEvent): void {
                diag stream. The frame-buster and globals passes still
                run; the runtime seams keep every request on the
                engine. */
+            /* #618: a relaxed owner page (accounts.google.com) runs
+               the literal pass on pinned bodies too, so the probe and
+               its skip telemetry stay off for it. */
+            const pinRelaxed = originPinningRelaxed(initiator);
             let pinnedScript = false;
-            try {
-              pinnedScript = await scriptPinsOrigins(src);
-            } catch {
-              pinnedScript = false;
+            if (!pinRelaxed) {
+              try {
+                pinnedScript = await scriptPinsOrigins(src);
+              } catch {
+                pinnedScript = false;
+              }
             }
             if (pinnedScript) {
               netLogAnnotateRewrite(traceId, "js-pinned");
               traceDecision({ subsystem: "rewriter", rule: "origin-pinning", original: target, result: "literal-skip", resource: rtype, traceId });
               DIAG.stage(traceId, "PINNED_SCRIPT", { url: target, message: "literal pass skipped: anchored origin-pinning regex (#449)" });
+            } else if (pinRelaxed) {
+              netLogAnnotateRewrite(traceId, "js-pin-relaxed");
+              traceDecision({ subsystem: "rewriter", rule: "origin-pinning", original: target, result: "literal-pass-relaxed", resource: rtype, traceId });
             }
             /* #46: external script bodies get the URL-literal +
                frame-buster pass inline scripts get. Specifiers run

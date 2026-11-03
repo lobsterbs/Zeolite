@@ -33,6 +33,17 @@ pub fn rewrite_script(js: &str, enc: &dyn Fn(&str) -> String) -> String {
     rewrite_literals(js, enc, true)
 }
 
+/// #618: the relaxation arm - run the URL-literal pass even on an
+/// origin-pinning body. The #449 needle also fires on generic
+/// scheme-sanity regexes (the accounts.google.com module chunk), and
+/// a skipped pass leaves endpoint literals verbatim; the runtime seams
+/// then pass those cross-origin fetches native and their responses
+/// are unreadable, which breaks the page. The caller decides (the
+/// owner page host, never a third-party CDN's).
+pub fn rewrite_script_forced(js: &str, enc: &dyn Fn(&str) -> String) -> String {
+    rewrite_literals(js, enc, true)
+}
+
 /// Rewrite URL-like string literals in an inline event handler value.
 pub fn rewrite_inline(js: &str, enc: &dyn Fn(&str) -> String) -> String {
     rewrite_literals(js, enc, false)
@@ -873,6 +884,23 @@ mod tests {
         assert!(
             !has_origin_pinning_regex(r#"var va=new RegExp("^https://apis.google.com/");"#),
             "no-quantifier anchored regex false positive"
+        );
+    }
+
+    /// #618: the forced pass rewrites a pinned body's literals while
+    /// rewrite_script keeps skipping it (#449 default).
+    #[test]
+    fn forced_pass_rewrites_pinned_body() {
+        let pinned = "var va=/^https?:/;var u=\"https://plain.example.com/x\";fetch(u);";
+        let enc = |u: &str| format!("/j/{}", u);
+        assert!(
+            !rewrite_script(pinned, &enc).contains("/j/"),
+            "default must skip"
+        );
+        let forced = rewrite_script_forced(pinned, &enc);
+        assert!(
+            forced.contains("/j/https://plain.example.com/x"),
+            "{forced}"
         );
     }
 
