@@ -117,6 +117,10 @@ data survive untouched):
   downloads. An anchor download without that header is served as an
   ordinary response; the browser may still save it, but Zeolite does
   not claim to track it.
+- DoubleClick ad artefacts (`f.txt` attachments from the
+  doubleclick.net ad host) are an upstream anti-clickjacking
+  convention, not user downloads: the response is served untouched,
+  but the registry does not claim it (`isAdArtefact`).
 - Speed is a whole-lifetime average, not a rolling window.
 - The ring is bounded (200 entries): eviction picks the oldest idle
   entry, never a live stream, so an all-active ring honestly runs
