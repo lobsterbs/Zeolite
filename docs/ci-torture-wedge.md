@@ -430,3 +430,23 @@ deterministic; only its firing is intermittent. Tracked in #514.
   the f.txt ad-artefact filter (c3268850) waits on Zeolite main
   with its dist bundle published by the green app job of every
   affected run.
+
+
+## Run 41610671597 (09:22Z 2026-11-03, head aa88d3ec, docs-only overnight retrigger)
+
+- Sixth strike: the MAIN e2e suite again (the 41607524709
+  signature class); rust/wasm/app/compat green; the app job
+  published dist 9866c5e8 normally. The wedge stayed hot through
+  the entire 08:2x-09:2x window; the strike count today is six
+  across four distinct first-failure signatures on identical
+  engine bytes.
+- OPERATOR DECISION (2026-11-03): the operator instructed the
+  LobsterBrowse pin bump. Pin 151 (dist 9866c5e8, sw.js
+  0be67794d1c15e81, bootstrap.js 097df230849e3d50) is taken per
+  the operational-notes precedent (pin 135): the app job that
+  builds the bundle is green in every strike, rust/wasm/compat
+  green in every strike, the f.txt change (c3268850) is exonerated
+  (its code is never on a failing arm), and the diagnosis is this
+  log. The stricter all-five-green gate returns for the next pin.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes.
