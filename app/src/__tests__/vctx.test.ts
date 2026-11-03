@@ -52,6 +52,7 @@ describe("VirtualContext routing (issue #33)", () => {
       clientId: "c1",
       targetOrigin: "https://new.example",
       currentUrl: "https://new.example/next",
+      clientKind: "window",
     });
     expect(m.get("c1")).toEqual(next);
     expect(resolveRelative(m, "c1", "/x")).toBe("https://new.example/x");
@@ -114,6 +115,7 @@ describe("Virtual context rehydration (issue #535)", () => {
       clientId: "c1",
       targetOrigin: "https://site.example",
       currentUrl: "https://site.example/dir/page.html",
+      clientKind: "window",
     });
     /* The recovered context resolves relative tails like a live one. */
     expect(resolveRelative(m, "c1", "sub/pixel.png")).toBe(

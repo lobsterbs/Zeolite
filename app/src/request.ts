@@ -53,7 +53,7 @@ import { adoptResponse } from "./downloads";
 import { flatRed, netLogAnnotateRewrite, netLogPush, type NetDetail } from "./netlog";
 import { traceDecision } from "./tracing";
 import { siteToken } from "./pageload";
-import { GUEST_FETCH_BODY_MAX, guestDispatchFetchForUrl, guestWireFetch } from "./kernel/guests/executor";
+import { GUEST_FETCH_BODY_MAX, guestDispatchFetchForUrl, guestWireClients, guestWireFetch } from "./kernel/guests/executor";
 
 import { altConfigured, altEndpoint, altRegister, altWispFetch, canReplayAfterFailure, wispTransport } from "./transport";
 import { normalizeWispUrl, primaryWispOverrideValue, setPrimaryWispOverride } from "./config";
@@ -1274,6 +1274,15 @@ guestWireFetch(async (r) => {
   });
   return { status: resp.status, statusText: resp.statusText, headers: outHeaders, body };
 });
+
+/* #596: the guest clients facade enumerates the engine's real
+   virtual-page contexts (VCTX) through this provider: the kernel
+   answers clients.matchAll()/get() from it. Worker-kind clients are
+   approximated from the establishing request's destination
+   (documented in docs/virtual-service-worker-phase2.md). */
+guestWireClients(() =>
+  [...VCTX.values()].map((c) => ({ id: c.id, url: c.currentUrl, kind: c.clientKind ?? "window" })),
+);
 
 /** #538: bounded body read for the guest bridge. A response whose
     content-length already exceeds the cap, or whose stream crosses it,
@@ -3537,7 +3546,10 @@ export function handleFetch(e: FetchEvent): void {
 
       if (e.request.mode === "navigate" || isWorkerDestination(e.request.destination)) {
         const newClient = e.resultingClientId || e.clientId;
-        if (newClient && establishContext(VCTX, newClient, target)) capContexts(VCTX, VCTX_CAP);
+        /* #596: the destination decides the client kind the guest
+           clients facade reports (window vs worker shapes). */
+        const clientKind = e.request.destination === "worker" || e.request.destination === "sharedworker" ? e.request.destination : "window";
+        if (newClient && establishContext(VCTX, newClient, target, clientKind)) capContexts(VCTX, VCTX_CAP);
         /* #531: the stale page's expectations must not gate the next
            document's subresources. */
         if (e.request.mode === "navigate") {
@@ -4644,7 +4656,9 @@ export function handleFetch(e: FetchEvent): void {
               isWorkerDestination(e.request.destination)
             ) {
               const navClient = e.resultingClientId || e.clientId;
-              if (navClient && establishContext(VCTX, navClient, finalDest))
+              /* #596: same client-kind decision as the pre-transport seam. */
+              const navKind = e.request.destination === "worker" || e.request.destination === "sharedworker" ? e.request.destination : "window";
+              if (navClient && establishContext(VCTX, navClient, finalDest, navKind))
                 capContexts(VCTX, VCTX_CAP);
               if (e.request.mode === "navigate") {
                 sriClearClient(SRI, navClient);

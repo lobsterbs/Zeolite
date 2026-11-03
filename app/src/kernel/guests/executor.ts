@@ -23,14 +23,17 @@
    scope) CacheStorage facade over kernel-side quota-bounded storage
    with teardown on terminate, registration.update() refetches the
    script through the same bridge and replaces the realm when the
-   bytes changed, and a Clients subset exposes no enumeration.
+   bytes changed, and a Clients subset enumerates the engine's live
+   virtual contexts (#596).
 
    Honest limits, by design (docs/virtual-service-worker-phase2.md):
    guest caches are kernel-side and session-scoped (no persistence
    across engine restarts); guest fetch cookies ride the
    default-profile jar (the guest realm is not a controlled client);
    Cache API Vary handling is not modeled (entries key on the exact
-   URL); clients.matchAll resolves [] (no client enumeration);
+   URL); clients.matchAll()/get() enumerate the engine's live
+   virtual-client contexts (#596; worker kinds approximate the request
+   destination); clients.openWindow and notifications stay unsupported;
    guest postMessage reaches the kernel listener only (no delivery
    surface into virtual pages in this wave); XMLHttpRequest,
    WebSocket, importScripts and indexedDB stay shadowed; controllerchange
@@ -144,6 +147,17 @@ function validGuestFetchResponse(
 
 /** Minimal structural port the kernel needs. Mirrors wsbridge's
     PortLike so a real MessagePort plugs in without a cast. */
+/** #596: one virtual client as the guest clients facade reports it. */
+export interface GuestClientInfo {
+  id: string;
+  url: string;
+  kind: "window" | "worker" | "sharedworker";
+}
+
+/** #596: provider over the engine's live virtual-client contexts,
+    wired by request.ts. An unwired kernel answers [], never a hang. */
+export type GuestClientsProvider = () => GuestClientInfo[];
+
 export interface GuestPortLike {
   postMessage(data: unknown): void;
   close(): void;
@@ -207,7 +221,7 @@ export function guestHarness(scope: string, scriptURL: string): string {
   return (
     '"use strict";(function(){' +
     "var ZL=" + meta + ";" +
-    "var L={},port=null,wSeq=0,nfSeq=0,nfPending={},caSeq=0,caPending={},upSeq=0,upPending={};" +
+    "var L={},port=null,wSeq=0,nfSeq=0,nfPending={},caSeq=0,caPending={},upSeq=0,upPending={},clSeq=0,clPending={};" +
     'function post(o){if(port)port.postMessage(o);}' +
     'function def(k,v){try{Object.defineProperty(self,k,{value:v,writable:true,configurable:true});}catch(err){try{self[k]=v;}catch(e2){}}}' +
     'function serHeaders(h){var o={};if(!h)return o;if(typeof h.forEach==="function"){h.forEach(function(v,k){o[k]=String(v);});}else{Object.keys(h).forEach(function(k){o[k]=String(h[k]);});}return o;}' +
@@ -220,6 +234,7 @@ export function guestHarness(scope: string, scriptURL: string): string {
     'function serResp(v){return Promise.resolve().then(function(){if(v&&typeof v.text==="function"){return Promise.resolve(v.text()).then(function(t){return {status:(typeof v.status==="number")?v.status:200,statusText:v.statusText||"",headers:serHeaders(v.headers),body:t};});}if(v&&typeof v==="object"&&typeof v.status==="number"){return {status:v.status,statusText:v.statusText||"",headers:serHeaders(v.headers),body:(typeof v.body==="string")?v.body:null};}throw new TypeError("a Response-like value is required");});}' +
     'function reqUrl(r){if(typeof r==="string")return r;if(r&&typeof r.url==="string")return r.url;return null;}' +
     'function caCall(op,payload){return new Promise(function(resolve,reject){var id=++caSeq;caPending[id]={res:resolve,rej:reject};post({zl:"guestCaches",id:id,op:op,payload:payload||{}});});}' +
+    'function clCall(){return new Promise(function(resolve){var id=++clSeq;clPending[id]=resolve;post({zl:"guestControl",op:"matchAll",id:id});});}' +
     'function mkCache(name){return {' +
     'put:function(req,resp){var u=reqUrl(req);if(!u)throw new TypeError("cache.put needs a URL");return serResp(resp).then(function(s){return caCall("put",{name:name,url:u,entry:s}).then(function(){return undefined;});});},' +
     'match:function(req){var u=reqUrl(req);if(!u)return Promise.resolve(undefined);return caCall("match",{name:name,url:u}).then(function(hit){return hit?mkResp(hit):undefined;});},' +
@@ -245,7 +260,8 @@ export function guestHarness(scope: string, scriptURL: string): string {
     "var cp=caPending[d.id];if(cp){delete caPending[d.id];if(d.ok){cp.res(d.result);}else{cp.rej(new Error(d.error||\"cache operation failed\"));}}" +
     "}else if(d.zl===\"guestUpdateResult\"){" +
     "var upp=upPending[d.id];if(upp){delete upPending[d.id];if(d.ok){upp.res(true);}else{upp.rej(new Error(d.error||\"registration update failed\"));}}" +
-    "}};" +
+    "}else if(d.zl===\"guestClientsResult\"){var clp=clPending[d.id];if(clp){delete clPending[d.id];clp(d.clients||[]);}}" +
+    "};" +
     'port.postMessage({zl:"guestReady"});}});' +
     'def("addEventListener",function(t,f){(L[t]=L[t]||[]).push(f);});' +
     'def("removeEventListener",function(t,f){var a=L[t]||[];var i=a.indexOf(f);if(i>=0)a.splice(i,1);});' +
@@ -271,11 +287,14 @@ export function guestHarness(scope: string, scriptURL: string): string {
     'keys:function(){return caCall("keys",{}).then(function(v){return v||[];});},' +
     'delete:function(name){return caCall("deleteCache",{name:String(name)}).then(function(v){return !!v;});},' +
     'match:function(req){var u=reqUrl(req);if(!u)return Promise.resolve(undefined);return caCall("storeMatch",{url:u}).then(function(hit){return hit?mkResp(hit):undefined;});}});' +
-    'def("clients",{claim:function(){return Promise.resolve();},matchAll:function(){return Promise.resolve([]);},get:function(){return Promise.resolve(undefined);},openWindow:function(){return Promise.reject(new Error("clients.openWindow is unsupported in the guest harness"));}});' +
+    'def("clients",{claim:function(){return Promise.resolve();},' +
+    'matchAll:function(o){var t=((o&&o.type)||"window");return clCall().then(function(list){var out=(list||[]).map(function(c){return {id:c.id,url:c.url,frameType:(c.kind==="worker"||c.kind==="sharedworker")?"none":"top-level",type:c.kind};});return out.filter(function(c){return (t==="all")?true:(c.type===t);});});},' +
+    'get:function(id){return clCall().then(function(list){var hit=(list||[]).filter(function(c){return c.id===id;})[0];return hit?{id:hit.id,url:hit.url,frameType:(hit.kind==="worker"||hit.kind==="sharedworker")?"none":"top-level",type:hit.kind}:undefined;});},' +
+    'openWindow:function(){return Promise.reject(new Error("clients.openWindow is unsupported in the guest harness"));}});' +
     "var R={scope:ZL.scope,scriptURL:ZL.scriptURL,updateViaCache:\"none\",installing:null,waiting:null," +
     'active:{scriptURL:ZL.scriptURL,state:"activated",onstatechange:null},' +
     'update:function(){return new Promise(function(resolve,reject){var id=++upSeq;upPending[id]={res:resolve,rej:reject};post({zl:"guestControl",op:"update",id:id});});},' +
-    'unregister:function(){if(port)port.postMessage({zl:"guestControl",op:"unregister"});return Promise.resolve(false);},' +
+    'unregister:function(){if(port){port.postMessage({zl:"guestControl",op:"unregister"});return Promise.resolve(true);}return Promise.resolve(false);},' +
     'getNotifications:function(){return Promise.resolve([]);}};' +
     'def("registration",R);' +
     'def("skipWaiting",function(){});' +
@@ -296,6 +315,8 @@ export class GuestKernel {
   >();
   /** #538: engine bridge over upstreamFetch, wired by request.ts. */
   private netFetch: GuestNetFetchBridge | null = null;
+  /** #596: virtual-client enumeration provider, wired by request.ts. */
+  private clientsProvider: GuestClientsProvider | null = null;
   private netPending = new Map<string, ReturnType<typeof setTimeout>>();
   /** #538: bounded waitUntil tracking, keyed origin#wid. */
   private waitPending = new Map<string, ReturnType<typeof setTimeout>>();
@@ -316,6 +337,12 @@ export class GuestKernel {
   /** #538: register (or clear) the engine network bridge. */
   wireFetch(b: GuestNetFetchBridge | null): void {
     this.netFetch = b;
+  }
+
+  /** #596: register (or clear) the virtual-client enumeration
+      provider clients.matchAll()/get() answer from. */
+  wireClients(p: GuestClientsProvider | null): void {
+    this.clientsProvider = p;
   }
 
   /** A guest host page announced itself with a control port. */
@@ -599,7 +626,23 @@ export class GuestKernel {
       this.terminateKey(key);
     } else if (d.zl === "guestControl" && d.op === "update") {
       this.guestUpdate(key, d as { id?: unknown });
+    } else if (d.zl === "guestControl" && d.op === "matchAll") {
+      this.guestMatchAll(key, d as { id?: unknown });
     }
+  }
+
+  /** #596: answer a clients.matchAll()/get() round-trip with the
+      engine's live virtual-client contexts. An unwired provider
+      answers an honest []; a bad id or a non-running realm is
+      dropped (the realm-side facade only asks while its port is
+      live, and the kernel terminate arm reaps an unregistering
+      realm, so a dropped reply never leaves a caller hanging). */
+  private guestMatchAll(key: string, d: { id?: unknown }): void {
+    const g = this.guests.get(key);
+    const id = typeof d.id === "number" ? d.id : -1;
+    if (!g || !g.guest || g.state !== "running" || id < 0) return;
+    const clients = this.clientsProvider ? this.clientsProvider() : [];
+    g.guest.postMessage({ zl: "guestClientsResult", id, clients });
   }
 
   /** #538: bounded waitUntil. Each promise handed to waitUntil opens
@@ -1211,6 +1254,12 @@ export function guestTerminateAll(): number {
     for guest fetches and script refetches. */
 export function guestWireFetch(b: GuestNetFetchBridge | null): void {
   kernel.wireFetch(b);
+}
+
+/** #596: register (or clear) the virtual-client provider the kernel
+    answers clients.matchAll()/get() from. */
+export function guestWireClients(p: GuestClientsProvider | null): void {
+  kernel.wireClients(p);
 }
 
   /** #477 P3: the live request path's fetch bridge entry. Every
