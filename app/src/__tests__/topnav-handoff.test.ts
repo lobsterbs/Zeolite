@@ -2,15 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyEmbedSync, embedTopNav } from "../bootstrap/embedsync";
 
 /* #558: a target=_top activation in an embedded realm hands the
-   destination to the embedder with a bounded ack; the realm's own
-   native drive stays the fallback for standalone documents, silent
-   hosts and fail-closed handshakes. */
+   destination to the embedder, which owns the real top document;
+   the realm never drives the top natively once the embedder is
+   known. A realm without a live embedder (standalone document,
+   fail-closed handshake) keeps the native drive through the
+   fallback, exactly once per request. */
 
 const ENGINE = "https://engine.host";
 const ENTRY = "/j/abc123";
-/* Past the embedsync ack bound so a no-ack wait proves the fallback
-   fired, not that the timer is still pending. */
-const PAST_ACK = 1100;
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
 function makeWin(href: string) {
@@ -63,25 +62,7 @@ describe("embedder top-nav handoff (#558)", () => {
     expect(fallback).not.toHaveBeenCalled();
   });
 
-  it("hands the destination to the embedder; the ack cancels the fallback", async () => {
-    const { w, fire } = makeWin(ENGINE + ENTRY);
-    const parent = { postMessage: vi.fn() };
-    w.parent = parent;
-    const calls = stubController();
-    applyEmbedSync(w);
-    await settle(calls, { ok: true, origin: "https://app.example", url: "https://site.example/one", clientId: "client-one" });
-    const fallback = vi.fn();
-    expect(embedTopNav(w, "https://accounts.example/signin", fallback)).toBe(true);
-    expect(parent.postMessage).toHaveBeenCalledWith(
-      { lb: "navigateTab", data: { href: "https://accounts.example/signin", clientId: "client-one", ack: "zltop1" } },
-      "https://app.example",
-    );
-    fire("message", { origin: "https://app.example", data: { lb: "navigateTabAck", nonce: "zltop1" } });
-    await new Promise((r) => setTimeout(r, PAST_ACK));
-    expect(fallback).not.toHaveBeenCalled();
-  });
-
-  it("runs the native fallback when no ack lands within the bound", async () => {
+  it("hands the destination to the embedder; the realm never drives the top natively", async () => {
     const { w } = makeWin(ENGINE + ENTRY);
     const parent = { postMessage: vi.fn() };
     w.parent = parent;
@@ -90,26 +71,16 @@ describe("embedder top-nav handoff (#558)", () => {
     await settle(calls, { ok: true, origin: "https://app.example", url: "https://site.example/one", clientId: "client-one" });
     const fallback = vi.fn();
     expect(embedTopNav(w, "https://accounts.example/signin", fallback)).toBe(true);
-    await new Promise((r) => setTimeout(r, PAST_ACK));
-    expect(fallback).toHaveBeenCalledTimes(1);
-  });
-
-  it("ignores an ack from the wrong origin", async () => {
-    const { w, fire } = makeWin(ENGINE + ENTRY);
-    const parent = { postMessage: vi.fn() };
-    w.parent = parent;
-    const calls = stubController();
-    applyEmbedSync(w);
-    await settle(calls, { ok: true, origin: "https://app.example", url: "https://site.example/one", clientId: "client-one" });
-    const fallback = vi.fn();
-    expect(embedTopNav(w, "https://accounts.example/signin", fallback)).toBe(true);
-    fire("message", { origin: "https://evil.example", data: { lb: "navigateTabAck", nonce: "zltop1" } });
-    await new Promise((r) => setTimeout(r, PAST_ACK));
-    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(parent.postMessage).toHaveBeenCalledWith(
+      { lb: "navigateTab", data: { href: "https://accounts.example/signin", clientId: "client-one" } },
+      "https://app.example",
+    );
+    await new Promise((r) => setTimeout(r, 120));
+    expect(fallback).not.toHaveBeenCalled();
   });
 
   it("queues a pre-settle activation and delivers it on settle", async () => {
-    const { w, fire } = makeWin(ENGINE + ENTRY);
+    const { w } = makeWin(ENGINE + ENTRY);
     const parent = { postMessage: vi.fn() };
     w.parent = parent;
     const calls = stubController();
@@ -119,15 +90,13 @@ describe("embedder top-nav handoff (#558)", () => {
     expect(parent.postMessage).not.toHaveBeenCalled();
     await settle(calls, { ok: true, origin: "https://app.example", url: "https://site.example/one", clientId: "client-one" });
     expect(parent.postMessage).toHaveBeenCalledWith(
-      { lb: "navigateTab", data: { href: "https://accounts.example/signin", clientId: "client-one", ack: "zltop1" } },
+      { lb: "navigateTab", data: { href: "https://accounts.example/signin", clientId: "client-one" } },
       "https://app.example",
     );
-    fire("message", { origin: "https://app.example", data: { lb: "navigateTabAck", nonce: "zltop1" } });
-    await new Promise((r) => setTimeout(r, PAST_ACK));
     expect(fallback).not.toHaveBeenCalled();
   });
 
-  it("runs queued fallbacks on a fail-closed terminal (unknown embedder)", async () => {
+  it("runs queued fallbacks on a fail-closed terminal and owns post-terminal requests", async () => {
     const { w } = makeWin(ENGINE + ENTRY);
     const parent = { postMessage: vi.fn() };
     w.parent = parent;
@@ -137,10 +106,14 @@ describe("embedder top-nav handoff (#558)", () => {
     expect(embedTopNav(w, "https://accounts.example/signin", fallback)).toBe(true);
     await settle(calls, { ok: false });
     expect(fallback).toHaveBeenCalledTimes(1);
-    expect(embedTopNav(w, "https://accounts.example/signin", fallback)).toBe(false);
+    /* the terminal handler answers true by running the fallback: the
+       native drive must fire exactly once per request, never zero
+       (a swallowed click) and never twice (a double drive). */
+    expect(embedTopNav(w, "https://accounts.example/two", fallback)).toBe(true);
+    expect(fallback).toHaveBeenCalledTimes(2);
   });
 
-  it("runs queued fallbacks on a standalone terminal", async () => {
+  it("runs queued fallbacks on a standalone terminal and answers false afterwards", async () => {
     const { w } = makeWin(ENGINE + ENTRY);
     const parent = { postMessage: vi.fn() };
     w.parent = parent;
@@ -150,6 +123,6 @@ describe("embedder top-nav handoff (#558)", () => {
     expect(embedTopNav(w, "https://accounts.example/signin", fallback)).toBe(true);
     await settle(calls, { ok: true, origin: null, url: "https://site.example/one" });
     expect(fallback).toHaveBeenCalledTimes(1);
-    expect(embedTopNav(w, "https://accounts.example/signin", fallback)).toBe(false);
+    expect(embedTopNav(w, "https://accounts.example/two", fallback)).toBe(false);
   });
 });
