@@ -17,6 +17,13 @@ import { NativeURL } from "./anchorshim";
 
 type Popup = { href: string; fallback: () => void };
 const popups = new WeakMap<object, (p: Popup) => void>();
+/** #558: a target=_top activation handed to the embedder, with the
+    realm's own native drive as the bounded-ack fallback. */
+type TopReq = { href: string; fallback: () => void };
+const topNavs = new WeakMap<object, (p: TopReq) => void>();
+/* The ack is a same-window postMessage round trip; the bound only
+   separates a live embedder from the native fallback. */
+const TOP_NAV_ACK_MS = 1000;
 /** #553: pages that keep the return value of window.open get a
     limited facade instead of null - but only when the popup was
     really routed to the embedder. A swallowed popup (unknown
@@ -62,6 +69,18 @@ export function embedPopup(w: object, href: string, fallback: () => void): boole
   return true;
 }
 
+/** #558: hand a target=_top activation to the embedder (the host
+    owns the real top document). True means the request was queued
+    or sent; the fallback runs when no ack lands within the bound
+    or the handshake fails closed, so standalone realms keep the
+    native drive. */
+export function embedTopNav(w: object, href: string, fallback: () => void): boolean {
+  const send = topNavs.get(w);
+  if (!send) return false;
+  send({ href, fallback });
+  return true;
+}
+
 export function applyEmbedSync(w: Record<string, unknown>): void {
   let parent: unknown;
   try { parent = w.parent; } catch { return; }
@@ -71,6 +90,7 @@ export function applyEmbedSync(w: Record<string, unknown>): void {
   let cur = "";
   let clientId = "";
   const pending: Popup[] = [];
+  const topPending: TopReq[] = [];
   let settled = false;
   /* #491: handshake state - the current channel, its timer, and the
      shared attempt budget (initial attempts plus retries, including
@@ -83,13 +103,21 @@ export function applyEmbedSync(w: Record<string, unknown>): void {
     cancel();
     facadeRouted.delete(w);
     closeReports.delete(w);
+    topNavs.delete(w);
     if (standalone) popups.delete(w);
     else popups.set(w, () => {}); // unknown embedder fails closed
     for (const p of pending.splice(0)) {
       if (standalone) { try { p.fallback(); } catch { /* popup blocked */ } }
     }
+    /* #558: a top-nav fallback never leaks the client IP (the
+       native drive stays engine-scoped), so both terminal paths
+       run it, unlike swallowed popups. */
+    for (const p of topPending.splice(0)) {
+      try { p.fallback(); } catch { /* the drive owns its errors */ }
+    }
   };
   popups.set(w, (p) => { if (pending.length < 32) pending.push(p); });
+  topNavs.set(w, (p) => { if (topPending.length < 32) topPending.push(p); });
   /* #553: from the first queued popup on, this document routes
      popups through the embedder and window.open answers a facade.
      A terminal fail-closed handshake un-marks (below), so a
@@ -126,6 +154,39 @@ export function applyEmbedSync(w: Record<string, unknown>): void {
       origin = d.origin;
       cur = d.url;
       clientId = typeof d.clientId === "string" ? d.clientId : "";
+      /* #558: target=_top activations hand the destination to
+         the embedder instead of committing the top document on
+         this realm's route: a split-origin top commit lands in
+         the first-party worker partition, which holds a
+         different route key and no transport config, and
+         strands on the host fallback shell. The bounded ack
+         separates "the embedder took it" from "drive native"
+         so a silent host never strands the click. */
+      let ackSeq = 0;
+      const acks = new Map<string, () => void>();
+      const onAckMsg = (ev: Event): void => {
+        const e2 = ev as MessageEvent;
+        if (e2.origin !== origin) return;
+        const m = e2.data as { lb?: string; nonce?: string } | null;
+        if (!m || m.lb !== "navigateTabAck" || typeof m.nonce !== "string") return;
+        acks.get(m.nonce)?.();
+      };
+      (w.addEventListener as Window["addEventListener"] | undefined)?.call(
+        w as unknown as Window,
+        "message",
+        onAckMsg,
+      );
+      topNavs.set(w, (p) => {
+        const nonce = "zltop" + ++ackSeq;
+        const t = setTimeout(() => {
+          if (acks.delete(nonce)) {
+            try { p.fallback(); } catch { /* the drive owns its errors */ }
+          }
+        }, TOP_NAV_ACK_MS);
+        acks.set(nonce, () => { clearTimeout(t); acks.delete(nonce); });
+        post({ lb: "navigateTab", data: { href: p.href, clientId, ack: nonce } });
+      });
+      for (const p of topPending.splice(0)) topNavs.get(w)?.(p);
       const open = (p: Popup): void => {
         if (!p.href || p.href === "about:blank") {
           post({ lb: "navigate", data: { href: "", newTab: true, blank: true, clientId } });
