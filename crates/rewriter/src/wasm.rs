@@ -57,6 +57,12 @@ impl JsRewriter {
         self.inner.set_location_policy(&mode, max_bytes);
     }
 
+    /// #618: opt out of the #449 origin-pinning literal skip (the
+    /// owner page host decided; see app/src/transform.ts).
+    pub fn set_origin_pinning_skip(&mut self, on: bool) {
+        self.inner.set_origin_pinning_skip(on);
+    }
+
     pub fn rewrite_script(&self, source: String) -> String {
         self.inner.rewrite_js_body(&source)
     }

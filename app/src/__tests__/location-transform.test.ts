@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SiteRules } from "../siteconfig";
-const state = vi.hoisted(() => ({ rules: {} as SiteRules, seen: [] as Array<[string, string, number]>, freed: 0 }));
+const state = vi.hoisted(() => ({ rules: {} as SiteRules, seen: [] as Array<[string, string, number]>, freed: 0, pinSkip: [] as Array<[string, boolean]> }));
 vi.mock("../siteconfig", async importOriginal => ({
   ...await importOriginal<typeof import("../siteconfig")>(),
   siteRules: async () => state.rules,
@@ -10,6 +10,7 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => ({
   JsRewriter: class {
     constructor(_origin: string, private base: string) {}
     set_location_policy(mode: string, cap: number) { state.seen.push([this.base, mode, cap]); }
+    set_origin_pinning_skip(on: boolean) { state.pinSkip.push([this.base, on]); }
     rewrite_script(source: string) { return source; }
     process(source: string) { return source; }
     finish() { return ""; }
@@ -22,7 +23,7 @@ import { resetExperimentalForTests, selectExperimental } from "../experimental-f
 
 beforeEach(() => {
   state.rules = { "page.example": { locationRewrite: { mode: "hybrid", maxBytes: 65536 } } };
-  state.seen = []; state.freed = 0;
+  state.seen = []; state.freed = 0; state.pinSkip = [];
   vi.stubGlobal("self", { location: { origin: "https://engine.example", href: "https://engine.example/sw.js" } });
   initTransform({ routeReady: async () => {}, routeKey: () => null, fpScript: () => null,
     siteScript: async () => null, setDegraded: () => {}, lazyImages: () => false });
@@ -49,5 +50,23 @@ describe("location policy transform wiring", () => {
     const rule = state.rules["page.example"];
     await new Response(rewriteStream(body, "https://page.example/path", rule, [], "text/html", undefined, false)).text();
     expect(state.seen).toEqual([["https://page.example/path", "hybrid", 65536]]);
+  });
+});
+
+describe("#618 origin-pinning relaxation wiring", () => {
+  it("relaxes the literal skip for accounts.google.com owner pages", async () => {
+    await rewriteJsBody("var va=/^https?:/;", "https://www.gstatic.com/x.js", "https://accounts.google.com/signup");
+    expect(state.pinSkip).toEqual([["https://www.gstatic.com/x.js", false]]);
+    expect(state.freed).toBe(1);
+  });
+  it("does not relax for other hosts or a missing page base", async () => {
+    await rewriteJsBody("var va=/^https?:/;", "https://www.gstatic.com/x.js", "https://www.google.com/");
+    await rewriteJsBody("var va=/^https?:/;", "https://www.gstatic.com/x.js");
+    expect(state.pinSkip).toEqual([]);
+  });
+  it("relaxes the streamed document rewrite for accounts.google.com", async () => {
+    const body = new Response("<script>var va=/^https?:/;</script>").body!;
+    await new Response(rewriteStream(body, "https://accounts.google.com/signup", state.rules["page.example"], [], "text/html", undefined, false)).text();
+    expect(state.pinSkip).toEqual([["https://accounts.google.com/signup", false]]);
   });
 });

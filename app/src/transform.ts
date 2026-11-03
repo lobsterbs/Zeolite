@@ -58,6 +58,9 @@ interface JsRewriter {
   /* #529: opt-in token-level decision tracing (see tracing.ts). */
   set_trace?(on: boolean): void;
   take_trace?(): string;
+  /* #618: opt out of the #449 origin-pinning literal skip for this
+     instance (owner-page decision; see originPinningRelaxed). */
+  set_origin_pinning_skip?(on: boolean): void;
 }
 interface JsCssRewriter {
   process(chunk: string): string;
@@ -291,6 +294,9 @@ export function rewriteStream(
         const mod = await modP;
         const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
         configureLocation(rw, resolveLocationPolicy(base, rule));
+        /* #618: the document's own host relaxes the #449 literal
+           skip for this rewriter instance (inline scripts included). */
+        if (originPinningRelaxed(base)) rw.set_origin_pinning_skip?.(false);
         /* #529: opt-in token-level decision tracing; off by default
            the wasm instance records and allocates nothing. */
         if (tracingEnabled()) rw.set_trace?.(true);
@@ -590,12 +596,34 @@ function reportLocation(rw: JsRewriter, owner?: string): void {
   if (owner && (counts.get("rewritten") ?? 0) > 0) recordDocumentLocationReads(owner);
 }
 
+/* #618: the #449 needle (^https?:) also fires on generic
+   scheme-sanity regexes (the accounts.google.com module chunk), and a
+   skipped literal pass leaves endpoint literals verbatim; the runtime
+   seams then pass those cross-origin fetches native and their
+   responses are unreadable, which breaks the page. The owner page
+   decides (the same principle as the location policy): pages on these
+   hosts run the literal pass even on pinned bodies. Operator
+   decision 2026-11-03. */
+const ORIGIN_PINNING_RELAX_HOSTS = new Set(["accounts.google.com"]);
+export function originPinningRelaxed(pageBase: string | undefined | null): boolean {
+  if (!pageBase) return false;
+  try {
+    return ORIGIN_PINNING_RELAX_HOSTS.has(new URL(pageBase).hostname);
+  } catch {
+    return false;
+  }
+}
+
 export async function rewriteJsBody(js: string, base: string, pageBase?: string): Promise<string> {
   const mod = await rewriter();
   // The owner page chooses policy; a third-party CDN's hostname must not.
   // #456 gate 4: the learned mark rides the same owner-page rule.
   const policy = resolveLocationPolicy(pageBase, pageBase ? ruleFor(await siteRules(), pageBase) : {});
   const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined);
+  /* #618: the owner page's host relaxes the #449 literal skip for
+     this one-shot pass (older WASM without the setter keeps the
+     skip: fail-safe to the current behavior). */
+  if (originPinningRelaxed(pageBase)) rw.set_origin_pinning_skip?.(false);
   try {
     if (configureLocation(rw, policy) && rw.rewrite_script) {
       const out = rw.rewrite_script(js);
