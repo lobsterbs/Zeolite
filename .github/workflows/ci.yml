@@ -530,6 +530,8 @@ jobs:
           npx playwright install --with-deps chromium
       - name: WebSocket closing buffered bytes vs Chromium (#462)
         run: node suite/e2e/ws-buffered.mjs
+      - name: WebSocket negotiation/close-order/slow-drain differential vs Chromium (#546)
+        run: node suite/e2e/ws-negotiation.mjs
       - name: Location policy Chromium + WASM fixture (#456)
         run: node suite/e2e/location-policy.mjs
       - name: Location targeting corroborated mark + scoreboard (#456 gate 4)
