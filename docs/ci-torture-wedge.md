@@ -476,3 +476,36 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes. Pin 151 (dist 9866c5e8) remains the deployed
   pin on all three LB services; the #546 wave waits on the pin gate.
+
+
+## Run 41636866431 (13:26Z 2026-11-03, head 709dc215, docs-only retrigger)
+
+- The retrigger of the #546 wave rotated the wedge back to the MAIN
+  e2e suite with the documented 41607524709 signature: the #545
+  worker-initiator timeout first ("worker fetch initiator timeout"),
+  then the standard page.goto 30 s cascade (shared-worker relay,
+  #453 identities, storage round-trip, jar-backed document.cookie,
+  Set-Cookie capture, cookieStore facade); rust/wasm/app/compat
+  green; the app job published dist 4c58a57 (engine content
+  identical to 8f331f1: sw.js 73e4dccabc9335e8, bootstrap.js
+  ba7e8e010a356496).
+- The #546 wave's own gates are green in BOTH runs of this pair:
+  the #546 differential passed in 41635594824 (with the main e2e
+  suite green in the same run) and again in 41636866431. The two
+  reds are the non-engine img#uni direct-oracle flake and the
+  documented main-e2e wedge signature - the position-random
+  rotation that exonerated every prior wave. Strike count today:
+  eight (six on pre-#546 bytes, two on #546 bytes) across the
+  passthrough-#96, img#uni-direct and #545-worker-initiator
+  signatures, plus the one-off app-job ws-shim MIME flake.
+- OPERATOR DECISION (2026-11-03): the operator instructed the
+  pin bump ("Bump and do all issues"). Pin 152 (dist 4c58a57,
+  sw.js 73e4dccabc9335e8, bootstrap.js ba7e8e010a356496) is taken
+  per the operational-notes precedent (pin 135): the app job that
+  builds the bundle is green in both runs, rust/wasm/compat green
+  in both runs, the #546 change is exonerated (its differential
+  gate is green in CI twice and the main e2e suite is green on
+  the wave's own head), and the diagnosis is this log. The
+  stricter all-five-green gate returns for the next pin.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes and the LAST of this session.
