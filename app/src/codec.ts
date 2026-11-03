@@ -1123,9 +1123,12 @@ export function isEngineAsset(path: string): boolean {
     case "/index.html":
     case "/rewriter_wasm.js":
     case "/rewriter_wasm_bg.wasm":
-    case "/wisp_wasm.js":
-    case "/wisp_wasm_bg.wasm":
       return true;
+    /* #595: the wisp-wasm crate stays built and unit-tested by the
+       CI wasm job, but no app/src module imports it, so its bundle
+       files are neither served nor engine assets. The gate re-adds
+       both paths together with the bundle files if the transport
+       ever wires the crate in. */
     default:
       return false;
   }
