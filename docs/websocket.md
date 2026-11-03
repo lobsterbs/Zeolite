@@ -48,9 +48,12 @@ the sender's virtual context, never re-schemed).
 ## Observable semantics (#546)
 
 - `url` is the URL the constructor resolved, serialized: resolved
-  against the calling realm base, scheme-less http(s) references mapped
-  to ws(s), explicit ws/wss kept as written, fragments refused with
-  SyntaxError (WHATWG throws on a non-null fragment, so the value can
+  against the calling realm base, http(s) references mapped to ws(s)
+  whether the scheme was explicit or implied by the base (the WHATWG
+  constructor rule; the #546 Chromium differential caught the old
+  explicit-http throw diverging from Chromium), explicit ws/wss kept
+  as written, non-web schemes refused through the native constructor,
+  fragments refused with SyntaxError (WHATWG throws on a non-null fragment, so the value can
   never carry one). This is the string the page constructed - nothing
   new leaks page-side, the property is never re-minted into an engine
   route and never the retargeted destination. The SW decodes the
@@ -72,6 +75,17 @@ the sender's virtual context, never re-schemed).
   peer or the network consumes them. Sends discarded in
   CLOSING/CLOSED still add their payload bytes, matching Chromium, and
   those discarded bytes receive no bridge acknowledgment.
+
+Parity for these observable contracts is gated continuously by two
+ differential e2e suites that run the shim and direct Chromium side
+ by side on the same origin: suite/e2e/ws-buffered.mjs (#462,
+ closing-state buffered bytes) and suite/e2e/ws-negotiation.mjs
+ (#546, URL serialization including the http(s) upgrade, subprotocol
+ negotiation, handshake error/close ordering, server-initiated close,
+ and drain-acknowledged bufferedAmount decay in both a page and a
+ worker). The #546 suite is what caught the explicit-http throw
+ diverging from Chromium. The observability seams carry event types
+ and byte counts, never frame payloads.
 
 ## URL handling (#279)
 

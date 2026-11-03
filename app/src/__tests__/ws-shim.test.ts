@@ -213,25 +213,30 @@ describe("page WebSocket shim relative URLs (#279)", () => {
     expect(urlOf(3)).toBe("wss://relay.example/ws");
   });
 
-  it("throws SyntaxError for explicit http(s) schemes like the native constructor (#364)", () => {
+  it("upgrades explicit http(s) schemes to ws(s) like the Chromium constructor (#546)", () => {
     const Real = globalThis.WebSocket;
     if (!Real) return;
     vi.stubGlobal("CloseEvent", FakeCloseEvent);
-    ctlState.ctl = { postMessage() { /* unused */ } };
+    const posted: unknown[] = [];
+    ctlState.ctl = { postMessage(msg: unknown) { posted.push(msg); } };
     const w: Record<string, unknown> = {
       WebSocket: Real,
       document: { baseURI: "https://engine.example/page.html" },
     };
     applyWs(w);
     const WS = w.WebSocket as new (u: string) => WebSocket;
-    for (const bad of ["http://engine.example/socket", "https://engine.example/socket", "HTTP://engine.example/socket"]) {
-      let err: unknown = null;
-      try {
-        new WS(bad);
-      } catch (e) {
-        err = e;
-      }
-      expect((err as DOMException).name).toBe("SyntaxError");
+    /* #546 differential: Chromium constructs ws:// from an http:
+       argument (WHATWG constructor mapping), so the old #364
+       explicit throw was a divergence, not parity. */
+    const cases = [
+      ["http://engine.example/socket", "ws://engine.example/socket"],
+      ["https://engine.example/socket", "wss://engine.example/socket"],
+      ["HTTP://engine.example/socket", "ws://engine.example/socket"],
+    ] as const;
+    for (const [written, resolved] of cases) {
+      const s = new WS(written);
+      expect(s.url).toBe(resolved);
+      expect((posted[posted.length - 1] as { url: string }).url).toBe(resolved);
     }
   });
 
@@ -255,14 +260,24 @@ describe("page WebSocket shim relative URLs (#279)", () => {
       }
       expect((err as DOMException).name).toBe("SyntaxError");
     }
-    /* non-web schemes are refused with the same SyntaxError (#364) */
-    let nativeErr: unknown = null;
+    /* non-web schemes fall through to the native constructor and
+       are refused exactly like it (#546: delegation - the unit
+       env's own WebSocket decides the throw) */
+    let shimErr: unknown = null;
+    let realErr: unknown = null;
     try {
       new WS("ftp://example.com/x");
     } catch (e) {
-      nativeErr = e;
+      shimErr = e;
     }
-    expect(nativeErr).not.toBeNull();
+    try {
+      new Real("ftp://example.com/x");
+    } catch (e) {
+      realErr = e;
+    }
+    expect(!!shimErr).toBe(!!realErr);
+    if (realErr)
+      expect((shimErr as DOMException).name).toBe((realErr as DOMException).name);
   });
 });
 

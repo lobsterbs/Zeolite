@@ -58,11 +58,10 @@ export function applyWs(w: Record<string, unknown>): void {
          realm base (the native constructor demands an absolute
          URL; the engine accepts the relative references
          same-origin apps use), then apply the native URL
-         semantics (#364): an explicit non-ws scheme throws
-         SyntaxError like native (the throw is explicit, not
-         delegated: Node's native ctor silently upgrades http(s));
-         only scheme-less relative references map http(s) to ws(s),
-         and a fragment fails like native. */
+         semantics: http(s) maps to ws(s) per the WHATWG
+         constructor rule, any other scheme falls through to the
+         native constructor (which refuses it), and a fragment
+         fails like native. */
       const base =
         (w.document as { baseURI?: string } | undefined)?.baseURI ||
         (w.location as { href?: string } | undefined)?.href;
@@ -71,12 +70,12 @@ export function applyWs(w: Record<string, unknown>): void {
       } catch {
         throw new DOMException(url, "SyntaxError");
       }
-      const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(url);
-      if (hasScheme) {
-        if (!/^wss?:$/.test(u.protocol)) {
-          throw new DOMException(url, "SyntaxError");
-        }
-      } else if (u.protocol === "http:") u.protocol = "ws:";
+      /* WHATWG constructor rule: http maps to ws and https maps
+         to wss whether the scheme was explicit or implied by the
+         base (#546: the Chromium differential suite proved the old
+         explicit-http throw diverged; Chromium constructs ws://
+         from an http: argument). */
+      if (u.protocol === "http:") u.protocol = "ws:";
       else if (u.protocol === "https:") u.protocol = "wss:";
       if (!/^wss?:$/.test(u.protocol)) {
         return new OWS(url, protocols);
@@ -164,6 +163,10 @@ const disp = (e: Event) => {
           if (typeof m.bytes === "number" && Number.isSafeInteger(m.bytes) && m.bytes >= 0)
             bufferedBytes = Math.max(0, bufferedBytes - m.bytes);
         } else if (m.ev === "error") {
+          /* WHATWG fail-the-connection: readyState reaches CLOSED
+             before the error event fires (#546 differential caught
+             the shim reporting CONNECTING at error time). */
+          wsState = 3;
           disp(new Event("error"));
         } else if (m.ev === "close") {
           wsState = 3;
