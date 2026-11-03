@@ -54,22 +54,14 @@ export function popupFacade(w: object, name: string | undefined): object | null 
 }
 /** #416/#553: a handled popup has a routing target. The synchronous
     return contract is kept by popupFacade; a fail-closed embedder
-    still swallows and window.open answers null. */
-export function embedPopup(w: object, href: string, fallback: () => void): boolean {
+    still swallows and window.open answers null. The optional top
+    flag (#558) routes a target=_top activation instead: the
+    embedder owns the real top document, and a realm without a live
+    embedder answers false so the caller keeps its native drive. */
+export function embedPopup(w: object, href: string, fallback: () => void, top?: boolean): boolean {
   const open = popups.get(w);
   if (!open) return false;
-  open({ href, fallback });
-  return true;
-}
-
-/** #558: hand a target=_top activation to the embedder (the host owns
-    the real top document). True means the request was queued, sent,
-    or terminally answered by its own fallback; a realm without a
-    live embedder answers false and keeps the native drive. */
-export function embedTopNav(w: object, href: string, fallback: () => void): boolean {
-  const open = popups.get(w);
-  if (!open) return false;
-  open({ href, fallback, top: true });
+  open({ href, fallback, top });
   return true;
 }
 
@@ -95,18 +87,9 @@ export function applyEmbedSync(w: Record<string, unknown>): void {
     facadeRouted.delete(w);
     closeReports.delete(w);
     if (standalone) popups.delete(w);
-    else
-      /* #558: a post-terminal top-nav request runs its own native
-         fallback (the drive never leaks the client IP); popups
-         stay swallowed, unknown-embedder semantics. */
-      popups.set(w, (p) => {
-        if (p.top) { try { p.fallback(); } catch { /* the drive owns its errors */ } }
-      });
-    /* #558: queued top-nav fallbacks run on both terminal paths
-       (the drive never leaks the client IP); popups only on the
-       standalone one. */
+    else popups.set(w, () => {}); // unknown embedder fails closed (#558 tops too: not routed, not driven)
     for (const p of pending.splice(0)) {
-      if (standalone || p.top) { try { p.fallback(); } catch { /* popup blocked */ } }
+      if (standalone) { try { p.fallback(); } catch { /* popup blocked */ } }
     }
   };
   popups.set(w, (p) => { if (pending.length < 32) pending.push(p); });
@@ -153,11 +136,9 @@ export function applyEmbedSync(w: Record<string, unknown>): void {
            known (a split-origin top commit lands in the
            first-party worker partition, which holds a different
            route key and no transport config, and strands on the
-           host shell). */
-        if (p.top) {
-          post({ lb: "navigateTab", data: { href: p.href, clientId } });
-          return;
-        }
+           host shell). No clientId rides this message: the
+           embedder routes the active tab. */
+        if (p.top) return post({ lb: "navigateTab", data: { href: p.href } });
         if (!p.href || p.href === "about:blank") {
           post({ lb: "navigate", data: { href: "", newTab: true, blank: true, clientId } });
           return;

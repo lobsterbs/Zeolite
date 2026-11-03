@@ -35,7 +35,7 @@ import { applyIsolation } from "./isolation";
 import { applyStorage } from "./storage";
 import { applySenderShim } from "./postmsg";
 import { anchorVirtual, NativeURL } from "./anchorshim";
-import { embedTopNav, embedPopup, popupFacade } from "./embedsync";
+import { embedPopup, popupFacade } from "./embedsync";
 
 export const NAV = "/__zl_nav__";
 /* #101: parent-relative marker. A same-origin child realm (an
@@ -618,11 +618,10 @@ export function applyNavGuard(
          which holds a different route key and no transport
          config: the minted route strands there and the host
          fallback shell renders (the Google sign-in strand). The
-         embedder owns the real top: hand the destination over
-         with a bounded ack; the native drive stays the fallback
-         for standalone realms and silent hosts. */
-      if (embedTopNav(w, d, driveNative)) return;
-      driveNative();
+         embedder owns the real top: hand the destination over;
+         the native drive stays the fallback for realms without
+         a live embedder (standalone documents). */
+      embedPopup(w, d, driveNative, true) || driveNative();
     };
     safe(() => AE.call(w, "click", drivePopup, true));
     safe(() => AE.call(w, "auxclick", drivePopup, true));
