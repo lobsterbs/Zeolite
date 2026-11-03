@@ -3446,6 +3446,31 @@ export function handleFetch(e: FetchEvent): void {
         target = tgFixed;
       }
 
+      /* #605: the Persona KYC widget iframe (bridge.withpersona.com
+         /widget) carries an iframe-origin= built by page JS from
+         window.location.origin (LegacyUnforgeable, the #112 co=
+         class): Persona validates it against the inquiry template's
+         Domain Manager allowlist, so a virtualized page names the
+         engine origin and the widget document is refused with
+         X-Frame-Options deny. Virtualize an iframe-origin= that names
+         this deployment at the seam the engine owns; this repairs the
+         request identity the allowlist validates, it does not add
+         any site to a customer's allowlist. */
+      const poFixed = virtualPersonaIframeOrigin(target, e.request.referrer, self.location.origin, initiator);
+      if (poFixed !== target) {
+        const poid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: poid,
+          requestId: poid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "persona iframe-origin virtualized to the page origin",
+          url: target,
+        });
+        target = poFixed;
+      }
+
       /* #129: challenge-widget frames stay engine-routed. The #120
          policy redirected these navigations provider-direct, which
          was an IP leak (the #32 class) AND left the widget
@@ -5658,6 +5683,45 @@ export function virtualTelegramOrigin(target: string, referrer: string, engineOr
   const parent = referrerOrigin(referrer, initiator);
   if (!parent) return target;
   return u.href.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
+}
+
+/** #605: the Persona KYC widget iframe (bridge.withpersona.com/widget)
+    receives an iframe-origin= built by page JS from
+    window.location.origin (LegacyUnforgeable, the #112 co= class);
+    Persona validates it against the inquiry template's Domain Manager
+    allowlist, so a virtualized page names the engine origin and the
+    widget document is refused (X-Frame-Options deny). Re-map only
+    exact engine-origin parameters using a verified page context;
+    everything else is intentionally left untouched, and this repairs
+    the request identity the allowlist validates - it does not add any
+    site to a customer's allowlist. */
+export function virtualPersonaIframeOrigin(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host !== "bridge.withpersona.com") return target;
+  if (u.pathname !== "/widget") return target;
+  const m = /([?&])iframe-origin=([^&]*)/.exec(u.search);
+  if (!m || !m[2]) return target;
+  let dec: string;
+  try {
+    dec = decodeURIComponent(m[2]);
+  } catch {
+    return target;
+  }
+  /* Only an iframe-origin= that names THIS deployment is ours to fix;
+     any other value is an origin the page genuinely chose. */
+  if (dec !== engineOrigin && dec !== engineOrigin + ":443" && dec !== engineOrigin + ":80")
+    return target;
+  /* Without a verified page origin there is no honest widget-side
+     fallback, so the request passes through unchanged. */
+  const parent = referrerOrigin(referrer, initiator);
+  if (!parent) return target;
+  return u.href.replace(m[0], m[1] + "iframe-origin=" + encodeURIComponent(parent));
 }
 
 /** #483: Google Identity Services embeds the page origin in the origin=
