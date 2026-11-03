@@ -362,3 +362,23 @@ deterministic; only its firing is intermittent. Tracked in #514.
   LobsterBrowse pin. Pin 150 (dist 8223b1ff, green run 41483811807)
   remains the deployed pin on all three LB services.
 
+
+
+## Run 41606184413 (08:49Z 2026-11-03, head 66807c00, docs-only retrigger)
+
+- The wedge struck the torture suite only: 19 of 20 torture probes
+  passed and the single red is the torture-page probe's img#uni
+  assertion on the DIRECT-oracle arm ("direct model failed to load
+  img#uni (fixture regression)", the harness's own wording for a
+  direct-oracle miss) - the same decode-skip flake family as
+  41520211250/41522301881, failing here through the b002d0ff
+  decode-or-serve contract. The failing arm does not traverse the
+  engine and exercises none of the head's app-TS change; the MAIN
+  e2e suite PASSED in the same run; rust/wasm/app/compat green; the
+  app job published dist 08fd43cd normally.
+- The app-job ws-shim flake of run 41604559271 did NOT recur (app
+  green this run), completing its record as a one-off.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin. Pin 150 (dist 8223b1ff, green run 41483811807)
+  remains the deployed pin on all three LB services.
