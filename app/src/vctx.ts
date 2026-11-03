@@ -42,6 +42,11 @@ export interface VirtualContext {
       document navigations, "worker"/"sharedworker" for worker-script
       destinations. Absent means the pre-#596 window default. */
   clientKind?: "window" | "worker" | "sharedworker";
+  /** #611: the client is a browsing pane's main surface (its document
+      was served from a minted navigation handle), so its own
+      navigations are top-level for Sec-Fetch purposes. Absent or
+      false means subframe semantics (fail closed). */
+  mainSurface?: boolean;
 }
 
 /** Default cap for the context map. Client ids are never reused, so a
@@ -59,6 +64,7 @@ export function establishContext(
   clientId: string,
   target: string,
   kind: "window" | "worker" | "sharedworker" = "window",
+  mainSurface = false,
 ): VirtualContext | null {
   let u: URL;
   try {
@@ -73,6 +79,9 @@ export function establishContext(
     targetOrigin: u.origin,
     currentUrl: target,
     clientKind: kind,
+    /* #611: stored only when true, so an absent field always means
+       subframe semantics for any reader. */
+    ...(mainSurface ? { mainSurface: true } : {}),
   };
   map.set(clientId, ctx);
   return ctx;
@@ -130,6 +139,7 @@ export function establishFromClientUrl(
   clientId: string,
   clientUrl: string,
   decode: (u: URL) => string | null,
+  mainSurface = false,
 ): VirtualContext | null {
   let u: URL;
   try {
@@ -139,5 +149,7 @@ export function establishFromClientUrl(
   }
   const target = decode(u);
   if (!target) return null;
-  return establishContext(map, clientId, target);
+  /* #611: surface class flows through the client-URL rehydration so
+     a restarted worker restores it from the same shape oracle. */
+  return establishContext(map, clientId, target, "window", mainSurface);
 }

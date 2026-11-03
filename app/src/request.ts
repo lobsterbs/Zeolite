@@ -14,7 +14,7 @@
    this module keeps calling decideTransport/refineWithContent at the
    same seams the old handler did. */
 /// <reference lib="webworker" />
-import { b64uDecode, b64uEncode, buildNavHandleUrl, buildQueryHandleUrl, decodeClientUrl, decodeExpiredNavHandle, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodeNavHandleRoot, decodePath, decodeQueryHandle, encodeDest, encodeDestLegacy, encodeNavHandle, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, legacyRouteShaped, looksKeyedToken, NAVH, NAVH_TTL_MS, NAVQ_PARAM, passChallengeRedirFixed, queryHandlePathShaped, queryHandleToken, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix, restoreLeadingSlashes } from "./codec";
+import { b64uDecode, b64uEncode, buildNavHandleUrl, buildQueryHandleUrl, decodeClientUrl, decodeExpiredNavHandle, decodeLegacyRoute, decodeNavHandle, decodeNavHandlePath, decodeNavHandleRoot, decodePath, decodeQueryHandle, handleRouteShaped, encodeDest, encodeDestLegacy, encodeNavHandle, isEngineAsset, isEnginePath, isOpaqueUrl, isWorkerDestination, legacyRouteShaped, looksKeyedToken, NAVH, NAVH_TTL_MS, NAVQ_PARAM, passChallengeRedirFixed, queryHandlePathShaped, queryHandleToken, recoverPath, referrerDest, setRouteKeys, setScheme, unwrapDest, currentPrefix, restoreLeadingSlashes } from "./codec";
 
 import { decodeBody, mapLocationHeader, mapRefreshHeader, stripHostile, utf8ContentType } from "./headers";
 import { parseKdl } from "./kdl";
@@ -1948,7 +1948,17 @@ async function rehydrateClientContext(
     return undefined;
   }
   if (!client || !client.url) return undefined;
-  const ctx = establishFromClientUrl(VCTX, clientId, client.url, decodeClientUrl);
+  /* #611: a restarted worker must also restore the client's surface
+     class: the pane's committed client URL is itself the minted
+     handle shape, so the same shape oracle that stamped the context
+     at serve time restores it here. */
+  let surface = false;
+  try {
+    surface = handleRouteShaped(new URL(client.url));
+  } catch {
+    surface = false;
+  }
+  const ctx = establishFromClientUrl(VCTX, clientId, client.url, decodeClientUrl, surface);
   if (!ctx) return undefined;
   capContexts(VCTX, VCTX_CAP);
   const rtid = DIAG.trace(clientId);
@@ -2547,6 +2557,14 @@ export function handleFetch(e: FetchEvent): void {
          keeps its native behavior, so a host page that happens to
          carry the param name never breaks. */
       const qHandle = decodeQueryHandle(url);
+      /* #611: the request rides a minted browsing-context handle (a
+         NAVH route or a committed query route): the pane's own
+         navigation re-driven by the navguard, an engine-minted
+         popup, or a genuine subframe's own cross-origin link click
+         (its navguard mints the same shape). The initiating
+         client's surface class is the tiebreaker; the shape alone
+         is deliberately not trusted. */
+      const reqMintedHandle = qHandle !== null || url.pathname.startsWith(NAVH + "/");
       /* Route-shaped pathname: the path arm owns the URL and the
          expired re-mint below must never feed on a copied token
          either (its qFull would graft the route path onto the
@@ -3279,6 +3297,19 @@ export function handleFetch(e: FetchEvent): void {
         }
       }
 
+      /* #611: main-surface tab navigation. The pane's own navigation
+         (the navguard re-drive) arrives as a minted-handle request
+         from the pane's client, whose context was stamped main
+         surface at serve time (or restored by the rehydrate above).
+         A genuine subframe's own cross-origin link click mints the
+         same request shape, but its client was served from a prefix
+         route, so the client class is the tiebreaker. Anything
+         unknown fails closed to the physical iframe dest. */
+      const mainSurfaceNav =
+        e.request.mode === "navigate" &&
+        reqMintedHandle &&
+        ctx?.mainSurface === true;
+
       /* #112: the Referer fix alone does not repair the reCAPTCHA
          widget: its JS builds co= from window.location.origin
          (LegacyUnforgeable), so upstream always receives the engine
@@ -3549,7 +3580,14 @@ export function handleFetch(e: FetchEvent): void {
         /* #596: the destination decides the client kind the guest
            clients facade reports (window vs worker shapes). */
         const clientKind = e.request.destination === "worker" || e.request.destination === "sharedworker" ? e.request.destination : "window";
-        if (newClient && establishContext(VCTX, newClient, target, clientKind)) capContexts(VCTX, VCTX_CAP);
+        /* #611: a document served from a minted navigation handle is
+           the browsing pane's main surface (or an engine-minted
+           popup): record the surface class with the context so the
+           client's own next navigation stamps Sec-Fetch-Dest
+           document. Worker scripts never ride handle routes, and a
+           genuine subframe's src is a prefix route, so the flag
+           fails closed for both. */
+        if (newClient && establishContext(VCTX, newClient, target, clientKind, reqMintedHandle)) capContexts(VCTX, VCTX_CAP);
         /* #531: the stale page's expectations must not gate the next
            document's subresources. */
         if (e.request.mode === "navigate") {
@@ -4158,7 +4196,7 @@ export function handleFetch(e: FetchEvent): void {
         let curStage: DiagStage = "UPSTREAM_REQUEST";
         try {
           DIAG.stage(traceId, "UPSTREAM_REQUEST", { url: target });
-          const fwd = forwardedHeaders(e.request, target, initiator);
+          const fwd = forwardedHeaders(e.request, target, initiator, mainSurfaceNav);
           /* webRequest.onBeforeSendHeaders: blocking listeners may
              replace the outgoing header set (validated pairs only). */
           const replaced = WEBREQ.beforeSendHeaders(wrDetails, fwd);
@@ -4658,7 +4696,10 @@ export function handleFetch(e: FetchEvent): void {
               const navClient = e.resultingClientId || e.clientId;
               /* #596: same client-kind decision as the pre-transport seam. */
               const navKind = e.request.destination === "worker" || e.request.destination === "sharedworker" ? e.request.destination : "window";
-              if (navClient && establishContext(VCTX, navClient, finalDest, navKind))
+              /* #611: the redirect-hop re-establishment must carry the
+                 same surface flag or it would replace the context
+                 and wipe it mid-navigation. */
+              if (navClient && establishContext(VCTX, navClient, finalDest, navKind, reqMintedHandle))
                 capContexts(VCTX, VCTX_CAP);
               if (e.request.mode === "navigate") {
                 sriClearClient(SRI, navClient);
@@ -6194,7 +6235,7 @@ export function stripCrossOriginHopHeaders(sendHeaders: Headers, injectedKeys: I
   for (const k of injectedKeys) sendHeaders.delete(k);
 }
 
-export function forwardedHeaders(req: Request, target: string, initiator?: string): Headers {
+export function forwardedHeaders(req: Request, target: string, initiator?: string, mainSurface = false): Headers {
   const out = new Headers();
   /* Sec-Fetch headers are never copied: the SW-visible values
      describe the engine iframe's fetch, not the virtual page's
@@ -6321,7 +6362,7 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
      both from the virtual initiator; unknown initiator sends none. */
   const vo = virtualOriginHeaders(initiator, target, req.method, req.mode);
   if (vo.origin) out.set("origin", vo.origin);
-  const sf = secFetchHeaders(initiator, target, req.method, req.mode, req.destination);
+  const sf = secFetchHeaders(initiator, target, req.method, req.mode, req.destination, mainSurface);
   if (sf.site) out.set("sec-fetch-site", sf.site);
   if (sf.mode) out.set("sec-fetch-mode", sf.mode);
   if (sf.dest) out.set("sec-fetch-dest", sf.dest);
