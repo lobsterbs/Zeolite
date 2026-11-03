@@ -166,6 +166,11 @@ jobs:
             exit 1
           fi
       - name: typecheck + build
+        # #617: stamp the workflow run id into the bundle so the
+        # running build is nameable (zl:ping/doctor/banner); the
+        # same id lands in the dist commit message downstream.
+        env:
+          VITE_ZEOLITE_BUILD_ID: ${{ github.run_id }}
         run: |
           cd app && npm install
           npx tsc --noEmit > tsc.out 2>&1 || true

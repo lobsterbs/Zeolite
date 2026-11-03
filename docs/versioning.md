@@ -21,6 +21,14 @@ or **1.3 Carbide**.
   printed by the server at startup, exposed as `zeolite_rewriter::VERSION`,
   exported by the service worker as `ZEOLITE_VERSION`, and returned in the
   `zl:getNetLog` reply so tooling can pin and display it.
+  Since #617 the service worker's `ZEOLITE_VERSION` also names the RUNNING
+  build: CI stamps `VITE_ZEOLITE_BUILD_ID` (the workflow run id,
+  the same id the dist publish step writes into the "engine
+  bundle: build <id>" commit) onto the bundle build step, so a
+  CI-built worker answers "3.0.1 Diamond (build <id>)" in zl:ping,
+  the doctor KDL, the console banner and the zl:engineUpdate
+  broadcast. Local and vitest builds stay bare: the build id is a
+  build stamp, not a version bump, and never gates compatibility.
 
 Current release: **3.0.1 Diamond** (cargo `3.0.1`). The 2.x line opened a
 new substance family; the roadmap's 1.x -ide sequence is complete.

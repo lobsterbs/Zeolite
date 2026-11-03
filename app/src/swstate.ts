@@ -30,7 +30,20 @@ import { ruleFor, ruleProfile, siteRules } from "./siteconfig";
 import { httpsUpgraded } from "./config";
 import { currentEngine } from "./transport";
 
-export const ZEOLITE_VERSION = "3.0.1 Diamond";
+/* #617: name the RUNNING build at bundle build time. CI stamps
+   VITE_ZEOLITE_BUILD_ID (the workflow run id, the same id the dist
+   publish step writes into the "engine bundle: build <id>" commit)
+   onto the bundle build step, so zl:ping, the doctor KDL, the
+   console banner and zl:engineUpdate all distinguish a stale active
+   worker from the served bundle. Absent (local, vitest) the version
+   stays bare: a build stamp, not a version bump. */
+export function withBuildId(base: string, buildId: string | null | undefined): string {
+  const b = (buildId ?? "").trim();
+  return b ? base + " (build " + b + ")" : base;
+}
+export const ZEOLITE_BUILD_ID =
+  ((import.meta.env.VITE_ZEOLITE_BUILD_ID as string | undefined) || "").trim();
+export const ZEOLITE_VERSION = withBuildId("3.0.1 Diamond", ZEOLITE_BUILD_ID);
 
 /* ---- Per-client virtual contexts (issue #33) ------------------------ */
 
