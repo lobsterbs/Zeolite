@@ -76,6 +76,13 @@ export class SpoolUnavailableError extends Error {}
 export class SpoolCapError extends Error {}
 
 let liveSpooledBytes = 0;
+/* #628: bytes of spools still being written. A spool joins
+   liveSpooledBytes only after its whole stream is written and the
+   file handle resolves, which for a slow large upload takes
+   minutes; without counting those in-flight bytes, concurrent
+   spools each check the budget against a pool that does not
+   include the others. */
+let inFlightSpooledBytes = 0;
 let spoolSeq = 0;
 
 /** Best-effort orphan sweep: a worker restart mid-chain leaves files
@@ -135,7 +142,13 @@ export async function spoolBody(
   }
   const reader = stream.getReader();
   let total = 0;
+  /* #628: reserved mirrors exactly the bytes this spool has added
+     to the shared in-flight counter, so every exit path rolls back
+     the right amount. */
+  let reserved = 0;
   const cleanup = async (): Promise<void> => {
+    inFlightSpooledBytes -= reserved;
+    reserved = 0;
     try {
       await writable.abort?.();
     } catch {
@@ -154,7 +167,9 @@ export async function spoolBody(
       if (done) break;
       total += value.byteLength;
       if (total > cap) throw new SpoolCapError("replay spool cap exceeded at " + total + " of " + cap + " bytes");
-      if (liveSpooledBytes + total > budget) throw new SpoolCapError("replay spool live budget exceeded at " + total + " bytes");
+      reserved += value.byteLength;
+      inFlightSpooledBytes += value.byteLength;
+      if (liveSpooledBytes + inFlightSpooledBytes > budget) throw new SpoolCapError("replay spool live budget exceeded at " + total + " bytes");
       await writable.write(value);
     }
     await writable.close();
@@ -169,6 +184,8 @@ export async function spoolBody(
     await cleanup();
     throw err;
   }
+  inFlightSpooledBytes -= total;
+  reserved = 0;
   liveSpooledBytes += total;
   let released = false;
   return {
