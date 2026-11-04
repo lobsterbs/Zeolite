@@ -12,7 +12,9 @@
 //! - framed-detection guards fold to their "not framed" values;
 //! - `top.location` navigation writes sink into a harmless property
 //!   (page code must never navigate the UI shell), reads map to the
-//!   page's own location.
+//!   page's own location. Every other `window.top` use folds to
+//!   `window`, keeping the top-level identity for indirect reads and
+//!   document walks (#636).
 //!
 //! Sink naming: method-call sinks use optional chaining
 //! (`self.zl_antiframe?.replace?.(u)`) so they are silent no-ops with
@@ -28,7 +30,15 @@ use super::literals::{find_regex_end, regex_allowed, MAX_KEYWORD};
 
 pub fn antiframe(js: &str) -> String {
     let mut s = replace_bound(js, "window.self", "self");
-    s = replace_bound(&s, "window.top", "top");
+    // #636: window.top.location keeps the location pipeline below
+    // (navigation writes sink, reads fold to the page's own location);
+    // every OTHER window.top use folds to window, the identity the
+    // script sees rendered top-level, so indirect reads
+    // ((t=window.top)?...t.location.search) and document walks
+    // (window.top.document.documentElement) no longer throw against
+    // the cross-origin shell.
+    s = replace_bound(&s, "window.top.location", "top.location");
+    s = replace_bound(&s, "window.top", "window");
     s = replace_bound(&s, "window.parent", "parent");
     // #208: every framing reference folds, not just 'top' vs 'self':
     // any comparison between top, parent, self and window becomes
@@ -581,5 +591,30 @@ mod tests {
     fn string_literals_are_never_folded() {
         let out = antiframe("var s = 'top != self'; var t = \"top.location = x\";");
         assert_eq!(out, "var s = 'top != self'; var t = \"top.location = x\";");
+    }
+
+    /// #636: window.top uses outside the location pipeline fold to
+    /// window, the identity a top-level render gives.
+    #[test]
+    fn window_top_folds_to_window_outside_location() {
+        let out = antiframe(
+            "r=(null===(t=window.top)||void 0===t?void 0:t.location.search)||window.location.search;",
+        );
+        assert!(out.contains("(t=window)"), "got: {out}");
+        assert!(!out.contains("window.top"), "got: {out}");
+        let out2 = antiframe("var l = window.top.document.documentElement.lang;");
+        assert_eq!(out2, "var l = window.document.documentElement.lang;");
+    }
+
+    /// #636: the location pipeline is unchanged - navigation writes
+    /// still sink, reads still fold to the page's own location.
+    #[test]
+    fn window_top_location_sink_and_read_unchanged() {
+        let out = antiframe("window.top.location = u;");
+        assert_eq!(out, "self.zl_antiframe = u;");
+        let out2 = antiframe("window.top.location.href = u;");
+        assert_eq!(out2, "self.zl_antiframe = u;");
+        let out3 = antiframe("var h = window.top.location.hostname;");
+        assert_eq!(out3, "var h = self.location.hostname;");
     }
 }
