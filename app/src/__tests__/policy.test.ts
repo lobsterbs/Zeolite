@@ -80,6 +80,12 @@ rule "r" { route "rewrite" }`)).toThrow(/duplicate rule id/);
 });
 
 describe("policyMatch", () => {
+  it("matches a trailing-dot host spelling (#621)", () => {
+    const d = compilePolicy('rule "dot" {\n  match host="example.com"\n  route "rewrite"\n}');
+    expect(policyMatch(d, "https://example.com./x.js", "script")).toMatchObject({ id: "dot" });
+    expect(policyMatch(d, "https://sub.example.com./x.js", "script")).toMatchObject({ id: "dot" });
+    expect(policyMatch(d, "https://other.example/x.js", "script")).toBeNull();
+  });
   const p = compilePolicy(`rule "low" priority=1 {
   match host="example.com"
   route "rewrite"

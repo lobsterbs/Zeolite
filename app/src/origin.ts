@@ -30,6 +30,10 @@ export interface VirtualOriginHeaders {
     is wider than the PSL in exotic cases (a.b.co.uk vs c.co.uk), never
     narrower, and only widens the "same-site" label. */
 function sameSite(a: string, b: string): boolean {
+  /* #621: a trailing dot is DNS-identical to the bare host; a dotted
+     spelling must not flip a same-site pair to cross-site. */
+  a = a.endsWith(".") ? a.slice(0, -1) : a;
+  b = b.endsWith(".") ? b.slice(0, -1) : b;
   if (a === b) return true;
   return a.endsWith("." + b) || b.endsWith("." + a);
 }

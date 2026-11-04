@@ -117,13 +117,21 @@ function hostOf(target: string): string | null {
   }
 }
 
+/** #621: a trailing dot is DNS-identical to the bare host (the URL
+    standard preserves it), so a dotted request host must not bypass
+    a rule; strip both sides at compare time. */
+function undotHost(h: string): string {
+  return h.endsWith(".") ? h.slice(0, -1) : h;
+}
+
 /** Longest host-suffix match for a target URL. Empty rule when none. */
 export function ruleFor(rules: SiteRules, target: string): SiteRule {
-  const host = hostOf(target);
-  if (!host) return {};
+  const hostRaw = hostOf(target);
+  if (!hostRaw) return {};
+  const host = undotHost(hostRaw); // #621: dotted spelling is the same host
   let best: string | null = null;
   for (const key of Object.keys(rules)) {
-    const k = key.toLowerCase();
+    const k = undotHost(key.toLowerCase());
     if (host === k || host.endsWith("." + k)) {
       if (best === null || k.length > best.length) best = k;
     }

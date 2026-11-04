@@ -30,6 +30,11 @@ describe("applyRules", () => {
     expect(applyRules(RULES, "https://evildoubleclick.net/", "script").action).toBe("pass");
   });
 
+  it("blocks a trailing-dot host spelling (#621)", () => {
+    expect(applyRules(RULES, "https://doubleclick.net./x.js", "script").action).toBe("block");
+    expect(applyRules(RULES, "https://ad.doubleclick.net./x.js", "script").action).toBe("block");
+  });
+
   it("honors the resource-type filter", () => {
     expect(applyRules(RULES, "https://ads.example/a.js", "script").action).toBe("block");
     expect(applyRules(RULES, "https://ads.example/a.png", "image").action).toBe("pass");
@@ -119,6 +124,13 @@ describe("site overrides (zl:rules)", () => {
   it("the allow list still wins over an adblock override", () => {
     setSiteOverrides([{ host: "captcha.example", adblock: false }]);
     expect(applyRules(RULES, "https://captcha.example/widget", "script").action).toBe("allow");
+  });
+
+  it("adblock override and site UA match a trailing-dot host (#621)", () => {
+    setSiteOverrides([{ host: "doubleclick.net", adblock: false }]);
+    expect(applyRules(RULES, "https://doubleclick.net./x.js", "script").action).toBe("pass");
+    setSiteOverrides([{ host: "news.example", ua: "TestUA/1.0" }]);
+    expect(siteUaFor("https://news.example./page")).toBe("TestUA/1.0");
   });
 
   it("rewrite and modify still run for an overridden host", () => {

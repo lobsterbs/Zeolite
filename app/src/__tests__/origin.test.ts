@@ -43,6 +43,12 @@ describe("virtualOriginHeaders (issue #23: upstream Origin / Sec-Fetch-Site)", (
     });
   });
 
+  it("a trailing-dot spelling stays same-site (#621)", () => {
+    expect(virtualOriginHeaders("https://a.site/x", "https://b.a.site./y", "GET", "no-cors")).toEqual({
+      secFetchSite: "same-site",
+    });
+  });
+
   it("unknown initiator fails closed: no headers at all", () => {
     expect(virtualOriginHeaders(undefined, API, "POST", "cors")).toEqual({});
     expect(virtualOriginHeaders(null, API, "POST", "cors")).toEqual({});
