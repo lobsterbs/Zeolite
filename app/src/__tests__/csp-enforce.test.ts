@@ -105,6 +105,21 @@ describe("sourceMatches, CSP3 host-source semantics (#527)", () => {
     expect(sourceMatches(any, u("https://cdn.example.com:8443/a.js"), plan)).toBe(true);
   });
 
+  it("an explicit default port equals the absent port (#629)", () => {
+    const src = planned("script-src https://cdn.example.com:443").sources.get("script-src")![0]!;
+    expect(sourceMatches(src, u("https://cdn.example.com/a.js"), plan)).toBe(true);
+    expect(sourceMatches(src, u("https://cdn.example.com:8443/a.js"), plan)).toBe(false);
+    const http = planned("script-src http://cdn.example.com:80").sources.get("script-src")![0]!;
+    expect(sourceMatches(http, u("http://cdn.example.com/a.js"), plan)).toBe(true);
+    expect(sourceMatches(http, u("http://cdn.example.com:8080/a.js"), plan)).toBe(false);
+    const bare = planned("script-src cdn.example.com:443").sources.get("script-src")![0]!;
+    expect(sourceMatches(bare, u("https://cdn.example.com/a.js"), plan)).toBe(true);
+    expect(sourceMatches(bare, u("http://cdn.example.com/a.js"), plan)).toBe(false);
+    const alt = planned("script-src https://cdn.example.com:8443").sources.get("script-src")![0]!;
+    expect(sourceMatches(alt, u("https://cdn.example.com:8443/a.js"), plan)).toBe(true);
+    expect(sourceMatches(alt, u("https://cdn.example.com/a.js"), plan)).toBe(false);
+  });
+
   it("a scheme-less source matches the page scheme only", () => {
     const src = planned("script-src cdn.example.com").sources.get("script-src")![0]!;
     expect(sourceMatches(src, u("https://cdn.example.com/a.js"), plan)).toBe(true);

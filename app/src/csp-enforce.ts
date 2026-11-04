@@ -229,6 +229,11 @@ export function planEngineCsp(raw: string, docUrl: string): CspEnginePlan {
 }
 
 /** CSP3 host-source matching against the decoded upstream URL. */
+/* #629: CSP3 equates an explicit default port with no port, and the
+   WHATWG URL parser drops default ports, so https://host:443 must
+   match a https://host URL exactly like an absent port. */
+const SCHEME_DEFAULT_PORTS: Record<string, string> = { "http": "80", "https": "443" };
+
 export function sourceMatches(s: CspSource, u: URL, plan: CspEnginePlan): boolean {
   if (s.k === "self") return u.origin === plan.selfOrigin;
   if (s.k === "any") return u.protocol === "http:" || u.protocol === "https:";
@@ -248,7 +253,8 @@ export function sourceMatches(s: CspSource, u: URL, plan: CspEnginePlan): boolea
     /* An absent port matches only the scheme's default port. */
     if (u.port !== "") return false;
   } else if (s.port !== "*") {
-    if (u.port !== s.port) return false;
+    const sp = s.port === SCHEME_DEFAULT_PORTS[s.scheme ?? plan.pageScheme.replace(/:$/, "")] ? "" : s.port;
+    if (u.port !== sp) return false;
   }
   if (s.path !== undefined) {
     if (s.path.endsWith("/")) {
