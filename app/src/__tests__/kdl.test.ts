@@ -58,3 +58,17 @@ describe("parseKdl", () => {
     expect(children[0].children[0].args).toEqual(["ada"]);
   });
 });
+
+describe("keyword delimiter guard (#631)", () => {
+  it("rejects junk suffixes instead of silently misparsing", () => {
+    expect(() => parseKdl("node #truexyz")).toThrow(/malformed keyword/);
+    expect(() => parseKdl("node priority=#true5")).toThrow(/malformed keyword/);
+    expect(() => parseKdl("node #nullish")).toThrow(/malformed keyword/);
+  });
+
+  it("still accepts keywords at every legal delimiter", () => {
+    const doc = parseKdl('node #true #false #null;\nother key=#true { child "x" }');
+    expect(doc[0].args).toEqual([true, false, null]);
+    expect(doc[1].props).toEqual({ key: true });
+  });
+});
