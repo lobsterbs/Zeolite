@@ -861,7 +861,10 @@ export async function pageCacheStore(
     if (finalUrl) stored.headers.set(ZL_FINAL_URL, finalUrl);
     await cache.put(req, stored);
     await writePageCacheUsage(req, index, fields, { bytes: bodyBytes, lastUsed: Date.now() });
-    return keepView ? new Response(resp.body, { status: 200, headers: storedHeaders }) : stored;
+    /* #632: the keepView fork serves the page, so the internal
+       bookkeeping headers (#338) must be stripped from the served copy
+       while the stored entry keeps them. */
+    return keepView ? new Response(resp.body, { status: 200, headers: stripInternalHeaders(storedHeaders) }) : stored;
   } catch {
     if (oversized) return null;
     if (!pageCacheStoreWarned) {
