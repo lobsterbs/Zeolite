@@ -241,3 +241,25 @@ describe("sriBlockedResponse (#531)", () => {
     }
   });
 });
+
+/* #622: the attribute extractor must bind the integrity hash to the
+   real src or href, never a longer attribute name written earlier in
+   the tag (a lazy-loader data-src must not shadow src). */
+describe("sriScanner attribute shadowing (#622)", () => {
+  it("binds the integrity hash to the real src, not data-src", async () => {
+    const noted: Array<[string, string]> = [];
+    const s = sriScanner("https://page.example/", (abs, integrity) => noted.push([abs, integrity]));
+    s.feed("<script data-src=\"/lazy.js\" integrity=\"" + (await integrityOf("real")) + "\" src=\"/real.js\"></script>");
+    expect(noted).toHaveLength(1);
+    expect(noted[0][0]).toBe("https://page.example/real.js");
+    expect(noted[0][1]).toBe(await integrityOf("real"));
+  });
+
+  it("binds the integrity hash to the real href, not data-href", async () => {
+    const noted: Array<[string, string]> = [];
+    const s = sriScanner("https://page.example/", (abs, integrity) => noted.push([abs, integrity]));
+    s.feed("<link rel=\"stylesheet\" data-href=\"/lazy.css\" integrity=\"" + (await integrityOf("real")) + "\" href=\"/real.css\">");
+    expect(noted).toHaveLength(1);
+    expect(noted[0][0]).toBe("https://page.example/real.css");
+  });
+});

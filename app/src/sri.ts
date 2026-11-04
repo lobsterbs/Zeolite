@@ -188,9 +188,11 @@ const TAG_HOLD_MAX = 64 * 1024;
     ride single or double quotes or bare; unquoted values end at the
     next whitespace or the tag end. Returns null for unquoted values
     containing characters that make the parse ambiguous - the safe
-    skip, never a wrong URL. */
+    skip, never a wrong URL. #622: the attribute name is
+    anchored to the tag start or whitespace, so a longer
+    data-src can never shadow the real src. */
 function attrOf(tag: string, name: string): string | null {
-  const re = new RegExp(name + '\\s*=\\s*("([^"]*)"|\'([^\']*)\'|([^\\s>]+))', "i");
+  const re = new RegExp("(?:^|\\s)" + name + '\\s*=\\s*("([^"]*)"|\'([^\']*)\'|([^\\s>]+))', "i");
   const m = tag.match(re);
   if (!m) return null;
   if (m[2] !== undefined) return m[2];
