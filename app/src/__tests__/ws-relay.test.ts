@@ -141,3 +141,29 @@ describe("relay ws factory (#511)", () => {
     }
   });
 });
+
+describe("relay ws re-registration sweep (#623)", () => {
+  it("tears down every socket from the old registration era", () => {
+    const portA = new FakePort();
+    relayRegister(portA as unknown as MessagePort);
+    const h = handlers();
+    relayWsFactory.open("wss://game.example/socket", [], h);
+    const rid = (portA.posted[0] as { rid: number }).rid;
+    portA.deliver({ type: "zl:wsOpen", rid, protocol: "" });
+    const h2 = handlers();
+    relayWsFactory.open("wss://other.example/", [], h2);
+    const rid2 = (portA.posted[1] as { rid: number }).rid;
+    const portB = new FakePort();
+    relayRegister(portB as unknown as MessagePort);
+    expect(h.onerror).toHaveBeenCalledTimes(1);
+    expect(h.onclose).toHaveBeenCalledWith(1006, "");
+    expect(h2.onerror).toHaveBeenCalledTimes(1);
+    expect(h2.onclose).not.toHaveBeenCalled();
+    const before = portB.posted.length;
+    portB.deliver({ type: "zl:wsData", rid, data: "ghost" });
+    portB.deliver({ type: "zl:wsClose", rid: rid2, code: 1000, reason: "" });
+    expect(h.onmessage).not.toHaveBeenCalled();
+    expect(h2.onclose).not.toHaveBeenCalled();
+    expect(portB.posted.length).toBe(before);
+  });
+});

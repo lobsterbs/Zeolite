@@ -173,6 +173,15 @@ if (typeof self !== "undefined") void relayColdWake();
     port and route its answers to the pending fetches. */
 let hostCredits = false;
 
+/** #623: subscribers told when a NEW relay port registers: the old
+    registration era is over, so state riding its frames must be
+    swept or it can never resolve. */
+const reRegisterSubscribers: Array<() => void> = [];
+
+export function relayOnReRegister(fn: () => void): void {
+  reRegisterSubscribers.push(fn);
+}
+
 export function relayRegister(port: MessagePort, credits?: unknown): void {
   hostPort = port;
   /* #470: only an embedder that understands byte credits receives
@@ -183,6 +192,7 @@ export function relayRegister(port: MessagePort, credits?: unknown): void {
   const ws = reRegisterWaiters;
   reRegisterWaiters = [];
   ws.forEach((w) => w());
+  for (const s of [...reRegisterSubscribers]) s();
   port.onmessage = (ev: MessageEvent) => {
     const m = ev.data as RelayMsg;
     if (!m || typeof m.rid !== "number") return;
