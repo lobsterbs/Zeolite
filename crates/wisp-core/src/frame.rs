@@ -138,6 +138,15 @@ fn parse_hostname(p: &[u8]) -> Result<String> {
             have: p.len(),
         });
     }
+    // #620: strict trailing check: the payload must end exactly at
+    // 4 + hostlen; junk past it means a corrupted CONNECT (a silent
+    // truncation elsewhere produces exactly this shape), never a
+    // valid one.
+    if p.len() > 4 + hostlen {
+        return Err(WispError::ProtocolViolation(
+            "trailing bytes after the connect hostname",
+        ));
+    }
     Ok(std::str::from_utf8(&p[4..4 + hostlen])?.to_string())
 }
 
@@ -195,8 +204,8 @@ fn parse_info(stream_id: u32, p: &[u8]) -> Result<Packet> {
 }
 
 /// Build a raw frame from a typed packet.
-pub fn encode_packet(packet: &Packet) -> Frame {
-    match packet {
+pub fn encode_packet(packet: &Packet) -> Result<Frame> {
+    let frame = match packet {
         Packet::Connect {
             stream_id,
             kind,
@@ -204,7 +213,14 @@ pub fn encode_packet(packet: &Packet) -> Frame {
             hostname,
         } => {
             let host = hostname.as_bytes();
-            debug_assert!(host.len() <= 255, "hostname exceeds u8 length prefix");
+            // #620: the wire layout length prefix is u8; a longer
+            // hostname must fail the encode instead of silently
+            // truncating to a different destination in release builds.
+            if host.len() > 255 {
+                return Err(WispError::ProtocolViolation(
+                    "connect hostname exceeds the u8 length prefix",
+                ));
+            }
             let mut p = BytesMut::with_capacity(4 + host.len());
             p.put_u8(*kind as u8);
             p.put_u16_le(*port);
@@ -258,13 +274,53 @@ pub fn encode_packet(packet: &Packet) -> Frame {
                 payload: p.freeze(),
             }
         }
-    }
+    };
+    Ok(frame)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::packet::Packet;
+
+    #[test]
+    fn connect_hostname_longer_than_u8_prefix_fails_encode() {
+        // #620: a 256-byte hostname cannot fit the wire u8 length
+        // prefix; the encode must fail instead of silently truncating
+        // to a different destination in release builds.
+        let pkt = Packet::Connect {
+            stream_id: 1,
+            kind: StreamKind::Tcp,
+            port: 443,
+            hostname: "a".repeat(256),
+        };
+        let err = encode_packet(&pkt).unwrap_err();
+        assert!(
+            matches!(err, WispError::ProtocolViolation(_)),
+            "hostname too long must fail the encode: {err}"
+        );
+    }
+
+    #[test]
+    fn connect_parse_rejects_trailing_bytes_after_host() {
+        // #620: a hand-built CONNECT with junk past 4 + hostlen is
+        // malformed; the strict check catches silent truncations.
+        let mut p = vec![StreamKind::Tcp as u8];
+        p.extend_from_slice(&443u16.to_le_bytes());
+        p.push(3);
+        p.extend_from_slice(b"abc");
+        p.push(b'X');
+        let frame = Frame {
+            packet_type: PacketType::Connect,
+            stream_id: 1,
+            payload: Bytes::from(p),
+        };
+        let err = frame.parse_packet().unwrap_err();
+        assert!(
+            matches!(err, WispError::ProtocolViolation(_)),
+            "trailing bytes must fail the parse: {err}"
+        );
+    }
 
     #[test]
     fn roundtrip_connect() {
@@ -274,7 +330,7 @@ mod tests {
             port: 443,
             hostname: "example.com".into(),
         };
-        let frame = encode_packet(&pkt);
+        let frame = encode_packet(&pkt).unwrap();
         let mut buf = BytesMut::new();
         frame.encode_into(&mut buf);
         let parsed = Frame::decode(&mut buf).unwrap().unwrap();
@@ -289,7 +345,7 @@ mod tests {
             minor: 1,
             extensions: vec![(0x01, vec![]), (0x04, b"hello".to_vec())],
         };
-        let frame = encode_packet(&pkt);
+        let frame = encode_packet(&pkt).unwrap();
         let mut buf = BytesMut::new();
         frame.encode_into(&mut buf);
         let parsed = Frame::decode(&mut buf).unwrap().unwrap();
