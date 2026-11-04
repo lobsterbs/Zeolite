@@ -39,7 +39,11 @@ export interface WsFactory {
     h: {
       onopen(protocol: string): void;
       onmessage(data: unknown): void;
-      onclose(code: number, reason: string): void;
+      /* #626: a transport that dies after the handshake ends with
+         clean=false (1006 with wasClean true is impossible per spec);
+         the flag is optional, so a transport passing only
+         (code, reason) keeps clean semantics. */
+      onclose(code: number, reason: string, clean?: boolean): void;
       onerror(error: string): void;
     },
     /** Handshake request headers (per-origin virtual WS identity,
@@ -218,7 +222,7 @@ export class WsBridge {
           this.hooks.trace({ subsystem: "websocket", original: "rx", result: conn.url, resource: "websocket" });
           port.postMessage({ ev: "message", data });
         },
-        onclose: (code, reason) => this.end(port, code, true, reason),
+        onclose: (code, reason, clean) => this.end(port, code, clean !== false, reason),
         onerror: (err) => {
           if (this.conns.get(port) !== conn) return;
           port.postMessage({ ev: "error", error: String(err) });

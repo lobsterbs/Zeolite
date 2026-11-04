@@ -33,7 +33,7 @@ import type { WsFactory } from "./wsbridge";
 interface Conn {
   onopen: (protocol: string) => void;
   onmessage: (data: unknown) => void;
-  onclose: (code: number, reason: string) => void;
+  onclose: (code: number, reason: string, clean?: boolean) => void;
   onerror: (error: string) => void;
   opened: boolean;
   closing: boolean;
@@ -54,7 +54,7 @@ relayOnReRegister(() => {
   for (const [rid, c] of [...conns]) {
     drop(rid, c);
     c.onerror("relay re-registered");
-    if (c.opened) c.onclose(1006, "");
+    if (c.opened) c.onclose(1006, "", false); /* #626: abnormal */
   }
 });
 
@@ -99,7 +99,7 @@ relaySubscribe((m) => {
        the socket had already opened. */
     drop(msg.rid, c);
     c.onerror(msg.error ?? "relay ws failed");
-    if (c.opened) c.onclose(1006, "");
+    if (c.opened) c.onclose(1006, "", false); /* #626: abnormal */
   }
 });
 

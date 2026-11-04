@@ -7,7 +7,7 @@ interface FakeHandlers {
   h: {
     onopen(protocol: string): void;
     onmessage(data: unknown): void;
-    onclose(code: number, reason: string): void;
+    onclose(code: number, reason: string, clean?: boolean): void;
     onerror(error: string): void;
   };
 }
@@ -454,5 +454,40 @@ describe("WsBridge keepalive watchdog (#61)", () => {
     expect(pings.count).toBe(2);
     vi.advanceTimersByTime(10000);
     expect(pings.count).toBe(2); /* no dangling intervals */
+  });
+});
+
+describe("transport close clean flag (#626)", () => {
+  it("ends clean=false when the transport flags an abnormal close after open", () => {
+    const { hooks, rec } = fakeHooks();
+    let h!: FakeHandlers["h"];
+    const factory: WsFactory = { open: (_url, _protocols, handlers) => {
+      h = handlers;
+      return { send() {}, close() {} };
+    } };
+    const bridge = new WsBridge(factory, hooks);
+    const port = fakePort();
+    bridge.open(port, "wss://example.com/", []);
+    h.onopen("");
+    h.onerror("relay channel died");
+    h.onclose(1006, "", false);
+    expect(rec.closes).toEqual([{ code: 1006, clean: false, ms: expect.any(Number) }]);
+    expect(port.posted.at(-1)).toMatchObject({ ev: "close", code: 1006, clean: false });
+  });
+
+  it("still reports a clean close when the transport passes no flag", () => {
+    const { hooks, rec } = fakeHooks();
+    let h!: FakeHandlers["h"];
+    const factory: WsFactory = { open: (_url, _protocols, handlers) => {
+      h = handlers;
+      return { send() {}, close() {} };
+    } };
+    const bridge = new WsBridge(factory, hooks);
+    const port = fakePort();
+    bridge.open(port, "wss://example.com/", []);
+    h.onopen("");
+    h.onclose(1000, "done");
+    expect(rec.closes).toEqual([{ code: 1000, clean: true, ms: expect.any(Number) }]);
+    expect(port.posted.at(-1)).toMatchObject({ ev: "close", code: 1000, clean: true });
   });
 });
