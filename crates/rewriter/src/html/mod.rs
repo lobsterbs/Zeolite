@@ -33,6 +33,11 @@ const DROP_RAW_CAP: usize = 256 * 1024;
 /// passthrough), fail-open exactly like the location pass's size cap.
 /// Matches the location pass's legacy AST ceiling.
 const RAW_PASS_CAP: usize = 2 * 1024 * 1024;
+/// #624: a tag whose closing ">" never arrives (an opened quote
+/// swallows every later ">") is given up on past this bound: the
+/// retained bytes emit verbatim as text and the stream
+/// resynchronizes, so tag-state retention stays bounded.
+const TAG_HOLD_CAP: usize = 256 * 1024;
 
 /// #456 passthrough carry: bytes this close to the end of the buffer
 /// are re-scanned on the next chunk, so no close or escape token can
@@ -891,6 +896,20 @@ impl Rewriter {
                             }
                         }
                         None => {
+                            // #624: a tag whose closing ">" never
+                            // arrives (an opened quote swallows every
+                            // later ">") would be retained forever.
+                            // Past the cap give up on the tag: the
+                            // retained bytes emit verbatim as text and
+                            // the stream resynchronizes from the next
+                            // chunk, so retention stays bounded.
+                            if buf.len() > TAG_HOLD_CAP {
+                                out.push_str(&buf);
+                                buf.clear();
+                                self.st = St::Text;
+                                self.cur_tag.clear();
+                                self.trace_rec("tag-hold", "over-cap-text");
+                            }
                             self.buf = buf;
                             break; // incomplete tag: wait for more input
                         }
@@ -2178,6 +2197,30 @@ mod tests {
             crate::encode::b64u_encode(b"https://plain.example.com/x")
         );
         assert!(out.contains(&route), "{out}");
+    }
+
+    /// #624: a tag whose closing ">" never arrives (an opened quote
+    /// swallows every later ">") must not be retained forever: past
+    /// the cap the retained bytes emit verbatim as text and the
+    /// rewriter resynchronizes on later markup.
+    #[test]
+    fn tag_hold_over_cap_bails_as_text() {
+        let mut r = Rewriter::new(cfg());
+        let head = r.process("<a href=\"");
+        assert_eq!(head, "", "in-tag bytes wait for the tag end");
+        let filler = "y".repeat(TAG_HOLD_CAP + 1024);
+        let out = r.process(&filler);
+        assert_eq!(
+            out,
+            format!("<a href=\"{filler}"),
+            "over-cap tag retention emits verbatim as text"
+        );
+        let after = r.process("<script>location.href</script>");
+        assert!(
+            after.contains("__zl.href"),
+            "stream resynchronized after the bail"
+        );
+        assert_eq!(r.finish(), "", "nothing retained at end of stream");
     }
 
     #[test]
