@@ -193,3 +193,58 @@ describe("spoolBody (#556 replay spool)", () => {
     await expect(spoolBody(streamOf([enc("x")]))).rejects.toBeInstanceOf(SpoolUnavailableError);
   });
 });
+
+describe("concurrent in-flight budget visibility (#628)", () => {
+  it("counts a slow spool's bytes against a concurrent spool before commit", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let first = true;
+    const files = new Map<string, Uint8Array[]>();
+    const mkWritable = (name: string) => ({
+      async write(c: Uint8Array) {
+        if (first) {
+          first = false;
+          await gate;
+        }
+        const parts = files.get(name) ?? [];
+        parts.push(c);
+        files.set(name, parts);
+      },
+      async close() {},
+      async abort() {},
+    });
+    const dir: SpoolDir = {
+      async getFileHandle(name: string) {
+        if (!files.has(name)) files.set(name, []);
+        return {
+          createWritable: async () => mkWritable(name),
+          async getFile() {
+            const parts = files.get(name) ?? [];
+            return new File(parts as unknown as BlobPart[], name);
+          },
+        };
+      },
+      async removeEntry() {},
+      entries() {
+        return (async function* (): AsyncGenerator<[string, SpoolFileHandle]> {})();
+      },
+    };
+    setSpoolRootForTests({ async getDirectoryHandle() { return dir; } });
+    /* spool A parks in its first write with 10 bytes reserved; a
+       95-byte spool must fail on its first chunk against the shared
+       in-flight counter (the old check saw only committed bytes). */
+    const a = spoolBody(streamOf([enc("0123456789")]), { cap: 100, totalBudget: 100 });
+    await new Promise((r) => setTimeout(r, 30));
+    await expect(spoolBody(streamOf([enc("x".repeat(95))]), { cap: 100, totalBudget: 100 })).rejects.toBeInstanceOf(SpoolCapError);
+    /* rollback: the failed spool returned its bytes, so a 90-byte
+       spool still fits exactly beside the in-flight 10. */
+    const c1 = spoolBody(streamOf([enc("y".repeat(90))]), { cap: 100, totalBudget: 100 });
+    release();
+    const ha = await a;
+    const hc = await c1;
+    expect(ha.bytes).toBe(10);
+    expect(hc.bytes).toBe(90);
+    await ha.release();
+    await hc.release();
+  });
+});
