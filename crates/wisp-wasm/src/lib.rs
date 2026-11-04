@@ -102,14 +102,21 @@ pub fn handshake_info_password(username: String, password: String) -> Option<Vec
 
 /// CONNECT for a new TCP stream to host:port.
 #[wasm_bindgen(js_name = "connectTcp")]
-pub fn connect_tcp(stream_id: u32, port: u16, hostname: String) -> Vec<u8> {
+pub fn connect_tcp(stream_id: u32, port: u16, hostname: String) -> Option<Vec<u8>> {
+    // #620: the wire format length prefix is u8; a longer hostname
+    // cannot be encoded. Like handshake_info_password, the boundary
+    // surfaces invalid input as null instead of silently dialing a
+    // truncated (different) destination.
+    if hostname.len() > 255 {
+        return None;
+    }
     let pkt = Packet::Connect {
         stream_id,
         kind: StreamKind::Tcp,
         port,
         hostname,
     };
-    encode_into_bytes(&pkt)
+    Some(encode_into_bytes(&pkt))
 }
 
 /// DATA payload on a stream.
@@ -154,7 +161,9 @@ pub fn parse_frame(msg: Vec<u8>) -> Option<JsFrame> {
 }
 
 fn encode_into_bytes(pkt: &Packet) -> Vec<u8> {
-    let frame = encode_packet(pkt);
+    // #620: encode_packet fails on an oversized CONNECT hostname;
+    // connect_tcp pre-validates, so this panic is a programming error.
+    let frame = encode_packet(pkt).expect("#620: connect hostname exceeds the u8 length prefix");
     let mut out = BytesMut::with_capacity(5 + frame.payload.len());
     frame.encode_into(&mut out);
     out.to_vec()
@@ -165,8 +174,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn connect_tcp_rejects_hostname_past_u8_prefix() {
+        // #620: the wasm boundary surfaces the wire-format limit as a
+        // thrown error instead of a silent truncation.
+        assert!(
+            connect_tcp(1, 443, "a".repeat(256)).is_none(),
+            "oversized hostname must fail"
+        );
+    }
+
+    #[test]
     fn roundtrip_through_wrapper() {
-        let wire = connect_tcp(7, 443, "example.com".into());
+        let wire = connect_tcp(7, 443, "example.com".into()).expect("valid hostname must encode");
         assert_eq!(wire[0], 0x01);
         let mut buf = BytesMut::from(&wire[..]);
         let frame = Frame::decode(&mut buf).unwrap().unwrap();

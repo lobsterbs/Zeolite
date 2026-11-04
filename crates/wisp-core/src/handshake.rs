@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn frames_roundtrip() {
         let pkt = handshake_reject(CloseReason::Blocked);
-        let frame = encode_packet(&pkt);
+        let frame = encode_packet(&pkt).unwrap();
         let mut buf = bytes::BytesMut::new();
         frame.encode_into(&mut buf);
         let parsed = Frame::decode(&mut buf).unwrap().unwrap();

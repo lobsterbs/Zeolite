@@ -2365,7 +2365,7 @@ async fn spawn_udp_relay(sess: &mut Session, stream_id: u32, port: u16, hostname
 }
 
 pub async fn send_packet(tx: &WsTx, pkt: &Packet) -> Result<(), mpsc::error::SendError<Message>> {
-    let frame = encode_packet(pkt);
+    let frame = encode_packet(pkt).expect("#620: connect hostname exceeds the u8 length prefix");
     let mut out = BytesMut::with_capacity(5 + frame.payload.len());
     frame.encode_into(&mut out);
     tx.send(Message::Binary(out.to_vec())).await
@@ -3495,7 +3495,8 @@ mod tests {
     }
 
     fn encode_pkt(pkt: &Packet) -> Vec<u8> {
-        let frame = encode_packet(pkt);
+        let frame =
+            encode_packet(pkt).expect("#620: connect hostname exceeds the u8 length prefix");
         let mut buf = BytesMut::new();
         frame.encode_into(&mut buf);
         buf.to_vec()
