@@ -156,7 +156,7 @@ describe("relay ws re-registration sweep (#623)", () => {
     const portB = new FakePort();
     relayRegister(portB as unknown as MessagePort);
     expect(h.onerror).toHaveBeenCalledTimes(1);
-    expect(h.onclose).toHaveBeenCalledWith(1006, "");
+    expect(h.onclose).toHaveBeenCalledWith(1006, "", false);
     expect(h2.onerror).toHaveBeenCalledTimes(1);
     expect(h2.onclose).not.toHaveBeenCalled();
     const before = portB.posted.length;
@@ -165,5 +165,30 @@ describe("relay ws re-registration sweep (#623)", () => {
     expect(h.onmessage).not.toHaveBeenCalled();
     expect(h2.onclose).not.toHaveBeenCalled();
     expect(portB.posted.length).toBe(before);
+  });
+});
+
+describe("relay ws unclean close flag (#626)", () => {
+  it("a post-open channel death reports close 1006 with clean false", () => {
+    const port = new FakePort();
+    relayRegister(port as unknown as MessagePort);
+    const h = handlers();
+    relayWsFactory.open("wss://x.example/", [], h);
+    const rid = (port.posted[0] as { rid: number }).rid;
+    port.deliver({ type: "zl:wsOpen", rid, protocol: "" });
+    port.deliver({ type: "zl:wsError", rid, error: "channel died" });
+    expect(h.onerror).toHaveBeenCalledWith("channel died");
+    expect(h.onclose).toHaveBeenCalledWith(1006, "", false);
+  });
+
+  it("the re-registration sweep also closes unclean (#626)", () => {
+    const portA = new FakePort();
+    relayRegister(portA as unknown as MessagePort);
+    const h = handlers();
+    relayWsFactory.open("wss://a.example/", [], h);
+    const rid = (portA.posted[0] as { rid: number }).rid;
+    portA.deliver({ type: "zl:wsOpen", rid, protocol: "" });
+    relayRegister(new FakePort() as unknown as MessagePort);
+    expect(h.onclose).toHaveBeenCalledWith(1006, "", false);
   });
 });
