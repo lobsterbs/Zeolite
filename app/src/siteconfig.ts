@@ -55,6 +55,10 @@ export function siteRules(): Promise<SiteRules> {
       let parsing = false;
       try {
         const resp = await fetch("/siteconfig.kdl", { cache: "no-cache" });
+        /* #627: 5xx is transient - forget the memo so the next call
+           retries; a 404 (no siteconfig file) stays memoized, matching
+           the rules.kdl and policy.kdl loaders. */
+        if (resp.status >= 500) cached = null;
         if (!resp.ok) { doctorState = resp.status === 404 ? "missing" : "unavailable"; return {}; }
         const body = await resp.text();
         parsing = true;

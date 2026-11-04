@@ -44,3 +44,33 @@ describe("read-only KDL source diagnostics (#495)", () => {
     });
   }
 });
+
+describe("siteconfig 5xx transient retry (#627)", () => {
+  it("forgets the memo after a 5xx so the next call retries", async () => {
+    let calls = 0;
+    const mockFetch = vi.fn(async () => {
+      calls++;
+      return calls === 1
+        ? new Response(null, { status: 503 })
+        : new Response('site "a.example" { inject "/a.js" }', { status: 200 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    const p = await loader("siteconfig");
+    expect(await p.load()).toEqual({});
+    expect(p.state()).toBe("unavailable");
+    const rules = (await p.load()) as Record<string, unknown>;
+    expect(Object.keys(rules)).toEqual(["a.example"]);
+    expect(p.state()).toBe("loaded");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a 404 memoized so a missing file costs one fetch", async () => {
+    const mockFetch = vi.fn(async () => new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", mockFetch);
+    const p = await loader("siteconfig");
+    await p.load();
+    await p.load();
+    expect(p.state()).toBe("missing");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
