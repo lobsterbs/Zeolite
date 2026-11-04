@@ -351,6 +351,14 @@ impl Rewriter {
                 }
             } else if b.len() - i >= needle.len()
                 && b[i..i + needle.len()].eq_ignore_ascii_case(&needle)
+                // #630: terminated-close rule, same as
+                // find_ci_terminated and the script branch above: the
+                // byte after the name must be whitespace, "/" or ">",
+                // so a longer name ("</styleex>" inside a stylesheet)
+                // does not end the element.
+                && b.get(i + needle.len()).is_some_and(|c| {
+                    matches!(c, b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>')
+                })
             {
                 close_at = Some(i);
                 break;
@@ -2221,6 +2229,37 @@ mod tests {
             "stream resynchronized after the bail"
         );
         assert_eq!(r.finish(), "", "nothing retained at end of stream");
+    }
+
+    /// #630: over-cap non-script passthrough must apply the same
+    /// terminated-close rule as find_ci_terminated and the script
+    /// branch: "</styleex>" inside a stylesheet is CSS text and must
+    /// not close the element.
+    #[test]
+    fn raw_pass_style_close_needs_terminator() {
+        let mut r = Rewriter::new(cfg());
+        let big = "x".repeat(RAW_PASS_CAP + 1024);
+        let mut joined = String::new();
+        joined.push_str(&r.process(&format!("<style>{big}")));
+        // The junk suffix must not close the element...
+        joined.push_str(&r.process("</styleex>"));
+        // ...so later markup stays RAWTEXT and serves verbatim, and
+        // the element ends only at the terminated close tag.
+        joined.push_str(&r.process("<a href=\"https://e.com/a\">t</a>"));
+        joined.push_str(&r.process(&format!("</style>{}", "z".repeat(4096))));
+        joined.push_str(&r.process(&format!(
+            "<script>location.href</script>{}",
+            "z".repeat(4096)
+        )));
+        assert!(
+            joined.contains("<a href=\"https://e.com/a\">"),
+            "markup inside the open element serves verbatim"
+        );
+        assert!(!joined.contains("/j/"), "no rewrite inside raw text");
+        assert!(
+            joined.contains("__zl.href"),
+            "stream recovers after the real close"
+        );
     }
 
     #[test]
