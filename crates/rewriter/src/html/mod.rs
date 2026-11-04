@@ -1710,6 +1710,9 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
 /// format_attr re-escapes the decoded value on emit, so pass-through
 /// values stay DOM-stable across repeated rewrite passes. Unknown or
 /// malformed references are still left for the browser.
+/// #625: the legacy spellings WITHOUT a trailing semicolon live in
+/// LEGACY_ENTITIES below, and numeric references decode with or
+/// without the semicolon, so both mirror the browser parser too.
 const NAMED_ENTITIES: &[(&str, char)] = &[
     ("&#39;", '\u{27}'),
     ("&AElig;", '\u{c6}'),
@@ -1970,8 +1973,124 @@ const NAMED_ENTITIES: &[(&str, char)] = &[
     ("&zwnj;", '\u{200c}'),
 ];
 
+/// #625: the HTML5 legacy named references: browsers decode these
+/// historical spellings without the trailing semicolon in attribute
+/// values, with the guard decode_entities applies (a match followed
+/// by "=" or an ASCII alphanumeric is NOT a reference). Generated
+/// from the WHATWG named-character-references table; every entry is
+/// the same character as its semicolon form in NAMED_ENTITIES.
+const LEGACY_ENTITIES: &[(&str, char)] = &[
+    ("&Aacute", '\u{c1}'),
+    ("&aacute", '\u{e1}'),
+    ("&Acirc", '\u{c2}'),
+    ("&acirc", '\u{e2}'),
+    ("&acute", '\u{b4}'),
+    ("&AElig", '\u{c6}'),
+    ("&aelig", '\u{e6}'),
+    ("&Agrave", '\u{c0}'),
+    ("&agrave", '\u{e0}'),
+    ("&AMP", '\u{26}'),
+    ("&amp", '\u{26}'),
+    ("&Aring", '\u{c5}'),
+    ("&aring", '\u{e5}'),
+    ("&Atilde", '\u{c3}'),
+    ("&atilde", '\u{e3}'),
+    ("&Auml", '\u{c4}'),
+    ("&auml", '\u{e4}'),
+    ("&brvbar", '\u{a6}'),
+    ("&Ccedil", '\u{c7}'),
+    ("&ccedil", '\u{e7}'),
+    ("&cedil", '\u{b8}'),
+    ("&cent", '\u{a2}'),
+    ("&COPY", '\u{a9}'),
+    ("&copy", '\u{a9}'),
+    ("&curren", '\u{a4}'),
+    ("&deg", '\u{b0}'),
+    ("&divide", '\u{f7}'),
+    ("&Eacute", '\u{c9}'),
+    ("&eacute", '\u{e9}'),
+    ("&Ecirc", '\u{ca}'),
+    ("&ecirc", '\u{ea}'),
+    ("&Egrave", '\u{c8}'),
+    ("&egrave", '\u{e8}'),
+    ("&ETH", '\u{d0}'),
+    ("&eth", '\u{f0}'),
+    ("&Euml", '\u{cb}'),
+    ("&euml", '\u{eb}'),
+    ("&frac12", '\u{bd}'),
+    ("&frac14", '\u{bc}'),
+    ("&frac34", '\u{be}'),
+    ("&GT", '\u{3e}'),
+    ("&gt", '\u{3e}'),
+    ("&Iacute", '\u{cd}'),
+    ("&iacute", '\u{ed}'),
+    ("&Icirc", '\u{ce}'),
+    ("&icirc", '\u{ee}'),
+    ("&iexcl", '\u{a1}'),
+    ("&Igrave", '\u{cc}'),
+    ("&igrave", '\u{ec}'),
+    ("&iquest", '\u{bf}'),
+    ("&Iuml", '\u{cf}'),
+    ("&iuml", '\u{ef}'),
+    ("&laquo", '\u{ab}'),
+    ("&LT", '\u{3c}'),
+    ("&lt", '\u{3c}'),
+    ("&macr", '\u{af}'),
+    ("&micro", '\u{b5}'),
+    ("&middot", '\u{b7}'),
+    ("&nbsp", '\u{a0}'),
+    ("&not", '\u{ac}'),
+    ("&Ntilde", '\u{d1}'),
+    ("&ntilde", '\u{f1}'),
+    ("&Oacute", '\u{d3}'),
+    ("&oacute", '\u{f3}'),
+    ("&Ocirc", '\u{d4}'),
+    ("&ocirc", '\u{f4}'),
+    ("&Ograve", '\u{d2}'),
+    ("&ograve", '\u{f2}'),
+    ("&ordf", '\u{aa}'),
+    ("&ordm", '\u{ba}'),
+    ("&Oslash", '\u{d8}'),
+    ("&oslash", '\u{f8}'),
+    ("&Otilde", '\u{d5}'),
+    ("&otilde", '\u{f5}'),
+    ("&Ouml", '\u{d6}'),
+    ("&ouml", '\u{f6}'),
+    ("&para", '\u{b6}'),
+    ("&plusmn", '\u{b1}'),
+    ("&pound", '\u{a3}'),
+    ("&QUOT", '\u{22}'),
+    ("&quot", '\u{22}'),
+    ("&raquo", '\u{bb}'),
+    ("&REG", '\u{ae}'),
+    ("&reg", '\u{ae}'),
+    ("&sect", '\u{a7}'),
+    ("&shy", '\u{ad}'),
+    ("&sup1", '\u{b9}'),
+    ("&sup2", '\u{b2}'),
+    ("&sup3", '\u{b3}'),
+    ("&szlig", '\u{df}'),
+    ("&THORN", '\u{de}'),
+    ("&thorn", '\u{fe}'),
+    ("&times", '\u{d7}'),
+    ("&Uacute", '\u{da}'),
+    ("&uacute", '\u{fa}'),
+    ("&Ucirc", '\u{db}'),
+    ("&ucirc", '\u{fb}'),
+    ("&Ugrave", '\u{d9}'),
+    ("&ugrave", '\u{f9}'),
+    ("&uml", '\u{a8}'),
+    ("&Uuml", '\u{dc}'),
+    ("&uuml", '\u{fc}'),
+    ("&Yacute", '\u{dd}'),
+    ("&yacute", '\u{fd}'),
+    ("&yen", '\u{a5}'),
+    ("&yuml", '\u{ff}'),
+];
+
 /// Decode one numeric character reference at the start of s
-/// ("&#38;" / "&#x26;"): the character and the bytes it consumed.
+/// ("&#38;" / "&#x26;", with or without the trailing semicolon per
+/// HTML5): the character and the bytes it consumed.
 fn decode_numeric(s: &str) -> Option<(char, usize)> {
     let b = s.as_bytes();
     if b.len() < 4 || b[0] != b'&' || b[1] != b'#' {
@@ -1987,11 +2106,18 @@ fn decode_numeric(s: &str) -> Option<(char, usize)> {
     while end < b.len() && (b[end].is_ascii_digit() || (hex && b[end].is_ascii_hexdigit())) {
         end += 1;
     }
-    if end == start || end >= b.len() || b[end] != b';' {
+    if end == start {
         return None;
     }
     let cp = u32::from_str_radix(&s[start..end], radix).ok()?;
-    Some((char::from_u32(cp)?, end + 1))
+    // #625: HTML5 forgives a missing trailing semicolon on numeric
+    // references: "&#38b" hands the DOM "&b".
+    let len = if b.get(end) == Some(&b';') {
+        end + 1
+    } else {
+        end
+    };
+    Some((char::from_u32(cp)?, len))
 }
 
 /// Decode the entities an attribute value may carry so resolve and
@@ -2016,6 +2142,25 @@ fn decode_entities(s: &str) -> String {
                 out.push(*ch);
                 consumed = Some(ent.len());
                 break;
+            }
+        }
+        if consumed.is_none() {
+            // #625: the HTML5 legacy named references decode without
+            // the trailing semicolon, with the historical attribute
+            // guard: a match followed by "=" or an ASCII alphanumeric
+            // is NOT a reference ("&copy2" and "&lt=5" stay as-is).
+            for (ent, ch) in LEGACY_ENTITIES {
+                if tail.strip_prefix(ent).is_some() {
+                    let guarded = tail
+                        .as_bytes()
+                        .get(ent.len())
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'=');
+                    if !guarded {
+                        out.push(*ch);
+                        consumed = Some(ent.len());
+                    }
+                    break;
+                }
             }
         }
         if consumed.is_none() {
@@ -2260,6 +2405,54 @@ mod tests {
             joined.contains("__zl.href"),
             "stream recovers after the real close"
         );
+    }
+
+    /// #625: HTML5 decodes the legacy named references without the
+    /// trailing semicolon (with the historical attribute guard) and
+    /// numeric references without one; attribute values must land on
+    /// the same DOM the browser hands the page.
+    #[test]
+    fn legacy_no_semicolon_refs_decode_in_attrs() {
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/dir/page.html");
+        // Named legacy, unguarded suffix decodes.
+        let a = format!(
+            "{}{}",
+            r.process("<td title=\"&copy Acme\">x</td>"),
+            r.finish()
+        );
+        assert!(a.contains("title=\"\u{a9} Acme\""), "decoded copy: {}", a);
+        // The guard: followed by alphanumeric or "=" stays literal
+        // (and format_attr re-escapes the raw & on emit).
+        let b = format!(
+            "{}{}",
+            r.process("<td title=\"&copy2x\">x</td>"),
+            r.finish()
+        );
+        assert!(b.contains("title=\"&amp;copy2x\""), "guarded: {}", b);
+        let c = format!("{}{}", r.process("<td title=\"&lt=5\">x</td>"), r.finish());
+        assert!(c.contains("title=\"&amp;lt=5\""), "guarded eq: {}", c);
+        // Numeric without the semicolon: the routed payload is the
+        // URL the browser resolves, not the literal spelling.
+        let d = format!(
+            "{}{}",
+            r.process("<a href=\"/x?a&#38b=1\">n</a>"),
+            r.finish()
+        );
+        assert_eq!(
+            decoded_attr(&d, "href"),
+            "https://example.com/x?a&b=1",
+            "got: {}",
+            d
+        );
+        // Decoder unit level.
+        assert_eq!(decode_entities("&copy x"), "\u{a9} x");
+        assert_eq!(decode_entities("&amp;"), "&");
+        assert_eq!(decode_entities("&amp"), "&");
+        assert_eq!(decode_entities("&ampx"), "&ampx");
+        assert_eq!(decode_entities("&#38;"), "&");
+        assert_eq!(decode_entities("&#38x"), "&x");
+        assert_eq!(decode_entities("&#38"), "&");
     }
 
     #[test]
