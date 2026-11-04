@@ -81,6 +81,9 @@ pub struct Rewriter {
     /// The element being entered was dropped (blocked host): its raw
     /// content and close tag must be swallowed, not emitted.
     drop_raw: bool,
+    /// #619: nesting depth of open <svg>/<math> subtrees; their
+    /// foreign content honors self-closing on raw-text elements.
+    foreign_depth: usize,
     injected: bool,
     /// A <base href> has been seen: per HTML only the FIRST base
     /// element with a non-empty href folds, later ones are ignored
@@ -124,6 +127,7 @@ impl Rewriter {
             cur_script_js: false,
             cur_script_importmap: false,
             drop_raw: false,
+            foreign_depth: 0,
             injected: false,
             base_seen: false,
             depth: 0,
@@ -845,10 +849,31 @@ impl Rewriter {
                             } else {
                                 self.cur_tag.clear();
                             }
+                            // #619: track open svg/math subtrees: their
+                            // foreign content honors the self-closing
+                            // slash on raw-text elements, so a
+                            // self-closed script/style there is a
+                            // COMPLETE element and raw-text mode must
+                            // not wait for a close tag that never
+                            // comes. Plain HTML ignores the slash.
+                            let name = elem_name(&buf[..end]);
+                            if matches!(name.as_str(), "svg" | "math") {
+                                if open && !tag_self_closed(&buf[..end]) {
+                                    self.foreign_depth += 1;
+                                } else if !open && self.foreign_depth > 0 {
+                                    self.foreign_depth -= 1;
+                                }
+                            }
+                            // ponytail: no HTML integration points
+                            // (foreignObject/desc/title); a raw tag
+                            // self-closed inside one misreads as
+                            // foreign, add if ever seen in the wild.
+                            let foreign_self_closed =
+                                open && self.foreign_depth > 0 && tag_self_closed(&buf[..end]);
                             out.push_str(&rewritten);
                             buf.drain(..end);
                             self.buf = buf;
-                            let raw = open && is_raw_tag(&self.cur_tag);
+                            let raw = open && is_raw_tag(&self.cur_tag) && !foreign_self_closed;
                             // Inject bootstrap + per-site hooks right after
                             // the opening <head> (fallback: <html>) so they
                             // precede all page scripts.
@@ -1424,6 +1449,23 @@ fn elem_name(tag: &str) -> String {
         .take_while(|c| c.is_ascii_alphanumeric())
         .collect::<String>()
         .to_ascii_lowercase()
+}
+
+/// #619: true when a COMPLETE open-tag text ends with the tag-syntax
+/// self-closing slash (outside quoted values, directly before the
+/// final '>'); an unquoted value keeps a trailing '/' as value
+/// bytes, so <a href=x/> is NOT self-closed. Plain HTML ignores this
+/// slash on raw-text elements; SVG/MathML foreign content honors it.
+fn tag_self_closed(raw: &str) -> bool {
+    let name_end = raw[1..]
+        .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+        .map(|i| i + 1)
+        .unwrap_or(raw.len());
+    let mut rest = &raw[name_end..];
+    while let Some(a) = next_attr(rest, true) {
+        rest = &rest[a.consumed..];
+    }
+    rest.trim_start().starts_with("/>")
 }
 
 fn is_raw_tag(tag: &str) -> bool {
@@ -4154,6 +4196,92 @@ document.write('<script src=x></script>');
         out.push_str(&r.finish());
         assert!(!out.contains("ads.example.net"), "blocked: {}", out);
         assert!(out.contains("after"), "post-close text survives: {}", out);
+    }
+
+    #[test]
+    fn svg_self_closed_blocked_script_keeps_document() {
+        // #619: in SVG/MathML foreign content a self-closed script is
+        // a COMPLETE element (browsers honor the slash), so a blocked
+        // one drops just the tag; the document must survive instead
+        // of stalling raw-text mode and draining past the cap.
+        let c = RewriteConfig {
+            block_hosts: vec!["ads.example".into()],
+            ..cfg()
+        };
+        let mut r = Rewriter::new(c);
+        r.set_base("https://example.com/");
+        let mut out =
+            r.process(r#"<svg><script href="https://ads.example/t.js"/></svg><p>before</p>"#);
+        out.push_str(&r.process(&"<p>fill</p>".repeat(90000)));
+        out.push_str(&r.process("<p>after</p>"));
+        out.push_str(&r.finish());
+        assert!(!out.contains("ads.example"), "blocked: {}", out);
+        assert!(out.contains("before"), "early content: {}", out);
+        assert!(out.contains("after"), "late content: {}", out);
+    }
+
+    #[test]
+    fn svg_self_closed_script_returns_to_markup() {
+        // #619 unblocked arm: after a self-closed foreign script the
+        // following markup parses as markup (anchor href routed),
+        // not as JavaScript source held for a close tag.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = r.process(
+            r#"<svg><script href="https://cdn.example.com/t.js"/></svg><a href="https://example.com/next">n</a>"#,
+        );
+        let out = out + &r.finish();
+        assert!(
+            out.contains(&cfg().encode_url("https://example.com/next")),
+            "post-svg anchor routed: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn math_self_closed_style_keeps_document() {
+        // #619 MathML arm: same shape as the svg one.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let mut out = r.process("<math><style href='x.css'/></math><p>keep</p>");
+        out.push_str(&r.process(&"<p>fill</p>".repeat(90000)));
+        out.push_str(&r.process("<p>after</p>"));
+        out.push_str(&r.finish());
+        assert!(out.contains("keep"), "early content: {}", out);
+        assert!(out.contains("after"), "late content: {}", out);
+    }
+
+    #[test]
+    fn plain_self_closed_script_stays_raw() {
+        // #619 scope guard: OUTSIDE foreign content browsers ignore
+        // the slash, so a plain <script/> still opens raw text and
+        // its body still gets the JS-literal pass.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = r.process(r#"<script/>var u = "https://cdn.example.net/a.js";</script>tail"#);
+        let out = out + &r.finish();
+        assert!(
+            out.contains(&cfg().encode_url("https://cdn.example.net/a.js")),
+            "script body rewritten: {}",
+            out
+        );
+        assert!(out.contains("tail"), "post-script text: {}", out);
+    }
+
+    #[test]
+    fn svg_open_style_keeps_css_pass() {
+        // #619: only the SELF-CLOSED form exits raw mode; a normal
+        // <style> body inside svg keeps the css-block pass.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let mut out =
+            r.process("<svg><style>a{background:url(https://example.com/i.png)}</style></svg>");
+        out.push_str(&r.finish());
+        assert!(
+            out.contains(&cfg().encode_url("https://example.com/i.png")),
+            "css pass ran: {}",
+            out
+        );
     }
 
     #[test]
