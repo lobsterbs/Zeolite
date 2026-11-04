@@ -36,7 +36,7 @@ vi.mock("../transport", () => ({
   },
 }));
 
-import { classifyRtype, forwardedHeaders, handleFetch, mergeRouteSearch, pageCacheMatch, reqDest, scheduleJarClientPrune, stripCrossOriginHopHeaders, withDeadline } from "../request";
+import { classifyRtype, forwardedHeaders, handleFetch, mergeRouteSearch, pageCacheMatch, pageCacheStore, reqDest, scheduleJarClientPrune, stripCrossOriginHopHeaders, withDeadline } from "../request";
 import { setFingerprint, setSiteEnabled } from "../swstate";
 import { establishContext, resolveRelative } from "../vctx";
 import { VCTX } from "../swstate";
@@ -1011,5 +1011,56 @@ describe("forwardedHeaders drops hop-by-hop tokens (#525)", () => {
     expect(out.get("proxy-connection")).toBe(null);
     expect(out.get("te")).toBe(null);
     expect(out.get("transfer-encoding")).toBe(null);
+  });
+});
+
+describe("pageCacheStore keepView strips internal headers (#632)", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("serves the page a copy free of x-zl-vary while the stored entry keeps them", async () => {
+    /* #632: storeVaryMeta decorates the shared headers object with the
+       internal x-zl-vary bookkeeping; the keepView fork must not hand
+       those to the page (#338), while the stored entry keeps them. */
+    const g = globalThis as Record<string, unknown>;
+    const hadSelf = "self" in g;
+    const prevSelf = g.self;
+    g.self = { location: { origin: "https://engine.example" } };
+    try {
+      const storedPuts: Response[] = [];
+      const fakeCache = {
+        put: async (_r: Request, s: Response) => { storedPuts.push(s); },
+        keys: async () => [],
+        match: async () => undefined,
+        delete: async () => false,
+      } as unknown as Cache;
+      vi.stubGlobal("caches", { open: async () => fakeCache });
+      const req = new Request("https://site.example/page");
+      const resp = new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) { c.enqueue(new TextEncoder().encode("hello")); c.close(); },
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+            "cache-control": "public, max-age=60",
+            vary: "accept-encoding",
+            "content-length": "5",
+          },
+        },
+      );
+      const out = await pageCacheStore(req, resp, true);
+      expect(out).not.toBeNull();
+      expect(out!.headers.get("x-zl-vary")).toBeNull();
+      expect(out!.headers.get("x-zl-vary-values")).toBeNull();
+      expect(out!.headers.get("x-zl-cached-at")).toBeNull();
+      expect(out!.headers.get("vary")).toBe("accept-encoding");
+      expect(storedPuts).toHaveLength(1);
+      expect(storedPuts[0]!.headers.get("x-zl-vary")).toBe("accept-encoding");
+      expect(storedPuts[0]!.headers.get("x-zl-cached-at")).not.toBeNull();
+    } finally {
+      if (hadSelf) g.self = prevSelf;
+      else delete g.self;
+    }
   });
 });
