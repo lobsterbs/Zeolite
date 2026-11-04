@@ -131,8 +131,17 @@ function hostOf(url: string): string | null {
   }
 }
 
+/** #621: a trailing dot is DNS-identical to the bare host (the URL
+    standard preserves it), so a dotted request host must not bypass
+    a rule; strip both sides at compare time. */
+function undotHost(h: string): string {
+  return h.endsWith(".") ? h.slice(0, -1) : h;
+}
+
 function matchesHost(entry: CompiledHost, host: string): boolean {
-  return host === entry.host || host.endsWith("." + entry.host);
+  const h = undotHost(host);
+  const e = undotHost(entry.host);
+  return h === e || h.endsWith("." + e);
 }
 
 function typeOk(types: Set<ResourceType> | null, rtype: ResourceType): boolean {
@@ -356,8 +365,10 @@ export function siteOverrideFor(url: string): SiteOverrideEntry | null {
     return null;
   }
   let best: SiteOverrideEntry | null = null;
+  const h = undotHost(host); // #621: dotted spelling is the same host
   for (const o of overrides) {
-    if (host === o.host || host.endsWith("." + o.host)) {
+    const oh = undotHost(o.host);
+    if (h === oh || h.endsWith("." + oh)) {
       if (!best || o.host.length > best.host.length) best = o;
     }
   }

@@ -165,6 +165,13 @@ export function compilePolicy(source: string): CompiledPolicy {
   return { rules };
 }
 
+/** #621: a trailing dot is DNS-identical to the bare host (the URL
+    standard preserves it), so a dotted request host must not bypass
+    a rule; strip both sides at compare time. */
+function undotHost(h: string): string {
+  return h.endsWith(".") ? h.slice(0, -1) : h;
+}
+
 /** The one rule a request matches: highest priority wins, equal
     priority means the later rule wins (document order).
     Deterministic and side-effect free. */
@@ -173,14 +180,17 @@ export function policyMatch(p: CompiledPolicy, url: string, rtype: ResourceType)
   let path: string;
   try {
     const u = new URL(url);
-    host = u.hostname.toLowerCase();
+    host = undotHost(u.hostname.toLowerCase());
     path = u.pathname;
   } catch {
     return null;
   }
   let best: PolicyRule | null = null;
   for (const r of p.rules) {
-    if (r.host !== null && host !== r.host && !host.endsWith("." + r.host)) continue;
+    if (r.host !== null) {
+      const rh = undotHost(r.host); // #621: dotted spelling is the same host
+      if (host !== rh && !host.endsWith("." + rh)) continue;
+    }
     if (r.path !== null && !path.startsWith(r.path)) continue;
     if (r.types !== null && !r.types.has(rtype)) continue;
     if (best === null || r.priority >= best.priority) best = r;

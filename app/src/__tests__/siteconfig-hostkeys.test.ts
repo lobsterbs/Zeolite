@@ -27,4 +27,10 @@ describe("siteconfig host key normalization (#265)", () => {
     );
     expect(Object.keys(rules)).toEqual(["ok.example"]);
   });
+
+  it("matches a trailing-dot target host (#621)", () => {
+    const rules = rulesFromNodes(parseKdl('site "ok.example" { block "b" }'));
+    expect(ruleFor(rules, "https://ok.example./x")).toEqual({ block: ["b"] });
+    expect(ruleFor(rules, "https://sub.ok.example./x")).toEqual({ block: ["b"] });
+  });
 });
