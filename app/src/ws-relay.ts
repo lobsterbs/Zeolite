@@ -27,7 +27,7 @@
    page counter drains when the bridge's send() returns, exactly like
    the wisp arm without the optional drainAt() seam. */
 
-import { relaySendWs, relaySubscribe } from "./relayfetch";
+import { relayOnReRegister, relaySendWs, relaySubscribe } from "./relayfetch";
 import type { WsFactory } from "./wsbridge";
 
 interface Conn {
@@ -44,6 +44,20 @@ const conns = new Map<number, Conn>();
 let ridSeq = 0;
 
 const CLOSE_FALLBACK_MS = 5000;
+/* #623: a host re-registration swaps the port every frame rides.
+   Sockets opened on the old era can never see another frame (a
+   freshly reloaded embedder cannot answer for rids it never knew,
+   so no ping watchdog applies), so the sweep tears each one down
+   exactly like the zl:wsError arm: honest error, close 1006 when
+   the socket had opened, no registry leak. */
+relayOnReRegister(() => {
+  for (const [rid, c] of [...conns]) {
+    drop(rid, c);
+    c.onerror("relay re-registered");
+    if (c.opened) c.onclose(1006, "");
+  }
+});
+
 
 function drop(rid: number, c: Conn): void {
   if (c.closeTimer !== null) clearTimeout(c.closeTimer);
