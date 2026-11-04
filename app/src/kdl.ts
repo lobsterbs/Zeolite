@@ -173,18 +173,32 @@ function parseValue(c: Cursor): KdlValue {
   const ch = peek(c);
   if (ch === '"') return parseString(c);
   if (ch === "#") {
-    if (c.src.startsWith("#true", c.pos)) {
-      c.pos += 5;
+    /* #631: a keyword must end at a delimiter, mirroring parseNumber;
+       startsWith alone would split #truexyz into true plus a stray
+       bareword and silently misparse configs. */
+    const keyword = (word: string): boolean => {
+      if (!c.src.startsWith(word, c.pos)) return false;
+      const after = c.src[c.pos + word.length];
+      if (
+        after !== undefined &&
+        after !== " " &&
+        after !== "\t" &&
+        after !== "\r" &&
+        after !== "\n" &&
+        after !== ";" &&
+        after !== "{" &&
+        after !== "}" &&
+        after !== "/" &&
+        after !== "="
+      ) {
+        fail(c, "malformed keyword " + word);
+      }
+      c.pos += word.length;
       return true;
-    }
-    if (c.src.startsWith("#false", c.pos)) {
-      c.pos += 6;
-      return false;
-    }
-    if (c.src.startsWith("#null", c.pos)) {
-      c.pos += 5;
-      return null;
-    }
+    };
+    if (keyword("#true")) return true;
+    if (keyword("#false")) return false;
+    if (keyword("#null")) return null;
     fail(c, "unsupported # syntax (only #true #false #null)");
   }
   if (isDigit(ch) || (ch === "-" && isDigit(c.src[c.pos + 1]))) return parseNumber(c);
