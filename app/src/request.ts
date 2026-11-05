@@ -3466,6 +3466,28 @@ export function handleFetch(e: FetchEvent): void {
         target = dqFixed;
       }
 
+      /* #637: the Giscus comments widget loader names the page in
+         origin= (backLink=, mapping=url term=) from the cleaned
+         location (LegacyUnforgeable, the #112 co= class): on a
+         virtualized page the parameter names this deployment,
+         giscus validates it against the site's giscus.json origins
+         and refuses the widget frame. Virtualize a parameter whose
+         URL names this deployment at the seam the engine owns. */
+      const gcFixed = virtualGiscusOrigin(target, e.request.referrer, self.location.origin, initiator);
+      if (gcFixed !== target) {
+        const gtid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: gtid,
+          requestId: gtid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "giscus origin virtualized to the page url",
+          url: target,
+        });
+        target = gcFixed;
+      }
+
       /* #509: the Telegram Login widget loader builds
          oauth.telegram.org/auth with an origin= minted from
          window.location.origin (LegacyUnforgeable, the #112 co=
@@ -6071,6 +6093,65 @@ export function virtualDisqusPageUrl(target: string, referrer: string, engineOri
     if (!/^https?:$/.test(du.protocol)) continue;
     if (du.origin !== eo.origin) continue;
     out = out.replace(m[0], m[1] + key + "=" + encodeURIComponent(page));
+  }
+  return out;
+}
+
+/** #637: the Giscus comments widget loader (giscus.app
+    client.js) names the page in origin= - and in backLink= and the
+    mapping=url term= - from the cleaned location (LegacyUnforgeable,
+    the #112 co= class): on a virtualized page the parameter names
+    this deployment, giscus validates it against the site's
+    giscus.json origins (strict mode) and refuses the widget frame.
+    Virtualize a parameter whose URL names this deployment on the
+    giscus.app widget request at the seam the engine owns; any other
+    value is the page's own choice and passes through. Rendering
+    fidelity only. */
+export function virtualGiscusOrigin(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host !== "giscus.app") return target;
+  /* A locale path segment precedes the suffix, so match /widget. */
+  if (!u.pathname.endsWith("/widget")) return target;
+  let eo: URL;
+  try {
+    eo = new URL(engineOrigin);
+  } catch {
+    return target;
+  }
+  /* No honest widget-side fallback exists: without a decoded page
+     URL the origins check has nothing real to validate, so the
+     request passes through unchanged. */
+  const page = referrerPageUrl(referrer, initiator);
+  if (!page) return target;
+  let out = u.href;
+  for (const key of ["origin", "backLink", "term"]) {
+    const m = new RegExp("([?&])" + key + "=([^&]*)").exec(new URL(out).search);
+    if (!m || !m[2]) continue;
+    let dec: string;
+    try {
+      dec = decodeURIComponent(m[2]);
+    } catch {
+      continue;
+    }
+    let du: URL;
+    try {
+      du = new URL(dec);
+    } catch {
+      continue;
+    }
+    if (!/^https?:$/.test(du.protocol)) continue;
+    /* Engine-origin match post-parse: explicit :443/:80 forms
+       normalize, following the #112 match set. */
+    if (du.origin !== eo.origin) continue;
+    /* Keep the matched value's anchor: giscus appends a #<container
+       id> for scroll anchoring. */
+    out = out.replace(m[0], m[1] + key + "=" + encodeURIComponent(page + (du.hash || "")));
   }
   return out;
 }
