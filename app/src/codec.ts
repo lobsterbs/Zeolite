@@ -747,6 +747,29 @@ export function queryHandlePathShaped(path: string): boolean {
   );
 }
 
+/* #633: a zlNavh param that MAC-verifies to an origin-only payload is
+   engine vocabulary, live OR expired. #558 stripped live tokens only,
+   so a token past NAVH_TTL_MS (120 s) that still rode a re-minted
+   destination was kept as an "impostor" and stacked one identical
+   param per navigation cycle (the sign-in capture: three concatenated
+   zlNavh tokens on one committed URL). Expired engine tokens are
+   history, never site data; anything else (a page-authored impostor,
+   a full-destination path-shape token) keeps the documented ride
+   contract. */
+function navqEngineOrigin(token: string): string | null {
+  const live = decodeNavHandle(token);
+  const o =
+    typeof live === "string"
+      ? live
+      : (decodeExpiredNavHandle(token)?.destination ?? null);
+  if (typeof o !== "string") return null;
+  try {
+    return new URL(o).origin === o ? o : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A committed query-route URL -> its destination, or null. The
     token is the same origin-only NAVH payload (MAC-verified,
     TTL-bound); the committed path and the cleaned search are the
@@ -797,8 +820,11 @@ export function decodeQueryHandle(u: URL): { destination: string; rootClientId?:
     }
     if (!live) {
       /* a page-authored impostor, or a full-destination NAVH token:
-         never a committed query-route token */
-      keep.push(part);
+         never a committed query-route token. #633: an expired
+         origin-only token is engine history - it never rides the
+         destination (the stacking loop) and never becomes the origin
+         (the live token names the page). */
+      if (navqEngineOrigin(token) === null) keep.push(part);
       continue;
     }
     if (origin === null) {
@@ -895,16 +921,12 @@ export function buildQueryHandleUrl(
       kept.push(part);
       continue;
     }
-    const o = decodeNavHandle(part.slice(head.length));
-    let live = false;
-    if (typeof o === "string") {
-      try {
-        live = new URL(o).origin === o;
-      } catch {
-        live = false;
-      }
-    }
-    if (!live) kept.push(part);
+    /* #633: an expired origin-only token is engine history too - the
+       mint strips it with the live ones (#558), so a destination that
+       rode through a decode can never re-stack one identical zlNavh
+       per navigation cycle. An impostor or a full-destination token
+       keeps the documented ride contract. */
+    if (navqEngineOrigin(part.slice(head.length)) === null) kept.push(part);
   }
   const search =
     kept.length === 0
