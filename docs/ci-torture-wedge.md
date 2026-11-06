@@ -567,3 +567,36 @@ deterministic; only its firing is intermittent. Tracked in #514.
   all-five-green gate returns for the next pin.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes.
+## Run 42246542499 (15:57Z 2026-11-06, head 6f1279f, the README DevTools banner)
+
+- The wedge struck the MAIN e2e suite with the passthrough #96
+  signature: the NativeTransit passthrough marks
+  range/cond/setcookie/cookie/stream/redir HUNG at 6000 ms with
+  get/post/abort ok, then the standard page.goto 30 s cascade
+  (IndexedDB and Cache API round-trip, serviceWorker.register,
+  rewriter img/srcset, iframe src, meta refresh, iframe srcdoc),
+  58 passed / 8 failed; rust/wasm/app/compat green; the app job
+  published dist 3157fdb normally. The torture suite was never
+  reached (main-suite red skips it).
+- The banner change (a top-level console.info of the README art
+  in sw.ts at worker-evaluation scope; the minifier folds the
+  five literals into one string) is exonerated three ways:
+  (1) the identical passthrough-#96 first-failure signature
+  struck runs 41407727247, 41524458112, 41413856957, 41603234425
+  and 42222084937 on engine bytes that predate it; (2) it is
+  mechanically inert for mid-suite traffic - a console.info
+  string on no probe arm, with the app/compat unit suites
+  (including the new version.test.ts banner pins) green on the
+  same head; (3) the built-bundle byte check: sw.js 824727 ->
+  824903 bytes (+176, the folded banner literal), the
+  pre-existing error-page <pre> art constant untouched (one art
+  occurrence in the pin-161 dist, two in the pin-162 dist: the
+  error page's own and the console.info's).
+- OPERATOR NOTE (2026-11-06): pin 162 (dist 3157fdb, sw.js
+  2337cd1084d158a0, bootstrap.js 0c81efb9ba343dff) is taken
+  per the pin 135/151/152/155/156/161 precedent (app/rust/wasm/
+  compat green, the diagnosis on record, the failing arms
+  exonerated); the stricter all-five-green gate returns for the
+  next pin.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes.
