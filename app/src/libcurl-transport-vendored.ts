@@ -1233,6 +1233,99 @@ installWispWatcher();
 /* #496: credentialed wisp sockets carry the PasswordAuth extension
    in their client INFO; without credentials this is a pass-through. */
 installWispAuthSocket();
+/* ---- #639: vendor control-stream CLOSE crash guard -------------------
+   The vendored wisp client (WispConnection in the libcurl bundle) only
+   guards a packet for an unknown stream when its id is nonzero. A wisp
+   CLOSE on the control stream (id 0) - which zeolite-server sends for
+   every handshake rejection (wisp_core::handshake_reject: 0xc0
+   AuthBadCredentials, 0xc1 AuthBadSignature, 0xc2 AuthRequired,
+   InvalidInfo) - reaches close_stream(undefined) and throws "Cannot set
+   properties of undefined (setting 'open')" out of the vendor's
+   message listener. The throw aborts on_ws_msg before its
+   connecting-to-open dispatch, so the initiating WispWebSocket never
+   opens and the shared WispConnection stays wedged in the bundle's
+   _wisp_connections cache under the same URL; every later proxied
+   socket reuses the wedged connection and fails instantly until a
+   reset() busts the cache key (live pin 160: each close_stream throw
+   immediately preceded an ERR_FAILED burst). The bundle is never
+   forked, so the reachable seam is the socket it constructs from this
+   scope. This wrapper hides control-stream CLOSE frames from the
+   vendor's message listener: the #496 auth wrapper is installed before
+   it, so its listener runs first and still maps the auth outcomes and
+   fails closed, and the server closes the websocket right after a
+   handshake rejection, so the vendor's own close-event path
+   (on_ws_close: live streams closed, shared connection evicted from
+   the cache) runs cleanly instead of wedging. The vendor already
+   ignores CLOSE for unknown nonzero streams itself (warn + return), so
+   only the control stream needs hiding. Epoxy's wasm speaks full wisp
+   v2 itself and needs its frames intact: the guard arms only for the
+   libcurl engine. */
+
+/** #639: pure wisp frame classifier - is this a CLOSE on the control
+    stream? Layout [type u8][stream u32 LE][payload], CLOSE is type 4.
+    Unit-gated in __tests__/transport-select.test.ts. */
+export function isStreamZeroClose(b: Uint8Array): boolean {
+  return b.length >= 5 && b[0] === 4 && b[1] === 0 && b[2] === 0 && b[3] === 0 && b[4] === 0;
+}
+
+const CLOSE_GUARD_FLAG = "__zlWispCloseGuard";
+
+interface CloseGuardGlobal {
+  WebSocket?: typeof WebSocket;
+  location?: { href: string };
+}
+
+/* Binary message payloads (the vendor sets binaryType "arraybuffer");
+   views and buffers both decode to bytes. */
+function closeGuardBytes(d: unknown): Uint8Array | null {
+  if (d instanceof ArrayBuffer) return new Uint8Array(d);
+  if (ArrayBuffer.isView(d)) {
+    const v = d as ArrayBufferView;
+    return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+  }
+  return null;
+}
+
+/** Wrap the scope's WebSocket so wisp control-stream CLOSE frames
+    never reach the vendor's message listener (#639). Idempotent; a
+    no-op where no WebSocket exists. Must be installed AFTER
+    installWispAuthSocket, so the auth wrapper's listener sees a frame
+    before this guard hides it from the vendor. */
+export function installWispCloseGuard(g: CloseGuardGlobal = globalThis as CloseGuardGlobal): void {
+  const Orig = g.WebSocket;
+  if (!Orig || (Orig as unknown as Record<string, unknown>)[CLOSE_GUARD_FLAG]) return;
+  class ZlWispCloseGuardWebSocket extends Orig {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols);
+      try {
+        /* epoxy's wasm speaks full wisp v2 and needs its own frames */
+        if (engine !== "libcurl") return;
+        const base = g.location?.href ?? "https://localhost/";
+        const target = new URL(String(url), base);
+        const sameEndpoint = (raw: string | null): boolean => {
+          if (!raw) return false;
+          const p = new URL(raw, base);
+          return target.origin === p.origin && target.pathname === p.pathname;
+        };
+        if (!sameEndpoint(lastCfg?.websocket ?? null) && !sameEndpoint(altUrl)) return;
+        /* The vendor registers its message listener after the socket is
+           constructed, so this listener runs before it. */
+        this.addEventListener("message", (ev: MessageEvent) => {
+          const bytes = closeGuardBytes(ev.data);
+          if (bytes !== null && isStreamZeroClose(bytes)) {
+            ev.stopImmediatePropagation();
+          }
+        });
+      } catch {
+        /* not a parseable URL: none of our business */
+      }
+    }
+  }
+  (ZlWispCloseGuardWebSocket as unknown as Record<string, unknown>)[CLOSE_GUARD_FLAG] = true;
+  g.WebSocket = ZlWispCloseGuardWebSocket as typeof WebSocket;
+}
+
+installWispCloseGuard();
 
 export async function init(cfg: { websocket: string }): Promise<void> {
   lastCfg = cfg;

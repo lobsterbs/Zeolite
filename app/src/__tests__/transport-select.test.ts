@@ -3,7 +3,8 @@
    cover the new pure surface only. */
 
 import { afterEach, describe, it, expect } from "vitest";
-import { setEngine, currentEngine, stripEsmExports, inlineDataImports, reset, isConnectClassError, reconnectDelay, installWispWatcher, bustWispUrl, LIBCURL_CONNECTIONS } from "../libcurl-transport-vendored";
+import { setEngine, currentEngine, stripEsmExports, inlineDataImports, reset, isConnectClassError, reconnectDelay, installWispWatcher, bustWispUrl, altRegister, installWispCloseGuard, isStreamZeroClose, LIBCURL_CONNECTIONS } from "../libcurl-transport-vendored";
+import { configureWispAuth, installWispAuthSocket, clearWispAuth, wispAuthStatus } from "../wisp-auth";
 import { setTransportState, onTransportState, transportState, waitForTransportState } from "../transport-lifecycle";
 
 describe("transport engine selection", () => {
@@ -214,5 +215,105 @@ describe("bounded libcurl connection pool", () => {
     expect(LIBCURL_CONNECTIONS).toEqual([64, 48, 8]);
     expect(LIBCURL_CONNECTIONS[0]).toBeGreaterThan(LIBCURL_CONNECTIONS[2]);
     expect(LIBCURL_CONNECTIONS[0]).toBeLessThan(256);
+  });
+});
+
+/* #639: vendor control-stream CLOSE crash guard. The vendored wisp
+   client guards unknown NONZERO streams only; every zeolite-server
+   handshake rejection is a CLOSE on stream 0, which reached
+   close_stream(undefined) and threw, wedging the shared cached
+   connection behind an instant-failure loop. */
+describe("wisp close guard (#639)", () => {
+  const frame = (type: number, id: number, payload: number[]): Uint8Array => {
+    const b = new Uint8Array(5 + payload.length);
+    b[0] = type;
+    new DataView(b.buffer).setUint32(1, id, true);
+    b.set(payload, 5);
+    return b;
+  };
+  const msg = (b: Uint8Array): MessageEvent => new MessageEvent("message", { data: b.buffer });
+
+  afterEach(() => {
+    clearWispAuth();
+    altRegister("");
+    setEngine("libcurl");
+    setTransportState("idle", "test cleanup");
+  });
+
+  it("isStreamZeroClose: only a CLOSE (type 4) on the control stream", () => {
+    expect(isStreamZeroClose(frame(4, 0, [0xc2]))).toBe(true);
+    expect(isStreamZeroClose(frame(4, 0, [1]))).toBe(true);
+    expect(isStreamZeroClose(frame(4, 7, [1]))).toBe(false);
+    expect(isStreamZeroClose(frame(2, 0, [1]))).toBe(false);
+    expect(isStreamZeroClose(frame(3, 0, [1]))).toBe(false);
+    expect(isStreamZeroClose(frame(5, 0, [1]))).toBe(false);
+    expect(isStreamZeroClose(new Uint8Array([4, 0, 0, 0]))).toBe(false);
+  });
+
+  it("no-op without WebSocket, idempotent with it", () => {
+    expect(() => installWispCloseGuard({})).not.toThrow();
+    class FakeWS extends EventTarget {}
+    const g: any = { WebSocket: FakeWS, location: { href: "https://sw.example/" } };
+    installWispCloseGuard(g);
+    const wrapped = g.WebSocket;
+    installWispCloseGuard(g);
+    expect(g.WebSocket).toBe(wrapped);
+  });
+
+  it("hides a stream-0 CLOSE from the vendor; other frames pass; the auth wrapper still sees it first", () => {
+    class FakeWS extends EventTarget {
+      send() {}
+      close() {}
+    }
+    altRegister("wss://e.example/wisp/");
+    configureWispAuth("wss://e.example/wisp/", "u", "hunter2");
+    const g: any = { WebSocket: FakeWS, location: { href: "https://sw.example/" } };
+    installWispWatcher(g);
+    installWispAuthSocket(g); /* its listener runs first: it must still see the frame */
+    installWispCloseGuard(g);
+    const ws: any = new g.WebSocket("wss://e.example/wisp/");
+    const vendor: unknown[] = [];
+    ws.addEventListener("message", (ev: MessageEvent) => vendor.push(ev.data));
+
+    /* a server handshake rejection: the #496 wrapper maps the outcome,
+       the guard hides the frame, the vendor never sees it */
+    ws.dispatchEvent(msg(frame(4, 0, [0xc2])));
+    expect(wispAuthStatus().lastOutcome).toBe("auth-required");
+    expect(vendor).toHaveLength(0);
+
+    /* everything else passes through untouched */
+    ws.dispatchEvent(msg(frame(2, 1, [1, 2, 3, 4])));
+    ws.dispatchEvent(msg(frame(3, 0, [1])));
+    ws.dispatchEvent(msg(frame(5, 0, [1])));
+    ws.dispatchEvent(msg(frame(4, 9, [1])));
+    expect(vendor).toHaveLength(4);
+  });
+
+  it("ignores sockets that are not a configured wisp endpoint", () => {
+    class FakeWS extends EventTarget {}
+    const g: any = { WebSocket: FakeWS, location: { href: "https://sw.example/" } };
+    installWispCloseGuard(g);
+    const ws: any = new g.WebSocket("wss://other.example/ws");
+    const seen: unknown[] = [];
+    ws.addEventListener("message", (ev: MessageEvent) => seen.push(ev.data));
+    ws.dispatchEvent(msg(frame(4, 0, [0xc2])));
+    expect(seen).toHaveLength(1);
+  });
+
+  it("arms only for the libcurl engine (epoxy wasm keeps its own frames)", () => {
+    class FakeWS extends EventTarget {}
+    altRegister("wss://e.example/wisp/");
+    const g: any = { WebSocket: FakeWS, location: { href: "https://sw.example/" } };
+    try {
+      setEngine("epoxy");
+      installWispCloseGuard(g);
+      const ws: any = new g.WebSocket("wss://e.example/wisp/");
+      const seen: unknown[] = [];
+      ws.addEventListener("message", (ev: MessageEvent) => seen.push(ev.data));
+      ws.dispatchEvent(msg(frame(4, 0, [0xc2])));
+      expect(seen).toHaveLength(1);
+    } finally {
+      setEngine("libcurl");
+    }
   });
 });
