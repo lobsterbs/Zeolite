@@ -39,6 +39,10 @@ describe("engine build id (#617)", () => {
     }
   });
 
+  it("the README ASCII banner logs to the DevTools console on every init", () => {
+    expect(swSource).toContain(" _____              ___ __");
+    expect(swSource).toContain("/__  /  ___  ____  / (_) /____");
+  });
   it("the console banner names the running build (#617)", () => {
     expect(swSource).toContain(
       'console.info("[Zeolite] runtime " + ZEOLITE_VERSION)'

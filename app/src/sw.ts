@@ -118,6 +118,17 @@ initTransform({
 
 
 export { ZEOLITE_VERSION };
+/* The README ASCII banner, printed to the browser DevTools console on
+   every worker evaluation (engine init). Plain console.info only: the
+   banner must never ride the netLog/DIAG planes into the embedder's
+   own in-app console. */
+console.info(
+  " _____              ___ __\n" +
+    "/__  /  ___  ____  / (_) /____\n" +
+    "  / /  / _ \\/ __ \\/ / / __/ _ \\\n" +
+    " / /__/  __/ /_/ / / / /_/  __/\n" +
+    "/____/\\___/\\____/_/_/\\__/\\___/",
+);
 console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
 self.addEventListener("install", (e) => {
