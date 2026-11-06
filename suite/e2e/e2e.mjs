@@ -426,21 +426,30 @@ async function main() {
     return landing.url().slice(0, 44);
   });
 
-  await check("routing: a navguard marker route serves the target through the engine (#28 SW branch)", async () => {
+  await check("routing: a navguard marker route 302s once to the visible handle form and serves the target (#28 SW branch, #612/#634 contract)", async () => {
     const pg = await context.newPage();
     attachRecorder(pg);
     /* The worker-side NAV branch: the runtime guard writes
-       /__zl_nav__/<b64u target> and the SW decodes it back to the
-       destination. The branch shipped broken (it matched the bare
-       marker path, which navEncode never emits) and neither the unit
-       suite nor this e2e ever navigated a marker, so every marker
-       navigation silently fell into the escaped-path recovery. This
-       goto is the pin: serve the landing page AT the marker route. */
+       /__zl_nav__/<b64u target> and the SW resolves it. Contract
+       change (#612/#634): serving the document AT the bare marker
+       route left /__zl_nav__/<b64u> in the committed URL, where site
+       JS copies it into destination-bound paths (the Microsoft
+       escaped-path 400 class). A top-level document GET on the
+       marker route must now 302 ONCE to the visible handle form
+       (the query shape, queryRoutes on in this harness) and the
+       engine serves the destination content there. */
     const tail = Buffer.from(ORIGIN_B + "/dir/landing.html", "utf8").toString("base64url");
-    await pg.goto(ENGINE + "/__zl_nav__/" + tail);
-    eq(await pg.locator("#zl-landing").textContent(), "zl-landing", "landing served through the marker route");
-    assert(pg.url().startsWith(ENGINE + "/__zl_nav__/"), "navigation left the marker route: " + pg.url());
-    return "served at " + pg.url().slice(0, 44) + "...";
+    const resp = await pg.goto(ENGINE + "/__zl_nav__/" + tail);
+    eq(await pg.locator("#zl-landing").textContent(), "zl-landing", "landing served through the handle route");
+    assert(pg.url().startsWith(ENGINE + "/dir/landing.html?zlNavh="), "navigation did not land on the visible handle form: " + pg.url());
+    assert(!pg.url().includes("/__zl_nav__/"), "the marker route stayed in the committed URL: " + pg.url());
+    /* Exactly one redirect hop: the marker request answered a
+       redirect, the handle request answered the document. */
+    const prev = resp?.request()?.redirectedFrom?.();
+    assert(prev, "the marker route served the document in place (no 302 to the handle form)");
+    assert(!prev.redirectedFrom(), "more than one redirect hop: " + prev.url());
+    assert(prev.url().startsWith(ENGINE + "/__zl_nav__/"), "redirect chain did not start at the marker route: " + prev.url());
+    return "302 to " + pg.url().slice(0, 44) + "...";
   });
 
   await check("routing: a relative link resolves against the virtual target", async () => {
