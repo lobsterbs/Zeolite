@@ -600,3 +600,24 @@ deterministic; only its firing is intermittent. Tracked in #514.
   next pin.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes.
+
+## Run 42248221617 (16:04Z 2026-11-06, head bb5829e, docs-only retrigger)
+
+- The retrigger rotated the wedge to the documented 41607524709
+  signature class: the #545 worker-initiator timeout first
+  ("worker fetch initiator timeout"), then the standard page.goto
+  30 s cascade (shared-worker relay, #453 identities, storage
+  round-trip, jar-backed document.cookie, Set-Cookie capture),
+  60 passed / 6 failed; rust/wasm/app/compat green. The torture
+  suite was never reached (main-suite red skips it).
+- The rotation itself completes the banner exoneration: 6f1279f and
+  bb5829e carry IDENTICAL engine bytes (docs-only delta), yet the
+  two runs present different first victims (the passthrough #96
+  HUNG marks on 42246542499, the #545 worker-initiator on this
+  run) - the position-random signature that exonerated every prior
+  wave; no deterministic regression can rotate first victims on
+  unchanged bytes.
+- The retrigger gate closes red for this wave; pin 162 stands per
+  the 135/151-161 precedent, with the full local verification
+  (66/66 on 6f1279f) on record in the 42246542499 entry. The
+  stricter all-five-green gate returns for the next pin.
