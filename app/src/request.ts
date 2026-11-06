@@ -1751,6 +1751,51 @@ export function challengeReanchorUrl(fixed: string, rootBinding?: string): strin
   return encodeDest(d);
 }
 
+/* #612/#634: the nav marker is engine vocabulary in a PATH too. A
+   destination whose path ends /__zl_nav__/<b64u> was page-built by
+   resolving the marker against a virtual origin (a page parked on a
+   marker route decorating its own opaque path, a mint-fallback
+   anchor read); dialed verbatim the marker path reached the real
+   site upstream (Google 404 #612, HTTP.sys 400 #634). The payload IS
+   the destination; the marker URL's own search is the page's
+   decoration and unions onto the payload (mergeRouteSearch
+   semantics, outer params winning per key). Null = no decodable
+   marker in the path; a marker-shaped tail whose payload does not
+   decode fails closed (never dialed). Bounded: a payload that itself
+   carries a marker resolves too (page chains), max three hops. Only
+   the observed end-of-path shape resolves; a marker mid-path with
+   trailing segments keeps the legacy behavior if a live case ever
+   names it. */
+export function markerPathDest(dest: string): string | null {
+  let resolved: string | null = null;
+  let d = dest;
+  for (let hop = 0; hop < 3; hop++) {
+    let u: URL;
+    try {
+      u = new URL(d);
+    } catch {
+      return resolved;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") return resolved;
+    const cut = u.pathname.lastIndexOf(NAV + "/");
+    if (cut < 0) return resolved;
+    const tail = u.pathname.slice(cut + NAV.length + 1);
+    if (!/^[A-Za-z0-9_-]+\/?$/.test(tail)) return resolved;
+    const bytes = b64uDecode(tail.replace(/\/$/, ""));
+    if (!bytes) return null;
+    let inner: string;
+    try {
+      inner = new TextDecoder().decode(bytes);
+    } catch {
+      return null;
+    }
+    if (!/^https?:\/\//.test(inner)) return null;
+    d = u.search ? mergeRouteSearch(inner, u.search) : inner;
+    resolved = d;
+  }
+  return resolved;
+}
+
 /** #101/#157: resolve a <parent route>/__zl_prel__/<encoded input>
     path to its destination. The parent may be a scheme route or a
     NAVH handle (decodeClientUrl) or a NAV navigation route (legacy
@@ -2791,6 +2836,40 @@ export function handleFetch(e: FetchEvent): void {
         /* #31: a bad marker target is a navigation strand - the error
            page replaces the bare 404 text for navigations. */
         if (!nav || !/^https?:\/\//.test(nav)) return navOutcome(e, url, 404, "route", "zeolite: bad route");
+        /* #612/#634 (the #290 prel contract for marker routes): a GET
+           top-level navigation on a marker route decodes correctly, but
+           the document would park on the opaque marker pathname, and
+           page JS that reads its own location then decorates the marker
+           itself (the /__zl_nav__/?sso_reload=true upstream-400 class)
+           or hands the raw marker to other surfaces. Serve the decoded
+           destination on the visible handle form instead: one
+           same-origin 302, then the document owns a URL whose path and
+           query it can read. Pane navigations keep the in-place serve
+           (their surface stamp fails closed as iframe, #612); fetches
+           and non-GET keep it too (a redirect strips a POST body). */
+        if (e.request.method === "GET" && e.request.mode === "navigate" && e.request.destination === "document") {
+          const navClean = queryRoutesEnabled()
+            ? buildQueryHandleUrl(nav, NAVH_TTL_MS)
+            : null;
+          const navLoc = navClean ?? buildNavHandleUrl(nav, NAVH_TTL_MS);
+          if (navLoc) {
+            const ntid = DIAG.trace(e.resultingClientId || e.clientId);
+            netLogPush({
+              method: e.request.method,
+              traceId: ntid,
+              path: url.pathname + url.search,
+              dest: nav,
+              status: 302,
+              rtype: classifyRtype(reqDest(e.request), ""),
+              ms: 0,
+              bytes: 0,
+              verdict: "engine: marker navigation redirected to the visible handle form",
+              transport: "engine",
+              detail: { internalUrl: navLoc, ttfb: 0 },
+            });
+            return new Response(null, { status: 302, headers: { location: navLoc } });
+          }
+        }
         dest0 = nav;
       } else if (url.pathname.startsWith(NAVH + "/")) {
         /* #63 (#54 design D): the opaque initial-navigation handle.
@@ -3202,6 +3281,40 @@ export function handleFetch(e: FetchEvent): void {
           const qs = q.toString();
           target = qs ? mergeRouteSearch(bareDest, "?" + qs) : bareDest;
         }
+      }
+      /* #612/#634: a destination whose PATH carries the nav marker is
+         never a real site path (page JS resolved the marker against a
+         virtual origin); the marker payload IS the destination, and
+         the marker URL's own search unions onto it. GET top-level
+         navigations redirect once to the visible handle form (the
+         marker-branch contract above); everything else serves the
+         resolved destination in place. */
+      const navPath = markerPathDest(target);
+      if (navPath !== null && navPath !== target) {
+        if (e.request.method === "GET" && e.request.mode === "navigate" && e.request.destination === "document") {
+          const mpClean = queryRoutesEnabled()
+            ? buildQueryHandleUrl(navPath, NAVH_TTL_MS)
+            : null;
+          const mpLoc = mpClean ?? buildNavHandleUrl(navPath, NAVH_TTL_MS);
+          if (mpLoc) {
+            const mptid = DIAG.trace(e.resultingClientId || e.clientId);
+            netLogPush({
+              method: e.request.method,
+              traceId: mptid,
+              path: url.pathname + url.search,
+              dest: navPath,
+              status: 302,
+              rtype: classifyRtype(reqDest(e.request), ""),
+              ms: 0,
+              bytes: 0,
+              verdict: "engine: marker-in-path navigation redirected to the visible handle form",
+              transport: "engine",
+              detail: { internalUrl: mpLoc, ttfb: 0 },
+            });
+            return new Response(null, { status: 302, headers: { location: mpLoc } });
+          }
+        }
+        target = navPath;
       }
       target = destUpgraded(target);
       /* #52 parity with the server-side anubis bridge: the challenge
