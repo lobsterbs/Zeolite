@@ -2567,6 +2567,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeolite-seam-wasm"
+version = "3.0.1"
+dependencies = [
+ "wasm-bindgen",
+ "zeolite-config",
+ "zeolite-csp",
+]
+
+[[package]]
 name = "zeolite-server"
 version = "3.0.1"
 dependencies = [

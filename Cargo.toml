@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/config", "crates/cookies", "crates/csp", "crates/rewriter", "crates/wisp-wasm", "crates/zeolite-server", "crates/wisp-core", "crates/wisp-extensions"]
+members = ["crates/config", "crates/cookies", "crates/csp", "crates/seam-wasm", "crates/rewriter", "crates/wisp-wasm", "crates/zeolite-server", "crates/wisp-core", "crates/wisp-extensions"]
 
 [workspace.package]
 version = "3.0.1"
@@ -10,6 +10,8 @@ license = "AGPL-3.0-only"
 [workspace.dependencies]
 wisp-core = { path = "crates/wisp-core" }
 wisp-extensions = { path = "crates/wisp-extensions" }
+zeolite-csp = { path = "crates/csp" }
+zeolite-config = { path = "crates/config" }
 wasm-bindgen = "0.2"
 bytes = "1"
 thiserror = "2"

@@ -1,0 +1,16 @@
+[package]
+name = "zeolite-seam-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# The wasm-bindgen wrapper over the pure zeolite-csp and
+# zeolite-config ports (#614/#615/#616 wiring). cdylib for
+# wasm-pack, rlib so the native clippy/test gates cover it.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = { workspace = true }
+zeolite-config = { workspace = true }
+zeolite-csp = { workspace = true }
