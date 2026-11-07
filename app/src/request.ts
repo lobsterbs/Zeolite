@@ -6633,6 +6633,16 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
     if (!ref && queryHandleToken(refU.search) !== null) {
       ref = decodeQueryHandle(refU)?.destination ?? null;
       queryReferrer = ref !== null;
+      /* #633: the query-shape mirror of the expired recovery above.
+         The deployed sign-in commits on the query shape (?zlNavh=),
+         so a page held past NAVH_TTL_MS - or orphaned by a worker
+         re-evaluation - loses the Referer exactly like the path
+         shape. The expired token still MAC-verifies (#385 trust):
+         recover the origin, keep the cleaned search. */
+      if (ref === null) {
+        ref = decodeQueryHandle(refU, {expired: true})?.destination ?? null;
+        queryReferrer = ref !== null;
+      }
     }
     /* #113: legacy /zl/ routes from cold starts or pre-#113 dists
        also fail decodePath when the prefix is not configured yet.
