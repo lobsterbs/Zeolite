@@ -813,8 +813,10 @@ function navqEngineOrigin(token: string): string | null {
     real destination tail. Only the component that MAC-verifies is
     removed from the search: every other param byte survives,
     including page-authored zlNavh impostors. Fail-closed: a garbage
-    or expired token decodes to null. */
-export function decodeQueryHandle(u: URL): { destination: string; rootClientId?: string } | null {
+    token decodes to null; an expired origin-only token decodes to
+    null unless the caller opts into expired recovery (the #633
+    Referer seam, the #385 trust - committed decode stays live-only). */
+export function decodeQueryHandle(u: URL, opts?: {expired?: boolean}): { destination: string; rootClientId?: string } | null {
   /* Route-shaped pathname: a page-copied zlNavh impostor, never a
      committed query route (the mint refuses these pathnames).
      The path-shape decoders own the URL; without this gate the
@@ -842,7 +844,7 @@ export function decodeQueryHandle(u: URL): { destination: string; rootClientId?:
       continue;
     }
     const token = part.slice(head.length);
-    const o = decodeNavHandle(token);
+    const o = decodeNavHandle(token, opts);
     /* Origin-only payload only: a full-destination token pasted into
        the search by a page is a path-shape NAVH token, not a
        committed query route. Fail closed; the NAVH path shape owns

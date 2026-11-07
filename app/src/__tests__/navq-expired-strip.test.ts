@@ -88,3 +88,33 @@ describe("expired zlNavh strip (#633)", () => {
     );
   });
 });
+
+describe("expired origin recovery for derived context (#633)", () => {
+  it("an all-expired search names the page only under the expired opt-in", () => {
+    const u = new URL("/p?a=1&zlNavh=" + expiredTok(), ENGINE);
+    expect(decodeQueryHandle(u)).toBeNull();
+    expect(decodeQueryHandle(u, { expired: true })?.destination).toBe("https://x.example/p?a=1");
+  });
+
+  it("the recovered origin is token-bound; the visible page supplies only the path", () => {
+    /* encodeNavHandle stores the origin only (#144), so the pasting
+       page controls the visible path and search but never the
+       origin: the recovered destination stays inside the mint. */
+    const u = new URL("/elsewhere?a=1&zlNavh=" + expiredTok(), ENGINE);
+    expect(decodeQueryHandle(u, { expired: true })?.destination).toBe(
+      "https://x.example/elsewhere?a=1",
+    );
+  });
+
+  it("a tampered token keeps failing closed under the opt-in", () => {
+    const tok = expiredTok();
+    const bad = tok.slice(0, -2) + (tok.endsWith("aa") ? "bb" : "aa");
+    const u = new URL("/p?zlNavh=" + bad, ENGINE);
+    expect(decodeQueryHandle(u, { expired: true })).toBeNull();
+  });
+
+  it("the expired token strips from the recovered destination", () => {
+    const u = new URL("/p?zlNavh=" + expiredTok() + "&a=1", ENGINE);
+    expect(decodeQueryHandle(u, { expired: true })?.destination).toBe("https://x.example/p?a=1");
+  });
+});

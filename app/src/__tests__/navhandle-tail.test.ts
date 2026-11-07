@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   b64uEncode,
   buildNavHandleUrl,
+  buildQueryHandleUrl,
   decodeNavHandle,
   decodeNavHandlePath,
   encodeNavHandle,
   NAVH,
+  queryHandleToken,
   setRouteKey,
   setScheme,
 } from "../codec";
@@ -91,6 +93,30 @@ describe("forwardedHeaders expired-navh referrer (#633)", () => {
     const bad = token.slice(0, -2) + (token.endsWith("aa") ? "bb" : "aa");
     const ref = ENGINE + NAVH + "/" + bad + "/signin?state=1";
     const req = new Request(ENGINE + "/x", { method: "POST", referrer: ref});
+    const out = forwardedHeaders(req, "https://accounts.example/rpc");
+    expect(out.get("referer")).toBeNull();
+  });
+});
+
+describe("forwardedHeaders expired query-route referrer (#633)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("derives the Referer from an expired committed query route", () => {
+    vi.stubGlobal("self", { location: { origin: ENGINE } });
+    const committed = new URL(buildQueryHandleUrl("https://accounts.example/signin?state=1", -1)!, ENGINE).href;
+    const req = new Request(ENGINE + "/x", { method: "POST", referrer: committed });
+    const out = forwardedHeaders(req, "https://accounts.example/rpc");
+    expect(out.get("referer")).toBe("https://accounts.example/signin?state=1");
+  });
+
+  it("keeps omitting the Referer for a tampered query-route token", () => {
+    vi.stubGlobal("self", { location: { origin: ENGINE } });
+    const u = new URL(buildQueryHandleUrl("https://accounts.example/signin", -1)!, ENGINE);
+    const tok = queryHandleToken(u.search)!;
+    u.searchParams.set("zlNavh", tok.slice(0, -2) + (tok.endsWith("aa") ? "bb" : "aa"));
+    const req = new Request(ENGINE + "/x", { method: "POST", referrer: u.href });
     const out = forwardedHeaders(req, "https://accounts.example/rpc");
     expect(out.get("referer")).toBeNull();
   });
