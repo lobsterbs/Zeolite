@@ -1,0 +1,12 @@
+[package]
+name = "zeolite-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KDL v2-subset config parsing, typed rules/siteconfig layers and single-source secret redaction for Zeolite (pure Rust, wasm-compatible)"
+
+# #616: no external dependencies by design. The TS seams keep the
+# fetch/memoize loaders, the interception runtime and the diagnostic
+# ring buffers; this crate owns the KDL subset grammar, the typed
+# rule structures and the one redaction boundary so "what is a
+# secret" has a single, fuzzable source of truth.
