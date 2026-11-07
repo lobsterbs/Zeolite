@@ -654,3 +654,48 @@ deterministic; only its firing is intermittent. Tracked in #514.
   gained no arm that can time out.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes.
+
+## Run 42377150340 (13:28Z 2026-11-07, head 0280265, docs-only retrigger)
+
+- The docs-only retrigger itself struck the img#uni torture
+  flake, the same single-failure signature as base run
+  42250073383 on 4fb2cd3: "[FAIL][rewriting] torture page:
+  CRLF-in-tag, unquoted/padded attributes, unicode src,
+  srcset and iframe all resolve through engine routes | direct
+  model failed to load img#uni" and nothing else. No cascade
+  and no initiator timeout; every other torture and e2e row
+  passed.
+- rust/wasm/app/compat green, the app job running the full
+  vitest suite on the same head. 0280265 differs from 728ed78
+  by docs bytes only, so the strike is position-random on
+  unchanged engine bytes, the same exonerating evidence class
+  as the rotations recorded above.
+- Verdict recorded for the follow-up head 3aea563 (the
+  zeolite-cookies crate) in its own entry below.
+
+## Run 42378850123 (13:51Z 2026-11-07, head 3aea563, zeolite-cookies crate)
+
+- Third consecutive img#uni single-failure strike: 42250073383
+  (4fb2cd3), 42377150340 (0280265) and this run all failed the
+  same single torture row, "[FAIL][rewriting] torture page:
+  CRLF-in-tag, unquoted/padded attributes, unicode src, srcset
+  and iframe all resolve through engine routes | direct model
+  failed to load img#uni (fixture regression)", and nothing
+  else.
+- 3aea563 changes only Rust workspace bytes (the zeolite-cookies
+  crate, workspace members, Cargo.lock); the browser job runs
+  the TS app with zero delta from 0280265. The failing leg is
+  the direct (unproxied) model of the row, which by construction
+  does not exercise the engine at all, so the strike exonerates
+  engine bytes a fortiori.
+- rust/wasm/app/compat green; the rust job runs the whole
+  workspace suite including the new cookies crate under
+  --locked on the same head.
+- Three consecutive same-row strikes on unchanged fixtures is
+  no longer the position-random wedge rotation class: the
+  row's own message says "fixture regression" and the suspect
+  is the runner Chrome's handling of the unicode src leg, so
+  this needs a fixture/runner look, tracked separately from
+  the rotations above.
+- This docs-only commit is the recorded bounded retrigger per
+  the operational notes.
