@@ -727,3 +727,52 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - This docs-only commit is the recorded bounded retrigger per
   the operational notes. The pin gate stands: all five jobs
   green or no LobsterBrowse pin.
+
+## Run 42383331239 (14:48Z 2026-11-07, head f1a073b, docs-only retrigger of the #615 wave)
+
+- The retrigger rotated the wedge to the documented passthrough #96
+  signature: NativeTransit marks range/cond/setcookie/cookie/stream/redir
+  HUNG at 6000 ms with get/post/abort ok, then the standard page.goto
+  30 s cascade (IndexedDB and Cache API round-trip,
+  serviceWorker.register, rewriter img/srcset, iframe src, meta
+  refresh, iframe srcdoc, base href), 57 passed / 9 failed, CDP
+  attach failures at teardown; rust/wasm/app/compat green. The
+  torture suite was never reached (main-suite red skips it).
+- The rotation completes the 14ca12f exoneration: f1a073b differs
+  from 14ca12f by docs bytes only, yet the two runs present
+  DIFFERENT first victims (the 41412551947 torture pair on
+  42381860014, the passthrough-#96 HUNG marks here) - the
+  position-random signature that exonerated every prior wave; no
+  deterministic regression can rotate first victims on unchanged
+  bytes.
+- f1a073b was the wave-71 bounded retrigger per the operational
+  notes; its verdict rides this entry because the #616 wave landed
+  before the record could be written.
+
+## Run 42394091259 (17:00Z 2026-11-07, head 778e99a, the #616 zeolite-config crate)
+
+- The MAIN e2e suite PASSED in full (66 passed / 0 failed) for the
+  first time in the recent record; the red is the torture suite
+  only, 18 passed / 2 failed: the 700 ms TTFB probe wedged first
+  ("timeout waiting for proxied frame", embedder "Starting
+  engine..."), the harness wedge restart fired, and the
+  torture-page img#uni direct assertion then failed through the
+  restart ("direct model failed to load img#uni (fixture
+  regression)") - the fixture-connection-starvation class of the
+  41528599862 entry, not the isolated decode-skip flake.
+- Fifth consecutive img#uni strike (42250073383, 42377150340,
+  42378850123, 42381860014, this run). The 42378850123
+  fixture/runner look stands for the isolated strikes; this one
+  lands inside the wedged-context restart window.
+- 778e99a changes only Rust workspace bytes (crates/config, the
+  new zeolite-config crate, workspace members, Cargo.lock); the
+  browser job runs the TS app with zero delta from f1a073b. The
+  failing img#uni leg is the direct (unproxied) model, which never
+  traverses the engine, so the strike exonerates engine bytes a
+  fortiori; the wedged TTFB probe is the documented #514 seam.
+- rust/wasm/app/compat green; the rust job runs the whole
+  workspace suite including the new config crate under --locked
+  on the same head.
+- This docs-only commit is the recorded bounded retrigger per
+  the operational notes. The pin gate stands: all five jobs
+  green or no LobsterBrowse pin.
