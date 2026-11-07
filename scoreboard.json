@@ -1,0 +1,101 @@
+{
+  "base": "http://localhost:6002",
+  "transport": "wisp v2.1 over /wisp/ (raw HTTP/1.1 on port 80)",
+  "generated": "2026-11-07T17:55:44.933Z",
+  "summary": {
+    "pass": 8,
+    "total": 8
+  },
+  "consentChain": [
+    {
+      "host": "consent.google.com",
+      "path": "/",
+      "status": 404,
+      "setCookie": [
+        "Set-Cookie: NID=CuYBCAESmAEBM9Agl8ilmvRGcnaMiUqV_OehZDqI-MbYvY7xBmCka8z7uCt2TBaUosWmaGs8cb-AWBoaoPZf0pN9zcnpjir8YaXgbBiBYzy05UYdTNz61Po49nwifpINSpPkYINJ1AP9n3ejI_2G1OiK7NABzwACr9nv5k0NMzYP1bVaTaMT6RPsP4vCJq_D9ajzAAe12zHxrW-IHz5JgCgBMkUBcEpCz_0xNwfsIq-42oVLEQzsFrS3p3PxE3jZ5zNPvtYfOGKGXe82znvQKf1W7NdRqcPWsdNwC88Ihe6pOaUR-D9V1wQ; expires=Sun, 09-May-2027 17:55:44 GMT; path=/; domain=.google.com; HttpOnly"
+      ]
+    }
+  ],
+  "results": [
+    {
+      "name": "youtube",
+      "status": "pass",
+      "ttfbDirect": 68,
+      "ttfbProxy": 82,
+      "ratio": 1.21,
+      "statusDirect": 301,
+      "statusProxy": 301,
+      "error": null
+    },
+    {
+      "name": "reddit",
+      "status": "pass",
+      "ttfbDirect": 52,
+      "ttfbProxy": 51,
+      "ratio": 0.98,
+      "statusDirect": 301,
+      "statusProxy": 301,
+      "error": null
+    },
+    {
+      "name": "wikipedia",
+      "status": "pass",
+      "ttfbDirect": 24,
+      "ttfbProxy": 52,
+      "ratio": 2.17,
+      "statusDirect": 301,
+      "statusProxy": 301,
+      "error": null
+    },
+    {
+      "name": "github",
+      "status": "pass",
+      "ttfbDirect": 14,
+      "ttfbProxy": 52,
+      "ratio": 3.71,
+      "statusDirect": 301,
+      "statusProxy": 301,
+      "error": null
+    },
+    {
+      "name": "discord",
+      "status": "pass",
+      "ttfbDirect": 22,
+      "ttfbProxy": 51,
+      "ratio": 2.32,
+      "statusDirect": 301,
+      "statusProxy": 301,
+      "error": null
+    },
+    {
+      "name": "google-home",
+      "status": "pass",
+      "ttfbDirect": 54,
+      "ttfbProxy": 58,
+      "ratio": 1.07,
+      "statusDirect": 200,
+      "statusProxy": 200,
+      "error": null
+    },
+    {
+      "name": "google-search",
+      "status": "pass",
+      "ttfbDirect": 1388,
+      "ttfbProxy": 4073,
+      "ratio": 2.93,
+      "statusDirect": 200,
+      "statusProxy": 200,
+      "error": null
+    },
+    {
+      "name": "google-consent",
+      "status": "pass",
+      "ttfbDirect": 47,
+      "ttfbProxy": 35,
+      "ratio": 0.74,
+      "statusDirect": 404,
+      "statusProxy": 404,
+      "error": null
+    }
+  ]
+}
