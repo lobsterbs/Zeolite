@@ -699,3 +699,31 @@ deterministic; only its firing is intermittent. Tracked in #514.
   the rotations above.
 - This docs-only commit is the recorded bounded retrigger per
   the operational notes.
+
+## Run 42381860014 (14:31Z 2026-11-07, head 14ca12f, the #615 zeolite-csp crate)
+
+- The wedge struck the torture suite with the documented
+  41412551947 first-failure pair: the ~2 MB streamed-document
+  probe ("the first marker never rendered in 60s", embedder
+  "Starting engine...") and the 700 ms TTFB probe ("timeout
+  waiting for proxied frame", embedder "Starting engine..."),
+  with the torture-page img#uni direct assertion failing in
+  the cascade ("direct model failed to load img#uni (fixture
+  regression)") - the fixture-connection-starvation class of
+  the 41528599862 entry, not the isolated decode-skip flake.
+- Fourth consecutive img#uni strike (42250073383, 42377150340,
+  42378850123, this run). The 42378850123 fixture/runner look
+  stands for the isolated strikes; this one lands inside a
+  transport cascade the isolated reading cannot produce.
+- 14ca12f changes only Rust workspace bytes (crates/csp, the
+  new zeolite-csp crate, workspace members, Cargo.lock); the
+  browser job runs the TS app with zero delta from 3aea563.
+  The failing img#uni leg is the direct (unproxied) model,
+  which never traverses the engine, so the strike exonerates
+  engine bytes a fortiori.
+- rust/wasm/app/compat green; the rust job runs the whole
+  workspace suite including the new csp crate under --locked
+  on the same head.
+- This docs-only commit is the recorded bounded retrigger per
+  the operational notes. The pin gate stands: all five jobs
+  green or no LobsterBrowse pin.
