@@ -3,6 +3,7 @@ app/node_modules/
 app/dist/
 app/src/rewriter_wasm/
 app/src/wisp_wasm/
+app/src/seam_wasm/
 app/public/libcurl/
 .vendor/
 suite/scoreboard.*
