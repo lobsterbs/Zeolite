@@ -11,22 +11,32 @@ import wasm from "vite-plugin-wasm";
    exists - CI, or a locally built tree - this resolver is inert, and
    the plugin is registered only under vitest, never in production
    builds. */
-function rewriterWasmTestFallback(): Plugin {
-  const realGlue = "src/rewriter_wasm/rewriter_wasm.js";
-  const stubPath = new URL("./src/rewriter_wasm_stub.ts", import.meta.url).pathname;
+function wasmGlueTestFallback(): Plugin {
+  /* Each entry: the generated glue module (absent without the
+     Rust toolchain) and the committed throwing stub that stands
+     in for it. Semantics identical to the rewriter-only plugin
+     this replaces: substitute the stub only when the generated
+     glue is absent. */
+  const glues = [
+    { suffix: "rewriter_wasm/rewriter_wasm.js", real: "src/rewriter_wasm/rewriter_wasm.js", stub: "./src/rewriter_wasm_stub.ts" },
+    { suffix: "seam_wasm/seam_wasm.js", real: "src/seam_wasm/seam_wasm.js", stub: "./src/seam_wasm_stub.ts" },
+  ].map((g) => ({ ...g, stubPath: new URL(g.stub, import.meta.url).pathname }));
   return {
-    name: "zl-rewriter-wasm-test-fallback",
+    name: "zl-wasm-glue-test-fallback",
     enforce: "pre",
     resolveId(id) {
-      if (!id.endsWith("rewriter_wasm/rewriter_wasm.js")) return null;
-      if (existsSync(realGlue)) return null;
-      return stubPath;
+      for (const g of glues) {
+        if (!id.endsWith(g.suffix)) continue;
+        if (existsSync(g.real)) return null;
+        return g.stubPath;
+      }
+      return null;
     },
   };
 }
 
 export default defineConfig({
-  plugins: [wasm(), ...(process.env.VITEST ? [rewriterWasmTestFallback()] : [])],
+  plugins: [wasm(), ...(process.env.VITEST ? [wasmGlueTestFallback()] : [])],
   /* Relative base: the engine bundle must be servable from any subpath
      (LobsterBrowse aliases the dist bundle under /zlsw/). With the
      default "/" base Vite freezes new URL(<asset>, import.meta.url)

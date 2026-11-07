@@ -183,7 +183,30 @@ function parseSourceList(tokens: string[]): { sources: CspSource[] } | { unverif
     for the document at docUrl. Invalid syntax, duplicates, commas and
     oversize policies yield an empty plan (unenforced), mirroring the
     conservative planner in csp-translation.ts. */
+import { activeSeam } from "./seam";
+
 export function planEngineCsp(raw: string, docUrl: string): CspEnginePlan {
+  const w = activeSeam();
+  if (w) {
+    /* The wasm seam emits the TS CspEnginePlan shape; the sources
+       Map is the only non-JSON part, so hydrate it after parse. */
+    const j = JSON.parse(w.planEngineCsp(raw, docUrl)) as {
+      selfOrigin: string;
+      pageScheme: string;
+      enforced: string[];
+      unsupported: string[];
+      sources: Record<string, CspSource[]>;
+      defaultSrc: CspSource[] | null;
+    };
+    return {
+      selfOrigin: j.selfOrigin,
+      pageScheme: j.pageScheme,
+      enforced: j.enforced,
+      unsupported: j.unsupported,
+      sources: new Map(Object.entries(j.sources)),
+      defaultSrc: j.defaultSrc,
+    };
+  }
   let selfOrigin = "";
   let pageScheme = "https:";
   try {
