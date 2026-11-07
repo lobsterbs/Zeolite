@@ -621,3 +621,36 @@ deterministic; only its firing is intermittent. Tracked in #514.
   the 135/151-161 precedent, with the full local verification
   (66/66 on 6f1279f) on record in the 42246542499 entry. The
   stricter all-five-green gate returns for the next pin.
+
+## Run 42250073383 (16:11Z 2026-11-06, head 4fb2cd3, docs-only retrigger)
+
+- The retrigger failed in the torture step instead of the E2E
+  suite: "direct model failed to load img#uni (fixture
+  regression)" on the torture-page fixture model, the documented
+  img#uni decode-skip flake class (see the 41520211250 entry).
+  No other job failed (wasm/rust/app/compat green). The head
+  differs from bb5829e by docs bytes only, so the strike is
+  position-random on unchanged engine bytes, the same exonerating
+  evidence class as the rotation recorded above.
+
+## Run 42376174491 (13:16Z 2026-11-07, head 728ed78, app-TS engine change #633/#612/#640)
+
+- The #633/#612/#640 engine commit (codec.ts, control.ts,
+  request.ts plus three test files) struck the documented
+  41607524709 signature class verbatim: the #545 worker-initiator
+  timeout first ("worker fetch initiator timeout"), then the
+  standard page.goto 30 s cascade (shared-worker relay, #453
+  identities, storage round-trip, jar-backed document.cookie,
+  Set-Cookie capture, cookieStore facade and change event), with
+  recovery after about four minutes (later tests in the same
+  suite pass: cookie deletion, virtual-site isolation, the
+  SameSite matrix, passthrough #96, IndexedDB, Cache API).
+  8 of the suite failed.
+- wasm/rust/app/compat green; the app job runs the full vitest
+  suite (2890 tests, the three new files included) on the same
+  head. The changed seams are synchronous (route-config restore,
+  NAVH decode arms, the Discourse widget rewrite): none can
+  await or hang a worker fetch, and the initiator derivation
+  gained no arm that can time out.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes.
