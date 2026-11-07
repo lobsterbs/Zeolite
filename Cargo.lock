@@ -2542,6 +2542,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeolite-config"
+version = "3.0.1"
+
+[[package]]
 name = "zeolite-cookies"
 version = "3.0.1"
 
