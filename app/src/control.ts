@@ -157,6 +157,8 @@ export interface ControlMessage {
   format?: "kdl";
   extId?: string;
   msg?: unknown;
+  /** zl:config: rotate the route prefix. Absent keeps the live
+      scheme (#633), like every other knob; the ack echoes it. */
   prefix?: string;
   /** zl:config route scheme. Fixed "b64u" since #32; any other value
       is rejected (mirror removed). Kept optional for old embedders. */
@@ -673,7 +675,10 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
          included, and the poisoned shape persists across restarts);
          reserved roots collide with navguard/NAVH/extension routing.
          Refuse atomically - no other knob moves on a bad prefix. */
-      if (!validSchemePrefix(msg.prefix ?? "/j/")) {
+      /* #633: an absent prefix keeps the live scheme, so only a
+         provided value is validated (and refused atomically); a
+         present non-string is refused too (the torture rows). */
+      if (msg.prefix !== undefined && !validSchemePrefix(msg.prefix)) {
         reply({
           ok: false,
           error:
@@ -706,7 +711,13 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       if (typeof msg.navHandles === "boolean") setNavHandles(msg.navHandles);
       /* Injector phase 2: same rule for the query-shape routes. */
       if (typeof msg.queryRoutes === "boolean") setQueryRoutes(msg.queryRoutes);
-      setScheme(msg.prefix ?? "/j/");
+      /* #633: absent keeps the live scheme, the rule every other
+         knob follows. The old unconditional "/j/" default let a
+         prefix-less toggle push reset the shape and persist the
+         reset, so an idle-killed worker restored /j/ under pages
+         still holding routes minted with the deployment prefix -
+         the orphaned-route ERR_FAILED storm class. */
+      if (typeof msg.prefix === "string") setScheme(msg.prefix);
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
       reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), adaptiveTransit: adaptiveTransitEnabled(), locationTargeting: locationTargetingEnabled(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled(), spoolUploads: spoolUploadsEnabled(), replayCapMb: replayCapMbValue(), experimental: experimentalSnapshot() });
