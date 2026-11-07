@@ -77,7 +77,7 @@ import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersi
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
    control plane are call sites. */
-import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setAdaptiveTransit, setHttpsUpgrade, setNavHandles, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setAdaptiveTransit, setHttpsUpgrade, setNavHandles, setQueryRoutes, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
 import { newSriRegistry, SRI_VERIFY_BYTE_CAP, sriBlockedResponse, sriClearClient, sriExpectation, sriNote, sriVerifyBytes } from "./sri";
 import { newImportmapRegistry, importmapNote, importmapReset, resolveBareImportFor, pageKeyOf } from "./importmaps";
 
@@ -1601,7 +1601,7 @@ const routeRestore: Promise<void> = (async () => {
     const cache = await caches.open(ZL_ROUTE_CACHE);
     const hit = await cache.match(routeKeyUrl());
     if (hit) {
-      /* KDL shape: route-config prefix "/j/" https-upgrade #true nav-handles #false adaptive-transit #false */
+      /* KDL shape: route-config prefix "/j/" https-upgrade #true nav-handles #false query-routes #true adaptive-transit #false */
       const [node] = parseKdl(await hit.text());
       if (node && node.name === "route-config") {
         /* Control-plane torture fix: a poisoned persisted prefix ("",
@@ -1617,6 +1617,9 @@ const routeRestore: Promise<void> = (async () => {
         }
         if (typeof node.props["https-upgrade"] === "boolean") setHttpsUpgrade(node.props["https-upgrade"]);
         if (typeof node.props["nav-handles"] === "boolean") setNavHandles(node.props["nav-handles"]);
+        /* #633: the query-shape flag persists with the route shape so
+           an idle-killed worker restores it too. */
+        if (typeof node.props["query-routes"] === "boolean") setQueryRoutes(node.props["query-routes"]);
         /* #539: the learned-transit kill switch persists with the route
            shape: a worker restart must not silently rearm demotion
            that the operator turned off. */
@@ -1703,6 +1706,8 @@ export async function persistRoute(prefix: string): Promise<void> {
           (isHttpsUpgrade() ? "#true" : "#false") +
           " nav-handles " +
           (navHandlesEnabled() ? "#true" : "#false") +
+          " query-routes " +
+          (queryRoutesEnabled() ? "#true" : "#false") +
           " adaptive-transit " +
           (adaptiveTransitEnabled() ? "#true" : "#false") +
           (altEndpoint() ? " wisp-endpoint " + JSON.stringify(altEndpoint()) : "") +
@@ -3406,7 +3411,20 @@ export function handleFetch(e: FetchEvent): void {
         try {
           if (e.clientId) {
             const client = await raceBoot(self.clients.get(e.clientId), "initiator client lookup", PRE_DEADLINE_BOUND_MS);
-            if (client) initiator = decodeClientUrl(new URL(client.url, self.location.origin)) ?? undefined;
+            if (client) {
+              const cu = new URL(client.url, self.location.origin);
+              initiator = decodeClientUrl(cu) ?? undefined;
+              /* #633: a page parked past NAVH_TTL_MS keeps its
+                 MAC-verified handle; committed navigation still
+                 expires honestly, but the initiator is derived
+                 context (the #385 trust), so the virtual origin and
+                 widget seams recover for long-lived pages instead of
+                 degrading every fetch after the first idle kill. */
+              if (initiator === undefined && cu.pathname.startsWith(NAVH + "/")) {
+                const expired = decodeNavHandlePath(cu.pathname.slice(NAVH.length + 1), {expired: true});
+                if (expired !== null) initiator = expired + cu.search;
+              }
+            }
           }
         } catch {
           /* initiator stays unknown */
@@ -3577,6 +3595,25 @@ export function handleFetch(e: FetchEvent): void {
           url: target,
         });
         target = dqFixed;
+      }
+
+      /* #640: Discourse embed_url= names the engine route from the
+         page location (LegacyUnforgeable, the #112 co= class);
+         without the repair the embeddable_hosts check fails closed
+         with the embed_error view. */
+      const deFixed = virtualDiscourseEmbed(target, e.request.referrer, self.location.origin, initiator);
+      if (deFixed !== target) {
+        const deid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: deid,
+          requestId: deid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "discourse embed_url virtualized to the page url",
+          url: target,
+        });
+        target = deFixed;
       }
 
       /* #637: the Giscus comments widget loader names the page in
@@ -6210,6 +6247,56 @@ export function virtualDisqusPageUrl(target: string, referrer: string, engineOri
   return out;
 }
 
+/** #640: the Discourse comments embed (the official embed.js every
+    Discourse forum serves) builds its /embed/comments iframe src
+    with embed_url=<percent-encoded window.location.href>
+    (LegacyUnforgeable, the #112 co= class): on a virtualized page
+    the parameter names this deployment, the forum validates it
+    against the admin embeddable_hosts allowlist (host plus path
+    regexp) and answers the embed_error view, so the comment
+    widget never renders. Forums are self-hosted on arbitrary
+    domains, so the scope is the path, not a host gate. Rendering
+    fidelity only. */
+export function virtualDiscourseEmbed(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return target;
+  if (u.pathname !== "/embed/comments" && u.pathname !== "/embed/status") return target;
+  const m = /([?&])embed_url=([^&]*)/.exec(u.search);
+  if (!m || !m[2]) return target;
+  let dec: string;
+  try {
+    dec = decodeURIComponent(m[2]);
+  } catch {
+    return target;
+  }
+  let du: URL;
+  try {
+    du = new URL(dec);
+  } catch {
+    return target;
+  }
+  if (du.protocol !== "https:" && du.protocol !== "http:") return target;
+  let eo: URL;
+  try {
+    eo = new URL(engineOrigin);
+  } catch {
+    return target;
+  }
+  if (du.origin !== eo.origin) return target;
+  /* No honest widget-side fallback exists: EmbeddableHost matches
+     host AND path against the admin allowlist, so without the
+     decoded page URL there is nothing real to validate and the
+     request passes through unchanged. */
+  const page = referrerPageUrl(referrer, initiator);
+  if (!page) return target;
+  return u.href.replace(m[0], m[1] + "embed_url=" + encodeURIComponent(page));
+}
+
 /** #637: the Giscus comments widget loader (giscus.app
     client.js) names the page in origin= - and in backLink= and the
     mapping=url term= - from the cleaned location (LegacyUnforgeable,
@@ -6373,7 +6460,12 @@ function referrerPageUrl(referrer: string, initiator?: string): string | null {
          the route carries the real path and query, so the page's
          full virtual URL is the decoded destination plus the route
          search. */
-      const nd = decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1));
+      /* #633: same expired-handle context recovery as the Referer
+         seam - the widget page-URL params validate against real
+         page data, which the MAC-verified token still names. */
+      const nd =
+        decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1)) ??
+        decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1), {expired: true});
       if (nd) ref = nd + (refU.search || "");
     }
     if (!ref && queryHandleToken(refU.search) !== null)
@@ -6527,6 +6619,14 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
          (the real query is the route search, appended below), so the
          Referer is the full upstream page URL. */
       ref = decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1));
+      /* #633: a page parked past NAVH_TTL_MS keeps its MAC-verified
+         handle; committed navigation still expires honestly, but the
+         Referer is derived context (the #385 trust), so it recovers
+         from the expired token instead of going Referer-less
+         upstream - the class the sign-in identifier RPC answers
+         with a generic rejection. */
+      if (ref === null)
+        ref = decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1), {expired: true});
     }
     /* Injector phase 2: a query-shape referrer carries its token in
        the search; the path is the real destination path. */

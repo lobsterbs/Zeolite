@@ -495,15 +495,22 @@ function decodeNavHandlePayload(token: string): NavHandleInfo | null {
   return null;
 }
 
-function decodeNavHandleInfo(token: string): NavHandleInfo | null {
+function decodeNavHandleInfo(token: string, allowExpired = false): NavHandleInfo | null {
   const info = decodeNavHandlePayload(token);
-  return info && Date.now() <= info.expires ? info : null;
+  if (!info) return null;
+  if (Date.now() <= info.expires) return info;
+  /* #633: derived context (Referer, initiator, widget page-URL
+     params) may recover from an expired handle whose MAC still
+     verifies - the same trust #385 grants navigation re-mint.
+     Committed-route decode stays live-only. */
+  return allowExpired ? info : null;
 }
 
 /** Handle tail -> destination, or null (bad tail, no key held, wrong
-    tag, non-mintable destination, or expired). */
-export function decodeNavHandle(token: string): string | null {
-  return decodeNavHandleInfo(token)?.destination ?? null;
+    tag, non-mintable destination, or expired; opts.expired recovers
+    derived context from a MAC-verified expired token, #633). */
+export function decodeNavHandle(token: string, opts?: {expired?: boolean}): string | null {
+  return decodeNavHandleInfo(token, opts?.expired === true)?.destination ?? null;
 }
 
 /** #385: an expired token whose MAC still verifies is one this engine
@@ -530,17 +537,41 @@ export function decodeNavHandleRoot(token: string): string | null {
   return decodeNavHandlePayload(token)?.rootClientId ?? null;
 }
 
+/* #612: a navguard NAV marker inside a handle tail is an engine
+   route the page re-anchored, never a site path: the marker tail is
+   b64u of an absolute destination. Decode it instead of composing
+   the minted origin with the marker, which dialed
+   <site>/__zl_nav__/<b64> upstream (the google.com 404). A
+   marker-shaped tail that does not decode keeps the honest
+   composition; only a clean decode intercepts. */
+function navMarkerTailDest(path: string): string | null {
+  const i = path.indexOf("__zl_nav__/");
+  if (i < 0 || i > 1) return null;
+  const tail = path.slice(i + 11);
+  const cut = tail.search(/[^A-Za-z0-9_-]/);
+  const token = cut < 0 ? tail : tail.slice(0, cut);
+  if (token.length === 0) return null;
+  const bytes = b64uDecode(token);
+  if (!bytes) return null;
+  try {
+    const dest = DEC_STRICT.decode(bytes);
+    return dest.startsWith("http://") || dest.startsWith("https://") ? dest : null;
+  } catch {
+    return null;
+  }
+}
+
 /** #144: resolve a full NAVH route tail - <token>, or <token>/
     <real path> on the new shape - to the destination it names. New
     tokens carry the origin only, so the visible path suffix resolves
     against it from the root; legacy tokens carry the full
     destination and arrive tailless. Null = a bad or expired token,
     or an unresolvable tail - the honest strand, never a guess. */
-export function decodeNavHandlePath(tail: string): string | null {
+export function decodeNavHandlePath(tail: string, opts?: {expired?: boolean}): string | null {
   const slash = tail.indexOf("/");
   const token = slash < 0 ? tail : tail.slice(0, slash);
   const rest = slash < 0 ? "" : tail.slice(slash + 1);
-  const dest = decodeNavHandle(token);
+  const dest = decodeNavHandle(token, opts);
   if (dest === null) return null;
   if (rest === "") return dest;
   /* #202: exactly one separator after the token. A "//" (or "\/")
@@ -567,6 +598,9 @@ export function decodeNavHandlePath(tail: string): string | null {
     /* vloc mints root-relative virtual paths; anything else, or a
        stack deeper than 4, is the honest null, never a guess. */
     if (cur.charAt(0) !== "/" || cur.indexOf(NAVP) >= 0) return null;
+    /* #612: the peeled virtual path can itself be marker-shaped. */
+    const peeledMarker = navMarkerTailDest(cur);
+    if (peeledMarker !== null) return peeledMarker;
     try {
       const base = new URL(dest);
       const u = new URL(cur, base.origin + "/");
@@ -577,6 +611,9 @@ export function decodeNavHandlePath(tail: string): string | null {
       return null;
     }
   }
+  /* #612: an unpeeled marker-shaped tail is an engine route too. */
+  const marked = navMarkerTailDest(rest);
+  if (marked !== null) return marked;
   try {
     const u = new URL(rest, dest.endsWith("/") ? dest : dest + "/");
     /* #202: the handle binds to the minted origin; a tail resolving
