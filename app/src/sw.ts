@@ -45,6 +45,7 @@ import { configureGhostery } from "./ghostery";
    live in ./transform; this entrypoint wires the state seam and
    prewarms the rewriter wasm on install. */
 import { initTransform, prewarmRewriter } from "./transform";
+import { initSeamWasm } from "./seam";
 /* #243-#247: client isolation, install lifetime, phased extension
    boot and dispatcher wiring live in ./lifecycle; this entrypoint
    is the composition root only. */
@@ -114,6 +115,18 @@ initTransform({
   siteScript: async (base) => (await siteProfileFor(base))?.script ?? null,
   setDegraded: setEngineDegraded,
   lazyImages: isImageLazy,
+});
+
+/* #614/#615/#616 wiring: instantiate the seam wasm at boot. One
+   attempt, one DIAG row on failure - every seam caller keeps its
+   TS fallback, so a failed init is a degradation, not an error. */
+initSeamWasm().catch((err) => {
+  DIAG.emit({
+    category: "SERVICE_WORKER",
+    severity: "warning",
+    message: "seam wasm init failed; TS fallbacks active",
+    technicalReason: String(err),
+  });
 });
 
 

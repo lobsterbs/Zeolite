@@ -16,6 +16,7 @@
 
 import { engineBindingError, resolveProfile, type FingerprintProfile } from "./fingerprint";
 import { parseKdl, type KdlNode } from "./kdl";
+import { activeSeam } from "./seam";
 
 export interface LocationPolicy { mode: "legacy" | "hybrid" | "off"; maxBytes: number }
 
@@ -62,7 +63,15 @@ export function siteRules(): Promise<SiteRules> {
         if (!resp.ok) { doctorState = resp.status === 404 ? "missing" : "unavailable"; return {}; }
         const body = await resp.text();
         parsing = true;
-        const result = rulesFromNodes(parseKdl(body));
+        const w = activeSeam();
+        let result: SiteRules;
+        if (w) {
+          const j = w.parseSiteconfigKdl(body);
+          if (j === null) throw new Error("siteconfig kdl parse failed");
+          result = JSON.parse(j) as SiteRules;
+        } else {
+          result = rulesFromNodes(parseKdl(body));
+        }
         doctorState = "loaded";
         return result;
       } catch {

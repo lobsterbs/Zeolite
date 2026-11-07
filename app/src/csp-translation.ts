@@ -38,10 +38,14 @@ const DENY_ONLY = new Set(["object-src", "base-uri", "form-action", "worker-src"
 const MAX_POLICY_BYTES = 8192;
 const MAX_DIRECTIVES = 64;
 
+import { activeSeam } from "./seam";
+
 export function planCspTranslation(
   raw: string,
   options: { reportOnly?: boolean } = {},
 ): CspTranslationPlan {
+  const w = activeSeam();
+  if (w) return JSON.parse(w.planTranslation(raw, !!options.reportOnly)) as CspTranslationPlan;
   if (options.reportOnly) return { kind: "unsupported", reason: "report-only" };
   if (new TextEncoder().encode(raw).length > MAX_POLICY_BYTES)
     return { kind: "unsupported", reason: "oversize" };

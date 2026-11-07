@@ -133,8 +133,12 @@ export function classifyStageFailure(stage: DiagStage): {
   return { category: "TRANSPORT", cause: "upstream" };
 }
 
+import { activeSeam } from "./seam";
+
 /** Redact secrets from any string before it enters the ring. */
 export function redactSecrets(s: string): string {
+  const w = activeSeam();
+  if (w) return w.redactSecrets(s);
   return s
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, "$1[redacted]@")
     .replace(/([?&#](?:code|state|nonce|code_verifier|id_token|access_token|refresh_token|session_token|credential|g-recaptcha-response|h-captcha-response|cf-turnstile-response)=)[^&#\s]*/gi, "$1[redacted]")

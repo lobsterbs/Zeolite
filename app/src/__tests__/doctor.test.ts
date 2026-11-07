@@ -169,8 +169,8 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
       1500,
       "https://engine.example/",
     );
-    expect(r).toHaveLength(10);
-    expect(r.filter(x => x.code.startsWith("assets."))).toHaveLength(8);
+    expect(r).toHaveLength(11);
+    expect(r.filter(x => x.code.startsWith("assets."))).toHaveLength(9);
     expect(r.every(x => x.status === "pass")).toBe(true);
     expect(seen.map(x => x[0])).toEqual([
       "https://engine.example/zlsw/sw.js",
@@ -178,6 +178,7 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
       "https://engine.example/zlsw/codec.js",
       "https://engine.example/zlsw/worker-prelude.js",
       "https://engine.example/zlsw/rewriter_wasm_bg.wasm",
+      "https://engine.example/zlsw/seam_wasm_bg.wasm",
       "https://engine.example/libcurl/index.mjs",
       "https://engine.example/epoxy/epoxy.js",
       "https://engine.example/epoxy/epoxy.wasm",
@@ -204,7 +205,7 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
       probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch, 1500, "https://engine.example/"),
       probeDoctorAssets("https://engine.example/zlsw/sw.js", fetcher as unknown as typeof fetch, 1500, "https://engine.example/"),
     ]);
-    expect(fetcher).toHaveBeenCalledTimes(9);
+    expect(fetcher).toHaveBeenCalledTimes(10);
     expect(one).toEqual(two);
   });
 
@@ -242,7 +243,7 @@ describe("Zeolite Doctor explicit same-origin asset probes (#495)", () => {
       "https://engine.example/zlsw/",
     );
     const assets = r.filter(c => c.code.startsWith("assets."));
-    expect(assets).toHaveLength(8);
+    expect(assets).toHaveLength(9);
     expect(assets.every(c => c.status === "warn")).toBe(true);
     expect(assets.every(c => c.summary.includes("nosniff"))).toBe(true);
     expect(r.find(c => c.code === "worker.service-worker-allowed")?.status).toBe("pass");

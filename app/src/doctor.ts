@@ -54,6 +54,10 @@ const ASSETS: readonly Asset[] = [
   { name: "codec", path: "codec.js", mime: "script", resolve: "sibling" },
   { name: "worker-prelude", path: "worker-prelude.js", mime: "script", resolve: "sibling" },
   { name: "rewriter-wasm", path: "rewriter_wasm_bg.wasm", mime: "wasm", resolve: "sibling" },
+  /* The seam wasm asset is REQUIRED at the sibling location: its
+     TS fallbacks absorb a runtime absence silently, so the doctor
+     is the only honest probe for a broken deployment. */
+  { name: "seam-wasm", path: "seam_wasm_bg.wasm", mime: "wasm", resolve: "sibling" },
   /* Integration-guide contract: transport bundles live at the origin
      root even when the Service Worker itself is mounted below /zlsw/. */
   { name: "libcurl", path: "libcurl/index.mjs", mime: "script", resolve: "root" },

@@ -20,6 +20,7 @@
    matcher stays in service-worker memory. See docs/interception.md. */
 
 import { parseKdl, type KdlNode } from "./kdl";
+import { activeSeam } from "./seam";
 import { ghosteryBlock, type GhosteryRedirect } from "./ghostery";
 
 export type { GhosteryRedirect };
@@ -305,7 +306,16 @@ export function loadRules(): Promise<CompiledRules> {
         if (!resp.ok) { doctorState = resp.status === 404 ? "missing" : "unavailable"; return compileRules(null); }
         const body = await resp.text();
         parsing = true;
-        const result = compileRules(parseRulesKdl(parseKdl(body)));
+        const w = activeSeam();
+        let data: RulesData;
+        if (w) {
+          const j = w.parseRulesKdl(body);
+          if (j === null) throw new Error("rules kdl parse failed");
+          data = JSON.parse(j) as RulesData;
+        } else {
+          data = parseRulesKdl(parseKdl(body));
+        }
+        const result = compileRules(data);
         doctorState = "loaded";
         return result;
       } catch {
