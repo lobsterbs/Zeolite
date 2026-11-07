@@ -1,10 +1,17 @@
 /* SW-realm storage for the opaque route key (issue #55).
-   The key must never leave the service worker realm. The route shape
-   persists in Cache Storage (sw.ts), but a cache entry is readable by
-   any same-origin context that can construct a fetch, so the key uses
-   an IndexedDB record instead: the bootstrap's storage isolation keeps
-   proxied pages off engine-owned databases, and the host page has no
-   reason to look - it mints opaque routes through zl:mint instead.
+   #606 settled the honest trust model: the bootstrap's storage shim is
+   namespacing, not isolation. A same-origin proxied script can always
+   reach an unwrapped storage factory through window.parent, window.top
+   or an about:blank iframe it creates itself (which inherits the
+   engine origin), so this record must be treated as readable by
+   proxied code. No client-side mechanism can seal origin storage
+   against same-origin scripts; the alternative custodies fail
+   analysis: a backend escrow needs an auth model an anonymous engine
+   does not have, memory-only custody strands every route on the
+   ~30s SW idle termination (the exact #55 strand class), and
+   split-origin hosting does not block the about:blank path. The
+   key's secrecy targets are therefore the browser UI, history and
+   cross-origin observers, never the proxied page's own scripts.
    Storage unavailable = no key = the legacy codec stays active. That
    is the documented degraded mode, never a silent failure: routes are
    then decodable by the browser, which is what #55 exists to stop.

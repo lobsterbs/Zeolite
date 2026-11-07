@@ -122,8 +122,15 @@ find bar.
 
 ## Isolation guarantees (Phase 2 acceptance)
 
-- Storage: proxied site data is namespaced `zl:<sitehash>:` per site;
-  engine-origin storage is never exposed to page code.
+- Storage: proxied site data is namespaced `zl:<sitehash>:` per site
+  through the per-window shim. That shim is namespacing, NOT a
+  security boundary (#606): a same-origin proxied script can always
+  reach an unwrapped storage factory through window.parent/top or an
+  about:blank iframe it creates itself, which inherits the engine
+  origin. Engine-origin storage must therefore be treated as
+  readable by proxied code. The route key's secrecy targets are the
+  browser UI, history and cross-origin observers, never the proxied
+  page's own scripts.
 - Host-app traffic is untouched by #34: the SW routes foreign-origin
   requests only for proxied clients (client URL decodes to an engine
   route, or a #33 virtual context exists). The embedding app's own
