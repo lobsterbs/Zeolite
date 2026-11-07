@@ -568,3 +568,27 @@ skipped:body-too-large marker rather than blocking.
   worker (wrap fallback) and opaque request URLs still passthrough;
   navigations are the #28 class. See the browser-direct HTTP(S)
   escape section.
+
+
+## Route token metadata contract (#607, #608, #610, decided 2026-11-07)
+
+- The keyed route token is a synthetic-IV deterministic AEAD assembled
+  from domain-separated SipHash-2-4 PRF calls; the full construction
+  analysis, property mapping and honest limits live in
+  docs/route-token-construction.md.
+- Determinism is an intentional #55 stability choice with two accepted
+  consequences that are part of the privacy contract: EQUALITY - the
+  same destination under the same key always mints the same token, so
+  a token collector can correlate repeats without decoding anything;
+  LENGTH - the token length reveals the destination's UTF-8 byte
+  length. Neither is hidden today and no padding is planned: bucketed
+  padding would cost bytes on every URL and still leak the bucket.
+- NAVH and query-route URLs carry the real pathname and query string
+  in the clear. This is architectural, not an oversight: location is
+  LegacyUnforgeable, page JS reads location.search natively, and the
+  query cannot be encoded into the token without breaking every page
+  that reads its own query. The handle hides the origin, no more.
+- The route key itself is readable by same-origin proxied scripts
+  (#606), so token confidentiality and integrity are claims against
+  the browser UI, history and cross-origin observers only, never
+  against a script running on the engine origin.
