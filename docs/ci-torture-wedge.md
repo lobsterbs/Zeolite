@@ -776,3 +776,51 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - This docs-only commit is the recorded bounded retrigger per
   the operational notes. The pin gate stands: all five jobs
   green or no LobsterBrowse pin.
+
+
+## Run 42395223834 (head a3f5991, docs-only retrigger of the #616 wave)
+
+- Browser red, 58 passed / 8 failed: the #545 worker fetch
+  initiator timeout leading a page.goto 30 s cascade (shared
+  worker relay, storage and cookie tests), CDP attach failures
+  after. rust/wasm/app/compat green; engine bytes identical to
+  the #616 publish. a3f5991 was that wave's bounded retrigger;
+  recorded here because the seam wave landed first.
+
+## Run 42397242051 (head 2b6e816, the zeolite-seam-wasm crate)
+
+- Browser red, 58 passed / 8 failed, the documented passthrough
+  #96 signature: NativeTransit marks range/cond/setcookie/cookie/
+  stream/redir HUNG at 6000 ms (get/post/abort ok), then the
+  standard goto 30 s cascade, CDP attach failures at teardown;
+  rust/wasm/app/compat green.
+- 2b6e816 adds only Rust workspace bytes (crates/seam-wasm,
+  members, Cargo.lock); the browser job runs the TS app with
+  zero delta from 778e99a's app bytes. Same wedge family,
+  position-random first victim; engine bytes exonerated a
+  fortiori.
+
+## Run 42397564185 (head faabd7d, NOT a wedge: session push defect)
+
+- The seam wiring push landed without its three new modules
+  (seam.ts, seam_wasm_stub.ts, seam.test.ts), so tsc could not
+  resolve ./seam: app red by construction, browser red
+  downstream. Fixed within minutes by 75dd58c. Recorded to keep
+  the ledger honest; not infra, and not a defect in the bytes
+  that followed the fixup.
+
+## Run 42397639113 (head 75dd58c, the seam wiring fixup)
+
+- Browser red at the #456 gate 4 step: proxied frame timeout on
+  the first openProxied of location-targeting.mjs.
+  location-policy PASSED proxied pages in the same job seconds
+  earlier; app job green (tsc, full vitest including the seam
+  fail-safe contract test, vite build, dist presence gate),
+  wasm job green (seam build). Classified as the first-victim
+  rotation family pending corroboration from the docs-only
+  retrigger.
+- The wiring is non-blocking by construction: initSeamWasm() is
+  fire-and-forget with one DIAG row on failure and every caller
+  keeps its TS fallback body. This docs-only commit is the
+  recorded bounded retrigger per the operational notes. The pin
+  gate stands: all five jobs green or no LobsterBrowse pin.
