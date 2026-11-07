@@ -2546,6 +2546,10 @@ name = "zeolite-cookies"
 version = "3.0.1"
 
 [[package]]
+name = "zeolite-csp"
+version = "3.0.1"
+
+[[package]]
 name = "zeolite-rewriter"
 version = "3.0.1"
 dependencies = [
