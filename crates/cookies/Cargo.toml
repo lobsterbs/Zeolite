@@ -1,0 +1,10 @@
+[package]
+name = "zeolite-cookies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RFC 6265 cookie parsing, jar bookkeeping and storage-limit eviction for Zeolite (pure Rust, wasm-compatible)"
+
+# #614: no external dependencies by design. The PSL gate stays
+# at the caller (the TS seam consults tldts), so the crate
+# builds offline and the parser surface stays auditable.
