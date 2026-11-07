@@ -1,0 +1,11 @@
+[package]
+name = "zeolite-csp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CSP deny-only translation planning, source-expression parsing and engine-side matching for Zeolite (pure Rust, wasm-compatible)"
+
+# #615: no external dependencies by design. The TS seams keep header
+# application, the per-client registry and the fetch wiring; this crate
+# owns the pure decision layer so the corpus stays the spec and the
+# parser surface stays auditable.

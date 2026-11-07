@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/cookies", "crates/rewriter", "crates/wisp-wasm", "crates/zeolite-server", "crates/wisp-core", "crates/wisp-extensions"]
+members = ["crates/cookies", "crates/csp", "crates/rewriter", "crates/wisp-wasm", "crates/zeolite-server", "crates/wisp-core", "crates/wisp-extensions"]
 
 [workspace.package]
 version = "3.0.1"
