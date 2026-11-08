@@ -43,7 +43,14 @@ const RETRY_AFTER_MS = 60 * 1000;
    successful load. */
 const RETRY_CAP_MS = 15 * 60 * 1000;
 let retryDelay = RETRY_AFTER_MS;
-const LISTS_ORIGIN = "https://raw.githubusercontent.com";
+/* #551 second slice: the list origin is a build-time constant
+   (vite define). The production default is the raw GitHub host; the
+   deterministic cosmetic e2e build overrides it with a loopback
+   fixture origin, which the fetch guard below then enforces for
+   every list fetch. Declared locally so the only producer is
+   vite.config.ts. */
+declare const __ZL_LISTS_ORIGIN__: string;
+const LISTS_ORIGIN = __ZL_LISTS_ORIGIN__;
 const LISTS_PATH = "/ghostery/adblocker/master/packages/adblocker/assets/";
 
 /* #613: the raw-list URL set for the Rust/WASM arm, mirroring the
@@ -79,7 +86,11 @@ let wasmEngine: WasmAdblockLike | null = null;
 let wasmDead = false;
 let loading: Promise<void> | null = null;
 let retryAt = 0;
-let refreshAt = 0;
+let refreshAt = 0
+/* #551 second slice: one not-loaded scout note per worker
+   lifetime, so a list origin that never delivers is visible in
+   diagnostics instead of matching silently passing everything. */
+let notLoadedReported = false;
 
 export interface GhosteryRedirect {
   body: string;
@@ -327,7 +338,13 @@ export function configureGhostery(fetcher: typeof fetch): void {
       url.origin !== LISTS_ORIGIN ||
       url.username ||
       url.password ||
-      url.port ||
+      /* #551 second slice: the origin equality above already pins
+         the port; this check compares against the configured
+         origin's own port, so a loopback fixture origin WITH a port
+         serves the deterministic cosmetic e2e while production
+         (portless raw.githubusercontent.com) keeps refusing every
+         ported URL exactly as before. */
+      url.port !== new URL(LISTS_ORIGIN).port ||
       !url.pathname.startsWith(LISTS_PATH) ||
       url.search ||
       url.hash ||
@@ -393,6 +410,19 @@ export function ghosteryBlock(
   destination?: string,
 ): GhosteryDecision | null {
   if (!engine && !wasmEngine) {
+    /* #551 second slice: the scout note above, emitted once per
+       worker lifetime, never per request. */
+    if (!notLoadedReported) {
+      notLoadedReported = true;
+      DIAG.emit({
+        category: "TRANSPORT",
+        cause: "proxy",
+        severity: "info",
+        stage: "UPSTREAM_REQUEST",
+        message: "ghostery filter lists not loaded; adblock matching disabled until a list load succeeds",
+        url,
+      });
+    }
     kickListLoad();
     return null;
   }

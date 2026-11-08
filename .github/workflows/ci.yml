@@ -229,6 +229,7 @@ jobs:
           test -f app/dist/seam_wasm_bg.wasm
           test -f app/dist/adblock_wasm_bg.wasm
           test -f app/dist/cookies_wasm_bg.wasm
+          test -f app/dist/cosmetics-runtime.js
       - name: Bootstrap size budget (must stay under 28 KiB minified)
         # Raises are deliberate decisions recorded here, never quiet
         # accommodations; CI prints the measured size. Every raise bought
@@ -343,6 +344,15 @@ jobs:
           SIZE=$(wc -c < app/dist/finder.js)
           echo "finder.js: $SIZE bytes"
           if [ "$SIZE" -ge 4096 ]; then echo "::error::FINDER $SIZE bytes (budget 4096)"; exit 1; fi
+      - name: Cosmetic-runtime size budget (must stay under 4 KiB minified)
+        # #551: dist/cosmetics-runtime.js is spliced inline into every
+        # adblock-on proxied document next to the cosmetic style tag,
+        # so its size is a per-document payload exactly like the
+        # finder gate. Measured 3720.
+        run: |
+          SIZE=$(wc -c < app/dist/cosmetics-runtime.js)
+          echo "cosmetics-runtime.js: $SIZE bytes"
+          if [ "$SIZE" -ge 4096 ]; then echo "::error::COSMETIC-RUNTIME $SIZE bytes (budget 4096)"; exit 1; fi
       - name: Classic-artifact gate (browser-runtime bundle formats)
         # The bootstrap is injected as a classic <script src>, the
         # worker prelude is prepended to classic worker scripts and the
@@ -355,7 +365,7 @@ jobs:
         # type: "module" (src/engine.ts).
         run: |
           cd app
-          for f in dist/bootstrap.js dist/worker-prelude.js dist/finder.js; do
+          for f in dist/bootstrap.js dist/worker-prelude.js dist/finder.js dist/cosmetics-runtime.js; do
             if [ ! -f "$f" ]; then echo "::error::CLASSIC missing artifact $f"; exit 1; fi
             BAD=$(grep -nE '(^|[;}])(import|export)[ { ]' "$f" | head -3 || true)
             if [ -n "$BAD" ]; then
@@ -784,6 +794,31 @@ jobs:
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
             grep -E "^\\[FAIL\\]|HARNESS-ERROR" sri.out | head -20 | while IFS= read -r l; do echo "::error::SRI $l"; done
+            exit 1
+          fi
+      - name: Cosmetic filtering suite (#551)
+        # Real-Chromium acceptance for privacy-safe cosmetic filtering:
+        # static cosmetic styles hide on first paint, the page-runtime
+        # dyn arm answers token queries over the MessageChannel bridge,
+        # late inserts are caught by the MutationObserver, the wasm arm
+        # refuses scriptlets, network rules still block, the zl:rules
+        # adblock override turns both arms off, exception hosts keep
+        # content visible and the oversized-token budget caps queries
+        # without wedging the page. The dist is rebuilt with the
+        # filter-list origin pinned to a loopback fixture
+        # (VITE_ZL_LISTS_ORIGIN) so the wasm engine loads a pinned list
+        # deterministically; the production dist is rebuilt before the
+        # verdict so later suites never see the pinned build. Ports
+        # 6051/7151/7152/7305 never collide.
+        run: |
+          cd app
+          VITE_ZL_LISTS_ORIGIN=http://127.0.0.1:7305 npm run build
+          cd ..
+          node suite/e2e/cosmetics.mjs 2>&1 | tee cosmetics.out
+          code=${PIPESTATUS[0]}
+          cd app && npm run build
+          if [ "$code" -ne 0 ]; then
+            grep -E "FAIL|HARNESS-ERROR" cosmetics.out | head -20 | while IFS= read -r l; do echo "::error::COSMETICS $l"; done
             exit 1
           fi
       - name: Import map suite (#554)
