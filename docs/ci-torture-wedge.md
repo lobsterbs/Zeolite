@@ -885,3 +885,18 @@ deterministic; only its firing is intermittent. Tracked in #514.
   byte-identical to the documented first-victim rotation. #609
   exoneration complete: two consecutive heads with #609 bytes show the
   same single-FAIL signature as 81f6c92 without them.
+
+## Run 42484780007 (head becf34d1, e2e doctor-count fix; #614 ship retrigger)
+
+- rust/wasm/app/compat GREEN. Doctor asset probe passes with the
+  corrected count (11). Browser red on a NEW intermittent cluster:
+  59 passed, 7 failed, first victim the #545 worker-fetch initiator
+  probe, followed by SharedWorker relay/identity, storage round-trip,
+  document.cookie, Set-Cookie capture and cookieStore goto timeouts.
+  27 checks still passed AFTER the first failure, so the engine never
+  died wholesale. The engine bytes are IDENTICAL to 086996e (run
+  42484144668), where every one of these 7 checks passed and only the
+  stale doctor count failed; becf34d1 changes the e2e expectation
+  line only. Verdict: intermittent runner flake, #614 bytes
+  exonerated on the identical-bytes comparison. Docs-only bounded
+  retrigger per the operational notes.
