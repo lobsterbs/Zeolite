@@ -2,7 +2,7 @@
  * Extracted from sw.ts (issues #85, #90, #91). Core zl: handling lives here;
  * extension-facing zl: messages are forwarded to ./extensions/control. */
 
-import { buildNavHandleUrl, buildQueryHandleUrl, currentPrefix, decodeClientUrl, encodeDest, mintableDest, setScheme, validSchemePrefix } from "./codec";
+import { buildNavHandleUrl, buildQueryHandleUrl, currentPrefix, decodeClientUrl, encodeDest, mintableDest, setScheme, validSchemePrefix, routeCodec } from "./codec";
 import type { JarConflictRule } from "./cookies";
 import { cookieStoreOp, documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
 import type { FacadeCookie } from "./cookies";
@@ -53,7 +53,7 @@ import { beginRecording, finishRecording } from "./recording";
 import { ghosteryListFetch, pageCacheClear, virtualHcaptchaFrameFragment } from "./request";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
-import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, locationTargetingEnabled, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setLocationTargeting, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled, setReplayCapMb, replayCapMbValue, setSpoolUploads, spoolUploadsEnabled } from "./swstate";
+import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, locationTargetingEnabled, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setLocationTargeting, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled, setReplayCapMb, replayCapMbValue, setSpoolUploads, spoolUploadsEnabled, setStrictOpacity, strictOpacityEnabled } from "./swstate";
 import { adaptiveEvidenceReset, adaptiveEvidenceSnapshot } from "./adaptive-evidence";
 import { locationTargetSnapshot, recordSpa404Report } from "./location-targeting";
 import { setTracing, tracingSnapshot } from "./tracing";
@@ -194,6 +194,14 @@ export interface ControlMessage {
       token rides ?zlNavh=). Ephemeral like navHandles: a worker
       restart reverts it, the host re-pushes on boot. */
   queryRoutes?: boolean;
+  /** zl:config: opt-in strict opaque custody (#609). On: a keyless
+      worker refuses zl:mint with a named reason instead of
+      answering a browser-decodable legacy route, and every
+      fallback that serves a non-opaque shape records an
+      opacity-downgrade diagnostic row naming the site. Persists
+      with the route shape (strict-opacity); absent keeps the
+      persisted choice, the ack and zl:ping echo the live value. */
+  strictOpacity?: boolean;
   /** zl:mint: navigation-bound mint (the navguard absolute
       location/href writes). Only this caller gets the query-shape
       handle behind the queryRoutes opt-in; the re-emission mints
@@ -638,6 +646,11 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         navHandles: navHandlesEnabled(),
         /* Injector phase 2: the live query-shape opt-in. */
         queryRoutes: queryRoutesEnabled(),
+        /* #609: the live strict-opacity choice plus the custody the
+           worker can actually mint with, so an embedder tells a
+           policy refusal from a compat-mode downgrade apart. */
+        strictOpacity: strictOpacityEnabled(),
+        custody: routeCodec(),
         experimental: experimentalSnapshot(),
         profile: jarProfileState((e.source as { id?: string } | null)?.id),
         wispAuth: wispAuthStatus(),
@@ -711,6 +724,8 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       if (typeof msg.navHandles === "boolean") setNavHandles(msg.navHandles);
       /* Injector phase 2: same rule for the query-shape routes. */
       if (typeof msg.queryRoutes === "boolean") setQueryRoutes(msg.queryRoutes);
+      /* #609: same rule for the strict-opacity custody policy. */
+      if (typeof msg.strictOpacity === "boolean") setStrictOpacity(msg.strictOpacity);
       /* #633: absent keeps the live scheme, the rule every other
          knob follows. The old unconditional "/j/" default let a
          prefix-less toggle push reset the shape and persist the
@@ -720,7 +735,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       if (typeof msg.prefix === "string") setScheme(msg.prefix);
       /* Issue #17: persist so a worker restart keeps the shape. */
       void persistRoute(currentPrefix());
-      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), adaptiveTransit: adaptiveTransitEnabled(), locationTargeting: locationTargetingEnabled(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled(), spoolUploads: spoolUploadsEnabled(), replayCapMb: replayCapMbValue(), experimental: experimentalSnapshot() });
+      reply({ ok: true, prefix: currentPrefix(), scheme: "b64u", httpsUpgrade: isHttpsUpgrade(), imageLazy: isImageLazy(), adaptiveTransit: adaptiveTransitEnabled(), locationTargeting: locationTargetingEnabled(), navHandles: navHandlesEnabled(), queryRoutes: queryRoutesEnabled(), strictOpacity: strictOpacityEnabled(), spoolUploads: spoolUploadsEnabled(), replayCapMb: replayCapMbValue(), experimental: experimentalSnapshot() });
       break;
     }
     case "zl:reloadBypass":
@@ -755,6 +770,20 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       const hash = dest.indexOf("#");
       const body = hash < 0 ? dest : dest.slice(0, hash);
       const tail = hash < 0 ? "" : dest.slice(hash);
+      /* #609: strict opaque custody. With strictOpacity on, a
+         keyless worker refuses the mint with a named reason
+         instead of answering a browser-decodable legacy route: the
+         old silent downgrade was invisible to the caller and
+         handed out a route that exposes the destination. The mint
+         seam keeps its #54 page admission - the refusal applies to
+         every sender, host and proxied page alike. */
+      if (strictOpacityEnabled() && routeCodec() === "legacy") {
+        reply({
+          ok: false,
+          error: "mint refused: strict opacity is on and no route key is active (storage degraded); a legacy route would expose the destination",
+        });
+        break;
+      }
       /* Injector phase 2 (#511 absolute-write seam): a nav-bound
          mint (the navguard location/href writes) with queryRoutes
          on takes the query-shape handle (<real path>?<real query>&
@@ -774,7 +803,10 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         ? buildQueryHandleUrl(body)
         : null;
       const route = qh !== null ? qh + tail : encodeDest(body) + tail;
-      reply({ ok: true, route });
+      /* #609: the reply names the codec the route was minted with,
+         so a caller tells an opaque keyed route from a compat-mode
+         legacy one without probing the shape. */
+      reply({ ok: true, route, codec: routeCodec() });
       break;
     }
     case "zl:decodeRoutes": {
@@ -840,7 +872,9 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         break;
       }
       registerJarNavHandle(url, sourceClientId);
-      reply({ ok: true, url });
+      /* #609: the handle is keyed by construction (the refusal
+         above covers the keyless case); the codec field says so. */
+      reply({ ok: true, url, codec: "keyed" });
       break;
     }
     case "zl:adblock":
@@ -1594,6 +1628,7 @@ export async function handleControlEvent(
       rules: rulesDoctorState(),
       siteconfig: siteconfigDoctorState(),
       clientControl,
+      routeCustody: routeCodec(),
     }, assets);
     reply({ ...report, kdl: msg.format === "kdl" ? doctorKdl(report) : undefined });
     return;

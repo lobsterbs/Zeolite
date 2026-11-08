@@ -12,7 +12,9 @@
      route for a destination.
    - navigateOpaque(): the SW mints the route with its realm-held key
      (#55), so the destination never appears in a page-visible string;
-     falls back to the legacy codec when no key is active.
+     #609: refuses visibly (throws with the worker's named reason)
+     instead of silently minting a legacy route; a compat-mode
+     legacy answer is the worker's own visible choice (codec field).
    - setSiteRoute(): per-site interception toggle, acknowledged by the SW.
    - teardown(): SW unregisters and caches drop; nothing survives an
      engine switch. */
@@ -113,15 +115,25 @@ export class ZeoliteEngine {
 
   /** Opaque engine-local route (#55): the SW mints it with its
       realm-held route key, so the destination never appears in a
-      page-visible string. Without an active key (storage unavailable)
-      the SW answers with a legacy route - the documented degraded
-      mode, not an error. */
+      page-visible string. #609: no silent fallback - the adapter
+      never mints in the page realm. A strict-opacity worker
+      refuses without a route key and the refusal propagates as an
+      error carrying the worker's named reason; a compat-mode
+      worker may answer a legacy route (codec "legacy"), which is
+      the worker's own visible policy choice, and navigate() stays
+      the documented compat path. No controller, timeout and
+      malformed reply all throw the same way. */
   async navigateOpaque(target: string): Promise<string> {
     const r = (await this.post({ type: "zl:mint", dest: target })) as {
       ok: boolean;
       route?: string;
+      codec?: "keyed" | "legacy";
+      error?: string;
     };
-    return r.ok && typeof r.route === "string" ? r.route : encodeDest(target);
+    if (!r.ok || typeof r.route !== "string") {
+      throw new Error("zl:mint refused: " + (r.error ?? "no reply"));
+    }
+    return r.route;
   }
 
   /** Enable/disable interception for one site. */

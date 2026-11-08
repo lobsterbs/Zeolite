@@ -224,6 +224,24 @@ export function setQueryRoutes(on: boolean): void {
   queryRoutes = on;
 }
 
+/* #609: strict opaque custody. Off (the default): a keyless worker
+   still answers mints with browser-decodable legacy routes - the
+   documented compat mode. On: a keyless worker refuses a mint
+   with a named reason instead of silently downgrading custody,
+   and every fallback that serves a non-opaque shape under strict
+   mode records an opacity-downgrade diagnostic row naming the
+   site. Persists with the other route-shape choices
+   (route-config strict-opacity). */
+let strictOpacity = false;
+
+export function strictOpacityEnabled(): boolean {
+  return strictOpacity;
+}
+
+export function setStrictOpacity(on: boolean): void {
+  strictOpacity = on;
+}
+
 /* #211 (LobsterBrowse): zl:reloadBypass arms a one-shot page-cache
    bypass consumed by the next document GET (the embedder's
    Reload-and-bypass-cache). Ephemeral: resets on SW restart. */

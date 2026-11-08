@@ -41,6 +41,11 @@ export interface DoctorEvidence {
   /** Explicit selected-client verification supplied by the host-only
       control plane. Undefined means the host did not request a client check. */
   clientControl?: "pass" | "fail" | "unknown";
+  /** #609: route-key custody the worker can mint with: "keyed"
+      means an active route key (opaque routes), "legacy" means
+      no key (browser-decodable compat routes). Undefined = not
+      observed; Unknown != healthy. */
+  routeCustody?: "keyed" | "legacy";
 }
 type Asset = {
   name: string;
@@ -103,6 +108,18 @@ export function buildDoctor(e: DoctorEvidence, assetChecks: DoctorCheck[] = []):
     { code: "transport.wisp-endpoint", status: "unknown", summary: "Endpoint was not inspected" },
     { code: "transport.wisp-auth", status: "unknown", summary: "Authentication handshake result cannot be inferred from endpoint configuration",
       remedy: "Use an explicitly authorized WISP handshake fixture to verify authentication" },
+    /* #609: the custody fact an operator needs beside the strict
+       toggle: a strict deployment with legacy custody refuses
+       mints (keyless), a compat deployment with legacy custody
+       leaks destinations into every minted route. */
+    { code: "route.custody",
+      status: e.routeCustody === "keyed" ? "pass" : e.routeCustody === "legacy" ? "warn" : "unknown",
+      summary: e.routeCustody === "keyed" ? "Route key active: routes mint keyed opaque tokens" :
+        e.routeCustody === "legacy" ? "No route key: routes mint browser-decodable legacy tokens (compat mode)" :
+        "Route custody was not observed",
+      remedy: e.routeCustody === "keyed" ? undefined :
+        e.routeCustody === "legacy" ? "Restore storage so the worker can hold a route key; with strict opacity on mints refuse rather than downgrade" :
+        "Observe the live custody with zl:ping (custody field)" },
   ];
   try {
     const u = new URL(e.primaryWisp);

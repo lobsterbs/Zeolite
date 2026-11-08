@@ -77,7 +77,7 @@ import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersi
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
    control plane are call sites. */
-import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setAdaptiveTransit, setHttpsUpgrade, setNavHandles, setQueryRoutes, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setAdaptiveTransit, setHttpsUpgrade, setNavHandles, setQueryRoutes, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, setStrictOpacity, strictOpacityEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
 import { newSriRegistry, SRI_VERIFY_BYTE_CAP, sriBlockedResponse, sriClearClient, sriExpectation, sriNote, sriVerifyBytes } from "./sri";
 import { newImportmapRegistry, importmapNote, importmapReset, resolveBareImportFor, pageKeyOf } from "./importmaps";
 
@@ -1624,6 +1624,11 @@ const routeRestore: Promise<void> = (async () => {
            shape: a worker restart must not silently rearm demotion
            that the operator turned off. */
         if (typeof node.props["adaptive-transit"] === "boolean") setAdaptiveTransit(node.props["adaptive-transit"]);
+        /* #609: the strict-opacity custody policy persists with the
+           route shape: an idle-killed worker must not silently
+           re-answer mints with legacy routes after the operator
+           turned strict mode on. */
+        if (typeof node.props["strict-opacity"] === "boolean") setStrictOpacity(node.props["strict-opacity"]);
         /* 2026-10-15: the announced public wisp endpoint persists with
            the route shape so an idle-killed worker instance restores
            it on restart - the embedder re-announces only on
@@ -1710,6 +1715,8 @@ export async function persistRoute(prefix: string): Promise<void> {
           (queryRoutesEnabled() ? "#true" : "#false") +
           " adaptive-transit " +
           (adaptiveTransitEnabled() ? "#true" : "#false") +
+          " strict-opacity " +
+          (strictOpacityEnabled() ? "#true" : "#false") +
           (altEndpoint() ? " wisp-endpoint " + JSON.stringify(altEndpoint()) : "") +
           (primaryWispOverrideValue() ? " wisp-primary " + JSON.stringify(primaryWispOverrideValue()) : ""),
       ),
@@ -1717,6 +1724,37 @@ export async function persistRoute(prefix: string): Promise<void> {
   } catch {
     /* storage unavailable: the in-memory rotation still works */
   }
+}
+
+/* #609: strict-mode opacity downgrade accounting. The page-realm
+   fallbacks (the bootstrap mint seam, the navguard encode, the
+   worker prelude, the plaintext ?url= embed, a mint-refused direct
+   fetch) cannot hard-fail by design - refusing would strand the
+   page - so under strict opacity they keep serving and the worker
+   records the downgrade here. One row per (seam, site) per worker
+   lifetime: the row names the policy breach, not every request
+   that rides it, so the diag ring cannot be flooded. */
+const opacityDowngrades = new Set<string>();
+function opacityDowngrade(e: FetchEvent, seam: string, dest: string): void {
+  let site = dest;
+  try {
+    site = new URL(dest).origin;
+  } catch {
+    /* keep the raw string */
+  }
+  const key = seam + " " + site;
+  if (opacityDowngrades.has(key)) return;
+  opacityDowngrades.add(key);
+  const tid = DIAG.trace(e.resultingClientId || e.clientId);
+  DIAG.emit({
+    traceId: tid,
+    requestId: tid,
+    category: "REWRITE",
+    severity: "warning",
+    stage: "REQUEST_INTERCEPTED",
+    message: "opacity downgrade: " + seam + " served a non-opaque shape under strict mode (site " + site + ")",
+    url: dest,
+  });
 }
 
 /* Issue #31: an in-engine navigation must land on the engine-owned
@@ -2742,6 +2780,12 @@ export function handleFetch(e: FetchEvent): void {
           return new Response(null, { status: 204, headers: h });
         }
         dest0 = url.href;
+        /* #609: under strict opacity this plaintext-destination
+           shape is a fallback class the page could not mint
+           opaquely (a refused mint, an unreachable worker, the
+           navguard encode, the worker prelude): functional by
+           design, recorded as a downgrade. */
+        if (strictOpacityEnabled()) opacityDowngrade(e, "plaintext cross-origin request", url.href);
       } else if (qHandle !== null) {
         /* Injector phase 2: the query-shape committed route. The live
            token names the origin; the real path and query are the
@@ -3000,6 +3044,13 @@ export function handleFetch(e: FetchEvent): void {
         }
       } else if (isEnginePath(url.pathname)) {
         let raw = decodePath(url.pathname);
+        /* #609: under strict opacity a legacy-tail decode is a
+           downgrade row: the route reached the browser decodable.
+           Keyed tails are exempt (decodePath's keyed arm), and the
+           check runs before recoverPath/relative recovery so a
+           hit means a genuine legacy route. */
+        if (raw && strictOpacityEnabled() && !looksKeyedToken(url.pathname))
+          opacityDowngrade(e, "legacy route", raw);
         let carriesQuery = true;
         /* Concatenated-route recovery: the JS literal pass mints a
            keyed route for a string literal that is only a URL
@@ -3100,6 +3151,16 @@ export function handleFetch(e: FetchEvent): void {
         ) {
           return navOutcome(e, url, 403, "blocked", "zeolite: plaintext ?url= embed refused (navHandles opt-in; use zl:navHandle)");
         }
+        /* #609: with navHandles off, a strict deployment still
+           serves the plaintext ?url= embed (the fallback that
+           cannot hard-fail) - record the downgrade. */
+        if (
+          strictOpacityEnabled() &&
+          e.request.mode === "navigate" &&
+          url.pathname === new URL(self.registration.scope).pathname &&
+          url.searchParams.get("url")
+        )
+          opacityDowngrade(e, "plaintext ?url= embed", url.href);
         /* Wave 46 follow-up (the split-origin URL-bar strand): a legacy
            /zl/<b64u> route that reaches this seam is a route, never a
            page-relative tail. The split-origin content worker keeps its
@@ -3141,6 +3202,7 @@ export function handleFetch(e: FetchEvent): void {
           });
           dest0 = unwrapDest(legacyFirst);
           routeCarriesQuery = true;
+          if (strictOpacityEnabled()) opacityDowngrade(e, "legacy route", legacyFirst);
         } else if (ctxDest) {
           /* #511 (the cyber.blooket join class): a same-virtual-origin
              navigation the page performed through a NATIVE location
@@ -3212,6 +3274,7 @@ export function handleFetch(e: FetchEvent): void {
               });
               dest0 = unwrapDest(legacy);
               routeCarriesQuery = true;
+              if (strictOpacityEnabled()) opacityDowngrade(e, "legacy route", legacy);
             } else if (legacyRouteShaped(url.pathname)) {
               /* #389: the path carries the engine's own mintable
                  route shape but nothing decodes it (a corrupt or
