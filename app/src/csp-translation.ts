@@ -45,7 +45,13 @@ export function planCspTranslation(
   options: { reportOnly?: boolean } = {},
 ): CspTranslationPlan {
   const w = activeSeam();
-  if (w) return JSON.parse(w.planTranslation(raw, !!options.reportOnly)) as CspTranslationPlan;
+  if (w) {
+    try {
+      return JSON.parse(w.planTranslation(raw, !!options.reportOnly)) as CspTranslationPlan;
+    } catch {
+      /* #633: a trapping seam degrades to the TS body below. */
+    }
+  }
   if (options.reportOnly) return { kind: "unsupported", reason: "report-only" };
   if (new TextEncoder().encode(raw).length > MAX_POLICY_BYTES)
     return { kind: "unsupported", reason: "oversize" };

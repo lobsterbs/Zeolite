@@ -111,7 +111,7 @@ fn redact_url_userinfo(s: &str) -> String {
                 }
                 k += l;
             }
-            if k > colon + 3 && bytes[k] == b'@' {
+            if k > colon + 3 && bytes.get(k) == Some(&b'@') {
                 out.push_str(&s[i..colon + 3]);
                 out.push_str("[redacted]@");
                 i = k + 1;
