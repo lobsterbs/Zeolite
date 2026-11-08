@@ -983,19 +983,29 @@ deterministic; only its firing is intermittent. Tracked in #514.
 ## Run 42513932627 (head 22645c32, the #544 ship)
 
 - rust/wasm/app/compat GREEN.
-- Browser red, 66 passed / 8 failed: the documented #514-class wedge
-  cluster fired EARLY this run (first victims the passthrough
-  NativeTransit probe, then the IndexedDB round-trip, the Cache API
-  round-trip, the #576 register probe and the img/srcset rewriter
-  group as page.goto timeouts) and the cascade ate the late
-  engine-needing checks too: the three new #544 ws/rtc checks failed
-  on page-open timeouts ("waiting for proxied frame"), never on
-  their own assertions, while the direct-control halves of both
-  groups passed (direct wss echo, direct RTC offer/gather) and the
-  doctor gate counted the new checks.
-- The three #544 checks have not yet had a healthy-engine CI
-  window; the same failure class is filed as #641 with a
-  pristine-main repro (any check placed in the wedge window fails,
-  plain openProxied probes included). This entry rides the
-  retrigger; the next run's verdict on the three checks is the
-  honest arbiter.
+- Browser red, 66 passed / 8 failed. Five early page.goto timeouts
+  (NativeTransit probe, IndexedDB round-trip, Cache API round-trip,
+  #576 register probe, img/srcset rewriter group): intermittent CI
+  flake, no local repro, cause unknown. The other three were the
+  new #544 ws/rtc checks failing on page-open timeouts, never on
+  their own assertions, while the direct-control halves passed.
+- CORRECTION (riding the #544 follow-up push): the three #544
+  checks failed on no wedge at all. They opened landing.html with
+  openProxied's default #zl-marker wait, which only page.html
+  carries, so they timed out by construction on a healthy engine,
+  in every environment. The earlier "#514-class wedge cluster" and
+  "pristine-main repro" attributions were wrong: the
+  registration-probe line in the failure messages is a static
+  baseline (the dist sw.js is an ES module, so a classic
+  registration always fails evaluation), and the #641 repro probe
+  had the same marker bug.
+
+## Run 42515104344 (head 05984eab, the docs-only retrigger)
+
+- rust/wasm/app/compat GREEN.
+- Browser red, 71 passed / 3 failed: only the three #544 ws/rtc
+  checks, failure messages byte-identical to the ship run. Root
+  cause for all three, both runs: the #zl-marker authoring bug
+  documented in the correction above, not an engine wedge. The
+  fix (the checks pass the marker landing.html contains) rides
+  the #544 follow-up push; this run stays red pending it.

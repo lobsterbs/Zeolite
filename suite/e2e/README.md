@@ -186,12 +186,16 @@ infrastructure redesign (issue acceptance).
 
 - WebSocket: covered by the #35 suite since #544, which now ships a
   plaintext ws echo endpoint and a self-signed TLS origin for wss.
-- Engine health late in long suites: a pre-existing wedge (issue
-  #641, reproduced on pristine main) makes new proxied page opens
-  intermittently take 45s+ once the engine has been up for a few
-  minutes. The #544 ws/rtc checks document this rather than dodge
-  it: a local run can show them failing on wedge timing alone, the
-  CI verdict is the arbiter, and #641 owns the fix.
+- (Withdrawn) Engine health late in long suites: the "#641 wedge"
+  was a test authoring bug, not an engine defect. The repro probe
+  and the three #544 ws/rtc checks opened landing.html but waited
+  for #zl-marker, which only page.html carries, so they timed out
+  by construction on a healthy engine - the profiling round that
+  "reproduced" the wedge watched the engine deliver landing.html
+  in 7 ms while the probe waited for the missing marker. Fixed in
+  the #544 follow-up; #641 closed as a false alarm. Genuinely
+  intermittent CI page.goto timeouts stay in the ledger with no
+  local repro; nothing ties them to an engine defect.
 - IDN hostnames: need a real domain; the fixtures are loopback IPs.
 - Downloads: the #90 registry is unit-tested; a fetch-shaped
   attachment is just another body probe, and a UI-observable download
