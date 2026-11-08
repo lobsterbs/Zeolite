@@ -8,6 +8,8 @@ import { cookieStoreOp, documentCookieRead, documentCookieWrite, flushJarPersist
 import type { FacadeCookie } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
 import { handleCosmeticTokens } from "./cosmetic-tokens";
+/* #550 ship 2: strict privacy mode state (zl:privacy, host-only). */
+import { isStrictPrivacy, setStrictPrivacy, STRICT_REFUSED } from "./privacy";
 import { GUEST_SCRIPT_MAX, guestRegisterHost, guestSpawn, guestTerminate, guestTerminateAll, guestUnregister, type GuestPortLike } from "./kernel/guests/executor";
 /* #477: canonical registration identity; inputs from untrusted pages
    pass the verified-client gates first (dispatch, below). */
@@ -147,6 +149,7 @@ export interface ControlMessage {
     | "zl:clearJar"
     | "zl:transport"
   | "zl:domInspect"
+  | "zl:privacy"
   | "zl:loadState";
   /** Experimental selections are preferences only, not security bypasses. */
   experimental?: unknown;
@@ -204,6 +207,10 @@ export interface ControlMessage {
       with the route shape (strict-opacity); absent keeps the
       persisted choice, the ack and zl:ping echo the live value. */
   strictOpacity?: boolean;
+  /** #550 ship 2: strict privacy mode toggle (zl:privacy, host-only). */
+  strict?: boolean;
+  /** #550 ship 2: the domInspect storage-view grant rides the authorize. */
+  storage?: boolean;
   /** zl:mint: navigation-bound mint (the navguard absolute
       location/href writes). Only this caller gets the query-shape
       handle behind the queryRoutes opt-in; the re-emission mints
@@ -1541,6 +1548,17 @@ case "zl:tracing":
       reply({ ok: true, generation: netLogGeneration(), clientId: clientId ?? null, ...DIAG.snapshot(since, clientId) });
       break;
     }
+    case "zl:privacy": {
+      /* #550 ship 2: the strict privacy toggle. Host-only by the #41
+         gate (never in PAGE_MESSAGES): a proxied page must not read or
+         flip the operator privacy mode. Memory-only, like every other
+         privacy-relevant state: a worker restart clears it and the
+         host page re-declares intent. */
+      const strict = (msg as { strict?: unknown }).strict === true;
+      setStrictPrivacy(strict);
+      reply({ ok: true, strict });
+      break;
+    }
     case "zl:domInspect": {
       /* #550 Tier 2 DOM inspection, first slice. Host-only by the
          dispatch gate above (not in PAGE_MESSAGES): a proxied page
@@ -1557,12 +1575,15 @@ case "zl:tracing":
         break;
       }
       if (op === "authorize") {
+        /* Ship 2: the storage grant rides the authorize handshake, so
+           the engine session and the page bridge can never disagree. */
+        const storage = (msg as { storage?: unknown }).storage === true;
         e.waitUntil(
-          domInspectAuthorize(cid).then((r) => reply(r), (err) => reply({ ok: false, error: String(err) })),
+          domInspectAuthorize(cid, 3000, { storage }).then((r) => reply(r), (err) => reply({ ok: false, error: String(err) })),
         );
       } else if (op === "revoke") {
         reply({ ok: domInspectRevoke(cid) });
-      } else if (op === "snapshot" || op === "styles" || op === "console") {
+      } else if (op === "snapshot" || op === "styles" || op === "console" || op === "highlight" || op === "storage") {
         const nodeId = typeof msg.nodeId === "number" && msg.nodeId >= 0 && msg.nodeId <= 100000
           ? Math.floor(msg.nodeId)
           : undefined;
@@ -1593,6 +1614,15 @@ export async function handleControlEvent(
   const msg = e.data as ControlMessage;
   const port = e.ports[0];
   const reply = (payload: unknown) => port?.postMessage(payload);
+  /* #550 ship 2: strict privacy mode refuses every diagnostic surface
+     that can name pages, URLs or page content. The toggle itself is
+     never refused, so the host can always leave the mode; the refused
+     list is data in privacy.ts, kept out of PAGE_MESSAGES so a proxied
+     page can neither read nor set it. */
+  if (isStrictPrivacy() && STRICT_REFUSED.has(String(msg?.type))) {
+    reply({ ok: false, error: "strict privacy mode: diagnostic surface refused" });
+    return;
+  }
   /* #495: Doctor must answer even when boot is wedged. It is never
      reachable from a proxied page, and it avoids dispatchCore's
      legacy cookie-context bookkeeping and all outbound traffic by
@@ -1736,7 +1766,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:cosmeticTokens", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:captchaTrace", "zl:domInspect", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:cosmeticTokens", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:captchaTrace", "zl:domInspect", "zl:privacy", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
 ]);
 
 

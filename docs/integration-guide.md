@@ -283,10 +283,44 @@ sender gate is fail-closed:
   `zl:installExtFiles`, `zl:extEnable`, `zl:extUninstall`, `zl:scripting`),
   the jar verbs (`zl:jarProfile`, `zl:getJars`, `zl:clearJar`),
   `zl:fingerprint`, the download verbs, `zl:recordStart`, `zl:recordStop`,
-  the session verbs and `zl:teardown`.
+  the session verbs, `zl:teardown`, `zl:domInspect` and
+  `zl:privacy`.
 
 Do not fight the gate. Put your host pages on the allowlisted paths, and
 never rely on a proxied page being able to send host verbs.
+
+### 6a. The Tier 2 DOM inspector and strict privacy mode (#550)
+
+`zl:domInspect` and `zl:privacy` are host-only verbs (the sender gate
+above keeps both away from proxied pages). The inspector is a
+postMessage bridge into one live proxied client, never direct DOM
+access from the host page:
+
+- Open a session: `{ type: "zl:domInspect", op: "authorize", clientId,
+  storage? }` with a netlog row's clientId. The optional storage-view
+  grant rides the same handshake, so the engine session and the page
+  bridge can never disagree on it.
+- Ask: `op` is one of `snapshot` (bounded tree, depth 12, 500 nodes),
+  `styles` (computed styles of a snapshot node), `console` (a bounded
+  redacted ring captured only while authorized), `highlight` (`nodeId`
+  pins a CSSOM-only fixed overlay to the node's rect; a request
+  without a nodeId clears it) and `storage` (the page realm's
+  localStorage/sessionStorage only, and only with the explicit
+  grant; document.cookie is never read).
+- Close it: `{ op: "revoke" }`, or let navigation, a new document
+  generation or client death tear it down. Replies carry the pinned
+  page generation; discard any reply whose generation no longer
+  matches.
+
+Strict privacy mode is the operator kill switch: `{ type: "zl:privacy",
+strict: true }` (host-only, memory-only: a worker restart clears it)
+makes the control plane refuse every diagnostic surface that can name
+pages, URLs or page content: `zl:domInspect`, `zl:getNetLog`,
+`zl:getDiag`, `zl:exportDiagnostics`, `zl:captchaTrace`. The doctor
+keeps answering (passive, redacted, host-only), and the toggle itself
+always answers, so the host can always leave the mode. An integration
+that surfaces these diagnostics should watch `strict` in the reply and
+grey its UI accordingly.
 
 ## 7. Split-origin hosting (optional)
 

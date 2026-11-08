@@ -82,6 +82,7 @@ import {
   domInspectRevoke,
 } from "../dom-inspect";
 import { CORE_CONTROL_TYPES, handleControlEvent, type ControlMessage } from "../control";
+import { privacyResetForTests } from "../privacy";
 
 const ORIGIN = "https://w.example.org";
 
@@ -99,6 +100,9 @@ function el(tag: string, attrs: Record<string, string> = {}, children: FakeEl[] 
   const node: FakeEl = { tagName: tag, attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })), children };
   if (attrs.id !== undefined) node.id = attrs.id;
   if (attrs.class !== undefined) node.className = attrs.class;
+  const hook = node as unknown as Record<string, unknown>;
+  hook.appendChild = (c: unknown): void => { (c as Record<string, unknown>).parentNode = node; };
+  hook.removeChild = (c: unknown): void => { (c as Record<string, unknown>).parentNode = null; };
   return node;
 }
 
@@ -109,6 +113,10 @@ interface Realm {
   consoleObj: Record<string, unknown>;
   setRoot: (root: FakeEl | null) => void;
   setStyles: (props: Array<[string, string]>) => void;
+  divs: Array<Record<string, unknown>>;
+  local: Map<string, string>;
+  session: Map<string, string>;
+  w: Record<string, unknown>;
 }
 
 function makeRealm(): Realm {
@@ -122,6 +130,27 @@ function makeRealm(): Realm {
   };
   let root: FakeEl | null = null;
   let styles: Array<[string, string]> = [];
+  const divs: Array<Record<string, unknown>> = [];
+  const local = new Map<string, string>();
+  const session = new Map<string, string>();
+  const makeDiv = (): Record<string, unknown> => {
+    const div: Record<string, unknown> = {
+      attrs: {} as Record<string, string>,
+      style: {} as Record<string, string>,
+      parentNode: null,
+    };
+    div.setAttribute = (n: string, v: string): void => { (div.attrs as Record<string, string>)[n] = v; };
+    div.appendChild = (c: unknown): void => { (c as Record<string, unknown>).parentNode = div; };
+    div.removeChild = (c: unknown): void => { (c as Record<string, unknown>).parentNode = null; };
+    div.remove = (): void => { div.parentNode = null; };
+    divs.push(div);
+    return div;
+  };
+  const storeOf = (m: Map<string, string>): Record<string, unknown> => ({
+    get length() { return m.size; },
+    key: (i: number) => Array.from(m.keys())[i] ?? null,
+    getItem: (k: string) => m.get(k) ?? null,
+  });
   const w: Record<string, unknown> = {
     navigator: {
       serviceWorker: {
@@ -136,7 +165,14 @@ function makeRealm(): Realm {
       get documentElement() {
         return root;
       },
+      get cookie(): string {
+        /* Oracle: the storage view must never read document.cookie. */
+        throw new Error("cookie read attempted");
+      },
+      createElement: () => makeDiv(),
     },
+    localStorage: storeOf(local),
+    sessionStorage: storeOf(session),
     getComputedStyle: (n: unknown) => {
       void n;
       return {
@@ -165,6 +201,10 @@ function makeRealm(): Realm {
     setStyles: (s) => {
       styles = s;
     },
+    divs,
+    local,
+    session,
+    w,
   };
 }
 
@@ -594,5 +634,404 @@ describe("zl:domInspect control message (#550)", () => {
     await handleControlEvent(snap.ev, deps);
     await Promise.all(snap.waiters);
     expect(snap.posted[0]).toMatchObject({ ok: true, gen: FAKE_GEN, nodes: 1 });
+  });
+
+  it("relays the storage grant on the authorize handshake (#550 ship 2)", async () => {
+    const { client, posts } = fakeBridgeClient((msg) =>
+      msg.type === "zl:domInspectCtl" ? { ok: true, gen: FAKE_GEN } : null,
+    );
+    clientsGet.mockResolvedValue(client);
+    const auth = mkMsgEvent(ORIGIN + "/", {
+      type: "zl:domInspect",
+      op: "authorize",
+      clientId: "ctl-s",
+      storage: true,
+    });
+    await handleControlEvent(auth.ev, deps);
+    await Promise.all(auth.waiters);
+    expect(auth.posted[0]).toEqual({ ok: true, gen: FAKE_GEN });
+    expect(posts[0]).toMatchObject({ type: "zl:domInspectCtl", storage: true });
+  });
+});
+
+
+/* ---- ship 2: highlight overlay (#550) ------------------------------ */
+
+describe("bridge highlight overlay (#550 ship 2)", () => {
+  const ask = (
+    realm: ReturnType<typeof makeRealm>,
+    msg: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> => {
+    const mc = new MessageChannel();
+    return new Promise((res) => {
+      mc.port1.onmessage = (ev) => res(ev.data as Record<string, unknown>);
+      realm.dispatch(msg, [mc.port2]);
+    });
+  };
+  type Rect = () => { left: number; top: number; width: number; height: number };
+  const withRect = (n: FakeEl, r: Rect): void => {
+    (n as unknown as { getBoundingClientRect: Rect }).getBoundingClientRect = r;
+  };
+
+  it("refuses highlight before a snapshot pinned any node", async () => {
+    const realm = makeRealm();
+    realm.setRoot(el("HTML", {}, [el("DIV")]));
+    realm.dispatch({ type: "zl:domInspectCtl", on: true }, []);
+    const reply = await ask(realm, { type: "zl:domInspectReq", op: "highlight", nodeId: 1 });
+    expect(reply).toMatchObject({ ok: false, error: "no such snapshot node" });
+    expect(realm.divs).toEqual([]);
+  });
+
+  it("creates a CSSOM-only overlay pinned to the snapshot node rect", async () => {
+    const realm = makeRealm();
+    const mark = el("DIV", { id: "mark" });
+    withRect(mark, () => ({ left: 5.4, top: 6.6, width: 30.2, height: 12.9 }));
+    realm.setRoot(el("HTML", {}, [mark]));
+    realm.dispatch({ type: "zl:domInspectCtl", on: true }, []);
+    const snap = await ask(realm, { type: "zl:domInspectReq", op: "snapshot" });
+    expect(snap).toMatchObject({ ok: true, nodes: 2 });
+    const hl = await ask(realm, { type: "zl:domInspectReq", op: "highlight", nodeId: 1 });
+    expect(hl).toMatchObject({ ok: true });
+    expect(realm.divs).toHaveLength(1);
+    const div = realm.divs[0];
+    /* CSSOM only: the data attribute is the single setAttribute call,
+       never a style attribute a page CSP could block. */
+    expect(Object.keys(div.attrs as Record<string, string>)).toEqual(["data-zl-di-hl"]);
+    const style = div.style as Record<string, string>;
+    expect(style.position).toBe("fixed");
+    expect(style.left).toBe("5px");
+    expect(style.top).toBe("7px");
+    expect(style.width).toBe("30px");
+    expect(style.height).toBe("13px");
+    expect(style.pointerEvents).toBe("none");
+    expect(style.zIndex).toBe("2147483647");
+    expect((div.parentNode as { tagName?: string }).tagName).toBe("HTML");
+  });
+
+  it("replaces the overlay, clears it without a nodeId, and revoke tears it down", async () => {
+    const realm = makeRealm();
+    const mark = el("DIV", { id: "mark" });
+    const other = el("SPAN", { id: "other" });
+    withRect(mark, () => ({ left: 1, top: 2, width: 3, height: 4 }));
+    withRect(other, () => ({ left: 9, top: 9, width: 9, height: 9 }));
+    realm.setRoot(el("HTML", {}, [mark, other]));
+    realm.dispatch({ type: "zl:domInspectCtl", on: true }, []);
+    await ask(realm, { type: "zl:domInspectReq", op: "snapshot" });
+    expect((await ask(realm, { type: "zl:domInspectReq", op: "highlight", nodeId: 1 })).ok).toBe(true);
+    const first = realm.divs[0];
+    expect(first.parentNode).toBeTruthy();
+    expect((await ask(realm, { type: "zl:domInspectReq", op: "highlight", nodeId: 2 })).ok).toBe(true);
+    expect(first.parentNode).toBeNull();
+    expect(realm.divs).toHaveLength(2);
+    expect((await ask(realm, { type: "zl:domInspectReq", op: "highlight" })).ok).toBe(true);
+    expect(realm.divs.every((d) => d.parentNode === null)).toBe(true);
+    expect((await ask(realm, { type: "zl:domInspectReq", op: "highlight", nodeId: 1 })).ok).toBe(true);
+    realm.dispatch({ type: "zl:domInspectCtl", on: false }, []);
+    expect(realm.divs.every((d) => d.parentNode === null)).toBe(true);
+    /* after teardown the session is closed: no more requests answer */
+    const mc = new MessageChannel();
+    const replies: unknown[] = [];
+    mc.port1.onmessage = (ev) => replies.push(ev.data);
+    realm.dispatch({ type: "zl:domInspectReq", op: "highlight", nodeId: 1 }, [mc.port2]);
+    await sleep(20);
+    expect(replies).toEqual([]);
+  });
+
+  it("refuses a bad nodeId and a node with no rect", async () => {
+    const realm = makeRealm();
+    realm.setRoot(el("HTML", {}, [el("DIV")]));
+    realm.dispatch({ type: "zl:domInspectCtl", on: true }, []);
+    await ask(realm, { type: "zl:domInspectReq", op: "snapshot" });
+    expect(await ask(realm, { type: "zl:domInspectReq", op: "highlight", nodeId: 999 })).toMatchObject({
+      ok: false,
+      error: "no such snapshot node",
+    });
+    /* node 0 is the root, which has no getBoundingClientRect at all */
+    expect(await ask(realm, { type: "zl:domInspectReq", op: "highlight", nodeId: 0 })).toMatchObject({
+      ok: false,
+      error: "no such snapshot node",
+    });
+  });
+});
+
+/* ---- ship 2: the storage view (#550) -------------------------------- */
+
+describe("bridge storage view (#550 ship 2)", () => {
+  const ask = (
+    realm: ReturnType<typeof makeRealm>,
+    msg: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> => {
+    const mc = new MessageChannel();
+    return new Promise((res) => {
+      mc.port1.onmessage = (ev) => res(ev.data as Record<string, unknown>);
+      realm.dispatch(msg, [mc.port2]);
+    });
+  };
+  interface StorageView {
+    entries: Array<{ k: string; v: string }>;
+    truncated: boolean;
+    unavailable: boolean;
+  }
+  const view = (reply: Record<string, unknown>, name: string): StorageView => reply[name] as StorageView;
+
+  it("refuses the storage op unless the authorize carried storage:true", async () => {
+    const realm = makeRealm();
+    realm.local.set("k", "v");
+    realm.setRoot(el("HTML"));
+    realm.dispatch({ type: "zl:domInspectCtl", on: true, storage: false }, []);
+    const reply = await ask(realm, { type: "zl:domInspectReq", op: "storage" });
+    expect(reply).toMatchObject({ ok: false, error: "storage view not granted" });
+  });
+
+  it("returns page-realm stores only: capped, redacted, cookie never read", async () => {
+    const realm = makeRealm();
+    realm.setRoot(el("HTML"));
+    /* the oracle: makeRealm w.document.cookie is a throwing getter, so
+       this test fails the moment any code path reads document.cookie */
+    realm.local.set("auth", "token=supersecret");
+    realm.local.set("k".repeat(200), "x");
+    for (let i = 0; i < 200; i++) realm.local.set("key-" + i, "v" + i);
+    realm.session.set("s1", "sessionval");
+    realm.dispatch({ type: "zl:domInspectCtl", on: true, storage: true }, []);
+    const reply = await ask(realm, { type: "zl:domInspectReq", op: "storage" });
+    expect(reply.ok).toBe(true);
+    const local = view(reply, "local");
+    expect(local.unavailable).toBe(false);
+    expect(local.entries).toHaveLength(128);
+    expect(local.truncated).toBe(true);
+    expect(local.entries[0]).toEqual({ k: "auth", v: "token=[redacted]" });
+    /* the 128-char key cap also loses the value: the truncated key no
+       longer matches the real 200-char key, so the view reports empty */
+    expect(local.entries[1].k).toHaveLength(128);
+    expect(local.entries[1].v).toBe("");
+    const session = view(reply, "session");
+    expect(session).toMatchObject({ unavailable: false, truncated: false });
+    expect(session.entries).toEqual([{ k: "s1", v: "sessionval" }]);
+  });
+
+  it("reports a throwing store as unavailable, never guessed", async () => {
+    const realm = makeRealm();
+    realm.setRoot(el("HTML"));
+    (realm.w as Record<string, unknown>).localStorage = {
+      length: 5,
+      key: () => {
+        throw new Error("store disabled");
+      },
+      getItem: () => "",
+    };
+    realm.dispatch({ type: "zl:domInspectCtl", on: true, storage: true }, []);
+    const reply = await ask(realm, { type: "zl:domInspectReq", op: "storage" });
+    expect(reply.ok).toBe(true);
+    expect(view(reply, "local")).toMatchObject({ unavailable: true, truncated: false, entries: [] });
+    expect(view(reply, "session").unavailable).toBe(false);
+  });
+
+  it("caps values at 500 characters", async () => {
+    const realm = makeRealm();
+    realm.setRoot(el("HTML"));
+    realm.local.set("big", "z".repeat(900));
+    realm.dispatch({ type: "zl:domInspectCtl", on: true, storage: true }, []);
+    const reply = await ask(realm, { type: "zl:domInspectReq", op: "storage" });
+    const local = view(reply, "local");
+    expect(local.entries[0].k).toBe("big");
+    expect(local.entries[0].v).toBe("z".repeat(500));
+  });
+});
+
+/* ---- ship 2: the storage grant and highlight relay (engine) --------- */
+
+describe("engine half: storage grant and highlight relay (#550 ship 2)", () => {
+  beforeEach(() => {
+    domInspectResetForTests();
+    clientsGet = vi.fn(async (_id: string) => null);
+    (globalThis as unknown as { self: unknown }).self = {
+      location: { origin: ORIGIN, href: ORIGIN + "/sw.js" },
+      clients: { get: clientsGet },
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("BRIDGE-SOURCE", { status: 200 })));
+  });
+  afterEach(() => {
+    domInspectResetForTests();
+    vi.unstubAllGlobals();
+  });
+
+  it("authorize carries the storage grant in the handshake", async () => {
+    const granted = fakeBridgeClient(() => ({ ok: true, gen: FAKE_GEN }));
+    clientsGet.mockResolvedValue(granted.client);
+    expect(await domInspectAuthorize("g-1", 3000, { storage: true })).toEqual({ ok: true, gen: FAKE_GEN });
+    expect(granted.posts.find((p) => p.type === "zl:domInspectCtl")).toMatchObject({
+      on: true,
+      ctl: true,
+      storage: true,
+    });
+    const bare = fakeBridgeClient(() => ({ ok: true, gen: FAKE_GEN }));
+    clientsGet.mockResolvedValue(bare.client);
+    await domInspectAuthorize("g-2");
+    expect(bare.posts.find((p) => p.type === "zl:domInspectCtl")).toMatchObject({
+      on: true,
+      ctl: true,
+      storage: false,
+    });
+  });
+
+  it("refuses storage without the grant and never contacts the client", async () => {
+    const { client, posts } = fakeBridgeClient(() => ({ ok: true, gen: FAKE_GEN }));
+    clientsGet.mockResolvedValue(client);
+    await domInspectAuthorize("n-1");
+    const before = posts.length;
+    expect(await domInspectRequest("n-1", "storage")).toEqual({
+      ok: false,
+      error: "storage view not granted for this session",
+    });
+    expect(posts.length).toBe(before);
+  });
+
+  it("relays storage with the grant and re-redacts the reply", async () => {
+    const { client } = fakeBridgeClient((msg) => {
+      if (msg.type === "zl:domInspectCtl") return { ok: true, gen: FAKE_GEN };
+      if (msg.op === "storage") {
+        return {
+          ok: true,
+          gen: FAKE_GEN,
+          local: { entries: [{ k: "a", v: "token=LEAK9" }], truncated: false, unavailable: false },
+          session: { entries: [], truncated: false, unavailable: false },
+        };
+      }
+      return null;
+    });
+    clientsGet.mockResolvedValue(client);
+    await domInspectAuthorize("s-1", 3000, { storage: true });
+    const reply = await domInspectRequest("s-1", "storage");
+    expect(reply.ok).toBe(true);
+    const local = reply.local as { entries: Array<{ k: string; v: string }> };
+    expect(local.entries[0].v).toBe("token=[redacted]");
+  });
+
+  it("refuses a bridge storage reply over the entry cap", async () => {
+    const over = Array.from({ length: 200 }, (_, i) => ({ k: "k" + i, v: "" }));
+    const { client } = fakeBridgeClient((msg) => {
+      if (msg.type === "zl:domInspectCtl") return { ok: true, gen: FAKE_GEN };
+      if (msg.op === "storage") {
+        return {
+          ok: true,
+          gen: FAKE_GEN,
+          local: { entries: over, truncated: false, unavailable: false },
+          session: { entries: [], truncated: false, unavailable: false },
+        };
+      }
+      return null;
+    });
+    clientsGet.mockResolvedValue(client);
+    await domInspectAuthorize("o-1", 3000, { storage: true });
+    expect(await domInspectRequest("o-1", "storage")).toEqual({
+      ok: false,
+      error: "bridge storage reply over cap",
+    });
+  });
+
+  it("relays highlight nodeIds and a clear without one", async () => {
+    const { client, posts } = fakeBridgeClient((msg) => {
+      if (msg.type === "zl:domInspectCtl") return { ok: true, gen: FAKE_GEN };
+      if (msg.op === "highlight") return { ok: true, gen: FAKE_GEN };
+      return null;
+    });
+    clientsGet.mockResolvedValue(client);
+    await domInspectAuthorize("h-1");
+    expect((await domInspectRequest("h-1", "highlight", 7)).ok).toBe(true);
+    expect((await domInspectRequest("h-1", "highlight")).ok).toBe(true);
+    const relays = posts.filter((p) => p.op === "highlight");
+    expect(relays).toHaveLength(2);
+    expect(relays[0]).toMatchObject({ op: "highlight", nodeId: 7 });
+    expect((relays[1] as { nodeId?: unknown }).nodeId).toBeUndefined();
+  });
+});
+
+/* ---- ship 2: strict privacy mode (#550) ----------------------------- */
+
+describe("zl:privacy strict mode (#550 ship 2)", () => {
+  const mkMsgEvent = (sourceUrl: string, msg: ControlMessage) => {
+    const posted: unknown[] = [];
+    const waiters: Array<Promise<unknown>> = [];
+    const ev = {
+      data: msg,
+      ports: [{ postMessage: (p: unknown) => posted.push(p), close: () => {} }],
+      source: { url: sourceUrl, id: "c1" },
+      waitUntil: (p: Promise<unknown>) => waiters.push(p),
+    } as unknown as ExtendableMessageEvent;
+    return { ev, posted, waiters };
+  };
+  const deps = { ready: Promise.resolve(), persistRoute: async () => {} };
+
+  beforeEach(() => {
+    privacyResetForTests();
+    domInspectResetForTests();
+    clientsGet = vi.fn(async (_id: string) => null);
+    (globalThis as unknown as { self: unknown }).self = {
+      location: { origin: ORIGIN, href: ORIGIN + "/sw.js" },
+      clients: { get: clientsGet },
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("BRIDGE-SOURCE", { status: 200 })));
+  });
+  afterEach(() => {
+    privacyResetForTests();
+    domInspectResetForTests();
+    vi.unstubAllGlobals();
+  });
+
+  it("registers zl:privacy in CORE_CONTROL_TYPES", () => {
+    expect(CORE_CONTROL_TYPES.has("zl:privacy")).toBe(true);
+  });
+
+  it("refuses a proxied-page sender (host pages only)", async () => {
+    const { ev, posted } = mkMsgEvent(ORIGIN + "/j/route", { type: "zl:privacy", strict: true });
+    await handleControlEvent(ev, deps);
+    expect(posted).toEqual([{ ok: false, error: "host-only control message" }]);
+  });
+
+  it("toggles strict from a host sender and refuses the five surfaces", async () => {
+    const on = mkMsgEvent(ORIGIN + "/", { type: "zl:privacy", strict: true });
+    await handleControlEvent(on.ev, deps);
+    expect(on.posted).toEqual([{ ok: true, strict: true }]);
+    const surfaces = [
+      { type: "zl:domInspect", op: "authorize", clientId: "x" },
+      { type: "zl:getNetLog", since: 0 },
+      { type: "zl:getDiag" },
+      { type: "zl:exportDiagnostics" },
+      { type: "zl:captchaTrace" },
+    ] as ControlMessage[];
+    for (const surface of surfaces) {
+      const { ev, posted } = mkMsgEvent(ORIGIN + "/", surface);
+      await handleControlEvent(ev, deps);
+      expect(posted).toEqual([{ ok: false, error: "strict privacy mode: diagnostic surface refused" }]);
+    }
+    /* the toggle itself still answers under strict mode */
+    const off = mkMsgEvent(ORIGIN + "/", { type: "zl:privacy", strict: false });
+    await handleControlEvent(off.ev, deps);
+    expect(off.posted).toEqual([{ ok: true, strict: false }]);
+  });
+
+  it("leaves the mode when strict is off: the inspector answers again", async () => {
+    await handleControlEvent(mkMsgEvent(ORIGIN + "/", { type: "zl:privacy", strict: true }).ev, deps);
+    const refused = mkMsgEvent(ORIGIN + "/", { type: "zl:domInspect", op: "authorize", clientId: "r-1" });
+    await handleControlEvent(refused.ev, deps);
+    expect(refused.posted[0]).toMatchObject({ ok: false, error: "strict privacy mode: diagnostic surface refused" });
+    await handleControlEvent(mkMsgEvent(ORIGIN + "/", { type: "zl:privacy", strict: false }).ev, deps);
+    const { client } = fakeBridgeClient((msg) => (msg.type === "zl:domInspectCtl" ? { ok: true, gen: FAKE_GEN } : null));
+    clientsGet.mockResolvedValue(client);
+    const auth = mkMsgEvent(ORIGIN + "/", { type: "zl:domInspect", op: "authorize", clientId: "r-1" });
+    await handleControlEvent(auth.ev, deps);
+    await Promise.all(auth.waiters);
+    expect(auth.posted[0]).toEqual({ ok: true, gen: FAKE_GEN });
+  });
+
+  it("is memory-only: the reset clears it for the next session", async () => {
+    await handleControlEvent(mkMsgEvent(ORIGIN + "/", { type: "zl:privacy", strict: true }).ev, deps);
+    privacyResetForTests();
+    const { client } = fakeBridgeClient((msg) => (msg.type === "zl:domInspectCtl" ? { ok: true, gen: FAKE_GEN } : null));
+    clientsGet.mockResolvedValue(client);
+    const auth = mkMsgEvent(ORIGIN + "/", { type: "zl:domInspect", op: "authorize", clientId: "m-1" });
+    await handleControlEvent(auth.ev, deps);
+    await Promise.all(auth.waiters);
+    expect(auth.posted[0]).toEqual({ ok: true, gen: FAKE_GEN });
   });
 });

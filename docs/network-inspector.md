@@ -31,7 +31,11 @@ so it talks to the engine through the SW control plane.
 - Bodies are not captured (the rewriter streams them; buffering them
   for the inspector would cost first paint).
 - A DOM/CSS inspector (postMessage bridge into proxied pages,
-  CDP-style subset) shipped its first slice (#550): bounded tree
-  snapshot, computed styles for a snapshot node and a bounded redacted
-  console ring, host-gated per session (see docs/power-features.md
-  §2). Element highlighting and a storage view are still not built.
+  CDP-style subset) is complete (#550): bounded tree snapshot,
+  computed styles for a snapshot node, a bounded redacted console
+  ring, a CSSOM-only element highlight and a granted, capped storage
+  view of the page realm's own localStorage/sessionStorage,
+  host-gated per session (see docs/power-features.md §2). Strict
+  privacy mode (zl:privacy, host-only, memory-only) refuses the
+  inspector, this net log, the diagnostics ring, the request-scoped
+  exporter and the captcha trace; the doctor still answers.

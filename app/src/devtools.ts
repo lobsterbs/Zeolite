@@ -511,15 +511,22 @@ const domConsoleBtn = document.getElementById("domConsoleBtn") as HTMLButtonElem
 const domStylesEl = document.getElementById("domStyles")!;
 const domTreeEl = document.getElementById("domTree")!;
 const domConsoleEl = document.getElementById("domConsoleList")!;
+const domStorageGrant = document.getElementById("domStorageGrant") as HTMLInputElement;
+const domStorageBtn = document.getElementById("domStorageBtn") as HTMLButtonElement;
+const domStorageEl = document.getElementById("domStorageList")!;
 let domClient: string | null = null;
 let domGen = -1;
 let domAuthorized = false;
+/* #550 ship 2: the storage grant is decided per authorize (the
+   checkbox state at authorize time), never per request. */
+let domStorageGranted = false;
 
 function domApplyButtons(): void {
   domAuthorizeBtn.disabled = !domClient || domAuthorized;
   domRevokeBtn.disabled = !domAuthorized;
   domSnapshotBtn.disabled = !domAuthorized;
   domConsoleBtn.disabled = !domAuthorized;
+  domStorageBtn.disabled = !domAuthorized || !domStorageGranted;
 }
 
 function domReset(why: string): void {
@@ -542,11 +549,13 @@ domAuthorizeBtn.addEventListener("click", () => {
     return;
   }
   domStatus.textContent = "authorizing...";
-  post({ type: "zl:domInspect", op: "authorize", clientId }, (data) => {
+  const storageGrant = domStorageGrant.checked;
+  post({ type: "zl:domInspect", op: "authorize", clientId, storage: storageGrant }, (data) => {
     if (data?.ok && typeof data.gen === "number") {
       domClient = clientId;
       domGen = data.gen;
       domAuthorized = true;
+      domStorageGranted = storageGrant;
       domApplyButtons();
       domStatus.textContent = "authorized for this document";
     } else {
@@ -564,6 +573,7 @@ domRevokeBtn.addEventListener("click", () => {
   domTreeEl.replaceChildren();
   domStylesEl.textContent = "no node selected";
   domConsoleEl.textContent = "";
+  domStorageEl.textContent = "";
   domReset("session revoked");
 });
 
@@ -604,6 +614,7 @@ function renderDomTree(node: DomNode | undefined, parent: HTMLElement, depth: nu
       domTreeEl.querySelectorAll(".dn.sel").forEach((x) => x.classList.remove("sel"));
       row.classList.add("sel");
       requestDomStyles(node.i);
+      requestDomHighlight(node.i);
     });
   }
   parent.append(row);
@@ -648,6 +659,38 @@ domConsoleBtn.addEventListener("click", () => {
           .map((e) => fmtTime(e.ts) + " " + e.level + ": " + e.args.join(" "))
           .join("\n") + (data.dropped ? "\n(" + data.dropped + " older entries dropped)" : "")
       : "console ring is empty";
+  });
+});
+
+/* #550 ship 2: highlight the selected snapshot node in the page
+   (the overlay lives in the inspected document; revoke and
+   navigation clear it). */
+function requestDomHighlight(nodeId: number): void {
+  if (!domAuthorized || !domClient) return;
+  post({ type: "zl:domInspect", op: "highlight", clientId: domClient, nodeId }, (data) => {
+    if (!data?.ok && data?.stale) domReset("stale document generation; authorize again");
+  });
+}
+domStorageBtn.addEventListener("click", () => {
+  if (!domAuthorized || !domClient || !domStorageGranted) return;
+  post({ type: "zl:domInspect", op: "storage", clientId: domClient }, (data) => {
+    if (!data?.ok) {
+      domStorageEl.textContent = "unavailable: " + (data?.error ?? "no answer");
+      if (data?.stale) domReset("stale document generation; authorize again");
+      return;
+    }
+    if (data.gen !== domGen) {
+      domStorageEl.textContent = "discarded: stale document generation";
+      return;
+    }
+    const render = (v: unknown, name: string): string => {
+      const view = (v ?? {}) as { entries?: Array<{ k: string; v: string }>; truncated?: boolean; unavailable?: boolean };
+      if (view.unavailable) return name + ": unavailable";
+      const rows = (view.entries ?? []).map((e) => "  " + e.k + " = " + e.v);
+      return name + ":" + (rows.length ? "\n" + rows.join("\n") : " (empty)") +
+        (view.truncated ? "\n  (truncated at 128 keys)" : "");
+    };
+    domStorageEl.textContent = render(data.local, "local") + "\n" + render(data.session, "session");
   });
 });
 
