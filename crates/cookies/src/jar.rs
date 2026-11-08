@@ -75,7 +75,7 @@ fn looks_like_ip(host: &str) -> bool {
 
 /// 5.1.3: exact host match, or a domain-suffix match on a host
 /// that is not an IP literal.
-fn domain_match(host: &str, domain: &str) -> bool {
+pub(crate) fn domain_match(host: &str, domain: &str) -> bool {
     host == domain || (host.ends_with(&format!(".{}", domain)) && !looks_like_ip(host))
 }
 
@@ -103,7 +103,7 @@ fn default_path(req_path: &str) -> String {
 }
 
 /// 5.1.4 path-match.
-fn path_match(req_path: &str, cookie_path: &str) -> bool {
+pub(crate) fn path_match(req_path: &str, cookie_path: &str) -> bool {
     cookie_path == "/"
         || req_path == cookie_path
         || (req_path.starts_with(cookie_path)
@@ -112,13 +112,85 @@ fn path_match(req_path: &str, cookie_path: &str) -> bool {
 }
 
 /// Identity: a replacement preserves this key's creation time.
-fn same_identity(a: &Cookie, b: &Cookie) -> bool {
+pub(crate) fn same_identity(a: &Cookie, b: &Cookie) -> bool {
     a.name == b.name && a.domain == b.domain && a.host_only == b.host_only && a.path == b.path
 }
 
 /// Eviction priority: sooner expiry first, then earlier created.
-fn order_key(c: &Cookie) -> (i64, i64) {
+pub(crate) fn order_key(c: &Cookie) -> (i64, i64) {
     (if c.expires == 0 { i64::MAX } else { c.expires }, c.created)
+}
+
+/// The shared 5.3 admission gates and fresh-cookie construction:
+/// SameSite=None needs Secure, Secure needs a secure origin, the
+/// Domain isolation gate (PSL + scoping + dotless refusal), the
+/// 6265bis name prefixes, the 6.1 size cap, expiry resolution and
+/// the deletion flag. Shared by the flat Jar and the bucketed
+/// Profile so the two storage layers cannot drift on the gates.
+pub(crate) fn build_cookie<P>(
+    origin: &Origin,
+    sc: &SetCookie,
+    now: i64,
+    is_public_suffix: &P,
+) -> Result<(Cookie, bool), Reject>
+where
+    P: Fn(&str) -> bool,
+{
+    let host = origin.host.as_str();
+    if sc.same_site == Some(SameSite::None) && !sc.secure {
+        return Err(Reject::SameSiteNoneWithoutSecure);
+    }
+    if sc.secure && !is_secure_origin(origin) {
+        return Err(Reject::SecureFromInsecureOrigin);
+    }
+    let (domain, host_only) = match &sc.domain {
+        Some(d) => (d.clone(), false),
+        None => (host.to_string(), true),
+    };
+    let path = sc
+        .path
+        .clone()
+        .unwrap_or_else(|| default_path(&origin.path));
+    if !host_only
+        && (is_public_suffix(&domain)
+            || !domain_match(host, &domain)
+            || (!domain.contains('.') && domain != host))
+    {
+        return Err(Reject::Domain);
+    }
+    if (sc.name.starts_with("__Secure-") || sc.name.starts_with("__Host-")) && !sc.secure {
+        return Err(Reject::PrefixRequiresSecure);
+    }
+    if sc.name.starts_with("__Host-") && (!host_only || path != "/") {
+        return Err(Reject::HostPrefixRequiresRoot);
+    }
+    let is_deletion = match sc.max_age {
+        Some(m) => m <= 0,
+        None => sc.expires.is_some_and(|t| t <= now),
+    };
+    let expiry = sc
+        .max_age
+        .map(|m| now + m * 1000)
+        .unwrap_or(sc.expires.unwrap_or(0));
+    /* 6.1 size gate: UTF-8 bytes of name+value. Deletions
+    are never size-gated, so an oversized cookie can still
+    be cleaned up. */
+    if !is_deletion && sc.name.len() + sc.value.len() > COOKIE_MAX_BYTES {
+        return Err(Reject::Size);
+    }
+    let fresh = Cookie {
+        name: sc.name.clone(),
+        value: sc.value.clone(),
+        domain: domain.clone(),
+        host_only,
+        path,
+        secure: sc.secure,
+        http_only: sc.http_only,
+        same_site: sc.same_site,
+        expires: expiry,
+        created: now,
+    };
+    Ok((fresh, is_deletion))
 }
 
 #[derive(Default, Debug)]
@@ -175,59 +247,9 @@ impl Jar {
     where
         P: Fn(&str) -> bool,
     {
-        let host = origin.host.as_str();
-        if sc.same_site == Some(SameSite::None) && !sc.secure {
-            return StoreOutcome::Rejected(Reject::SameSiteNoneWithoutSecure);
-        }
-        if sc.secure && !is_secure_origin(origin) {
-            return StoreOutcome::Rejected(Reject::SecureFromInsecureOrigin);
-        }
-        let (domain, host_only) = match &sc.domain {
-            Some(d) => (d.clone(), false),
-            None => (host.to_string(), true),
-        };
-        let path = sc
-            .path
-            .clone()
-            .unwrap_or_else(|| default_path(&origin.path));
-        if !host_only
-            && (is_public_suffix(&domain)
-                || !domain_match(host, &domain)
-                || (!domain.contains('.') && domain != host))
-        {
-            return StoreOutcome::Rejected(Reject::Domain);
-        }
-        if (sc.name.starts_with("__Secure-") || sc.name.starts_with("__Host-")) && !sc.secure {
-            return StoreOutcome::Rejected(Reject::PrefixRequiresSecure);
-        }
-        if sc.name.starts_with("__Host-") && (!host_only || path != "/") {
-            return StoreOutcome::Rejected(Reject::HostPrefixRequiresRoot);
-        }
-        let is_deletion = match sc.max_age {
-            Some(m) => m <= 0,
-            None => sc.expires.is_some_and(|t| t <= now),
-        };
-        let expiry = sc
-            .max_age
-            .map(|m| now + m * 1000)
-            .unwrap_or(sc.expires.unwrap_or(0));
-        /* 6.1 size gate: UTF-8 bytes of name+value. Deletions
-        are never size-gated, so an oversized cookie can still
-        be cleaned up. */
-        if !is_deletion && sc.name.len() + sc.value.len() > COOKIE_MAX_BYTES {
-            return StoreOutcome::Rejected(Reject::Size);
-        }
-        let fresh = Cookie {
-            name: sc.name.clone(),
-            value: sc.value.clone(),
-            domain: domain.clone(),
-            host_only,
-            path,
-            secure: sc.secure,
-            http_only: sc.http_only,
-            same_site: sc.same_site,
-            expires: expiry,
-            created: now,
+        let (fresh, is_deletion) = match build_cookie(origin, sc, now, &is_public_suffix) {
+            Ok(x) => x,
+            Err(r) => return StoreOutcome::Rejected(r),
         };
         if is_deletion {
             let mut removed: Option<Cookie> = None;

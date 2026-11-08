@@ -2654,6 +2654,16 @@ name = "zeolite-cookies"
 version = "3.0.1"
 
 [[package]]
+name = "zeolite-cookies-wasm"
+version = "3.0.1"
+dependencies = [
+ "js-sys",
+ "serde_json",
+ "wasm-bindgen",
+ "zeolite-cookies",
+]
+
+[[package]]
 name = "zeolite-csp"
 version = "3.0.1"
 

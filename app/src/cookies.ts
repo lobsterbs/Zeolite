@@ -31,6 +31,7 @@ import { traceDecision } from "./tracing";
 import { openDb, idbGet, idbPut, STORE_COOKIES } from "./extensions/idb";
 
 import { getDomain, getPublicSuffix } from "tldts";
+import { initCookiesWasmGlue, type CookiesWasmCore } from "./cookieswasm";
 
 export type SameSite = "strict" | "lax" | "none";
 
@@ -210,6 +211,72 @@ export function registerOrigin(origin: string): VirtualOrigin {
 /** jar key = virtual-origin id of the origin the cookie was SET from. */
 const jars = new Map<string, Cookie[]>();
 
+/* ---- #614: the wasm jar arm -------------------------------------------
+
+   zeolite-cookies-wasm (crates/cookies-wasm) is the WORKING jar: one
+   Profile per cookie namespace inside the wasm registry, driven by
+   the seams below. This module keeps persistence, profile
+   assignment, the facade surfaces and the origin registry TS-side;
+   every seam branches on wasmCore and keeps its TS body verbatim as
+   the fail-safe fallback, so a missing, older or failed module can
+   never regress jar behavior. The cutover is one synchronous
+   handoff: the live TS jars are grouped by namespace, replaceNs'd
+   into the wasm registry, and the TS map is emptied. */
+
+let wasmCore: CookiesWasmCore | null = null;
+
+/** Wasm store outcome (storeBatch element): the SetCookieResult
+    shape plus the admission sweep's evicted cookies. */
+interface WasmOutcome {
+  name: string;
+  stored: boolean;
+  deleted: boolean;
+  rejected?: string;
+  cookie?: Cookie | null;
+  replaced?: boolean;
+  evicted?: Cookie[];
+}
+
+/** Group the live TS jars map by cookie namespace, the shape the
+    wasm registry imports. */
+function jarsByNamespace(): Map<string, Array<[string, Cookie[]]>> {
+  const groups = new Map<string, Array<[string, Cookie[]]>>();
+  for (const [key, list] of jars) {
+    const sep = key.indexOf(SEP);
+    const ns = sep < 0 ? PROFILE_DEFAULT : key.slice(0, sep);
+    const id = sep < 0 ? key : key.slice(sep + 1);
+    let g = groups.get(ns);
+    if (!g) groups.set(ns, (g = []));
+    g.push([id, list]);
+  }
+  return groups;
+}
+
+/** Hand the live TS jars to the wasm registry and drop the TS map:
+    the boot cutover, and jarLoad when a restore lands after it. */
+function migrateJarsIntoWasm(core: CookiesWasmCore): void {
+  for (const [ns, entries] of jarsByNamespace()) core.replaceNs(ns, JSON.stringify(entries));
+  jars.clear();
+}
+
+/** #614: bring the wasm jar arm live: instantiate the glue, wrap the
+    tldts predicate so a throwing PSL can never abort the wasm (it
+    fails closed), then cut over in one synchronous step. A failure
+    at any point leaves wasmCore null with the TS map untouched, so
+    every seam keeps its TS body. */
+export async function initCookiesWasm(): Promise<void> {
+  const core = await initCookiesWasmGlue();
+  core.setPsl((d: string) => {
+    try {
+      return isPublicSuffix(d);
+    } catch {
+      return true;
+    }
+  });
+  migrateJarsIntoWasm(core);
+  wasmCore = core;
+}
+
 /* ---- jar profiles (host app, zl:jarProfile) --------------------------
    One engine origin serves one host app instance; the host can switch
    the whole jar between the durable "default" profile and a throwaway
@@ -376,6 +443,10 @@ function inProfile(key: string, namespace = PROFILE_DEFAULT): boolean {
 }
 
 function clearNamespace(namespace: string): void {
+  if (wasmCore) {
+    wasmCore.clearNs(namespace);
+    return;
+  }
   for (const key of [...jars.keys()]) if (key.startsWith(namespace + SEP)) jars.delete(key);
 }
 
@@ -809,7 +880,105 @@ function noteEvictions(removed: Cookie[], namespace: string): void {
     Rejects (hard gate) any cookie whose Domain does not scope the
     response host. Deletion follows max-age<=0 or an already-past
     expiry. */
+/** Mirror the TS rejection DIAG rows for each wasm reject reason, so
+    the observable diagnostics never depend on which arm is live. */
+function emitWasmRejection(reason: string, name: string, responseUrl: string): void {
+  switch (reason) {
+    case "malformed":
+      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: malformed" });
+      return;
+    case "control character":
+      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: control character in name or value" });
+      return;
+    case "samesite none without secure":
+      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: samesite none without secure" });
+      return;
+    case "secure from insecure origin":
+      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: secure cookie from insecure origin" });
+      return;
+    case "domain":
+      DIAG.emit({
+        category: "COOKIE",
+        cause: "blocked",
+        severity: "warning",
+        message: "set-cookie rejected: domain does not scope response host",
+        url: responseUrl,
+      });
+      traceDecision({ subsystem: "cookies", original: responseUrl, result: "rejected:domain " + name });
+      return;
+    case "prefix requires secure":
+      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: __Secure- or __Host- prefix without secure" });
+      return;
+    case "__Host- requires host-only and path /":
+      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: __Host- prefix needs host-only and path /" });
+      return;
+    case "size":
+      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: name+value exceed the 4096-byte limit" });
+      traceDecision({ subsystem: "cookies", original: responseUrl, result: "rejected:size " + name });
+      return;
+    case "httponly":
+      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "document.cookie write refused: HttpOnly cookie" });
+      return;
+  }
+}
+
+/** Map one wasm store outcome onto the SetCookieResult the TS seam
+    produces, with the same evictions, notifications, persistence
+    and trace rows. */
+function wasmOutcomeToResult(o: WasmOutcome, namespace: string, responseUrl: string, fromScript: boolean): SetCookieResult {
+  if (o.stored && o.cookie) {
+    noteEvictions(o.evicted ?? [], namespace);
+    schedulePersist();
+    traceDecision({ subsystem: "cookies", original: responseUrl, result: "stored " + o.cookie.name });
+    const result: SetCookieResult = { name: o.name, stored: true, deleted: false, cookie: o.cookie, replaced: !!o.replaced, namespace };
+    noteJarChange(result, responseUrl, fromScript);
+    return result;
+  }
+  if (o.deleted) {
+    schedulePersist();
+    traceDecision({ subsystem: "cookies", original: responseUrl, result: "deleted " + o.name });
+    const result: SetCookieResult = { name: o.name, stored: false, deleted: true, cookie: o.cookie ?? undefined, replaced: true, namespace };
+    noteJarChange(result, responseUrl, fromScript);
+    return result;
+  }
+  if (o.rejected) {
+    emitWasmRejection(o.rejected, o.name, responseUrl);
+    return { name: o.name, stored: false, deleted: false, rejected: o.rejected };
+  }
+  return { name: o.name, stored: false, deleted: false };
+}
+
+/** Parse and admit one Set-Cookie header: the wasm arm when live,
+    the TS body otherwise - and whenever the wasm answer is unusable
+    (a URL the wasm cannot parse, or a batch answer that is not
+    exactly one outcome), the TS body answers instead. */
 function admitCookie(
+  responseUrl: string,
+  header: string,
+  fromScript = false,
+  namespace = PROFILE_DEFAULT,
+): SetCookieResult {
+  const core = wasmCore;
+  if (core) {
+    const u = parseUrl(responseUrl);
+    if (u) {
+      const bucket = registerOrigin(u.origin).id;
+      const batch = core.storeBatch(namespace, bucket, responseUrl, JSON.stringify([header]), fromScript, Date.now());
+      let outcomes: WasmOutcome[] | null = null;
+      try {
+        const parsed = JSON.parse(batch) as unknown;
+        if (Array.isArray(parsed) && parsed.length === 1) outcomes = parsed as WasmOutcome[];
+      } catch {
+        /* fall through to the TS body */
+      }
+      if (outcomes) return wasmOutcomeToResult(outcomes[0], namespace, responseUrl, fromScript);
+    }
+  }
+  return admitCookieTs(responseUrl, header, fromScript, namespace);
+}
+
+/* The TS admission body, verbatim: the fail-safe fallback. */
+function admitCookieTs(
   responseUrl: string,
   header: string,
   fromScript = false,
@@ -1107,6 +1276,18 @@ export function applySetCookie(responseUrl: string, headers: Headers, clientId?:
 export function cookieHeaderFor(requestUrl: string, ctx?: CookieRequestContext): string | null {
   const u = parseUrl(requestUrl);
   if (!u) return null;
+  if (wasmCore) {
+    /* #614: the wasm purges the active namespace's expired cookies
+       (the TS body purges across every namespace; session jars are
+       in-memory either way, so persistence is unaffected) and the
+       TS-side SameSite policy still gates the attach. */
+    const namespace = namespaceForClient(ctx?.clientId);
+    if (namespace === UNBOUND_GLOBAL_NAMESPACE) return null;
+    const r = JSON.parse(wasmCore.matchRequest(namespace, requestUrl, Date.now())) as { matched: Cookie[]; purged: Cookie[] };
+    if (r.purged.length) schedulePersist();
+    const matched = r.matched.filter((c) => sameSiteAllows(c, u, ctx));
+    return matched.length ? matched.map((c) => c.name + "=" + c.value).join("; ") : null;
+  }
   const now = Date.now();
   let purged = false;
   for (const [key, list] of jars) {
@@ -1164,6 +1345,9 @@ function matchDocumentCookies(pageUrl: string, clientId?: string): Cookie[] {
   const namespace = namespaceForClient(clientId);
   /* #366: the shared unbound namespace admits nothing on any seam. */
   if (namespace === UNBOUND_GLOBAL_NAMESPACE) return [];
+  if (wasmCore) {
+    return JSON.parse(wasmCore.matchDocument(namespace, pageUrl, Date.now())) as Cookie[];
+  }
   const matched: Cookie[] = [];
   for (const [key, list] of jars) {
     if (!inProfile(key, namespace)) continue;
@@ -1284,6 +1468,19 @@ export function jarRemoveIdentities(
   ids: Array<{ name: string; domain: string; hostOnly: boolean; path: string }>,
   clientId?: string,
 ): number {
+  if (wasmCore) {
+    const removed = wasmCore.removeIdentities(
+      clientId ? namespaceForClient(clientId) : PROFILE_DEFAULT,
+      JSON.stringify(ids),
+    );
+    if (removed > 0) {
+      schedulePersist();
+      for (const i of ids) {
+        traceDecision({ subsystem: "cookies", original: "browser.cookies.remove", result: "api-removed " + i.name });
+      }
+    }
+    return removed;
+  }
   const sameIdentity = (c: Cookie) =>
     ids.some(
       (i) => i.name === c.name && i.domain === c.domain && i.hostOnly === c.hostOnly && i.path === c.path,
@@ -1313,6 +1510,11 @@ export function jarRemoveIdentities(
 export function jarSnapshot(clientId?: string): Map<string, Cookie[]> {
   const out = new Map<string, Cookie[]>();
   const namespace = namespaceForClient(clientId);
+  if (wasmCore) {
+    const entries = JSON.parse(wasmCore.exportNs(namespace)) as Array<[string, Cookie[]]>;
+    for (const [id, list] of entries) out.set(id, list.map((c) => ({ ...c })));
+    return out;
+  }
   for (const [k, v] of jars) {
     if (!inProfile(k, namespace)) continue;
     const id = k.includes(SEP) ? k.slice(k.indexOf(SEP) + 1) : k;
@@ -1353,18 +1555,33 @@ export interface JarProfileView {
 export function jarEnumeration(clientId?: string): JarProfileView[] {
   const byProfile = new Map<string, Map<string, Cookie[]>>();
   const activeNamespace = namespaceForClient(clientId);
-  for (const [k, list] of jars) {
-    const sep = k.indexOf(SEP);
-    const namespace = sep < 0 ? PROFILE_DEFAULT : k.slice(0, sep);
-    if (clientId && namespace !== activeNamespace) continue;
-    const pid = profileNameForNamespace(namespace);
-    const id = sep < 0 ? k : k.slice(sep + 1);
-    let m = byProfile.get(pid);
-    if (!m) {
-      m = new Map<string, Cookie[]>();
-      byProfile.set(pid, m);
+  if (wasmCore) {
+    const all: Array<[string, Array<[string, Cookie[]]>]> = clientId
+      ? [[activeNamespace, JSON.parse(wasmCore.exportNs(activeNamespace)) as Array<[string, Cookie[]]>]]
+      : Object.entries(JSON.parse(wasmCore.exportAll()) as Record<string, Array<[string, Cookie[]]>>);
+    for (const [ns, entries] of all) {
+      const pid = profileNameForNamespace(ns);
+      let m = byProfile.get(pid);
+      if (!m) {
+        m = new Map<string, Cookie[]>();
+        byProfile.set(pid, m);
+      }
+      for (const [id, list] of entries) m.set(id, list);
     }
-    m.set(id, list);
+  } else {
+    for (const [k, list] of jars) {
+      const sep = k.indexOf(SEP);
+      const namespace = sep < 0 ? PROFILE_DEFAULT : k.slice(0, sep);
+      if (clientId && namespace !== activeNamespace) continue;
+      const pid = profileNameForNamespace(namespace);
+      const id = sep < 0 ? k : k.slice(sep + 1);
+      let m = byProfile.get(pid);
+      if (!m) {
+        m = new Map<string, Cookie[]>();
+        byProfile.set(pid, m);
+      }
+      m.set(id, list);
+    }
   }
   const active = activeProfile(clientId);
   if (!byProfile.has(active)) byProfile.set(active, new Map<string, Cookie[]>());
@@ -1385,6 +1602,17 @@ export function jarEnumeration(clientId?: string): JarProfileView[] {
 /** Extension background contexts do not carry a trustworthy window
     client id, so browser.cookies sees only the durable shared jar. */
 export function jarDefaultEnumeration(): JarProfileView[] {
+  if (wasmCore) {
+    const views: JarOriginView[] = [];
+    let count = 0;
+    const entries = JSON.parse(wasmCore.exportNs(PROFILE_DEFAULT)) as Array<[string, Cookie[]]>;
+    for (const [id, list] of entries) {
+      count += list.length;
+      views.push({ origin: originById.get(id) ?? null, id, cookies: list.map((c) => ({ ...c })) });
+    }
+    views.sort((a, b) => (a.origin ?? a.id).localeCompare(b.origin ?? b.id));
+    return [{ profile: PROFILE_DEFAULT, active: true, cookies: count, origins: views }];
+  }
   const origins = new Map<string, Cookie[]>();
   for (const [key, list] of jars) {
     if (!inProfile(key, PROFILE_DEFAULT)) continue;
@@ -1428,6 +1656,21 @@ export function jarClearScope(
   } else {
     id = originIdOf(origin);
     if (id === null) return { ok: false, error: "invalid origin", jars: 0, cookies: 0 };
+  }
+  if (wasmCore) {
+    const namespace = namespaceForProfile(pid, rootOf(clientId));
+    let jarsCleared = 0;
+    let cookiesCleared = 0;
+    if (id === null) {
+      const cleared = JSON.parse(wasmCore.clearNs(namespace)) as { jars: number; cookies: number };
+      jarsCleared = cleared.jars;
+      cookiesCleared = cleared.cookies;
+    } else {
+      cookiesCleared = wasmCore.clearBucket(namespace, id);
+      jarsCleared = cookiesCleared > 0 ? 1 : 0;
+    }
+    if (jarsCleared > 0 && pid === PROFILE_DEFAULT) schedulePersist();
+    return { ok: true, jars: jarsCleared, cookies: cookiesCleared };
   }
   let jarsCleared = 0;
   let cookiesCleared = 0;
@@ -1508,10 +1751,16 @@ export async function jarPersist(): Promise<void> {
   /* #598: persist-time enforcement bounds the durable record even when
      an over-cap jar reached memory through a host import or an older
      engine's restore. Evictions ride the same write (no re-schedule). */
-  noteEvictions(sweepJarLimits(PROFILE_DEFAULT), PROFILE_DEFAULT);
+  noteEvictions(
+    wasmCore
+      ? (JSON.parse(wasmCore.sweep(PROFILE_DEFAULT, Date.now())) as Cookie[])
+      : sweepJarLimits(PROFILE_DEFAULT),
+    PROFILE_DEFAULT,
+  );
   const db = await openDb();
-  const entries: Array<[string, Cookie[]]> = [];
-  for (const [k, v] of jars) if (!k.includes(SEP)) entries.push([k, v]);
+  const entries: Array<[string, Cookie[]]> = wasmCore
+    ? (JSON.parse(wasmCore.exportNs(PROFILE_DEFAULT)) as Array<[string, Cookie[]]>)
+    : ([...jars].filter(([k]) => !k.includes(SEP)) as Array<[string, Cookie[]]>);
   await idbPut(db, STORE_COOKIES, "jar", entries);
   /* #41: the id -> origin map rides along as its own record so
      enumeration can name origins after a restart.
@@ -1547,6 +1796,12 @@ function isStoredCookie(c: unknown): c is Cookie {
 /** Restore the persisted jar (SW activate). Storage failures mean an
     in-memory jar, never an engine failure. */
 export async function jarLoad(): Promise<void> {
+  /* #614: a restore that lands after the cutover wipes the wasm
+     registry first (jarLoad replaces the WHOLE jar state, session
+     namespaces included) and hands the restored records back at the
+     end; before the cutover the records simply sit in the TS map the
+     cutover migrates. */
+  if (wasmCore) wasmCore.clearAll();
   try {
     const db = await openDb();
     const rec = (await idbGet(db, STORE_COOKIES, "jar")) as Array<[string, Cookie[]]> | undefined;
@@ -1621,6 +1876,7 @@ export async function jarLoad(): Promise<void> {
         }
       }
     }
+    if (wasmCore) migrateJarsIntoWasm(wasmCore);
   } catch {
     /* storage unavailable: the jar stays in memory */
   }
@@ -1640,6 +1896,18 @@ function validImportKey(k: unknown): k is string {
     is persisted right away. */
 export function jarReplace(entries: Array<[string, unknown[]]>, clientId?: string): void {
   const namespace = namespaceForClient(clientId);
+  if (wasmCore) {
+    const clean: Array<[string, Cookie[]]> = [];
+    for (const entry of entries) {
+      if (Array.isArray(entry) && validImportKey(entry[0]) && Array.isArray(entry[1])) {
+        const list = entry[1].filter(isStoredCookie);
+        if (list.length) clean.push([entry[0], list]);
+      }
+    }
+    wasmCore.replaceNs(namespace, JSON.stringify(clean));
+    runPersist().catch(persistDiag);
+    return;
+  }
   for (const key of [...jars.keys()]) if (inProfile(key, namespace)) jars.delete(key);
   for (const entry of entries) {
     if (Array.isArray(entry) && validImportKey(entry[0]) && Array.isArray(entry[1])) {
@@ -1662,6 +1930,18 @@ export function jarMerge(
   rule: JarConflictRule,
   clientId?: string,
 ): { jars: number; cookies: number; conflicts: number } {
+  if (wasmCore) {
+    const namespace = namespaceForClient(clientId);
+    const clean: Array<[string, Cookie[]]> = [];
+    for (const entry of entries) {
+      if (!Array.isArray(entry) || !validImportKey(entry[0]) || !Array.isArray(entry[1])) continue;
+      const list = entry[1].filter(isStoredCookie);
+      if (list.length) clean.push([entry[0], list]);
+    }
+    const r = JSON.parse(wasmCore.mergeNs(namespace, JSON.stringify(clean), rule)) as { jars: number; cookies: number; conflicts: number };
+    runPersist().catch(persistDiag);
+    return r;
+  }
   let jarsTouched = 0;
   let cookies = 0;
   let conflicts = 0;
@@ -1706,6 +1986,7 @@ export function jarMerge(
 /** Teardown: cookies do not survive an engine switch. */
 export function jarClear(): void {
   jars.clear();
+  if (wasmCore) wasmCore.clearAll();
   registry.clear();
   originById.clear();
   clientRoots.clear();
@@ -1722,6 +2003,8 @@ export function cookiesResetForTests(): void {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
+  if (wasmCore) wasmCore.clearAll();
+  wasmCore = null;
   jars.clear();
   registry.clear();
   originById.clear();

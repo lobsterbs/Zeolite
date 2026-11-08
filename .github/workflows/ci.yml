@@ -106,8 +106,17 @@ jobs:
           fi
           mkdir -p app/src/adblock_wasm
           cp crates/adblock/pkg/adblock_wasm* app/src/adblock_wasm/
+      - name: Build cookies wasm
+        run: |
+          if ! wasm-pack build crates/cookies-wasm --target web --release --out-name cookies_wasm > wasm5.out 2>&1; then
+            D=$(grep -m1 -A10 -i "error" wasm5.out | head -c 700 | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error::CKWASM%0A$D"
+            exit 1
+          fi
+          mkdir -p app/src/cookies_wasm
+          cp crates/cookies-wasm/pkg/cookies_wasm* app/src/cookies_wasm/
       - name: Measure wasm bundles (record; budget enforcement is the Phase 1 gate)
-        run: du -b app/src/rewriter_wasm/rewriter_wasm_bg.wasm app/src/wisp_wasm/wisp_wasm_bg.wasm app/src/seam_wasm/seam_wasm_bg.wasm app/src/adblock_wasm/adblock_wasm_bg.wasm
+        run: du -b app/src/rewriter_wasm/rewriter_wasm_bg.wasm app/src/wisp_wasm/wisp_wasm_bg.wasm app/src/seam_wasm/seam_wasm_bg.wasm app/src/adblock_wasm/adblock_wasm_bg.wasm app/src/cookies_wasm/cookies_wasm_bg.wasm
       - uses: actions/upload-artifact@v4
         with:
           name: zeolite-wasm
@@ -219,6 +228,7 @@ jobs:
           test -f app/dist/epoxy/epoxy.wasm
           test -f app/dist/seam_wasm_bg.wasm
           test -f app/dist/adblock_wasm_bg.wasm
+          test -f app/dist/cookies_wasm_bg.wasm
       - name: Bootstrap size budget (must stay under 28 KiB minified)
         # Raises are deliberate decisions recorded here, never quiet
         # accommodations; CI prints the measured size. Every raise bought
@@ -365,7 +375,7 @@ jobs:
         # against its own script URL.
         run: |
           cd app
-          PAT=$'["\']/(zlsw/)?(rewriter_wasm|wisp_wasm|seam_wasm|adblock_wasm|prelude|libcurl)'
+          PAT=$'["\']/(zlsw/)?(rewriter_wasm|wisp_wasm|seam_wasm|adblock_wasm|cookies_wasm|prelude|libcurl)'
           BAD=$(grep -oE ".{0,40}$PAT.{0,50}" dist/sw.js || true)
           if [ -n "$BAD" ]; then
             echo "$BAD" | head -9 | while IFS= read -r l; do echo "::error::SUBPATH origin-root asset URL in sw.js: $l"; done

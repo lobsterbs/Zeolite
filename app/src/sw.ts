@@ -32,7 +32,7 @@
    emitted by the build pipeline to src/rewriter_wasm/. */
 
 /// <reference lib="webworker" />
-import { jarLoad } from "./cookies";
+import { initCookiesWasm, jarLoad } from "./cookies";
 /* #90: the download registry (DL) lives in ./downloads; the boot
    below restores it and the request engine calls adoptResponse. */
 import { DL } from "./downloads";
@@ -125,6 +125,19 @@ initSeamWasm().catch((err) => {
     category: "SERVICE_WORKER",
     severity: "warning",
     message: "seam wasm init failed; TS fallbacks active",
+    technicalReason: String(err),
+  });
+});
+
+/* #614: the cookie jar wasm arm boots the same way - one attempt,
+   one DIAG row on failure. Every jar seam in cookies.ts keeps its
+   TS body as the fallback, so a failed init is a degradation, not
+   an error. */
+initCookiesWasm().catch((err) => {
+  DIAG.emit({
+    category: "SERVICE_WORKER",
+    severity: "warning",
+    message: "cookies wasm init failed; TS jar arm active",
     technicalReason: String(err),
   });
 });

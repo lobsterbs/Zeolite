@@ -1,0 +1,23 @@
+[package]
+name = "zeolite-cookies-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "wasm-bindgen wrapper over zeolite-cookies: the working cookie jar registry for the service worker (#614 wiring)"
+
+# The wasm arm of the cookie jar (#614): one Profile per cookie
+# namespace, driven by the TS seam (cookies.ts) which keeps
+# persistence, profiles and facade surfaces. cdylib for wasm-pack,
+# rlib so the native clippy and test gates cover it. The TS arm
+# stays the fail-safe fallback when the module is missing, older,
+# or its init failed. serde_json is already in the lock via
+# zeolite-adblock; js-sys carries the injected tldts predicate.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+js-sys = "0.3"
+serde_json = "1"
+wasm-bindgen = { workspace = true }
+zeolite-cookies = { path = "../cookies" }

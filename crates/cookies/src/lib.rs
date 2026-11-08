@@ -13,6 +13,7 @@
 pub mod date;
 pub mod jar;
 pub mod parse;
+pub mod profile;
 pub mod url;
 
 pub use date::parse_cookie_date;
@@ -20,4 +21,5 @@ pub use jar::{
     Cookie, Jar, Reject, StoreOutcome, COOKIE_MAX_BYTES, COOKIE_MAX_PER_DOMAIN, COOKIE_MAX_TOTAL,
 };
 pub use parse::{parse_set_cookie, ParseReject, SameSite, SetCookie};
+pub use profile::{CookieIdentity, MergeRule, Profile};
 pub use url::{parse_http_url, Origin};

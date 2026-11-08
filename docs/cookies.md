@@ -405,3 +405,35 @@ Cache refreshes and blocking revalidation use the normal transport policy.
 Redirect and final response cookies are admitted through the requesting
 client's profile, subject to Request.credentials. Background refreshes from
 different clients or credential contexts are not coalesced (#466/#467).
+
+## The wasm jar arm (#614)
+
+The RFC 6265 semantics live in Rust: crates/cookies (parsing, the 5.4
+matchers, jar bookkeeping, per-origin caps, profiles) behind
+crates/cookies-wasm, a wasm-bindgen registry keyed by cookie namespace.
+The service worker brings the arm live at boot (initCookiesWasm in
+cookies.ts): the glue module is statically imported and lazily
+instantiated, the tldts public-suffix predicate is injected (it fails
+closed: an unset or throwing predicate means every Domain attribute is
+refused), and the live TS jars are cut over in one synchronous handoff,
+grouped by namespace.
+
+Everything else stays TS-side on purpose: IndexedDB persistence,
+profile assignment, the origin registry, the facade surfaces, and the
+SameSite policy gate. Every jar seam branches on the live wasm core
+and keeps its TS body verbatim as the fail-safe fallback, so a missing,
+older, or failed wasm module can never regress jar behavior: a failed
+init emits one DIAG row (SERVICE_WORKER) and every seam keeps answering
+through the TS body.
+
+Honest divergences while both arms exist:
+
+- The wasm request-match purges expired cookies only in the active
+  namespace; the TS body purges across every namespace it walks.
+  Session jars are in-memory either way, so the durable record is
+  unaffected.
+- Merge rules are shared verbatim (import-wins, keep-newest,
+  keep-existing) and tested in both arms.
+- Rejection reasons are TS strings, mirrored one-to-one; the DIAG rows
+  for wasm rejections are emitted by cookies.ts, so observable
+  diagnostics never depend on which arm is live.
