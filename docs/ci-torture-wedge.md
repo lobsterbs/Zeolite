@@ -857,3 +857,21 @@ deterministic; only its firing is intermittent. Tracked in #514.
   same-job and cross-head corroboration. This docs-only commit is
   the recorded bounded retrigger per the operational notes; the
   pin gate stands.
+
+## Run 42429730777 (head 0dc0445a, the wedge-ledger retrigger)
+
+- rust/wasm/app/compat GREEN; browser red on the identical single
+  signature (one [FAIL] proxied frame timeout, the location-targeting
+  first openProxied). The docs-only retrigger reproduced the wedge
+  instead of clearing it; no new signature, no action.
+
+## Run 42476465345 (head 20d8421, the #609 strict-opacity ship)
+
+- rust/wasm/app/compat GREEN. Browser red on the identical single
+  signature: one [FAIL] proxied frame timeout on the spa ?url=
+  openProxied, byte-identical to the failure on 42429230444 (head
+  81f6c92, no #609 bytes), so the #609 changes are exonerated.
+  Side note: scheduled run 42472176104 (head 0dc0445a) failed its
+  wasm job; wasm is green on this head, so that was a transient
+  fetch flake, not a defect. This docs-only commit is the recorded
+  bounded retrigger per the operational notes.
