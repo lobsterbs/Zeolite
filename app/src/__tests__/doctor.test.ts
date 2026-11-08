@@ -309,3 +309,12 @@ describe("Doctor boot guard (#495)", () => {
     }
   });
 });
+
+
+describe("route custody fact (#609)", () => {
+  it("classifies keyed custody as pass, legacy as warn, unobserved as unknown", () => {
+    expect(check(buildDoctor(evidence({ routeCustody: "keyed" })), "route.custody").status).toBe("pass");
+    expect(check(buildDoctor(evidence({ routeCustody: "legacy" })), "route.custody").status).toBe("warn");
+    expect(check(buildDoctor(evidence()), "route.custody").status).toBe("unknown");
+  });
+});

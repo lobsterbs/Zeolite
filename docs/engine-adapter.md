@@ -55,8 +55,10 @@ export interface ZeoliteEngine {
   navigate(target: string): string;
   /** Opaque route for a destination (#55): the SW mints it with its
    *  realm-held key, so the destination never appears in a
-   *  page-visible URL; falls back to the legacy codec when no key is
-   *  active. */
+   *  page-visible URL. #609: no silent fallback - a strict-opacity
+   *  worker refuses a keyless mint and navigateOpaque rejects with
+   *  the worker's named reason; a compat-mode worker may answer a
+   *  legacy route and the reply's codec field says so. */
   navigateOpaque(target: string): Promise<string>;
   /** Enable/disable interception for one site (per-site toggle),
    *  acknowledged by the SW and persisted across SW restarts. */
@@ -73,6 +75,7 @@ interface EngineConfig {
   profile?: string;                       // cookie jar profile, default "default"
   httpsUpgrade?: boolean;                 // opt-in: upgrade http:// destinations before fetching (#53)
   navHandles?: boolean;                   // opt-in: refuse the plaintext ?url= embed; hosts navigate via zl:navHandle routes instead (#63)
+  strictOpacity?: boolean;               // opt-in (#609): a keyless worker refuses mints with a named reason instead of answering browser-decodable legacy routes; page-realm fallbacks keep serving but record opacity-downgrade diagnostic rows naming the site
 }
 ```
 
@@ -84,10 +87,10 @@ in `app/src/sw.ts`; the adapter-relevant subset:
 
 | message | payload | effect |
 | --- | --- | --- |
-| `zl:ping` | - | liveness probe (echoes version, degraded, route shape, httpsUpgrade, navHandles) |
-| `zl:config` | `prefix`, `httpsUpgrade?`, `navHandles?` | rotate the route prefix at runtime; the scheme is fixed to `"b64u"` since #32, any other `scheme` value is rejected. `httpsUpgrade` toggles the opt-in engine-side upgrade of http:// destinations (#53): absent keeps the persisted choice, the ack echoes the live value. `navHandles` toggles the opt-in refusal of the plaintext `?url=` embed (#63): with it on, a scope-root `/?url=` navigation is answered 403 and the host must navigate via `zl:navHandle` routes instead; absent keeps the persisted choice |
-| `zl:mint` | `dest` | mint an opaque route for a destination (#55): answers `{ ok, route }`; the SW-realm key never leaves the worker. Admitted to proxied pages as the #54 page-realm mint seam: a page can construct a legacy route for any destination itself, so minting grants no new capability; `dest` is bounded to absolute http(s) URLs (`mintableDest`). Consumers (navguard markers, worker-prelude inputs, bootstrap re-emission) are not yet migrated, see the #54 residuals |
-| `zl:navHandle` | `dest` | mint an opaque initial-navigation handle for a destination (#63, #54 design D): answers `{ ok, url }` where `url` is `/__zl_navh__/<keyed token>`, valid for a short TTL (120s), navigable like any engine route and decodable by nothing but the worker (the destination appears on no browser-visible surface). Host-only: a proxied-page sender gets the host-only refusal. Stateless: nothing is persisted, so a handle survives a SW restart and a route-key rotation (decode walks the key history). Without a route key (storage degraded) it refuses (`ok: false`) rather than answering a decodable legacy shape |
+| `zl:ping` | - | liveness probe (echoes version, degraded, route shape, httpsUpgrade, navHandles, strictOpacity and the live custody `keyed`/`legacy`) |
+| `zl:config` | `prefix`, `httpsUpgrade?`, `navHandles?`, `strictOpacity?` | rotate the route prefix at runtime; the scheme is fixed to `"b64u"` since #32, any other `scheme` value is rejected. `httpsUpgrade` toggles the opt-in engine-side upgrade of http:// destinations (#53): absent keeps the persisted choice, the ack echoes the live value. `navHandles` toggles the opt-in refusal of the plaintext `?url=` embed (#63): with it on, a scope-root `/?url=` navigation is answered 403 and the host must navigate via `zl:navHandle` routes instead; absent keeps the persisted choice. `strictOpacity` (#609) toggles strict opaque custody: with it on, a keyless worker refuses `zl:mint` with a named reason instead of answering a legacy route, and every fallback that serves a non-opaque shape records an opacity-downgrade diagnostic row naming the site; it persists with the route shape and the ack echoes it |
+| `zl:mint` | `dest` | mint an opaque route for a destination (#55): answers `{ ok, route, codec }` where `codec` is `"keyed"` or `"legacy"` (#609); the SW-realm key never leaves the worker. With `strictOpacity` on and no route key (storage degraded) it refuses with a named reason instead of a legacy route. Admitted to proxied pages as the #54 page-realm mint seam: a page can construct a legacy route for any destination itself, so minting grants no new capability; `dest` is bounded to absolute http(s) URLs (`mintableDest`). Consumers (navguard markers, worker-prelude inputs, bootstrap re-emission) are not yet migrated, see the #54 residuals |
+| `zl:navHandle` | `dest` | mint an opaque initial-navigation handle for a destination (#63, #54 design D): answers `{ ok, url, codec }` with `codec: "keyed"` where `url` is `/__zl_navh__/<keyed token>`, valid for a short TTL (120s), navigable like any engine route and decodable by nothing but the worker (the destination appears on no browser-visible surface). Host-only: a proxied-page sender gets the host-only refusal. Stateless: nothing is persisted, so a handle survives a SW restart and a route-key rotation (decode walks the key history). Without a route key (storage degraded) it refuses (`ok: false`) rather than answering a decodable legacy shape |
 | `zl:adblock` | `enabled` | global toggle for `/rules.kdl` and Ghostery network blocking |
 | `zl:rules` | `ua`, `rules` (`host`, `adblock`, `ua`) | host-app per-site adblock + User-Agent overrides (rules.ts) |
 | `zl:jarProfile` | `profile` (or null) | switch the cookie jar to a throwaway session profile (incognito; cookies.ts) |

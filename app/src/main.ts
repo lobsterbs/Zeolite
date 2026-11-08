@@ -67,7 +67,16 @@ if (!target) {
     status.style.display = "none";
     frame.style.display = "block";
     /* #55: the frame navigates an opaque route minted by the SW, so
-       the destination never appears in a browser-visible URL. */
-    frame.src = await engine.navigateOpaque(target);
+       the destination never appears in a browser-visible URL.
+       #609: a refused mint (strict opacity, keyless worker) or an
+       unreachable worker fails visibly here instead of silently
+       committing a legacy route. */
+    try {
+      frame.src = await engine.navigateOpaque(target);
+    } catch (err) {
+      frame.style.display = "none";
+      status.style.display = "block";
+      status.textContent = "Opaque navigation failed: " + String(err);
+    }
   })();
 }

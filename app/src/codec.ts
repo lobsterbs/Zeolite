@@ -186,6 +186,16 @@ export function setRouteKeys(b64s: string[]): void {
   routeKey = keys[0] ?? null;
 }
 
+/** #609: the live minting custody. "keyed" while a route key is
+    held, "legacy" when storage is unavailable and minting falls to
+    the browser-decodable legacy codec (the documented compat
+    mode). Strict-opacity hosts read this to tell a policy refusal
+    from a degraded one; the same fact names the codec of every
+    minted route in zl:mint replies. */
+export function routeCodec(): "keyed" | "legacy" {
+  return routeKey ? "keyed" : "legacy";
+}
+
 const M64 = (1n << 64n) - 1n;
 function rotl64(v: bigint, n: number): bigint {
   return ((v << BigInt(n)) | (v >> BigInt(64 - n))) & M64;
