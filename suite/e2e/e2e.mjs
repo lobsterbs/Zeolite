@@ -2164,15 +2164,16 @@ async function main() {
   /* ---- #550 ship 2: Tier 2 DOM inspector, storage view, strict mode */
 
   /* ---- #544: WebSocket and WebRTC direct-vs-proxied fixtures -------
-     Placement note: a pre-existing engine wedge (issue #641, already
-     reproduced on pristine main) makes new proxied page opens
-     intermittently exceed the 45s frame wait once the engine has
-     been up for a few minutes, so engine-needing checks this late
-     in the suite can fail on wedge timing alone. Documented, not
-     hidden; #641 owns the fix. */
+     Correction note: the first revision of these checks opened
+     landing.html but kept openProxied's default #zl-marker wait,
+     which only page.html carries, so they timed out by construction
+     on a healthy engine - in every local and CI run alike. The
+     "#641 wedge" was the same authoring bug in the repro probe;
+     #641 is closed as a false alarm. The checks now wait for the
+     marker landing.html actually contains. */
 
   await check("ws: plaintext ws:// echo rides the bridge and matches the direct reply (#525/#544)", async () => {
-    const { page, frame } = await openProxied(ORIGIN_A + "/dir/landing.html");
+    const { page, frame } = await openProxied(ORIGIN_A + "/dir/landing.html", "#zl-landing");
     const proxied = await evalIn(frame, "proxied plaintext ws echo", wsEchoProbeJs("ws://127.0.0.1:7101/api/ws-echo", "zl544-plain", 30000), 35000);
     assert(proxied.echo === "zl544-plain", "proxied plaintext ws echo failed: " + JSON.stringify(proxied));
     const dctx = await browser.newContext();
@@ -2185,7 +2186,7 @@ async function main() {
   });
 
   await check("ws: proxied wss to a self-signed origin settles honestly within the open deadline, never a silent stall (#544)", async () => {
-    const { page, frame } = await openProxied(ORIGIN_A + "/dir/landing.html");
+    const { page, frame } = await openProxied(ORIGIN_A + "/dir/landing.html", "#zl-landing");
     const r = await evalIn(frame, "proxied wss", wsEchoProbeJs(ORIGIN_T + "/api/ws-echo", "zl544-secure", 40000), 45000);
     assert(!r.timeout, "proxied wss never settled within 40s: silent stall, got " + JSON.stringify(r));
     if (r.echo) return "echo (the transport verified the self-signed cert)";
@@ -2206,7 +2207,7 @@ async function main() {
   });
 
   await check("rtc: proxied pages expose no constructible RTCPeerConnection, the webkit- alias included; zl:ping reports unavailable (#544)", async () => {
-    const { page, frame } = await openProxied(ORIGIN_A + "/dir/landing.html");
+    const { page, frame } = await openProxied(ORIGIN_A + "/dir/landing.html", "#zl-landing");
     const rtc = await frame.evaluate(() => {
       const out = { unprefixed: typeof RTCPeerConnection, prefixed: typeof webkitRTCPeerConnection };
       try { new RTCPeerConnection({ iceServers: [] }); out.unprefixedConstructed = true; } catch (e) { out.unprefixedError = String(e); }
