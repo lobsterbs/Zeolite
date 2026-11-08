@@ -2232,7 +2232,9 @@ async function main() {
     eq(view.local.entries.length, 128, "local entries not capped at 128");
     eq(view.local.truncated, true, "truncated flag missing");
     const auth = view.local.entries.find((e) => e.k === "zl-di-auth");
-    assert(auth, "auth entry missing from the capped view");
+    assert(auth, "auth entry missing from the capped view: first keys " +
+      view.local.entries.slice(0, 5).map((e) => e.k).join(",") +
+      " (n=" + view.local.entries.length + ")");
     eq(auth.v, "token=[redacted]", "secret value not redacted");
     assert(JSON.stringify(view).indexOf("e2esecret") === -1, "raw secret leaked in the storage view");
     const ses = view.session.entries.find((e) => e.k === "zl-di-s1");

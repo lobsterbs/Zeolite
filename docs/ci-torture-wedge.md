@@ -935,3 +935,28 @@ deterministic; only its firing is intermittent. Tracked in #514.
   documented position-random transport wedge (#514), engine bytes
   exonerated on the identical-bytes comparison. The #550 ship push
   carries this record.
+
+
+## Run 42505372055 (head a54c97aa, the #550 ship 2)
+
+- rust/wasm/app/compat GREEN. Browser red, 61 passed / 8 failed:
+  the documented 42484780007 cluster verbatim (first victim the #545
+  worker-fetch initiator probe, then the shared-worker relay, #453
+  identities, storage round-trip, jar-backed document.cookie,
+  Set-Cookie capture and cookieStore goto timeouts), the wedge
+  clearing at the Cache API check with every later engine-side
+  check green.
+- The 8th failure is the NEW #550 storage-view e2e check ("auth
+  entry missing from the capped view"): the same check passed twice
+  in full local suite runs on these exact bytes (69 passed / 0
+  failed, real Chromium), the cap assertions that precede it
+  (exactly 128 entries, truncated) passed in the same reply, and
+  the check's write order pins zl-di-auth first, where
+  insertion-order enumeration must surface it inside a 128-entry
+  cap, so the reply described a page state the check's own writes
+  cannot produce in a healthy realm. Not yet classifiable as wedge
+  collateral (the surrounding window had recovered) and not yet
+  classifiable as a #550 defect (green twice locally); this
+  harness-only retrigger adds the first-keys dump to the assert so
+  a recurrence is diagnosable, and the next run's verdict
+  disambiguates.
