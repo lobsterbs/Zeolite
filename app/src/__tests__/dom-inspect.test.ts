@@ -800,10 +800,15 @@ describe("bridge storage view (#550 ship 2)", () => {
     expect(local.entries).toHaveLength(128);
     expect(local.truncated).toBe(true);
     expect(local.entries[0]).toEqual({ k: "auth", v: "token=[redacted]" });
-    /* the 128-char key cap also loses the value: the truncated key no
-       longer matches the real 200-char key, so the view reports empty */
-    expect(local.entries[1].k).toHaveLength(128);
-    expect(local.entries[1].v).toBe("");
+    /* the view SORTS (#550 follow-up): the facade enumerates in hash
+       order, so the capped window is deterministic, ascending, and
+       the lexicographic key order puts key-0 and key-1 right after
+       auth while the 200-char k-key sorts last, outside the cap */
+    expect(local.entries[1]).toEqual({ k: "key-0", v: "v0" });
+    expect(local.entries[2]).toEqual({ k: "key-1", v: "v1" });
+    expect(local.entries[3]).toEqual({ k: "key-10", v: "v10" });
+    expect(local.entries).toHaveLength(128);
+    for (const e of local.entries) expect(e.k.length).toBeLessThan(128);
     const session = view(reply, "session");
     expect(session).toMatchObject({ unavailable: false, truncated: false });
     expect(session.entries).toEqual([{ k: "s1", v: "sessionval" }]);
@@ -824,6 +829,50 @@ describe("bridge storage view (#550 ship 2)", () => {
     expect(reply.ok).toBe(true);
     expect(view(reply, "local")).toMatchObject({ unavailable: true, truncated: false, entries: [] });
     expect(view(reply, "session").unavailable).toBe(false);
+  });
+
+  it("sorts the capped view so a hash-ordered facade cannot change it (#550 follow-up)", async () => {
+    const realm = makeRealm();
+    realm.setRoot(el("HTML"));
+    /* the live defect, replayed: key(i) returns hash order, not
+       insertion order (observed on real Chromium as zl-di-key-20,
+       115, 82, 97, 197 with the first-written auth entry lost from
+       the cap), so the view must not be order-faithful */
+    const scrambled = [
+      "zl-di-key-20", "zl-di-auth", "zl-di-key-115", "zl-di-key-82",
+      "zl-di-key-97", "zl-di-key-197",
+    ];
+    for (let i = 0; i < 300; i++) scrambled.push("zl-di-key-" + i);
+    const backing = new Map<string, string>();
+    for (const k of scrambled) backing.set(k, "v-" + k);
+    (realm.w as Record<string, unknown>).localStorage = {
+      get length() {
+        return scrambled.length;
+      },
+      key: (i: number) => scrambled[i] ?? null,
+      getItem: (k: string) => backing.get(k) ?? null,
+    };
+    realm.dispatch({ type: "zl:domInspectCtl", on: true, storage: true }, []);
+    const reply = await ask(realm, { type: "zl:domInspectReq", op: "storage" });
+    const local = view(reply, "local");
+    expect(local.unavailable).toBe(false);
+    expect(local.entries).toHaveLength(128);
+    expect(local.truncated).toBe(true);
+    expect(local.entries[0].k).toBe("zl-di-auth");
+    const ks = local.entries.map((e) => e.k);
+    expect(ks).toEqual([...ks].sort());
+  });
+
+  it("keeps the value of an over-length key via the raw lookup (#550 follow-up)", async () => {
+    const realm = makeRealm();
+    realm.setRoot(el("HTML"));
+    realm.local.set("k".repeat(200), "x");
+    realm.dispatch({ type: "zl:domInspectCtl", on: true, storage: true }, []);
+    const reply = await ask(realm, { type: "zl:domInspectReq", op: "storage" });
+    const local = view(reply, "local");
+    expect(local.entries).toHaveLength(1);
+    expect(local.entries[0].k).toHaveLength(128);
+    expect(local.entries[0].v).toBe("x");
   });
 
   it("caps values at 500 characters", async () => {

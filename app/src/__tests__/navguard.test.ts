@@ -85,6 +85,7 @@ function makeEnv() {
     HTMLLinkElement: { prototype: link.proto },
     HTMLScriptElement: { prototype: script.proto },
     RTCPeerConnection: function RTCPeerConnection() {},
+    webkitRTCPeerConnection: function webkitRTCPeerConnection() {},
     open: openFake,
   };
   applyNavGuard(w, LOC, ENGINE);
@@ -211,9 +212,10 @@ describe("applyNavGuard", () => {
     expect(e.submitted).toEqual(["submit", "requestSubmit"]);
   });
 
-  it("removes RTCPeerConnection entirely", () => {
+  it("removes RTCPeerConnection and its webkit- alias entirely (#544)", () => {
     const e = makeEnv();
     expect("RTCPeerConnection" in e.w).toBe(false);
+    expect("webkitRTCPeerConnection" in e.w).toBe(false);
   });
 
   it("overrides document.referrer to the empty string (#32/#35)", () => {

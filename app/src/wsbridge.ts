@@ -101,6 +101,8 @@ interface Conn {
   /* Keepalive watchdog state (#61): interval handle, consecutive
      unanswered pings, pong timestamp seen at the previous tick. */
   ka?: ReturnType<typeof setInterval>;
+  /* #544: open-phase deadline handle, cleared at onopen and at end(). */
+  openDeadline?: ReturnType<typeof setTimeout>;
   missed: number;
   lastPong: number;
   /* #546: the transport-accepted watermark already acknowledged to
@@ -113,12 +115,18 @@ export interface WsBridgeOptions {
   keepaliveIntervalMs?: number;
   /** Consecutive unanswered pings before an abnormal close. */
   keepaliveMisses?: number;
+  /** #544: open-phase deadline in ms (default 20s, 0 disables). The
+      transports surface no lifecycle events, so a handshake that can
+      never settle (a wss target whose TLS the transport cannot verify)
+      must fail honestly instead of stalling the page socket. */
+  openTimeoutMs?: number;
 }
 
 export class WsBridge {
   private conns = new Map<PortLike, Conn>();
   private kaInterval: number;
   private kaMisses: number;
+  private openMs: number;
 
   constructor(
     private factory: WsFactory,
@@ -127,6 +135,7 @@ export class WsBridge {
   ) {
     this.kaInterval = opts?.keepaliveIntervalMs ?? 30_000;
     this.kaMisses = opts?.keepaliveMisses ?? 2;
+    this.openMs = opts?.openTimeoutMs ?? 20_000;
   }
 
   get size(): number {
@@ -181,6 +190,10 @@ export class WsBridge {
       conn.handle = this.factory.open(target, protocols, {
         onopen: (protocol) => {
           if (this.conns.get(port) !== conn) return;
+          if (conn.openDeadline !== undefined) {
+            clearTimeout(conn.openDeadline);
+            conn.openDeadline = undefined;
+          }
           conn.ready = true;
           this.hooks.onReady(conn.token, protocol, Date.now() - conn.t0);
           this.hooks.trace({ subsystem: "websocket", original: target, result: "open", resource: "websocket" });
@@ -241,6 +254,17 @@ export class WsBridge {
       port.postMessage({ ev: "close", code: 1006, clean: false });
       port.close();
     }
+    if (this.openMs > 0 && this.conns.get(port) === conn) {
+      /* #544: the transports emit no lifecycle events, so a handshake
+         that never settles (a wss target whose TLS the transport
+         cannot verify) must fail honestly instead of stalling the
+         page socket - the same stall class #525 closed for ws://. */
+      conn.openDeadline = setTimeout(() => {
+        if (this.conns.get(port) !== conn || conn.ready) return;
+        port.postMessage({ ev: "error", error: "open timeout" });
+        this.end(port, 1006, false, "open timeout");
+      }, this.openMs);
+    }
   }
 
   /** Teardown: close and forget every live connection. */
@@ -293,6 +317,7 @@ export class WsBridge {
     const conn = this.conns.get(port);
     if (!conn) return;
     if (conn.ka !== undefined) clearInterval(conn.ka);
+    if (conn.openDeadline !== undefined) clearTimeout(conn.openDeadline);
     this.conns.delete(port);
     port.onmessage = null;
     // Detach first: close() may synchronously report onclose/onerror.

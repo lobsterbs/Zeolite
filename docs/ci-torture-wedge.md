@@ -960,3 +960,22 @@ deterministic; only its firing is intermittent. Tracked in #514.
   harness-only retrigger adds the first-keys dump to the assert so
   a recurrence is diagnosable, and the next run's verdict
   disambiguates.
+
+
+## Run 42506647348 (head a766be32, the #550 storage-view retrigger)
+
+- rust/wasm/app/compat GREEN. The e2e battery on the browser job ran
+  green: 69 passed / 0 failed; the job still closed red on the
+  torture battery, 19/1 on the img#uni direct-oracle check, the
+  documented flake signature of this battery, accepted per the 4/5
+  plus documented-signature bar.
+- The green storage-view check here was LUCK, not exoneration: the
+  42505372055 one-off reproduced during #544 local work, the
+  first-keys dump firing (zl-di-key-20,115,82,97,197, n=128, no
+  zl-di-auth, no insertion order). Root cause: the engine-backed
+  facade enumerates in hash order, so the order-faithful capped
+  view was nondeterministic across realms - the same store could
+  keep or lose the first-written key from the 128-cap. Fixed by
+  the sorted-view follow-up (dominspect-core sorts the swept keys
+  before capping, unit-pinned with a scrambled-order store) riding
+  the #544 push; this record rides the same push.

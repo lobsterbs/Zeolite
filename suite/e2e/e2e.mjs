@@ -21,12 +21,15 @@
       its 200: the response did come from the engine, so it is not an
       escape. The gate fails only on positive evidence.
 
-   Honest gaps (documented, not faked): WebSocket targets are skipped
-      (plaintext ws:// passes through since #525, but the local
-      fixture is plain HTTP and neither suite ships a ws endpoint, so
-      the bridge cannot be exercised here without a socket fixture)
-      and the SW-restart group is not covered -
-      see suite/e2e/README.md. The #36 rewriter constructs have
+   #544: the fixtures ship a plaintext ws:// echo endpoint (bridged
+      direct-vs-proxied) and a self-signed TLS origin for wss://. The
+      proxied wss arm cannot verify that cert inside the wasm
+      transport, so that check pins the honest bounded failure.
+      Honest gaps (documented, not faked): the SW-restart group is
+      not covered, and nothing pins engine health after the #550
+      dominspect group because the engine degrades there (#641) -
+      see suite/e2e/README.md. The #36 rewriter
+      constructs have
       real-Chromium checks below (meta refresh, iframe srcdoc, base
       href, srcset data URL candidates); SVG paint url() attributes
       are covered by the rewriter's Rust unit tests instead (a
@@ -43,7 +46,7 @@ import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright";
-import { startFixture, ORIGIN_A, ORIGIN_B } from "./fixtures.mjs";
+import { startFixture, startTlsFixture, ORIGIN_A, ORIGIN_B, ORIGIN_T } from "./fixtures.mjs";
 
 const ENGINE = "http://127.0.0.1:6002";
 const results = [];
@@ -54,6 +57,7 @@ let browser = null;
 let context = null;
 let fixtureA = null;
 let fixtureB = null;
+let fixtureT = null;
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
@@ -220,6 +224,13 @@ async function probeClientId(page, frame) {
   return row.clientId;
 }
 
+/* #544: one page-side ws round trip as an evalIn body. The in-page
+   promise settles on first echo, on close, or on its own deadline -
+   never a silent hang - so the checks can pin exact outcomes. */
+function wsEchoProbeJs(url, payload, timeoutMs) {
+  return "async () => new Promise((resolve) => { const out = { events: [] }; const ws = new WebSocket(" + JSON.stringify(url) + "); const done = (v) => { try { ws.close(); } catch (e) {} resolve(v); }; const t = setTimeout(() => done({ events: out.events, timeout: true }), " + timeoutMs + "); ws.onerror = () => out.events.push('error'); ws.onclose = (e) => { clearTimeout(t); done({ events: out.events, failed: { code: e.code, wasClean: e.wasClean, reason: e.reason } }); }; ws.onopen = () => { out.events.push('open'); ws.onmessage = (e) => { clearTimeout(t); done({ events: out.events, echo: e.data }); }; ws.onclose = (e) => out.events.push('close-after-open:' + e.code); ws.send(" + JSON.stringify(payload) + "); }; })";
+}
+
 async function startEngine() {
   const bin = resolve("target/release/zeolite-server");
   if (!existsSync(bin)) {
@@ -265,6 +276,7 @@ async function main() {
   console.log("== Zeolite browser E2E (issue #35) ==");
   fixtureA = await startFixture(7101);
   fixtureB = await startFixture(7102);
+  fixtureT = await startTlsFixture(7103);
   await startEngine();
 
   await check("engine serves the built bundle (index + sw.js)", async () => {
@@ -2151,6 +2163,108 @@ async function main() {
 
   /* ---- #550 ship 2: Tier 2 DOM inspector, storage view, strict mode */
 
+  /* ---- #544: WebSocket and WebRTC direct-vs-proxied fixtures -------
+     Placement note: a pre-existing engine wedge (issue #641, already
+     reproduced on pristine main) makes new proxied page opens
+     intermittently exceed the 45s frame wait once the engine has
+     been up for a few minutes, so engine-needing checks this late
+     in the suite can fail on wedge timing alone. Documented, not
+     hidden; #641 owns the fix. */
+
+  await check("ws: plaintext ws:// echo rides the bridge and matches the direct reply (#525/#544)", async () => {
+    const { page, frame } = await openProxied(ORIGIN_A + "/dir/landing.html");
+    const proxied = await evalIn(frame, "proxied plaintext ws echo", wsEchoProbeJs("ws://127.0.0.1:7101/api/ws-echo", "zl544-plain", 30000), 35000);
+    assert(proxied.echo === "zl544-plain", "proxied plaintext ws echo failed: " + JSON.stringify(proxied));
+    const dctx = await browser.newContext();
+    const dp = await dctx.newPage();
+    await dp.goto(ORIGIN_A + "/dir/landing.html");
+    const direct = await evalIn(dp.mainFrame(), "direct plaintext ws echo", wsEchoProbeJs("ws://127.0.0.1:7101/api/ws-echo", "zl544-plain", 20000), 25000);
+    await dctx.close();
+    assert(direct.echo === "zl544-plain", "direct plaintext ws echo failed: " + JSON.stringify(direct));
+    return "echo round trip identical, direct and proxied";
+  });
+
+  await check("ws: proxied wss to a self-signed origin settles honestly within the open deadline, never a silent stall (#544)", async () => {
+    const { page, frame } = await openProxied(ORIGIN_A + "/dir/landing.html");
+    const r = await evalIn(frame, "proxied wss", wsEchoProbeJs(ORIGIN_T + "/api/ws-echo", "zl544-secure", 40000), 45000);
+    assert(!r.timeout, "proxied wss never settled within 40s: silent stall, got " + JSON.stringify(r));
+    if (r.echo) return "echo (the transport verified the self-signed cert)";
+    assert(r.failed, "malformed proxied wss outcome: " + JSON.stringify(r));
+    eq(r.failed.code, 1006, "proxied wss close code");
+    assert(r.events.indexOf("error") !== -1, "proxied wss failed without an error event: " + JSON.stringify(r));
+    return "honest failure: error event + abnormal close 1006 within the deadline";
+  });
+
+  await check("ws: the direct control echoes over native wss to the same TLS origin (#544)", async () => {
+    const sctx = await browser.newContext({ ignoreHTTPSErrors: true });
+    const sp = await sctx.newPage();
+    await sp.goto(ORIGIN_T + "/");
+    const r = await evalIn(sp.mainFrame(), "direct wss echo", wsEchoProbeJs(ORIGIN_T + "/api/ws-echo", "zl544-secure", 20000), 25000);
+    await sctx.close();
+    assert(r.echo === "zl544-secure", "direct wss echo failed: " + JSON.stringify(r));
+    return "native wss echo ok";
+  });
+
+  await check("rtc: proxied pages expose no constructible RTCPeerConnection, the webkit- alias included; zl:ping reports unavailable (#544)", async () => {
+    const { page, frame } = await openProxied(ORIGIN_A + "/dir/landing.html");
+    const rtc = await frame.evaluate(() => {
+      const out = { unprefixed: typeof RTCPeerConnection, prefixed: typeof webkitRTCPeerConnection };
+      try { new RTCPeerConnection({ iceServers: [] }); out.unprefixedConstructed = true; } catch (e) { out.unprefixedError = String(e); }
+      try { new webkitRTCPeerConnection({ iceServers: [] }); out.prefixedConstructed = true; } catch (e) { out.prefixedError = String(e); }
+      return out;
+    });
+    eq(rtc.unprefixed, "undefined", "RTCPeerConnection survived on a proxied page");
+    eq(rtc.prefixed, "undefined", "webkitRTCPeerConnection survived on a proxied page (#544 alias hole)");
+    assert(!rtc.unprefixedConstructed, "unprefixed RTC constructed on a proxied page");
+    assert(!rtc.prefixedConstructed, "prefixed alias RTC constructed on a proxied page");
+    const ping = await hostControl(page, { type: "zl:ping" });
+    assert(ping && ping.ok === true && ping.capabilities && ping.capabilities.webrtc === "unavailable", "zl:ping capabilities wrong: " + JSON.stringify(ping).slice(0, 200));
+    eq(ping.capabilities.websocketPlaintext, true, "websocketPlaintext capability");
+    assert(ping.capabilities.websocket === "relay" || ping.capabilities.websocket === "native-bridge", "websocket capability");
+    return "constructor + alias absent; capabilities report unavailable honestly";
+  });
+
+  await check("rtc: the direct control constructs, offers and gathers; relay-only without TURN yields no relay candidates (#544)", async () => {
+    const ctx = await browser.newContext();
+    const pg = await ctx.newPage();
+    await pg.goto(ORIGIN_A + "/dir/landing.html");
+    const r = await pg.evaluate(() => new Promise(async (resolve) => {
+      const out = {};
+      let pc = null;
+      let relay = null;
+      try {
+        pc = new RTCPeerConnection({ iceServers: [] });
+        pc.createDataChannel("zl");
+        const offer = await pc.createOffer();
+        out.offer = typeof offer.sdp === "string" && offer.sdp.length > 0;
+        out.candidates = 0;
+        pc.onicecandidate = (e) => { if (e.candidate) out.candidates++; };
+        await pc.setLocalDescription(offer);
+        relay = new RTCPeerConnection({ iceServers: [], iceTransportPolicy: "relay" });
+        relay.createDataChannel("zl");
+        const roffer = await relay.createOffer();
+        out.relayOffer = typeof roffer.sdp === "string" && roffer.sdp.length > 0;
+        out.relayCandidates = 0;
+        relay.onicecandidate = (e) => { if (e.candidate) out.relayCandidates++; };
+        await relay.setLocalDescription(roffer);
+        setTimeout(() => { out.gathering = pc.iceGatheringState; out.relayGathering = relay.iceGatheringState; resolve(out); pc.close(); relay.close(); }, 3000);
+      } catch (e) {
+        out.error = String(e);
+        resolve(out);
+      }
+    }));
+    await ctx.close();
+    assert(!r.error, "direct RTC probe errored: " + JSON.stringify(r));
+    assert(r.offer === true, "direct createOffer produced no sdp: " + JSON.stringify(r));
+    assert(r.relayOffer === true, "direct relay-only createOffer produced no sdp: " + JSON.stringify(r));
+    assert(r.gathering === "gathering" || r.gathering === "complete", "direct gathering state: " + JSON.stringify(r));
+    assert(r.relayCandidates === 0, "relay-only without TURN produced relay candidates: " + JSON.stringify(r));
+    /* Host candidate counts are environment-dependent (0 in locked
+       sandboxes): the acceptance is the differential - the direct arm
+       runs the real gathering machinery, the proxied arm has no
+       constructor at all. */
+    return "offer + relay-only offer ok; host candidates " + r.candidates + " (informational)";
+  });
   await check("dominspect: snapshot, styles, console and a CSSOM-only highlight through the real bridge (#550)", async () => {
     const { page, frame } = await openProxied(ORIGIN_A + "/dir/page.html");
     const cid = await probeClientId(page, frame);
@@ -2292,5 +2406,6 @@ main()
     try { if (browser) await browser.close(); } catch {}
     try { fixtureA?.stop(); } catch {}
     try { fixtureB?.stop(); } catch {}
+    try { fixtureT?.stop(); } catch {}
     try { engineProc?.kill("SIGKILL"); } catch {}
   });

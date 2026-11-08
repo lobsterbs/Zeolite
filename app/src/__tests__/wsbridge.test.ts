@@ -83,6 +83,47 @@ function fakeFactory(): {
 }
 
 describe("WsBridge", () => {
+  it("an open that never settles fails honestly at the open deadline (#544)", () => {
+    vi.useFakeTimers();
+    try {
+      const { hooks, rec } = fakeHooks();
+      const { factory, handlers, closed } = fakeFactory();
+      const b = new WsBridge(factory, hooks, { openTimeoutMs: 1000 });
+      const p = fakePort();
+      b.open(p, "wss://selfsigned.example/", []);
+      expect(handlers.length).toBe(1);
+      vi.advanceTimersByTime(999);
+      expect(rec.closes).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(p.posted).toContainEqual({ ev: "error", error: "open timeout" });
+      expect(p.posted).toContainEqual({ ev: "close", code: 1006, clean: false, reason: "open timeout" });
+      expect(rec.closes).toEqual([{ code: 1006, clean: false, ms: expect.any(Number) }]);
+      expect(closed).toEqual([1000]);
+      expect(b.size).toBe(0);
+      expect(p.closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a completed open clears the deadline, no late fire (#544)", () => {
+    vi.useFakeTimers();
+    try {
+      const { hooks } = fakeHooks();
+      const { factory, handlers } = fakeFactory();
+      const b = new WsBridge(factory, hooks, { openTimeoutMs: 1000 });
+      const p = fakePort();
+      b.open(p, "ws://plain.example/", []);
+      handlers[0].h.onopen("");
+      vi.advanceTimersByTime(5000);
+      expect(p.posted.filter((x) => (x as { ev?: string }).ev === "error")).toEqual([]);
+      expect(p.posted.filter((x) => (x as { ev?: string }).ev === "close")).toEqual([]);
+      expect(b.size).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("acknowledges accepted UTF-8 and binary bytes after open, including queued bridge races (#462)", () => {
     const { hooks } = fakeHooks();
     const { factory, handlers, sent } = fakeFactory();
