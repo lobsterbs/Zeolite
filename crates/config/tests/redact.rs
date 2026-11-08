@@ -102,3 +102,21 @@ fn hostile_inputs_complete_linearly() {
     let userinfo = format!("http://{}@x", "a".repeat(512 * 1024));
     assert_eq!(redact_secrets(&userinfo), "http://[redacted]@x");
 }
+
+/// #633: a bare origin (no path, no trailing @) ended the URL
+/// userinfo scan at bytes.len() and the '@' check indexed out of
+/// bounds, trapping the seam wasm. netlog redacts header values
+/// individually and Origin / access-control-allow-origin values
+/// are exactly this shape. JS parity: no '@' means no match, the
+/// string passes through unchanged.
+#[test]
+fn bare_origin_strings_pass_through_without_userinfo() {
+    assert_eq!(
+        redact_secrets("https://accounts.google.com"),
+        "https://accounts.google.com"
+    );
+    assert_eq!(
+        redact_secrets("see https://fonts.gstatic.com"),
+        "see https://fonts.gstatic.com"
+    );
+}

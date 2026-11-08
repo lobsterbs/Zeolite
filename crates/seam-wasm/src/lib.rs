@@ -129,4 +129,15 @@ mod tests {
             "https://[redacted]@x.test/"
         );
     }
+
+    /* #633 live incident: a bare-origin header value (Origin or
+    access-control-allow-origin) ended the userinfo scan at the
+    end of input and the '@' check indexed out of bounds. */
+    #[test]
+    fn bare_origin_redaction_does_not_trap() {
+        assert_eq!(
+            redact_secrets_js("https://accounts.google.com"),
+            "https://accounts.google.com"
+        );
+    }
 }
