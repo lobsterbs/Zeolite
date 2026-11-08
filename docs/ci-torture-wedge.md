@@ -900,3 +900,19 @@ deterministic; only its firing is intermittent. Tracked in #514.
   line only. Verdict: intermittent runner flake, #614 bytes
   exonerated on the identical-bytes comparison. Docs-only bounded
   retrigger per the operational notes.
+
+## Run 42499184109 (head 793b5361, #551 second-slice ship)
+
+- rust/wasm/app/compat GREEN. The main browser E2E is 66/66
+  clean on this head, with the corrected doctor asset count
+  (12, the cosmetics-runtime asset). The new Cosmetic filtering
+  suite (#551) step passed: the job ran past it into the e2e and
+  torture suites, and a cosmetics failure would have exited the
+  job at that step before either ran. Browser red is the single
+  documented torture signature, the img#uni DIRECT-oracle load
+  flake ("direct model failed to load img#uni (fixture
+  regression)"), the harness's own wording for the class already
+  ledgered on earlier heads. Verdict: documented wedge class,
+  #551 bytes exonerated by the clean 66/66 e2e and the green
+  cosmetics step on the same head. This docs-only commit is the
+  recorded bounded retrigger per the operational notes.
