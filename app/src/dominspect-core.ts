@@ -91,6 +91,9 @@ const STYLE_CAP = 64;
 const STORAGE_KEYS_CAP = 128;
 const STORAGE_KEY_LEN = 128;
 const STORAGE_VALUE_LEN = 500;
+/* Bounded key sweep: a hostile page can stuff arbitrarily many keys,
+   and the sort needs the raw keys before the window is chosen. */
+const STORAGE_ENUM_CEILING = 4096;
 /* Form state that a serialized attribute copy could leak: named, but
    never read (and the .value/.checked properties are never touched
    anywhere in this module). */
@@ -244,17 +247,29 @@ export function applyDomInspect(w: Record<string, unknown>): void {
     const store = s as unknown as StoreLike;
     try {
       const len = store.length;
+      /* The engine-backed facade does NOT enumerate in insertion
+         order (observed live as hash order: a 128-cap view lost the
+         first-written key, nondeterministically, #550 follow-up), so
+         the capped view sorts: the same store always yields the same
+         view. Raw keys are swept (bounded), sorted, and only the kept
+         window is read - via the raw key, so an over-length display
+         key still finds its value. */
+      const sweep = Math.min(len, STORAGE_ENUM_CEILING);
+      const keys: string[] = [];
+      for (let i = 0; i < sweep; i++) {
+        const rk = String(store.key(i) ?? "");
+        if (rk) keys.push(rk);
+      }
+      keys.sort();
       const entries: Array<{ k: string; v: string }> = [];
-      const n = Math.min(len, STORAGE_KEYS_CAP);
-      for (let i = 0; i < n; i++) {
-        const k = String(store.key(i) ?? "").slice(0, STORAGE_KEY_LEN);
+      for (const rk of keys.slice(0, STORAGE_KEYS_CAP)) {
         let v = "";
         try {
-          v = String(store.getItem(k) ?? "").slice(0, STORAGE_VALUE_LEN);
+          v = String(store.getItem(rk) ?? "").slice(0, STORAGE_VALUE_LEN);
         } catch {
           v = "";
         }
-        entries.push({ k: red(k), v: red(v) });
+        entries.push({ k: red(rk.slice(0, STORAGE_KEY_LEN)), v: red(v) });
       }
       return { entries, truncated: len > STORAGE_KEYS_CAP, unavailable: false };
     } catch {

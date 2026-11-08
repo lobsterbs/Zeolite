@@ -155,10 +155,11 @@ connection is closed and forgotten before the SW unregisters).
 ## WebRTC is unavailable (#544)
 
 WebRTC is not proxied and not faked: the bootstrap navguard deletes
-`RTCPeerConnection` outright (plus its prefixed aliases), so the exact
-failure mode is a plain constructor absence - a `ReferenceError`/
-`TypeError` at construction, never a half-working object, never a
-silent fallback onto another transport. The reason is egress honesty:
+`RTCPeerConnection` and the `webkitRTCPeerConnection` legacy alias
+outright (a headless-Chromium probe proved the alias is a second live
+constructor, #544), so the exact failure mode is a plain constructor
+absence - a `ReferenceError`/`TypeError` at construction, never a
+half-working object, never a silent fallback onto another transport. The reason is egress honesty:
 ICE/STUN negotiates direct browser-to-peer UDP paths that bypass the
 service worker and the engine transport entirely, so a constructible
 WebRTC API would leak real connection metadata and traffic around the
@@ -174,6 +175,16 @@ control (a page outside the engine scope fails with error + close
 1006, which matches native offline behavior); subprotocol and
 extension negotiation follow libcurl; plaintext ws:// targets are
 dialed as plaintext since #525 (no upgrade, no TLS fallback).
+
+An open phase that never settles fails honestly (#544): the wasm
+transports report no lifecycle events, so a handshake that can never
+complete (today: a wss target whose certificate the transport cannot
+verify) is ended by the bridge after 20 seconds - the page receives an
+error event and an abnormal 1006 close, never a silent stall. The
+transport TLS trust is not overridable by the engine, so an
+unverifiable origin is a designed failure, not a bug. The browser E2E
+pins both arms: plaintext ws:// echoes proxied and direct, and
+proxied wss to a self-signed fixture settles within the deadline.
 
 Synchronous transport send failures terminate the bridge connection (#485).
 The page receives an error followed by an abnormal 1006 close; the bridge

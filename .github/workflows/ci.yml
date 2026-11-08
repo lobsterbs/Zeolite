@@ -327,13 +327,17 @@ jobs:
         # measured 49301 plus the #553 facade delta (383 bytes over
         # baseline 47288, branch-measured 47671); estimate 49684,
         # to be corrected to the measured value CI prints.
+        # 49800 -> 50000 for #544: the webkitRTCPeerConnection
+        # legacy-alias delete (a live second constructor on real
+        # Chromium, an ICE egress bypass) rides bootstrap.js via
+        # navguard.ts; measured 49819, baseline 49800.
         # resolves lazily (virtual-origin marker + injected vpath
         # at call time) so a page's relative register() lands on the
         # page's virtual URL; measured 41310, baseline 41025.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 49800 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 49800)"; exit 1; fi
+          if [ "$SIZE" -ge 50000 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 50000)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

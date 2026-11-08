@@ -956,6 +956,11 @@ export function applyNavGuard(
       }
     }
   }
-  /* WebRTC connects directly; presence would be a fake feature. */
+  /* WebRTC connects directly; presence would be a fake feature.
+     #544: the webkit- prefixed legacy alias is a second live
+     constructor on real Chromium windows (verified in headless
+     Chromium), so deleting only the unprefixed name left a full
+     ICE escape around the engine. */
   delete w.RTCPeerConnection;
+  delete w.webkitRTCPeerConnection;
 }

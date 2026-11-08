@@ -80,10 +80,12 @@ fixture pages through `/?url=<target>` and asserts:
 
 ## Honest gaps (not faked)
 
-- WebSocket bridge: skipped. Plaintext ws:// passes through since
-  #525, but the fixture origins are plain HTTP and a wss:// (or
-  plaintext ws://) terminator is not part of the fixture set, so the
-  bridge cannot be exercised here without a socket fixture.
+- WebSocket bridge: covered since #544 (plaintext ws:// echo direct
+  and proxied; proxied wss to the self-signed TLS fixture settles
+  honestly within the bridge open deadline - the wasm transport
+  cannot verify that cert, so a silent stall is the only forbidden
+  outcome). Valid-cert wss against a real origin is not fixtureable
+  locally.
 - SW restart: not covered yet.
 - SVG paint url() attributes (fill/stroke/filter/...): covered by the
   rewriter's Rust unit tests (#36), not here - a browser-side
@@ -182,9 +184,14 @@ infrastructure redesign (issue acceptance).
 
 ## Honest gaps (not faked)
 
-- WebSocket: needs a socket fixture (plaintext ws:// passes through
-  since #525, but neither suite ships a ws endpoint); same gap as the
-  #35 suite.
+- WebSocket: covered by the #35 suite since #544, which now ships a
+  plaintext ws echo endpoint and a self-signed TLS origin for wss.
+- Engine health late in long suites: a pre-existing wedge (issue
+  #641, reproduced on pristine main) makes new proxied page opens
+  intermittently take 45s+ once the engine has been up for a few
+  minutes. The #544 ws/rtc checks document this rather than dodge
+  it: a local run can show them failing on wedge timing alone, the
+  CI verdict is the arbiter, and #641 owns the fix.
 - IDN hostnames: need a real domain; the fixtures are loopback IPs.
 - Downloads: the #90 registry is unit-tested; a fetch-shaped
   attachment is just another body probe, and a UI-observable download

@@ -25,13 +25,26 @@
    uses). */
 
 import { createServer } from "node:http";
+import { createServer as createTlsServer } from "node:https";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 
 export const PORT_A = 7101;
 export const PORT_B = 7102;
 export const ORIGIN_A = `http://127.0.0.1:${PORT_A}`;
 export const ORIGIN_B = `http://localhost:${PORT_B}`;
+
+/* #544: a third, TLS fixture origin with a self-signed cert, so the
+   browser suite can exercise wss:// direct-vs-proxied. The wasm
+   transport cannot verify this cert: the proxied arm must fail
+   honestly (the bridge open deadline), the direct arm (launched with
+   ignoreHTTPSErrors) echoes. */
+export const PORT_T = 7103;
+export const ORIGIN_T = "https://127.0.0.1:" + PORT_T;
 
 /* 1x1 transparent PNG (naturalWidth > 0 asserts the image decoded). */
 const PNG = Buffer.from(
@@ -104,6 +117,76 @@ function send(res, type, body, extra) {
   const headers = { "content-type": type, "content-length": Buffer.byteLength(body), ...(extra ?? {}) };
   res.writeHead(200, headers);
   res.end(body);
+}
+
+/* #544: a minimal RFC 6455 echo endpoint. Client frames are masked;
+   the reply echoes the same opcode and payload, close frames are
+   answered, pings are ponged. Enough for echo round trips - no
+   fragmentation of control frames, no extensions, by design. */
+const WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const CRLF = String.fromCharCode(13, 10);
+function wsEchoUpgrade(server) {
+  server.on("upgrade", (req, socket) => {
+    if ((req.url ?? "").split("?")[0] !== "/api/ws-echo") { socket.destroy(); return; }
+    const key = req.headers["sec-websocket-key"];
+    const accept = createHash("sha1").update(key + WS_MAGIC).digest("base64");
+    socket.write("HTTP/1.1 101 Switching Protocols" + CRLF + "Upgrade: websocket" + CRLF + "Connection: Upgrade" + CRLF + "Sec-WebSocket-Accept: " + accept + CRLF + CRLF);
+    let buf = Buffer.alloc(0);
+    socket.on("data", (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      for (;;) {
+        if (buf.length < 2) break;
+        const opcode = buf[0] & 0x0f;
+        const masked = (buf[1] & 0x80) !== 0;
+        let len = buf[1] & 0x7f;
+        let off = 2;
+        if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); off = 4; }
+        else if (len === 127) { if (buf.length < 10) break; len = Number(buf.readBigUInt64BE(2)); off = 10; }
+        if (masked) { if (buf.length < off + 4) break; off += 4; }
+        if (buf.length < off + len) break;
+        const payload = Buffer.from(buf.subarray(off, off + len));
+        if (masked) {
+          const mask = buf.subarray(off - 4, off);
+          for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
+        }
+        buf = buf.subarray(off + len);
+        if (opcode === 8) { socket.write(Buffer.concat([Buffer.from([0x88, payload.length]), payload])); socket.end(); return; }
+        if (opcode === 9) { socket.write(Buffer.concat([Buffer.from([0x8a, payload.length]), payload])); continue; }
+        const first = opcode === 1 ? 0x81 : 0x82;
+        let head;
+        if (len < 126) head = Buffer.from([first, len]);
+        else if (len < 65536) { head = Buffer.alloc(4); head[0] = first; head[1] = 126; head.writeUInt16BE(len, 2); }
+        else { head = Buffer.alloc(10); head[0] = first; head[1] = 127; head.writeBigUInt64BE(BigInt(len), 2); }
+        socket.write(Buffer.concat([head, payload]));
+      }
+    });
+    socket.on("error", () => {});
+  });
+}
+
+/* #544: the TLS fixture. Self-signed cert minted at start (openssl,
+   one-day validity, SAN covers localhost and 127.0.0.1), removed at
+   stop. Any GET serves a minimal page so a direct context can land
+   on it; the ws echo upgrade rides the same listener. */
+export async function startTlsFixture(port) {
+  const tmp = mkdtempSync(join(tmpdir(), "zl-ws-tls-"));
+  const keyPath = join(tmp, "key.pem");
+  const certPath = join(tmp, "cert.pem");
+  execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1", "-keyout", keyPath, "-out", certPath], { stdio: "ignore" });
+  const server = createTlsServer({ key: readFileSync(keyPath), cert: readFileSync(certPath) }, (req, res) => {
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.end('<!doctype html><html><body><p id="zl-tls">tls-fixture</p></body></html>');
+  });
+  wsEchoUpgrade(server);
+  await new Promise((r) => server.listen(port, "::", r));
+  return {
+    server,
+    origin: "https://127.0.0.1:" + port,
+    stop: () => {
+      rmSync(tmp, { recursive: true, force: true });
+      return new Promise((r) => server.close(() => r()));
+    },
+  };
 }
 
 export function startFixture(port) {
@@ -622,6 +705,7 @@ document.getElementById("zl-spa-go").addEventListener("click", function () {
       }
     });
   });
+  wsEchoUpgrade(server);
   return new Promise((resolve) => {
     /* #534: dual-stack loopback. The *.localhost cross-site fixture
      hostname resolves to ::1 first on glibc (nss myhostname) and to

@@ -211,9 +211,10 @@ upstream bytes.
 - Re-audited at 3.0: the SharedWorker bridge (2.3) rides the same
   relay rule (the engine is the relay parent, a page never becomes
   one) and the same plaintext passthrough.
-- WebRTC is unavailable by design (#544): RTCPeerConnection is
-  deleted (see Runtime navigation escapes below) because ICE egress
-  bypasses the engine; the zl:ping capability report states this as
+- WebRTC is unavailable by design (#544): RTCPeerConnection and the
+  webkitRTCPeerConnection legacy alias are deleted (see Runtime
+  navigation escapes below) because ICE egress bypasses the engine;
+  the zl:ping capability report states this as
   webrtc: "unavailable" so a host can distinguish designed absence
   from breakage.
 
