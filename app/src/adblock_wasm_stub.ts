@@ -1,1 +1,23 @@
-[{"type":"resource","resource":{"uri":"sprite://mcp-zeolite-2/file?path=app%2Fsrc%2Fadblock_wasm_stub.ts&workingDir=%2Fhome%2Fsprite%2Fzeo613","mimeType":"text/plain","text":"/* Deterministic stand-in for the CI-generated zeolite-adblock wasm\n   glue (the seam_wasm_stub.ts pattern). One deliberate difference:\n   EVERY export throws, including the class constructor and the\n   default init. The adblock seam is fail-safe, so in test\n   environments initAdblockWasm() must reject and ghostery matching\n   stays on its @ghostery/adblocker TS fallback body. Where the real\n   glue exists (CI), the vite resolver never loads this file. */\nfunction missing(): never {\n  throw new Error(\n    \"zeolite: adblock wasm glue is not generated in this environment \" +\n      \"(build it with: wasm-pack build crates/adblock --target web \" +\n      \"--release --out-name adblock_wasm, then copy \" +\n      \"crates/adblock/pkg/adblock_wasm* into app/src/adblock_wasm/).\",\n  );\n}\nexport class WasmAdblock {\n  constructor(_listsJson: string) {\n    missing();\n  }\n}\nexport default function init(_path?: unknown): Promise<never> {\n  return missing();\n}\n"}}]
+/* Deterministic stand-in for the CI-generated zeolite-adblock wasm
+   glue (the seam_wasm_stub.ts pattern). One deliberate difference:
+   EVERY export throws, including the class constructor and the
+   default init. The adblock seam is fail-safe, so in test
+   environments initAdblockWasm() must reject and ghostery matching
+   stays on its @ghostery/adblocker TS fallback body. Where the real
+   glue exists (CI), the vite resolver never loads this file. */
+function missing(): never {
+  throw new Error(
+    "zeolite: adblock wasm glue is not generated in this environment " +
+      "(build it with: wasm-pack build crates/adblock --target web " +
+      "--release --out-name adblock_wasm, then copy " +
+      "crates/adblock/pkg/adblock_wasm* into app/src/adblock_wasm/).",
+  );
+}
+export class WasmAdblock {
+  constructor(_listsJson: string) {
+    missing();
+  }
+}
+export default function init(_path?: unknown): Promise<never> {
+  return missing();
+}

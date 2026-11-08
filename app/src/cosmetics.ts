@@ -1,1 +1,295 @@
-[{"type":"resource","resource":{"uri":"sprite://mcp-zeolite-2/file?path=app%2Fsrc%2Fcosmetics.ts&workingDir=%2Fhome%2Fsprite%2Fzeo613","mimeType":"text/plain","text":"/* Ghostery cosmetic CSS selector injection (#551, first slice).\n\n   Scope of this slice: the `styles` arm of the engine's\n   getCosmeticsFilters for the DOCUMENT URL only, computed in the\n   service worker at document-rewrite time and spliced into the\n   rewritten stream head as a single <style data-zl-cosmetic> element\n   (the same after-doctype splice the bootstrap init script rides).\n\n   Never applied, by design of this slice:\n   - scriptlets (+js(...)): counted, refused, never executed;\n   - extended/HTML filters (:has()-style AST arms, :-abp-contains,\n     element removal): counted, refused;\n   - class/id/href-anchored generic hides that need DOM feature\n     extraction (getRulesFromDOM): the SW has no DOM at rewrite time,\n     so the engine query runs with getRulesFromDOM=false and those\n     rules stay dormant;\n   - re-injection on dynamic DOM mutations (the engine's\n     lifecycle=\"dom-update\" half): follow-up work;\n   - frame-ancestor-constrained rules: the frame chain is not tracked\n     SW-side, so ancestors stays empty.\n\n   The gate mirrors network blocking exactly (rules.ts applyRules):\n   the zl:adblock toggle, the per-site zl:rules adblock override, and\n   the shipped captcha/anti-bot allowlist (challenge-provider\n   allowlists take precedence over cosmetics - the same single\n   compiled allow list the block evaluation consults, never a copy).\n\n   #613 wasm arm: when the Rust/WASM adblock engine installed, the\n   decision comes from its cosmetic(url) JSON (page-specific hide\n   selectors, generichide, scriptlet refusal counts). Generic\n   class/id hides (the crate hidden_css) stay dormant in this\n   slice: the SW has no DOM tokens at head-splice time, the same\n   honest limit as the TS arm DOM-anchored rules, and the TS\n   fallback keeps its precompiled generic base stylesheet.\n\n   Diagnostics: at most ONE bounded REWRITE event per document with\n   aggregate counts only - no selectors, no page content; anything\n   URL-shaped passes through redactSecrets on emit. */\n\nimport { getDomain } from \"tldts\";\nimport type { FiltersEngine } from \"@ghostery/adblocker\";\nimport { DIAG } from \"./diag\";\nimport {\n  allowlistedHostFor,\n  isRulesEnabled,\n  siteOverrideFor,\n  type CompiledRules,\n} from \"./rules\";\nimport { ghosteryEngine, requestType, wasmAdblockEngine } from \"./ghostery\";\nimport type { WasmAdblockLike } from \"./adblockwasm\";\n\n/** Cap for the injected stylesheet (#551). A compiled EasyList-scale\n    stylesheet for one site is a few KiB; 64 KiB is generous headroom.\n    A larger stylesheet truncates at a rule boundary is NOT attempted -\n    CSS error recovery drops the incomplete tail rule, and the DIAG\n    event records the truncation honestly. */\nexport const COSMETIC_STYLE_CAP = 64 * 1024;\n\nexport interface CosmeticOutcome {\n  /** Compiled stylesheet text, truncated to COSMETIC_STYLE_CAP when\n      truncated=true. Empty when nothing applies. */\n  styles: string;\n  /** Matched hide/style filters the engine compiled into the styles\n      arm (exception-free). Generic rules folded into the engine's\n      precompiled base stylesheet do not arrive as per-call matches;\n      the event wording says \"+base stylesheet\" for them. */\n  applied: number;\n  /** Matched but suppressed by an exception rule (@# / #@#). */\n  skipped: number;\n  /** Scriptlet (+js) and extended-selector matches: counted, never\n      executed or compiled. */\n  unsupported: number;\n  truncated: boolean;\n}\n\n/** Structural engine surface this module uses; the real FiltersEngine\n    satisfies it and tests can build one with FiltersEngine.parse. */\nexport interface CosmeticEngineLike {\n  getCosmeticsFilters(opts: {\n    url: string;\n    hostname: string;\n    domain: string | null | undefined;\n    ancestors?: { domain: string; hostname: string }[];\n    classes?: string[];\n    hrefs?: string[];\n    ids?: string[];\n    getBaseRules?: boolean;\n    getInjectionRules?: boolean;\n    getExtendedRules?: boolean;\n    getRulesFromDOM?: boolean;\n    getRulesFromHostname?: boolean;\n    callerContext?: unknown;\n  }): { active?: boolean; styles?: string; scripts?: string[]; extended?: unknown[] };\n  /* The adblocker EventEmitter types its callbacks per event-name\n     generic; `any` keeps the seam structural for the real engine and\n     stand-ins alike. */\n  on?(event: string, cb: (match: any, ctx: any) => void): void;\n  unsubscribe?(event: string, cb: (match: any, ctx: any) => void): void;\n}\n\ninterface CosmeticFilterLike {\n  isScriptInject: () => boolean;\n  isExtended: () => boolean;\n  getId: () => number;\n}\n\ninterface CosmeticMatch {\n  filter?: CosmeticFilterLike;\n  exception?: unknown;\n}\n\ninterface CosmeticMatchContext {\n  url?: string;\n  /* The adblocker versions this filterType as a numeric enum\n     (COSMETIC = 2); number keeps the comparison honest. */\n  filterType?: string | number;\n}\n\n/** Compute the cosmetic styles for one document URL against one\n    engine. Returns null when the engine has no cosmetic data active.\n    Counts ride the engine's own filter-matched events (filtered to\n    this URL, deduplicated by filter id), so the engine's matching and\n    exception logic stays the single source of truth - nothing here\n    re-implements selector matching. The engine emits asynchronously\n    (microtask), so the counts settle one microtask after the call. */\nexport async function computeCosmeticStyles(\n  eng: CosmeticEngineLike,\n  docUrl: string,\n): Promise<CosmeticOutcome | null> {\n  let u: URL;\n  try {\n    u = new URL(docUrl);\n  } catch {\n    return null;\n  }\n  const hostname = u.hostname.toLowerCase();\n  if (!hostname) return null;\n  /* tldts gives the eTLD+1 the engine's domain/entity constraints\n     want (cookies.ts uses the same dependency). */\n  const domain = getDomain(hostname) ?? \"\";\n  const appliedIds = new Set<number>();\n  const skippedIds = new Set<number>();\n  const unsupportedIds = new Set<number>();\n  const cb = (m: CosmeticMatch, ctx: CosmeticMatchContext): void => {\n    /* filterType is a NUMERIC enum in this adblocker version\n       (lists.js: NETWORK=1, COSMETIC=2); the URL filter scopes the\n       counts to this document so a concurrent engine query cannot\n       pollute them. */\n    if (ctx?.filterType !== 2 || ctx?.url !== docUrl) return;\n    if (m.exception !== undefined && m.exception !== null) {\n      if (m.filter) skippedIds.add(m.filter.getId());\n      return;\n    }\n    const f = m.filter;\n    if (!f) return;\n    /* Scriptlet and extended arms are counted, never compiled. */\n    if (f.isScriptInject?.() || f.isExtended?.()) unsupportedIds.add(f.getId());\n    else appliedIds.add(f.getId());\n  };\n  eng.on?.(\"filter-matched\", cb);\n  let out: { active?: boolean; styles?: string; scripts?: string[]; extended?: unknown[] };\n  try {\n    out = eng.getCosmeticsFilters({\n      url: docUrl,\n      hostname,\n      domain,\n      getBaseRules: true,\n      getInjectionRules: true,\n      getExtendedRules: true,\n      /* No DOM at rewrite time: class/id/href-anchored rules stay\n         dormant (honest limit of this slice, see header). */\n      getRulesFromDOM: false,\n      getRulesFromHostname: true,\n      callerContext: \"zl-cosmetics\",\n    });\n    /* The engine dispatches filter-matched via queueMicrotask: the\n       queued emits must run BEFORE the listener detaches (the\n       dispatcher iterates the live listener array), so the settle\n       await lives inside the try, ahead of the unsubscribe. One turn\n       suffices: the engine's emit task was enqueued before this\n       continuation. */\n    await Promise.resolve();\n  } finally {\n    eng.unsubscribe?.(\"filter-matched\", cb);\n  }\n  if (out.active === false) return null;\n  let styles = typeof out.styles === \"string\" ? out.styles : \"\";\n  let truncated = false;\n  if (styles.length > COSMETIC_STYLE_CAP) {\n    styles = styles.slice(0, COSMETIC_STYLE_CAP);\n    truncated = true;\n  }\n  return {\n    styles,\n    applied: appliedIds.size,\n    skipped: skippedIds.size,\n    unsupported: unsupportedIds.size,\n    truncated,\n  };\n}\n\n/** The injected markup. The stylesheet text is engine output, but the\n    splice is raw HTML: neutralize the one sequence that could escape\n    the <style> element (`</style`), preserving the CSS bytes a\n    selector like that would never legitimately contain. */\nexport function cosmeticStyleTag(styles: string): string {\n  if (!styles.trim()) return \"\";\n  const safe = styles.replace(/<\\/(style)/gi, \"<\\\\/$1\");\n  return `<style data-zl-cosmetic>${safe}</style>`;\n}\n\n/* #613 wasm arm: the Rust engine answers one cosmetic query per\n    document URL; its JSON crosses the boundary once. Exception-\n    skipped selectors are already folded out by the engine, so\n    skipped stays 0. */\nexport function wasmCosmeticOutcome(\n  wasm: WasmAdblockLike,\n  docUrl: string,\n): CosmeticOutcome | null {\n  let dec: { active?: boolean; style?: string; unsupported?: number };\n  try {\n    dec = JSON.parse(wasm.cosmetic(docUrl));\n  } catch {\n    return null;\n  }\n  if (dec.active !== true) return null;\n  let styles = typeof dec.style === \"string\" ? dec.style : \"\";\n  let truncated = false;\n  if (styles.length > COSMETIC_STYLE_CAP) {\n    styles = styles.slice(0, COSMETIC_STYLE_CAP);\n    truncated = true;\n  }\n  /* Every compiled rule ends with the literal hide body, so the\n     applied count needs no selector parsing. */\n  const applied = styles.split(\"{display:none!important}\").length - 1;\n  return {\n    styles,\n    applied,\n    skipped: 0,\n    unsupported: dec.unsupported ?? 0,\n    truncated,\n  };\n}\n\n/** The document-rewrite seam (#551): gate, compute, diagnose, and\n    return the <style data-zl-cosmetic> markup to splice into the\n    rewrite head, or \"\" when cosmetics do not apply. The gate mirrors\n    rules.ts applyRules for the document host: the zl:adblock toggle,\n    the per-site adblock override, and the captcha/anti-bot allowlist\n    all refuse cosmetics exactly like they spare network requests. */\nexport async function ghosteryCosmeticsForDocument(\n  engineRules: CompiledRules,\n  docUrl: string,\n  destination: string,\n  traceId?: string,\n): Promise<string> {\n  if (!isRulesEnabled()) return \"\";\n  /* Challenge-provider allowlists take precedence over cosmetics. */\n  if (allowlistedHostFor(engineRules, docUrl, \"document\") !== null) return \"\";\n  if (siteOverrideFor(docUrl)?.adblock === false) return \"\";\n  const wasm = wasmAdblockEngine();\n  let outcome: CosmeticOutcome | null;\n  if (wasm) {\n    outcome = wasmCosmeticOutcome(wasm, docUrl);\n  } else {\n    const eng = ghosteryEngine();\n    if (!eng) return \"\";\n    outcome = await computeCosmeticStyles(eng, docUrl);\n  }\n  if (!outcome) return \"\";\n  /* One bounded event per document, and only when something actually\n     happened (a silent all-zero row per navigation would flood the\n     512-event ring with noise). */\n  if (outcome.applied > 0 || outcome.skipped > 0 || outcome.unsupported > 0 || outcome.truncated) {\n    const rtype = requestType(\"document\", destination);\n    DIAG.emit({\n      traceId,\n      requestId: traceId,\n      category: \"REWRITE\",\n      cause: \"rewrite\",\n      severity: \"info\",\n      stage: \"REWRITE_STARTED\",\n      message:\n        (wasm ? \"adblock wasm\" : \"ghostery\") + \" cosmetic styles for \" + rtype + \": \" +\n        outcome.applied + (wasm ? \" applied, \" : \" applied (+base stylesheet), \") +\n        outcome.skipped + \" skipped by exception, \" +\n        outcome.unsupported + \" unsupported (scriptlets/extended, never executed), \" +\n        outcome.styles.length + \" bytes\" +\n        (outcome.truncated ? \", truncated at \" + COSMETIC_STYLE_CAP + \" bytes\" : \"\"),\n      url: docUrl,\n    });\n  }\n  if (!outcome.styles.trim()) return \"\";\n  return cosmeticStyleTag(outcome.styles);\n}\n"}}]
+/* Ghostery cosmetic CSS selector injection (#551, first slice).
+
+   Scope of this slice: the `styles` arm of the engine's
+   getCosmeticsFilters for the DOCUMENT URL only, computed in the
+   service worker at document-rewrite time and spliced into the
+   rewritten stream head as a single <style data-zl-cosmetic> element
+   (the same after-doctype splice the bootstrap init script rides).
+
+   Never applied, by design of this slice:
+   - scriptlets (+js(...)): counted, refused, never executed;
+   - extended/HTML filters (:has()-style AST arms, :-abp-contains,
+     element removal): counted, refused;
+   - class/id/href-anchored generic hides that need DOM feature
+     extraction (getRulesFromDOM): the SW has no DOM at rewrite time,
+     so the engine query runs with getRulesFromDOM=false and those
+     rules stay dormant;
+   - re-injection on dynamic DOM mutations (the engine's
+     lifecycle="dom-update" half): follow-up work;
+   - frame-ancestor-constrained rules: the frame chain is not tracked
+     SW-side, so ancestors stays empty.
+
+   The gate mirrors network blocking exactly (rules.ts applyRules):
+   the zl:adblock toggle, the per-site zl:rules adblock override, and
+   the shipped captcha/anti-bot allowlist (challenge-provider
+   allowlists take precedence over cosmetics - the same single
+   compiled allow list the block evaluation consults, never a copy).
+
+   #613 wasm arm: when the Rust/WASM adblock engine installed, the
+   decision comes from its cosmetic(url) JSON (page-specific hide
+   selectors, generichide, scriptlet refusal counts). Generic
+   class/id hides (the crate hidden_css) stay dormant in this
+   slice: the SW has no DOM tokens at head-splice time, the same
+   honest limit as the TS arm DOM-anchored rules, and the TS
+   fallback keeps its precompiled generic base stylesheet.
+
+   Diagnostics: at most ONE bounded REWRITE event per document with
+   aggregate counts only - no selectors, no page content; anything
+   URL-shaped passes through redactSecrets on emit. */
+
+import { getDomain } from "tldts";
+import type { FiltersEngine } from "@ghostery/adblocker";
+import { DIAG } from "./diag";
+import {
+  allowlistedHostFor,
+  isRulesEnabled,
+  siteOverrideFor,
+  type CompiledRules,
+} from "./rules";
+import { ghosteryEngine, requestType, wasmAdblockEngine } from "./ghostery";
+import type { WasmAdblockLike } from "./adblockwasm";
+
+/** Cap for the injected stylesheet (#551). A compiled EasyList-scale
+    stylesheet for one site is a few KiB; 64 KiB is generous headroom.
+    A larger stylesheet truncates at a rule boundary is NOT attempted -
+    CSS error recovery drops the incomplete tail rule, and the DIAG
+    event records the truncation honestly. */
+export const COSMETIC_STYLE_CAP = 64 * 1024;
+
+export interface CosmeticOutcome {
+  /** Compiled stylesheet text, truncated to COSMETIC_STYLE_CAP when
+      truncated=true. Empty when nothing applies. */
+  styles: string;
+  /** Matched hide/style filters the engine compiled into the styles
+      arm (exception-free). Generic rules folded into the engine's
+      precompiled base stylesheet do not arrive as per-call matches;
+      the event wording says "+base stylesheet" for them. */
+  applied: number;
+  /** Matched but suppressed by an exception rule (@# / #@#). */
+  skipped: number;
+  /** Scriptlet (+js) and extended-selector matches: counted, never
+      executed or compiled. */
+  unsupported: number;
+  truncated: boolean;
+}
+
+/** Structural engine surface this module uses; the real FiltersEngine
+    satisfies it and tests can build one with FiltersEngine.parse. */
+export interface CosmeticEngineLike {
+  getCosmeticsFilters(opts: {
+    url: string;
+    hostname: string;
+    domain: string | null | undefined;
+    ancestors?: { domain: string; hostname: string }[];
+    classes?: string[];
+    hrefs?: string[];
+    ids?: string[];
+    getBaseRules?: boolean;
+    getInjectionRules?: boolean;
+    getExtendedRules?: boolean;
+    getRulesFromDOM?: boolean;
+    getRulesFromHostname?: boolean;
+    callerContext?: unknown;
+  }): { active?: boolean; styles?: string; scripts?: string[]; extended?: unknown[] };
+  /* The adblocker EventEmitter types its callbacks per event-name
+     generic; `any` keeps the seam structural for the real engine and
+     stand-ins alike. */
+  on?(event: string, cb: (match: any, ctx: any) => void): void;
+  unsubscribe?(event: string, cb: (match: any, ctx: any) => void): void;
+}
+
+interface CosmeticFilterLike {
+  isScriptInject: () => boolean;
+  isExtended: () => boolean;
+  getId: () => number;
+}
+
+interface CosmeticMatch {
+  filter?: CosmeticFilterLike;
+  exception?: unknown;
+}
+
+interface CosmeticMatchContext {
+  url?: string;
+  /* The adblocker versions this filterType as a numeric enum
+     (COSMETIC = 2); number keeps the comparison honest. */
+  filterType?: string | number;
+}
+
+/** Compute the cosmetic styles for one document URL against one
+    engine. Returns null when the engine has no cosmetic data active.
+    Counts ride the engine's own filter-matched events (filtered to
+    this URL, deduplicated by filter id), so the engine's matching and
+    exception logic stays the single source of truth - nothing here
+    re-implements selector matching. The engine emits asynchronously
+    (microtask), so the counts settle one microtask after the call. */
+export async function computeCosmeticStyles(
+  eng: CosmeticEngineLike,
+  docUrl: string,
+): Promise<CosmeticOutcome | null> {
+  let u: URL;
+  try {
+    u = new URL(docUrl);
+  } catch {
+    return null;
+  }
+  const hostname = u.hostname.toLowerCase();
+  if (!hostname) return null;
+  /* tldts gives the eTLD+1 the engine's domain/entity constraints
+     want (cookies.ts uses the same dependency). */
+  const domain = getDomain(hostname) ?? "";
+  const appliedIds = new Set<number>();
+  const skippedIds = new Set<number>();
+  const unsupportedIds = new Set<number>();
+  const cb = (m: CosmeticMatch, ctx: CosmeticMatchContext): void => {
+    /* filterType is a NUMERIC enum in this adblocker version
+       (lists.js: NETWORK=1, COSMETIC=2); the URL filter scopes the
+       counts to this document so a concurrent engine query cannot
+       pollute them. */
+    if (ctx?.filterType !== 2 || ctx?.url !== docUrl) return;
+    if (m.exception !== undefined && m.exception !== null) {
+      if (m.filter) skippedIds.add(m.filter.getId());
+      return;
+    }
+    const f = m.filter;
+    if (!f) return;
+    /* Scriptlet and extended arms are counted, never compiled. */
+    if (f.isScriptInject?.() || f.isExtended?.()) unsupportedIds.add(f.getId());
+    else appliedIds.add(f.getId());
+  };
+  eng.on?.("filter-matched", cb);
+  let out: { active?: boolean; styles?: string; scripts?: string[]; extended?: unknown[] };
+  try {
+    out = eng.getCosmeticsFilters({
+      url: docUrl,
+      hostname,
+      domain,
+      getBaseRules: true,
+      getInjectionRules: true,
+      getExtendedRules: true,
+      /* No DOM at rewrite time: class/id/href-anchored rules stay
+         dormant (honest limit of this slice, see header). */
+      getRulesFromDOM: false,
+      getRulesFromHostname: true,
+      callerContext: "zl-cosmetics",
+    });
+    /* The engine dispatches filter-matched via queueMicrotask: the
+       queued emits must run BEFORE the listener detaches (the
+       dispatcher iterates the live listener array), so the settle
+       await lives inside the try, ahead of the unsubscribe. One turn
+       suffices: the engine's emit task was enqueued before this
+       continuation. */
+    await Promise.resolve();
+  } finally {
+    eng.unsubscribe?.("filter-matched", cb);
+  }
+  if (out.active === false) return null;
+  let styles = typeof out.styles === "string" ? out.styles : "";
+  let truncated = false;
+  if (styles.length > COSMETIC_STYLE_CAP) {
+    styles = styles.slice(0, COSMETIC_STYLE_CAP);
+    truncated = true;
+  }
+  return {
+    styles,
+    applied: appliedIds.size,
+    skipped: skippedIds.size,
+    unsupported: unsupportedIds.size,
+    truncated,
+  };
+}
+
+/** The injected markup. The stylesheet text is engine output, but the
+    splice is raw HTML: neutralize the one sequence that could escape
+    the <style> element (`</style`), preserving the CSS bytes a
+    selector like that would never legitimately contain. */
+export function cosmeticStyleTag(styles: string): string {
+  if (!styles.trim()) return "";
+  const safe = styles.replace(/<\/(style)/gi, "<\\/$1");
+  return `<style data-zl-cosmetic>${safe}</style>`;
+}
+
+/* #613 wasm arm: the Rust engine answers one cosmetic query per
+    document URL; its JSON crosses the boundary once. Exception-
+    skipped selectors are already folded out by the engine, so
+    skipped stays 0. */
+export function wasmCosmeticOutcome(
+  wasm: WasmAdblockLike,
+  docUrl: string,
+): CosmeticOutcome | null {
+  let dec: { active?: boolean; style?: string; unsupported?: number };
+  try {
+    dec = JSON.parse(wasm.cosmetic(docUrl));
+  } catch {
+    return null;
+  }
+  if (dec.active !== true) return null;
+  let styles = typeof dec.style === "string" ? dec.style : "";
+  let truncated = false;
+  if (styles.length > COSMETIC_STYLE_CAP) {
+    styles = styles.slice(0, COSMETIC_STYLE_CAP);
+    truncated = true;
+  }
+  /* Every compiled rule ends with the literal hide body, so the
+     applied count needs no selector parsing. */
+  const applied = styles.split("{display:none!important}").length - 1;
+  return {
+    styles,
+    applied,
+    skipped: 0,
+    unsupported: dec.unsupported ?? 0,
+    truncated,
+  };
+}
+
+/** The document-rewrite seam (#551): gate, compute, diagnose, and
+    return the <style data-zl-cosmetic> markup to splice into the
+    rewrite head, or "" when cosmetics do not apply. The gate mirrors
+    rules.ts applyRules for the document host: the zl:adblock toggle,
+    the per-site adblock override, and the captcha/anti-bot allowlist
+    all refuse cosmetics exactly like they spare network requests. */
+export async function ghosteryCosmeticsForDocument(
+  engineRules: CompiledRules,
+  docUrl: string,
+  destination: string,
+  traceId?: string,
+): Promise<string> {
+  if (!isRulesEnabled()) return "";
+  /* Challenge-provider allowlists take precedence over cosmetics. */
+  if (allowlistedHostFor(engineRules, docUrl, "document") !== null) return "";
+  if (siteOverrideFor(docUrl)?.adblock === false) return "";
+  const wasm = wasmAdblockEngine();
+  let outcome: CosmeticOutcome | null;
+  if (wasm) {
+    outcome = wasmCosmeticOutcome(wasm, docUrl);
+  } else {
+    const eng = ghosteryEngine();
+    if (!eng) return "";
+    outcome = await computeCosmeticStyles(eng, docUrl);
+  }
+  if (!outcome) return "";
+  /* One bounded event per document, and only when something actually
+     happened (a silent all-zero row per navigation would flood the
+     512-event ring with noise). */
+  if (outcome.applied > 0 || outcome.skipped > 0 || outcome.unsupported > 0 || outcome.truncated) {
+    const rtype = requestType("document", destination);
+    DIAG.emit({
+      traceId,
+      requestId: traceId,
+      category: "REWRITE",
+      cause: "rewrite",
+      severity: "info",
+      stage: "REWRITE_STARTED",
+      message:
+        (wasm ? "adblock wasm" : "ghostery") + " cosmetic styles for " + rtype + ": " +
+        outcome.applied + (wasm ? " applied, " : " applied (+base stylesheet), ") +
+        outcome.skipped + " skipped by exception, " +
+        outcome.unsupported + " unsupported (scriptlets/extended, never executed), " +
+        outcome.styles.length + " bytes" +
+        (outcome.truncated ? ", truncated at " + COSMETIC_STYLE_CAP + " bytes" : ""),
+      url: docUrl,
+    });
+  }
+  if (!outcome.styles.trim()) return "";
+  return cosmeticStyleTag(outcome.styles);
+}

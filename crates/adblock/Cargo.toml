@@ -1,1 +1,21 @@
-[{"type":"resource","resource":{"uri":"sprite://mcp-zeolite-2/file?path=crates%2Fadblock%2FCargo.toml&workingDir=%2Fhome%2Fsprite%2Fzeo613","mimeType":"text/plain","text":"[package]\nname = \"zeolite-adblock\"\nversion.workspace = true\nedition.workspace = true\nlicense.workspace = true\n# #613: the wasm-bindgen wrapper over Brave's adblock-rust engine\n# (MPL-2.0 dependency). Edge crate: it must never become a dependency\n# of the dep-free cores (wisp-core, rewriter, csp, config, cookies).\n# cdylib for wasm-pack, rlib so the native clippy and test gates\n# cover it. The TS side keeps its @ghostery/adblocker path as the\n# fail-safe fallback when the module is missing, older, or its init\n# failed.\n\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n\n[dependencies]\nadblock = \"0.13.5\"\nserde = { version = \"1\", features = [\"derive\"] }\nserde_json = \"1\"\nwasm-bindgen = { workspace = true }\n"}}]
+[package]
+name = "zeolite-adblock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# #613: the wasm-bindgen wrapper over Brave's adblock-rust engine
+# (MPL-2.0 dependency). Edge crate: it must never become a dependency
+# of the dep-free cores (wisp-core, rewriter, csp, config, cookies).
+# cdylib for wasm-pack, rlib so the native clippy and test gates
+# cover it. The TS side keeps its @ghostery/adblocker path as the
+# fail-safe fallback when the module is missing, older, or its init
+# failed.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+adblock = "0.13.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = { workspace = true }

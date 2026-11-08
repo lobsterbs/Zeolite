@@ -1,1 +1,442 @@
-[{"type":"resource","resource":{"uri":"sprite://mcp-zeolite-2/file?path=app%2Fsrc%2Fghostery.ts&workingDir=%2Fhome%2Fsprite%2Fzeo613","mimeType":"text/plain","text":"/* Ghostery's EasyList-compatible network filter engine. The matcher\n   lives only in service-worker memory: proxied documents share the\n   app origin today, so persisted matcher data would be writable by\n   untrusted page scripts. List downloads use the engine's\n   transport decision (wired by sw.ts through ghosteryListFetch,\n   #381), never browser fetch.\n\n   This adapter applies network block and resource-redirect\n   decisions. #551 first slice: cosmetic CSS selectors for the\n   document URL are computed from this engine by ./cosmetics and\n   spliced into the document rewrite as a <style data-zl-cosmetic>\n   (transform.ts init splice). Scriptlets and extended/HTML filters\n   are counted and refused, never executed. */\n\n/* #613: a Rust/WASM adblock engine (Brave's adblock-rust, crates/\n   adblock) answers network and cosmetic queries in preference to\n   the TS matcher when its CI-generated glue instantiated. Every\n   gate here (the #381 fetch surface, the #500 sanity floor, the\n   #577 idle kick, the retry cooldowns) applies to BOTH arms, and\n   the TS matcher stays the fail-safe fallback body. */\n\nimport {\n  FiltersEngine,\n  Request as GhosteryRequest,\n  type RequestType,\n} from \"@ghostery/adblocker\";\nimport type { ResourceType } from \"./rules\";\nimport { initAdblockWasm, type AdblockWasmGlue, type WasmAdblockLike } from \"./adblockwasm\";\nimport { DIAG } from \"./diag\";\nimport { loadInflight } from \"./loadstate\";\nimport { activeStreams, firstStreamSettled } from \"./streams-alive\";\n\nconst REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;\n/* #500: sanity floor for a parsed ads+tracking engine. Any single\n   real list parses to tens of thousands of network filters; a junk\n   or truncated body parses to a handful. Below this the matcher\n   counts as empty or partial and is never installed. */\nconst MIN_NETWORK_FILTERS = 1000;\nconst RETRY_AFTER_MS = 60 * 1000;\n/* #577: an unreachable or hanging list origin must not burst its\n   ~10 vendored fetches through the transport every minute. The\n   cooldown grows 60s -> 4min -> 15min (cap) and resets on the first\n   successful load. */\nconst RETRY_CAP_MS = 15 * 60 * 1000;\nlet retryDelay = RETRY_AFTER_MS;\nconst LISTS_ORIGIN = \"https://raw.githubusercontent.com\";\nconst LISTS_PATH = \"/ghostery/adblocker/master/packages/adblocker/assets/\";\n\n/* #613: the raw-list URL set for the Rust/WASM arm, mirroring the\n   @ghostery/adblocker 2.20.1 adsAndTrackingLists the TS fallback\n   downloads through this same guarded fetcher. Kept as a literal so\n   the module never reaches into the dependency's dist internals;\n   the ghostery-wasm-arm test pins set equality against the installed\n   package, so a dependency bump that changes the set fails the\n   suite instead of silently shipping a weaker engine. */\nexport const WASM_LIST_URLS: readonly string[] = [\n  LISTS_ORIGIN + LISTS_PATH + \"easylist/easylist.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"peter-lowe/serverlist.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"ublock-origin/badware.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"ublock-origin/filters-2020.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"ublock-origin/filters-2021.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"ublock-origin/filters-2022.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"ublock-origin/filters-2023.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"ublock-origin/filters-2024.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"ublock-origin/filters.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"ublock-origin/quick-fixes.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"ublock-origin/resource-abuse.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"ublock-origin/unbreak.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"easylist/easyprivacy.txt\",\n  LISTS_ORIGIN + LISTS_PATH + \"ublock-origin/privacy.txt\",\n];\n\nlet fetchLists: typeof fetch | null = null;\nlet engine: FiltersEngine | null = null;\n/* #613: the wasm arm engine; preferred over the TS engine above\n   once installed. wasmDead pins a glue that is missing, older or\n   failed to instantiate for this worker lifetime. */\nlet wasmEngine: WasmAdblockLike | null = null;\nlet wasmDead = false;\nlet loading: Promise<void> | null = null;\nlet retryAt = 0;\nlet refreshAt = 0;\n\nexport interface GhosteryRedirect {\n  body: string;\n  contentType: string;\n}\n\nexport interface GhosteryDecision {\n  host: string;\n  redirect?: GhosteryRedirect;\n}\n\n/** Engine resource type mapping (#551 exports it so the cosmetic\n    seam labels documents with the same vocabulary; getCosmeticsFilters\n    itself is hostname-scoped and takes no request type). */\nexport function requestType(type: ResourceType, destination?: string): RequestType {\n  if (destination === \"iframe\" || destination === \"frame\") return \"sub_frame\";\n  if (destination === \"document\") return \"document\";\n  if (destination === \"object\") return \"object\";\n  if (destination === \"audio\" || destination === \"video\") return \"media\";\n  switch (type) {\n    case \"document\":\n      return \"document\";\n    case \"script\":\n    case \"worker\":\n    case \"wasm\":\n      return \"script\";\n    case \"style\":\n      return \"stylesheet\";\n    case \"image\":\n      return \"image\";\n    case \"font\":\n      return \"font\";\n    case \"media\":\n      return \"media\";\n    case \"websocket\":\n      return \"websocket\";\n    case \"fetch\":\n      return \"xmlhttprequest\";\n    case \"eventsource\":\n      return \"eventsource\";\n    case \"manifest\":\n      return \"manifest\";\n    default:\n      return \"other\";\n  }\n}\n\nasync function fetchListsText(url: string): Promise<string> {\n  const response = await fetchLists!(url);\n  return response.text();\n}\n\nasync function loadEngine(force = false): Promise<void> {\n  if (loading || !fetchLists || ((engine || wasmEngine) && !force) || Date.now() < retryAt) {\n    return loading ?? Promise.resolve();\n  }\n  loading = (async () => {\n    try {\n      let installed = false;\n      /* #613: the Rust/WASM engine answers first when its glue\n         initialized. It downloads the raw list set through the same\n         guarded fetcher the TS matcher uses, so the #381 fetch\n         surface never widens. A glue that is missing, older or\n         failed to instantiate is sticky for this worker\n         lifetime: one DIAG names the degradation and later loads\n         skip straight to the TS arm. A failed list fetch or build\n         is NOT sticky: that is transport or data, and the TS arm\n         refetches immediately (one extra burst per failed\n         attempt, backoff-capped by the retry cooldown below). */\n      if (!wasmDead) {\n        let glue: AdblockWasmGlue | undefined;\n        try {\n          glue = await initAdblockWasm();\n        } catch (err) {\n          wasmDead = true;\n          DIAG.emit({\n            requestId: DIAG.trace(),\n            category: \"TRANSPORT\",\n            cause: \"proxy\",\n            severity: \"info\",\n            stage: \"UPSTREAM_RESPONSE\",\n            message:\n              \"adblock wasm arm unavailable (\" +\n              (err instanceof Error ? err.message : String(err)) +\n              \"); the TS matcher stays authoritative\",\n          });\n        }\n        if (glue) {\n          try {\n            const lists = await Promise.all(WASM_LIST_URLS.map(fetchListsText));\n            const fresh = new glue.WasmAdblock(JSON.stringify(lists));\n            const rules = fresh.input_rules();\n            /* The #500 floor plus a canary probe: a junk or truncated\n               body parses to a handful of rules and can never block\n               the doubleclick canary, so either gate fails and the\n               engine never installs. Not sticky: a later refresh\n               can still draw a good body. */\n            if (rules < MIN_NETWORK_FILTERS || !fresh.canary_blocks()) {\n              DIAG.emit({\n                requestId: DIAG.trace(),\n                category: \"TRANSPORT\",\n                cause: \"proxy\",\n                severity: \"warning\",\n                stage: \"UPSTREAM_RESPONSE\",\n                message:\n                  \"adblock wasm engine parsed \" + rules + \" input rules from the filter lists (canary \" +\n                  (fresh.canary_blocks() ? \"blocked\" : \"not blocked\") +\n                  \"); empty or partial matcher, falling back to the TS matcher\",\n              });\n            } else {\n              wasmEngine = fresh;\n              installed = true;\n            }\n          } catch (err) {\n            DIAG.emit({\n              requestId: DIAG.trace(),\n              category: \"TRANSPORT\",\n              cause: \"proxy\",\n              severity: \"warning\",\n              stage: \"UPSTREAM_RESPONSE\",\n              message:\n                \"adblock wasm arm failed to build (\" +\n                (err instanceof Error ? err.message : String(err)) +\n                \"); falling back to the TS matcher\",\n            });\n          }\n        }\n      }\n      if (!installed) {\n        const fresh = await FiltersEngine.fromPrebuiltAdsAndTracking(fetchLists!);\n        /* #500: a list host can answer 200 with a junk or truncated\n           body (captive portal, HTML error page) and the parser turns\n           that into an engine with zero or a handful of network\n           filters. No fetch failed, so the #381 load-failure row\n           never fires, and the matcher runs with a near-zero block\n           rate - the exact live symptom reported from relay-only\n           deployments. The ads+tracking set parses to tens of\n           thousands of network filters; anything under the sanity\n           floor is junk, not a partial real load. One DIAG names the\n           condition and junk never installs: the previously loaded\n           good matcher survives, otherwise the matcher stays null. */\n        const network = fresh.getFilters().networkFilters.length;\n        if (network < MIN_NETWORK_FILTERS) {\n          retryAt = Date.now() + retryDelay;\n          refreshAt = retryAt;\n          retryDelay = Math.min(retryDelay * 4, RETRY_CAP_MS);\n          DIAG.emit({\n            requestId: DIAG.trace(),\n            category: \"TRANSPORT\",\n            cause: \"proxy\",\n            severity: \"warning\",\n            stage: \"UPSTREAM_RESPONSE\",\n            message:\n              \"ghostery filter lists parsed \" + network + \" network filters (empty or partial matcher); \" +\n              (engine ? \"keeping the previously loaded rules\" : \"local rules stay active\") +\n              \"; retrying after cooldown\",\n          });\n          return;\n        }\n        engine = fresh;\n      }\n      retryAt = 0;\n      retryDelay = RETRY_AFTER_MS;\n      refreshAt = Date.now() + REFRESH_AFTER_MS;\n    } catch (err) {\n      /* A temporarily unavailable list host must not break page\n         requests. The existing local host list stays active and\n         this worker retries after a short cooldown. #381: the\n         failure is no longer silent - a TRANSPORT row names the\n         load failure so relay-only transport gaps are visible. */\n      retryAt = Date.now() + retryDelay;\n      refreshAt = retryAt;\n      retryDelay = Math.min(retryDelay * 4, RETRY_CAP_MS);\n      DIAG.emit({\n        requestId: DIAG.trace(),\n        category: \"TRANSPORT\",\n        cause: \"proxy\",\n        severity: \"warning\",\n        stage: \"UPSTREAM_REQUEST\",\n        message:\n          \"ghostery filter-list load failed: \" +\n          (err instanceof Error ? err.message : String(err)) +\n          \"; local rules stay active\",\n      });\n    } finally {\n      loading = null;\n    }\n  })();\n  return loading;\n}\n\n/* #577: the lazy list load shares the wisp transport singleton with\n   page traffic, and the list origins are the one fetch class that\n   can wedge for a whole first-byte deadline on filtered networks\n   (the list host connects, then never answers). Started inline from\n   the matching request, that wedge cost the triggering navigation\n   its own deadline: the boot wedged through the reset/retry churn,\n   the #477 ttfb seam turned it into a deterministic torture red, and\n   CI flaked whenever the list origin was slow. The kick now defers\n   to the first transport-idle gap: the loadstate counter reads zero once no upstream request is between its enter and its headers, and activeStreams (streams-alive) reads zero once no rewritten body is still pumping past its headers, so the download starts between page requests instead of racing the first one. Before any proxied body settles, every counter reads\n   zero vacuously, so the gate also requires firstStreamSettled\n   (streams-alive): the kick cannot fire in the boot window. The\n   gate needs two consecutive quiet samples a poll apart, and a failed load backs off 60s -> 4min -> 15min so an unreachable list origin cannot keep churning the transport. ghosteryBlock keeps answering from the local rules\n   (null) until the matcher exists, so no request ever waits on the\n   download. */\nconst KICK_IDLE_POLL_MS = 250;\nlet kickTimer: ReturnType<typeof setTimeout> | null = null;\n\nfunction kickListLoad(force = false): void {\n  if (kickTimer !== null) return;\n  let quiet = 0;\n  const poll = () => {\n    kickTimer = null;\n    if (loading || !fetchLists || ((engine || wasmEngine) && !force) || Date.now() < retryAt) return;\n    if (!firstStreamSettled() || loadInflight() > 0 || activeStreams() > 0) {\n      quiet = 0;\n      kickTimer = setTimeout(poll, KICK_IDLE_POLL_MS);\n      return;\n    }\n    /* #577: one quiet sample can land in the sub-millisecond gap\n       between a rule match and its transport enter; two samples a\n       poll interval apart cannot. */\n    quiet += 1;\n    if (quiet < 2) {\n      kickTimer = setTimeout(poll, KICK_IDLE_POLL_MS);\n      return;\n    }\n    void loadEngine(force);\n  };\n  kickTimer = setTimeout(poll, 0);\n}\n\n/** Set the list-fetch transport; matching starts lazily on first use.\n    Ghostery's prebuilt list URLs are fixed, but keep this seam narrow:\n    only its HTTPS asset directory is reachable and Wisp redirects are\n    surfaced to this adapter instead of being followed to a new host. */\nexport function configureGhostery(fetcher: typeof fetch): void {\n  fetchLists = async (input, init) => {\n    const request = typeof Request !== \"undefined\" && input instanceof Request ? input : null;\n    const rawUrl =\n      typeof input === \"string\" ? input : input instanceof URL ? input.href : input.url;\n    const url = new URL(rawUrl);\n    const method = (init?.method ?? request?.method ?? \"GET\").toUpperCase();\n    if (\n      url.origin !== LISTS_ORIGIN ||\n      url.username ||\n      url.password ||\n      url.port ||\n      !url.pathname.startsWith(LISTS_PATH) ||\n      url.search ||\n      url.hash ||\n      method !== \"GET\"\n    ) {\n      throw new TypeError(\"Ghostery requested an unexpected filter-list URL\");\n    }\n    const response = await fetcher(url.href, { ...init, method: \"GET\", redirect: \"manual\" });\n    if (!response.ok) {\n      await response.body?.cancel().catch(() => {});\n      throw new Error(\"Ghostery filter-list request did not return a success status\");\n    }\n    return response;\n  };\n}\n\n/** The loaded matcher, or null while the list load is pending/failed.\n    #551: the cosmetic injection seam reads the same engine instance\n    the network matcher answers from, so both arms agree on what is\n    loaded; never a second parse. */\nexport function ghosteryEngine(): FiltersEngine | null {\n  return engine;\n}\n\n/** The request event uses this to keep a lazy filter-list load alive. */\nexport function ghosteryLoadInProgress(): Promise<void> | null {\n  return loading;\n}\n\n/** The loaded Rust/WASM matcher, or null while pending or failed\n    (#613). The cosmetic seam prefers it exactly like ghosteryBlock\n    does, so network and cosmetic decisions always come from one\n    loaded engine instance. */\nexport function wasmAdblockEngine(): WasmAdblockLike | null {\n  return wasmEngine;\n}\n\n/** The wasm arm redirects to full data: URLs (its builtin resource\n    set); the seam expects the same { body, contentType } shape as\n    the TS arm's resource redirects, so the payload is decoded once\n    at the boundary. An unparsable data URL drops the redirect and\n    keeps the plain block. */\nfunction dataUrlRedirect(dataUrl: string): GhosteryRedirect | null {\n  const comma = dataUrl.indexOf(\",\");\n  if (!dataUrl.startsWith(\"data:\") || comma < 6) return null;\n  const parts = dataUrl.slice(5, comma).split(\";\");\n  const payload = dataUrl.slice(comma + 1);\n  try {\n    const body = parts.includes(\"base64\")\n      ? atob(payload)\n      : decodeURIComponent(payload);\n    return { body, contentType: parts[0] || \"text/plain\" };\n  } catch {\n    return null;\n  }\n}\n\n/** Return the matched block or redirect filter, or null when unmatched. */\nexport function ghosteryBlock(\n  url: string,\n  type: ResourceType,\n  sourceUrl?: string,\n  destination?: string,\n): GhosteryDecision | null {\n  if (!engine && !wasmEngine) {\n    kickListLoad();\n    return null;\n  }\n  if (Date.now() >= refreshAt) kickListLoad(true);\n  if (wasmEngine) {\n    /* #613 wasm arm: one JSON decision crosses the boundary per\n       request. The TS arm matches no method at all, so the wasm arm\n       pins \"get\" and $method-specific rules match in neither arm. */\n    try {\n      const raw = wasmEngine.check_network(url, sourceUrl ?? \"\", requestType(type, destination), \"get\");\n      if (raw === null) return null;\n      const dec = JSON.parse(raw) as { matched?: boolean; redirect?: string | null };\n      if (!dec.matched) return null;\n      const redirect = dec.redirect ? dataUrlRedirect(dec.redirect) : null;\n      let host = \"adblock wasm filter\";\n      try {\n        host = new URL(url).hostname || host;\n      } catch {\n        /* keep the generic label */\n      }\n      return { host, ...(redirect ? { redirect } : {}) };\n    } catch {\n      return null;\n    }\n  }\n  /* Narrowing only: reached with engine null solely when the wasm\n     arm above returned, so this never fires in practice. */\n  if (!engine) return null;\n  try {\n    const result = engine.match(\n      GhosteryRequest.fromRawDetails({\n        url,\n        sourceUrl: sourceUrl ?? \"\",\n        type: requestType(type, destination),\n      }),\n    );\n    if (!result.match) return null;\n    return {\n      host: result.filter?.getHostname() || \"Ghostery network filter\",\n      ...(result.redirect\n        ? { redirect: { body: result.redirect.body, contentType: result.redirect.contentType } }\n        : {}),\n    };\n  } catch {\n    return null;\n  }\n}\n"}}]
+/* Ghostery's EasyList-compatible network filter engine. The matcher
+   lives only in service-worker memory: proxied documents share the
+   app origin today, so persisted matcher data would be writable by
+   untrusted page scripts. List downloads use the engine's
+   transport decision (wired by sw.ts through ghosteryListFetch,
+   #381), never browser fetch.
+
+   This adapter applies network block and resource-redirect
+   decisions. #551 first slice: cosmetic CSS selectors for the
+   document URL are computed from this engine by ./cosmetics and
+   spliced into the document rewrite as a <style data-zl-cosmetic>
+   (transform.ts init splice). Scriptlets and extended/HTML filters
+   are counted and refused, never executed. */
+
+/* #613: a Rust/WASM adblock engine (Brave's adblock-rust, crates/
+   adblock) answers network and cosmetic queries in preference to
+   the TS matcher when its CI-generated glue instantiated. Every
+   gate here (the #381 fetch surface, the #500 sanity floor, the
+   #577 idle kick, the retry cooldowns) applies to BOTH arms, and
+   the TS matcher stays the fail-safe fallback body. */
+
+import {
+  FiltersEngine,
+  Request as GhosteryRequest,
+  type RequestType,
+} from "@ghostery/adblocker";
+import type { ResourceType } from "./rules";
+import { initAdblockWasm, type AdblockWasmGlue, type WasmAdblockLike } from "./adblockwasm";
+import { DIAG } from "./diag";
+import { loadInflight } from "./loadstate";
+import { activeStreams, firstStreamSettled } from "./streams-alive";
+
+const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+/* #500: sanity floor for a parsed ads+tracking engine. Any single
+   real list parses to tens of thousands of network filters; a junk
+   or truncated body parses to a handful. Below this the matcher
+   counts as empty or partial and is never installed. */
+const MIN_NETWORK_FILTERS = 1000;
+const RETRY_AFTER_MS = 60 * 1000;
+/* #577: an unreachable or hanging list origin must not burst its
+   ~10 vendored fetches through the transport every minute. The
+   cooldown grows 60s -> 4min -> 15min (cap) and resets on the first
+   successful load. */
+const RETRY_CAP_MS = 15 * 60 * 1000;
+let retryDelay = RETRY_AFTER_MS;
+const LISTS_ORIGIN = "https://raw.githubusercontent.com";
+const LISTS_PATH = "/ghostery/adblocker/master/packages/adblocker/assets/";
+
+/* #613: the raw-list URL set for the Rust/WASM arm, mirroring the
+   @ghostery/adblocker 2.20.1 adsAndTrackingLists the TS fallback
+   downloads through this same guarded fetcher. Kept as a literal so
+   the module never reaches into the dependency's dist internals;
+   the ghostery-wasm-arm test pins set equality against the installed
+   package, so a dependency bump that changes the set fails the
+   suite instead of silently shipping a weaker engine. */
+export const WASM_LIST_URLS: readonly string[] = [
+  LISTS_ORIGIN + LISTS_PATH + "easylist/easylist.txt",
+  LISTS_ORIGIN + LISTS_PATH + "peter-lowe/serverlist.txt",
+  LISTS_ORIGIN + LISTS_PATH + "ublock-origin/badware.txt",
+  LISTS_ORIGIN + LISTS_PATH + "ublock-origin/filters-2020.txt",
+  LISTS_ORIGIN + LISTS_PATH + "ublock-origin/filters-2021.txt",
+  LISTS_ORIGIN + LISTS_PATH + "ublock-origin/filters-2022.txt",
+  LISTS_ORIGIN + LISTS_PATH + "ublock-origin/filters-2023.txt",
+  LISTS_ORIGIN + LISTS_PATH + "ublock-origin/filters-2024.txt",
+  LISTS_ORIGIN + LISTS_PATH + "ublock-origin/filters.txt",
+  LISTS_ORIGIN + LISTS_PATH + "ublock-origin/quick-fixes.txt",
+  LISTS_ORIGIN + LISTS_PATH + "ublock-origin/resource-abuse.txt",
+  LISTS_ORIGIN + LISTS_PATH + "ublock-origin/unbreak.txt",
+  LISTS_ORIGIN + LISTS_PATH + "easylist/easyprivacy.txt",
+  LISTS_ORIGIN + LISTS_PATH + "ublock-origin/privacy.txt",
+];
+
+let fetchLists: typeof fetch | null = null;
+let engine: FiltersEngine | null = null;
+/* #613: the wasm arm engine; preferred over the TS engine above
+   once installed. wasmDead pins a glue that is missing, older or
+   failed to instantiate for this worker lifetime. */
+let wasmEngine: WasmAdblockLike | null = null;
+let wasmDead = false;
+let loading: Promise<void> | null = null;
+let retryAt = 0;
+let refreshAt = 0;
+
+export interface GhosteryRedirect {
+  body: string;
+  contentType: string;
+}
+
+export interface GhosteryDecision {
+  host: string;
+  redirect?: GhosteryRedirect;
+}
+
+/** Engine resource type mapping (#551 exports it so the cosmetic
+    seam labels documents with the same vocabulary; getCosmeticsFilters
+    itself is hostname-scoped and takes no request type). */
+export function requestType(type: ResourceType, destination?: string): RequestType {
+  if (destination === "iframe" || destination === "frame") return "sub_frame";
+  if (destination === "document") return "document";
+  if (destination === "object") return "object";
+  if (destination === "audio" || destination === "video") return "media";
+  switch (type) {
+    case "document":
+      return "document";
+    case "script":
+    case "worker":
+    case "wasm":
+      return "script";
+    case "style":
+      return "stylesheet";
+    case "image":
+      return "image";
+    case "font":
+      return "font";
+    case "media":
+      return "media";
+    case "websocket":
+      return "websocket";
+    case "fetch":
+      return "xmlhttprequest";
+    case "eventsource":
+      return "eventsource";
+    case "manifest":
+      return "manifest";
+    default:
+      return "other";
+  }
+}
+
+async function fetchListsText(url: string): Promise<string> {
+  const response = await fetchLists!(url);
+  return response.text();
+}
+
+async function loadEngine(force = false): Promise<void> {
+  if (loading || !fetchLists || ((engine || wasmEngine) && !force) || Date.now() < retryAt) {
+    return loading ?? Promise.resolve();
+  }
+  loading = (async () => {
+    try {
+      let installed = false;
+      /* #613: the Rust/WASM engine answers first when its glue
+         initialized. It downloads the raw list set through the same
+         guarded fetcher the TS matcher uses, so the #381 fetch
+         surface never widens. A glue that is missing, older or
+         failed to instantiate is sticky for this worker
+         lifetime: one DIAG names the degradation and later loads
+         skip straight to the TS arm. A failed list fetch or build
+         is NOT sticky: that is transport or data, and the TS arm
+         refetches immediately (one extra burst per failed
+         attempt, backoff-capped by the retry cooldown below). */
+      if (!wasmDead) {
+        let glue: AdblockWasmGlue | undefined;
+        try {
+          glue = await initAdblockWasm();
+        } catch (err) {
+          wasmDead = true;
+          DIAG.emit({
+            requestId: DIAG.trace(),
+            category: "TRANSPORT",
+            cause: "proxy",
+            severity: "info",
+            stage: "UPSTREAM_RESPONSE",
+            message:
+              "adblock wasm arm unavailable (" +
+              (err instanceof Error ? err.message : String(err)) +
+              "); the TS matcher stays authoritative",
+          });
+        }
+        if (glue) {
+          try {
+            const lists = await Promise.all(WASM_LIST_URLS.map(fetchListsText));
+            const fresh = new glue.WasmAdblock(JSON.stringify(lists));
+            const rules = fresh.input_rules();
+            /* The #500 floor plus a canary probe: a junk or truncated
+               body parses to a handful of rules and can never block
+               the doubleclick canary, so either gate fails and the
+               engine never installs. Not sticky: a later refresh
+               can still draw a good body. */
+            if (rules < MIN_NETWORK_FILTERS || !fresh.canary_blocks()) {
+              DIAG.emit({
+                requestId: DIAG.trace(),
+                category: "TRANSPORT",
+                cause: "proxy",
+                severity: "warning",
+                stage: "UPSTREAM_RESPONSE",
+                message:
+                  "adblock wasm engine parsed " + rules + " input rules from the filter lists (canary " +
+                  (fresh.canary_blocks() ? "blocked" : "not blocked") +
+                  "); empty or partial matcher, falling back to the TS matcher",
+              });
+            } else {
+              wasmEngine = fresh;
+              installed = true;
+            }
+          } catch (err) {
+            DIAG.emit({
+              requestId: DIAG.trace(),
+              category: "TRANSPORT",
+              cause: "proxy",
+              severity: "warning",
+              stage: "UPSTREAM_RESPONSE",
+              message:
+                "adblock wasm arm failed to build (" +
+                (err instanceof Error ? err.message : String(err)) +
+                "); falling back to the TS matcher",
+            });
+          }
+        }
+      }
+      if (!installed) {
+        const fresh = await FiltersEngine.fromPrebuiltAdsAndTracking(fetchLists!);
+        /* #500: a list host can answer 200 with a junk or truncated
+           body (captive portal, HTML error page) and the parser turns
+           that into an engine with zero or a handful of network
+           filters. No fetch failed, so the #381 load-failure row
+           never fires, and the matcher runs with a near-zero block
+           rate - the exact live symptom reported from relay-only
+           deployments. The ads+tracking set parses to tens of
+           thousands of network filters; anything under the sanity
+           floor is junk, not a partial real load. One DIAG names the
+           condition and junk never installs: the previously loaded
+           good matcher survives, otherwise the matcher stays null. */
+        const network = fresh.getFilters().networkFilters.length;
+        if (network < MIN_NETWORK_FILTERS) {
+          retryAt = Date.now() + retryDelay;
+          refreshAt = retryAt;
+          retryDelay = Math.min(retryDelay * 4, RETRY_CAP_MS);
+          DIAG.emit({
+            requestId: DIAG.trace(),
+            category: "TRANSPORT",
+            cause: "proxy",
+            severity: "warning",
+            stage: "UPSTREAM_RESPONSE",
+            message:
+              "ghostery filter lists parsed " + network + " network filters (empty or partial matcher); " +
+              (engine ? "keeping the previously loaded rules" : "local rules stay active") +
+              "; retrying after cooldown",
+          });
+          return;
+        }
+        engine = fresh;
+      }
+      retryAt = 0;
+      retryDelay = RETRY_AFTER_MS;
+      refreshAt = Date.now() + REFRESH_AFTER_MS;
+    } catch (err) {
+      /* A temporarily unavailable list host must not break page
+         requests. The existing local host list stays active and
+         this worker retries after a short cooldown. #381: the
+         failure is no longer silent - a TRANSPORT row names the
+         load failure so relay-only transport gaps are visible. */
+      retryAt = Date.now() + retryDelay;
+      refreshAt = retryAt;
+      retryDelay = Math.min(retryDelay * 4, RETRY_CAP_MS);
+      DIAG.emit({
+        requestId: DIAG.trace(),
+        category: "TRANSPORT",
+        cause: "proxy",
+        severity: "warning",
+        stage: "UPSTREAM_REQUEST",
+        message:
+          "ghostery filter-list load failed: " +
+          (err instanceof Error ? err.message : String(err)) +
+          "; local rules stay active",
+      });
+    } finally {
+      loading = null;
+    }
+  })();
+  return loading;
+}
+
+/* #577: the lazy list load shares the wisp transport singleton with
+   page traffic, and the list origins are the one fetch class that
+   can wedge for a whole first-byte deadline on filtered networks
+   (the list host connects, then never answers). Started inline from
+   the matching request, that wedge cost the triggering navigation
+   its own deadline: the boot wedged through the reset/retry churn,
+   the #477 ttfb seam turned it into a deterministic torture red, and
+   CI flaked whenever the list origin was slow. The kick now defers
+   to the first transport-idle gap: the loadstate counter reads zero once no upstream request is between its enter and its headers, and activeStreams (streams-alive) reads zero once no rewritten body is still pumping past its headers, so the download starts between page requests instead of racing the first one. Before any proxied body settles, every counter reads
+   zero vacuously, so the gate also requires firstStreamSettled
+   (streams-alive): the kick cannot fire in the boot window. The
+   gate needs two consecutive quiet samples a poll apart, and a failed load backs off 60s -> 4min -> 15min so an unreachable list origin cannot keep churning the transport. ghosteryBlock keeps answering from the local rules
+   (null) until the matcher exists, so no request ever waits on the
+   download. */
+const KICK_IDLE_POLL_MS = 250;
+let kickTimer: ReturnType<typeof setTimeout> | null = null;
+
+function kickListLoad(force = false): void {
+  if (kickTimer !== null) return;
+  let quiet = 0;
+  const poll = () => {
+    kickTimer = null;
+    if (loading || !fetchLists || ((engine || wasmEngine) && !force) || Date.now() < retryAt) return;
+    if (!firstStreamSettled() || loadInflight() > 0 || activeStreams() > 0) {
+      quiet = 0;
+      kickTimer = setTimeout(poll, KICK_IDLE_POLL_MS);
+      return;
+    }
+    /* #577: one quiet sample can land in the sub-millisecond gap
+       between a rule match and its transport enter; two samples a
+       poll interval apart cannot. */
+    quiet += 1;
+    if (quiet < 2) {
+      kickTimer = setTimeout(poll, KICK_IDLE_POLL_MS);
+      return;
+    }
+    void loadEngine(force);
+  };
+  kickTimer = setTimeout(poll, 0);
+}
+
+/** Set the list-fetch transport; matching starts lazily on first use.
+    Ghostery's prebuilt list URLs are fixed, but keep this seam narrow:
+    only its HTTPS asset directory is reachable and Wisp redirects are
+    surfaced to this adapter instead of being followed to a new host. */
+export function configureGhostery(fetcher: typeof fetch): void {
+  fetchLists = async (input, init) => {
+    const request = typeof Request !== "undefined" && input instanceof Request ? input : null;
+    const rawUrl =
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const url = new URL(rawUrl);
+    const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+    if (
+      url.origin !== LISTS_ORIGIN ||
+      url.username ||
+      url.password ||
+      url.port ||
+      !url.pathname.startsWith(LISTS_PATH) ||
+      url.search ||
+      url.hash ||
+      method !== "GET"
+    ) {
+      throw new TypeError("Ghostery requested an unexpected filter-list URL");
+    }
+    const response = await fetcher(url.href, { ...init, method: "GET", redirect: "manual" });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error("Ghostery filter-list request did not return a success status");
+    }
+    return response;
+  };
+}
+
+/** The loaded matcher, or null while the list load is pending/failed.
+    #551: the cosmetic injection seam reads the same engine instance
+    the network matcher answers from, so both arms agree on what is
+    loaded; never a second parse. */
+export function ghosteryEngine(): FiltersEngine | null {
+  return engine;
+}
+
+/** The request event uses this to keep a lazy filter-list load alive. */
+export function ghosteryLoadInProgress(): Promise<void> | null {
+  return loading;
+}
+
+/** The loaded Rust/WASM matcher, or null while pending or failed
+    (#613). The cosmetic seam prefers it exactly like ghosteryBlock
+    does, so network and cosmetic decisions always come from one
+    loaded engine instance. */
+export function wasmAdblockEngine(): WasmAdblockLike | null {
+  return wasmEngine;
+}
+
+/** The wasm arm redirects to full data: URLs (its builtin resource
+    set); the seam expects the same { body, contentType } shape as
+    the TS arm's resource redirects, so the payload is decoded once
+    at the boundary. An unparsable data URL drops the redirect and
+    keeps the plain block. */
+function dataUrlRedirect(dataUrl: string): GhosteryRedirect | null {
+  const comma = dataUrl.indexOf(",");
+  if (!dataUrl.startsWith("data:") || comma < 6) return null;
+  const parts = dataUrl.slice(5, comma).split(";");
+  const payload = dataUrl.slice(comma + 1);
+  try {
+    const body = parts.includes("base64")
+      ? atob(payload)
+      : decodeURIComponent(payload);
+    return { body, contentType: parts[0] || "text/plain" };
+  } catch {
+    return null;
+  }
+}
+
+/** Return the matched block or redirect filter, or null when unmatched. */
+export function ghosteryBlock(
+  url: string,
+  type: ResourceType,
+  sourceUrl?: string,
+  destination?: string,
+): GhosteryDecision | null {
+  if (!engine && !wasmEngine) {
+    kickListLoad();
+    return null;
+  }
+  if (Date.now() >= refreshAt) kickListLoad(true);
+  if (wasmEngine) {
+    /* #613 wasm arm: one JSON decision crosses the boundary per
+       request. The TS arm matches no method at all, so the wasm arm
+       pins "get" and $method-specific rules match in neither arm. */
+    try {
+      const raw = wasmEngine.check_network(url, sourceUrl ?? "", requestType(type, destination), "get");
+      if (raw === null) return null;
+      const dec = JSON.parse(raw) as { matched?: boolean; redirect?: string | null };
+      if (!dec.matched) return null;
+      const redirect = dec.redirect ? dataUrlRedirect(dec.redirect) : null;
+      let host = "adblock wasm filter";
+      try {
+        host = new URL(url).hostname || host;
+      } catch {
+        /* keep the generic label */
+      }
+      return { host, ...(redirect ? { redirect } : {}) };
+    } catch {
+      return null;
+    }
+  }
+  /* Narrowing only: reached with engine null solely when the wasm
+     arm above returned, so this never fires in practice. */
+  if (!engine) return null;
+  try {
+    const result = engine.match(
+      GhosteryRequest.fromRawDetails({
+        url,
+        sourceUrl: sourceUrl ?? "",
+        type: requestType(type, destination),
+      }),
+    );
+    if (!result.match) return null;
+    return {
+      host: result.filter?.getHostname() || "Ghostery network filter",
+      ...(result.redirect
+        ? { redirect: { body: result.redirect.body, contentType: result.redirect.contentType } }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
+}
