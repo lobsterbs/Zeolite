@@ -824,3 +824,36 @@ deterministic; only its firing is intermittent. Tracked in #514.
   keeps its TS fallback body. This docs-only commit is the
   recorded bounded retrigger per the operational notes. The pin
   gate stands: all five jobs green or no LobsterBrowse pin.
+
+
+## Runs 42428545839 and 42428565823 (heads 4fe91e0/47397adb, NOT wedges: corrupt push)
+
+- Both runs show the workflow FILE PATH as the run name and ZERO
+  jobs: the push pipeline fed the file-read resource envelope in
+  place of file text, so every file on main was a single-line JSON
+  wrapper and GitHub could not parse ci.yml at all. Repaired at
+  0753d7ae with byte-verified content (codeload diff against the
+  gate-green worktree). Recorded to keep the ledger honest; the
+  corruption was tooling, never engine bytes.
+
+## Run 42428824893 (head 0753d7ae, the #613 byte-restore re-push)
+
+- App red is a REAL defect, not a wedge: the SW-scope loading lint
+  flagged SWIMPORT src/adblockwasm.ts:34 (a dynamic import() with
+  a string literal; the local gate list lacked the CI grep steps).
+  Fixed in 81f6c92 with the seam.ts pattern (static glue import,
+  lazy init kept). Browser red is the first-victim rotation
+  family: proxied frame timeout at the #456 gate 4 step of
+  location-targeting.mjs, the same single failure as 75dd58c;
+  rust/wasm/compat green in the same run.
+
+## Run 42429230444 (head 81f6c92, the SWIMPORT fix)
+
+- rust/wasm/app/compat GREEN. Browser red on the same single
+  signature: one [FAIL] proxied frame timeout on the first
+  openProxied of location-targeting.mjs, the documented #456
+  gate 4 first-victim wedge, identical on the 0753d7ae bytes and
+  the pre-adblock 75dd58c bytes. Engine bytes exonerated by the
+  same-job and cross-head corroboration. This docs-only commit is
+  the recorded bounded retrigger per the operational notes; the
+  pin gate stands.
