@@ -1,1 +1,26 @@
-[{"type":"resource","resource":{"uri":"sprite://mcp-zeolite-2/file?path=Cargo.toml&workingDir=%2Fhome%2Fsprite%2Fzeo613","mimeType":"text/plain","text":"[workspace]\nresolver = \"2\"\nmembers = [\"crates/adblock\", \"crates/config\", \"crates/cookies\", \"crates/csp\", \"crates/seam-wasm\", \"crates/rewriter\", \"crates/wisp-wasm\", \"crates/zeolite-server\", \"crates/wisp-core\", \"crates/wisp-extensions\"]\n\n[workspace.package]\nversion = \"3.0.1\"\nedition = \"2021\"\nlicense = \"AGPL-3.0-only\"\n\n[workspace.dependencies]\nwisp-core = { path = \"crates/wisp-core\" }\nwisp-extensions = { path = \"crates/wisp-extensions\" }\nzeolite-csp = { path = \"crates/csp\" }\nzeolite-config = { path = \"crates/config\" }\nwasm-bindgen = \"0.2\"\nbytes = \"1\"\nthiserror = \"2\"\nsha2 = \"0.10\"\ned25519-dalek = \"2\"\nrand = \"0.8\"\npbkdf2 = \"0.12\"\nsubtle = \"2\"\n\n[profile.release]\nopt-level = \"z\"\nlto = true\n"}}]
+[workspace]
+resolver = "2"
+members = ["crates/adblock", "crates/config", "crates/cookies", "crates/csp", "crates/seam-wasm", "crates/rewriter", "crates/wisp-wasm", "crates/zeolite-server", "crates/wisp-core", "crates/wisp-extensions"]
+
+[workspace.package]
+version = "3.0.1"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+wisp-core = { path = "crates/wisp-core" }
+wisp-extensions = { path = "crates/wisp-extensions" }
+zeolite-csp = { path = "crates/csp" }
+zeolite-config = { path = "crates/config" }
+wasm-bindgen = "0.2"
+bytes = "1"
+thiserror = "2"
+sha2 = "0.10"
+ed25519-dalek = "2"
+rand = "0.8"
+pbkdf2 = "0.12"
+subtle = "2"
+
+[profile.release]
+opt-level = "z"
+lto = true
