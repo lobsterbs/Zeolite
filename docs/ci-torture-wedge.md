@@ -979,3 +979,23 @@ deterministic; only its firing is intermittent. Tracked in #514.
   the sorted-view follow-up (dominspect-core sorts the swept keys
   before capping, unit-pinned with a scrambled-order store) riding
   the #544 push; this record rides the same push.
+
+## Run 42513932627 (head 22645c32, the #544 ship)
+
+- rust/wasm/app/compat GREEN.
+- Browser red, 66 passed / 8 failed: the documented #514-class wedge
+  cluster fired EARLY this run (first victims the passthrough
+  NativeTransit probe, then the IndexedDB round-trip, the Cache API
+  round-trip, the #576 register probe and the img/srcset rewriter
+  group as page.goto timeouts) and the cascade ate the late
+  engine-needing checks too: the three new #544 ws/rtc checks failed
+  on page-open timeouts ("waiting for proxied frame"), never on
+  their own assertions, while the direct-control halves of both
+  groups passed (direct wss echo, direct RTC offer/gather) and the
+  doctor gate counted the new checks.
+- The three #544 checks have not yet had a healthy-engine CI
+  window; the same failure class is filed as #641 with a
+  pristine-main repro (any check placed in the wedge window fails,
+  plain openProxied probes included). This entry rides the
+  retrigger; the next run's verdict on the three checks is the
+  honest arbiter.
