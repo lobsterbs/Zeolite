@@ -206,6 +206,20 @@ async function hostControl(pg, message, timeoutMs = 6000) {
     catch { finish({ ok: false, status: "unavailable", error: "postMessage failed" }); }
   }), { message, timeoutMs });
 }
+/* #550: deterministic clientId discovery for one freshly opened
+   proxied page. A unique same-virtual-origin fetch is engine-proxied
+   and logged with the frame's clientId; scanning the netlog for the
+   token names the exact client, instead of guessing the newest row
+   (older checks leave live streams behind). */
+async function probeClientId(page, frame) {
+  const token = "zl-di-probe-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  await frame.evaluate((t) => fetch(t).catch(() => {}), token);
+  const logs = await hostControl(page, { type: "zl:getNetLog", since: 0 });
+  const row = logs.entries.find((e) => JSON.stringify(e).indexOf(token) !== -1);
+  assert(row, "probe row missing from the netlog");
+  return row.clientId;
+}
+
 async function startEngine() {
   const bin = resolve("target/release/zeolite-server");
   if (!existsSync(bin)) {
@@ -2133,6 +2147,126 @@ async function main() {
     const direct = rec.requests.filter((r3) => r3.url.startsWith(ORIGIN_A) || r3.url.startsWith(ORIGIN_B));
     assert(direct.length === 0, "browser-direct requests to fixture origins: " + JSON.stringify(direct.slice(0, 4).map((r3) => r3.url)));
     return "validated; fetch engine-served; popup engine-routed; anchor engine-routed; wire clean";
+  });
+
+  /* ---- #550 ship 2: Tier 2 DOM inspector, storage view, strict mode */
+
+  await check("dominspect: snapshot, styles, console and a CSSOM-only highlight through the real bridge (#550)", async () => {
+    const { page, frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const cid = await probeClientId(page, frame);
+    await frame.evaluate(() => {
+      const d = document.createElement("div");
+      d.id = "di-mark";
+      d.textContent = "di-marker";
+      document.body.appendChild(d);
+      const inp = document.createElement("input");
+      inp.value = "hunter2-secret";
+      document.body.appendChild(inp);
+    });
+    const auth = await hostControl(page, { type: "zl:domInspect", op: "authorize", clientId: cid });
+    assert(auth && auth.ok === true && typeof auth.gen === "number", "authorize failed: " + JSON.stringify(auth));
+    await frame.evaluate(() => console.log("zl-di access_token=LEAKED"));
+    const snap = await hostControl(page, { type: "zl:domInspect", op: "snapshot", clientId: cid });
+    assert(snap.ok === true, "snapshot failed: " + JSON.stringify(snap).slice(0, 300));
+    const flat = [];
+    const walk = (n) => { flat.push(n); (n.children ?? []).forEach(walk); };
+    walk(snap.tree);
+    const mark = flat.find((n) => n.id === "di-mark");
+    assert(mark, "marker node missing from the snapshot tree");
+    assert(JSON.stringify(snap).indexOf("hunter2-secret") === -1, "input value leaked into the snapshot");
+    const styles = await hostControl(page, { type: "zl:domInspect", op: "styles", clientId: cid, nodeId: mark.i });
+    assert(styles.ok === true && Array.isArray(styles.styles) && styles.styles.length > 0, "styles failed: " + JSON.stringify(styles).slice(0, 300));
+    const con = await hostControl(page, { type: "zl:domInspect", op: "console", clientId: cid });
+    assert(con.ok === true && Array.isArray(con.entries), "console capture failed: " + JSON.stringify(con).slice(0, 300));
+    const line = JSON.stringify(con.entries);
+    assert(line.indexOf("token=[redacted]") !== -1, "console secret not redacted: " + line.slice(0, 300));
+    assert(line.indexOf("LEAKED") === -1, "raw console secret leaked");
+    const hl = await hostControl(page, { type: "zl:domInspect", op: "highlight", clientId: cid, nodeId: mark.i });
+    assert(hl.ok === true, "highlight failed: " + JSON.stringify(hl));
+    const overlay = await frame.evaluate(() => {
+      const el = document.querySelector('[data-zl-di-hl="1"]');
+      if (!el) return null;
+      const o = el.getBoundingClientRect();
+      const m = document.getElementById("di-mark").getBoundingClientRect();
+      /* CSSOM writes reflect into the style attribute in a real
+         browser, so the attribute is not the contract here; the
+         unit suite proves the bridge never calls setAttribute. */
+      return {
+        fixed: getComputedStyle(el).position,
+        covers: Math.abs(o.left - m.left) <= 1 && Math.abs(o.top - m.top) <= 1 && Math.abs(o.width - m.width) <= 1 && Math.abs(o.height - m.height) <= 1,
+      };
+    });
+    assert(overlay, "no highlight overlay in the page");
+    assert(overlay.fixed === "fixed", "overlay is not position fixed");
+    assert(overlay.covers, "overlay does not cover the marker rect: " + JSON.stringify(overlay));
+    const clear = await hostControl(page, { type: "zl:domInspect", op: "highlight", clientId: cid });
+    assert(clear.ok === true, "highlight clear failed: " + JSON.stringify(clear));
+    const gone = await frame.evaluate(() => document.querySelector('[data-zl-di-hl="1"]') === null);
+    assert(gone, "overlay survived the clear");
+    const rev = await hostControl(page, { type: "zl:domInspect", op: "revoke", clientId: cid });
+    assert(rev.ok === true, "revoke failed: " + JSON.stringify(rev));
+    return "validated; snapshot/styles/console/highlight; secrets redacted; overlay pinned to the rect";
+  });
+
+  await check("dominspect: the storage view needs the explicit grant and is capped and redacted (#550)", async () => {
+    const { page, frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const cid = await probeClientId(page, frame);
+    await frame.evaluate(() => {
+      for (const area of [localStorage, sessionStorage]) {
+        let n = area.length;
+        while (n--) area.removeItem(area.key(0));
+      }
+      localStorage.setItem("zl-di-auth", "token=e2esecret");
+      for (let i = 0; i < 200; i++) localStorage.setItem("zl-di-key-" + i, "v" + i);
+      sessionStorage.setItem("zl-di-s1", "sessionval");
+    });
+    const authNo = await hostControl(page, { type: "zl:domInspect", op: "authorize", clientId: cid });
+    assert(authNo.ok === true, "authorize failed: " + JSON.stringify(authNo));
+    const refused = await hostControl(page, { type: "zl:domInspect", op: "storage", clientId: cid });
+    assert(refused.ok === false && refused.error === "storage view not granted for this session", "ungranted storage view answered: " + JSON.stringify(refused));
+    await hostControl(page, { type: "zl:domInspect", op: "revoke", clientId: cid });
+    const authYes = await hostControl(page, { type: "zl:domInspect", op: "authorize", clientId: cid, storage: true });
+    assert(authYes.ok === true, "storage-granted authorize failed: " + JSON.stringify(authYes));
+    const view = await hostControl(page, { type: "zl:domInspect", op: "storage", clientId: cid });
+    assert(view.ok === true, "storage view failed: " + JSON.stringify(view).slice(0, 300));
+    eq(view.local.entries.length, 128, "local entries not capped at 128");
+    eq(view.local.truncated, true, "truncated flag missing");
+    const auth = view.local.entries.find((e) => e.k === "zl-di-auth");
+    assert(auth, "auth entry missing from the capped view");
+    eq(auth.v, "token=[redacted]", "secret value not redacted");
+    assert(JSON.stringify(view).indexOf("e2esecret") === -1, "raw secret leaked in the storage view");
+    const ses = view.session.entries.find((e) => e.k === "zl-di-s1");
+    assert(ses, "session entry missing");
+    eq(ses.v, "sessionval", "session value wrong");
+    const rev = await hostControl(page, { type: "zl:domInspect", op: "revoke", clientId: cid });
+    assert(rev.ok === true, "revoke failed: " + JSON.stringify(rev));
+    await frame.evaluate(() => {
+      for (const area of [localStorage, sessionStorage]) {
+        let n = area.length;
+        while (n--) area.removeItem(area.key(0));
+      }
+    });
+    return "validated; grant gate honored; 128-entry cap; redacted; session view present";
+  });
+
+  await check("privacy: strict mode refuses diagnostics, keeps doctor, and a proxied page cannot flip it (#550)", async () => {
+    const { page, frame } = await openProxied(ORIGIN_A + "/dir/page.html");
+    const cid = await probeClientId(page, frame);
+    const flip = await evalIn(frame, "zl:privacy from a proxied page", '() => new Promise((res) => { const ch = new MessageChannel(); const ctl = navigator.serviceWorker.controller; if (!ctl) return res({ ok: false, error: "no controller" }); ctl.postMessage({ type: "zl:privacy", strict: true }, [ch.port2]); ch.port1.onmessage = (e) => res(e.data); setTimeout(() => res({ ok: false, error: "timeout" }), 5000); })');
+    eq(flip.error, "host-only control message", "a proxied page flipped the strict privacy mode: " + JSON.stringify(flip));
+    const on = await hostControl(page, { type: "zl:privacy", strict: true });
+    assert(on.ok === true && on.strict === true, "strict toggle failed: " + JSON.stringify(on));
+    const refusedNetlog = await hostControl(page, { type: "zl:getNetLog", since: 0 });
+    eq(refusedNetlog.error, "strict privacy mode: diagnostic surface refused", "netlog answered under strict privacy");
+    const refusedInspect = await hostControl(page, { type: "zl:domInspect", op: "authorize", clientId: cid });
+    eq(refusedInspect.error, "strict privacy mode: diagnostic surface refused", "domInspect answered under strict privacy");
+    const doc = await hostControl(page, { type: "zl:doctor" });
+    assert(doc && Array.isArray(doc.checks), "doctor refused under strict privacy (passive evidence must stay available): " + JSON.stringify(doc).slice(0, 200));
+    const off = await hostControl(page, { type: "zl:privacy", strict: false });
+    assert(off.ok === true && off.strict === false, "leaving strict mode failed: " + JSON.stringify(off));
+    const netlog = await hostControl(page, { type: "zl:getNetLog", since: 0 });
+    assert(Array.isArray(netlog.entries), "netlog did not recover after leaving strict mode: " + JSON.stringify(netlog).slice(0, 200));
+    return "validated; host-only; netlog/domInspect refused; doctor preserved; recovery clean";
   });
 
   /* ---- report ------------------------------------------------------ */

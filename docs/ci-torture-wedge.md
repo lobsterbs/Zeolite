@@ -916,3 +916,22 @@ deterministic; only its firing is intermittent. Tracked in #514.
   #551 bytes exonerated by the clean 66/66 e2e and the green
   cosmetics step on the same head. This docs-only commit is the
   recorded bounded retrigger per the operational notes.
+
+
+## Run 42500730845 (head 705b64c0, docs-only retrigger of the #551 wave)
+
+- rust/wasm/app/compat GREEN. Browser red with the documented
+  trigger probe as the first victim: "redirect semantics: 301/302/
+  303 rewrite POST to GET, 307/308 preserve method and body |
+  proxied redirect probe failed on code 301: Timeout 8000ms
+  exceeded (fetch never settled)", the 41134928744 settle-variant
+  class on code 301, then the standard page.goto 30 s cascade
+  (redirect chains, unicode routing, query and path edges, the
+  torture-page row, the JS-pass row): 6 unique failures across
+  [transport]/[routing]/[rewriting].
+- 705b64c0 differs from 793b5361 by docs bytes only, and on those
+  identical engine bytes run 42499184109 ran the main e2e 66/66
+  clean with every routing and rewriting check green. Verdict: the
+  documented position-random transport wedge (#514), engine bytes
+  exonerated on the identical-bytes comparison. The #550 ship push
+  carries this record.

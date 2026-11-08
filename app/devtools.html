@@ -82,9 +82,12 @@
       <button id="domRevoke" type="button" disabled>Revoke</button>
       <button id="domSnapshot" type="button" disabled>Snapshot</button>
       <button id="domConsoleBtn" type="button" disabled>Console</button>
+      <button id="domStorageBtn" type="button" disabled>Storage</button>
+      <label><input type="checkbox" id="domStorageGrant"> grant storage view at authorize</label>
       <pre id="domStyles">no node selected</pre>
       <div id="domTree"></div>
       <pre id="domConsoleList"></pre>
+      <pre id="domStorageList"></pre>
     </section>
     <h2>transport engine <select id="transportSelect"><option value="libcurl">libcurl (mbedTLS)</option><option value="epoxy">epoxy (rustls)</option></select></h2>
     <h2>rewrite tracing <label><input type="checkbox" id="traceToggle" /> enabled</label></h2>

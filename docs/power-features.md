@@ -63,28 +63,47 @@ supports, at most: DOM tree snapshot, element highlight, computed styles,
 console capture, storage view. Full CDP is out of scope; the bridge speaks
 a tiny JSON schema of our own.
 
-Status (#550, first slice shipped): the bridge exists
-(`app/src/bootstrap/dominspect.ts`, wired into the bootstrap) and
+Status (#550, both slices shipped): the bridge exists
+(`app/src/dominspect-core.ts`, wired into the bootstrap) and
 speaks the tiny JSON schema: bounded DOM tree snapshot (depth 12, 500
 nodes, truncation counted), computed styles for a snapshot node (64
-properties), and a bounded redacted console ring (128 entries, 8 args
-x 500 chars, objects flattened to their class name). The bridge
-answers only the controlling service worker, only with serialized
-data. Privacy shape: OFF by default - the devtools page (a host page)
+properties), a bounded redacted console ring (128 entries, 8 args
+x 500 chars, objects flattened to their class name), element
+highlighting, and the page-realm storage view. The bridge answers
+only the controlling service worker, only with serialized data.
+Privacy shape: OFF by default - the devtools page (a host page)
 authorizes an inspection session for one live proxied client with
-`zl:domInspect {op:"authorize"}`; the console patch and every snapshot
-run only while authorized; revoke, navigation (new document
-generation) and client death tear it down. Replies carry the page
-generation; the engine and the devtools page discard stale
-generations, so a stale DevTools view cannot inspect a later document.
-NOT in this slice: element highlighting, storage view, and the
-"strict" privacy mode that would disable devtools entirely (the spec
-toggle does not exist yet; the gate is purely the explicit per-session
-host authorization).
+`zl:domInspect {op:"authorize"}`; the console patch, every snapshot,
+the highlight overlay and every storage read run only while
+authorized; revoke, navigation (new document generation) and client
+death tear it down. Replies carry the page generation; the engine
+and the devtools page discard stale generations, so a stale DevTools
+view cannot inspect a later document.
+
+Ship 2 contracts: the highlight op pins a fixed-position overlay to
+the snapshot node's rect, styled through the CSSOM only (never a
+style attribute, so a page CSP without unsafe-inline cannot break
+it), cleared by a highlight request without a nodeId and torn down on
+revoke. The storage op reads the page realm's localStorage and
+sessionStorage ONLY - document.cookie is never read and engine-owned
+cookie jars are out of reach - and only when the authorize message
+explicitly carried `storage:true` (the engine refuses an ungranted
+storage request before contacting the page; the bridge refuses it
+again independently). Storage views are bounded (128 keys, 128-char
+keys, 500-char values, truncation flagged) and redacted on both
+sides; a store that throws is reported unavailable, never guessed.
+Strict privacy mode: the host-only, memory-only
+`zl:privacy {strict:true}` control message refuses every diagnostic
+surface that can name pages, URLs or page content - the inspector,
+the network log, the diagnostics ring, the request-scoped exporter
+and the captcha trace - while the doctor keeps answering (passive,
+redacted, host-only); a worker restart clears the mode and the host
+can always toggle it back off.
 
 Both tiers respect permissions: an inspector that is not granted
-observe:requests shows nothing. Devtools are disabled entirely when the
-user is in a "strict" privacy mode.
+observe:requests shows nothing. The Tier 2 inspector and the other
+named diagnostic surfaces are refused entirely while the operator is
+in strict privacy mode (`zl:privacy`, host-only and memory-only).
 
 ## 3. Spoofing (fingerprint impersonation)
 

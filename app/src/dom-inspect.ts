@@ -1,12 +1,12 @@
-/* Tier 2 DOM inspection bridge, engine half (#550 first slice).
+/* Tier 2 DOM inspection bridge, engine half (#550 ships 1+2).
 
    The devtools page (a host page) authorizes an inspection session for
    one live proxied client; the SW relays snapshot / computed-styles /
-   console requests to that page's bootstrap bridge over the standard
-   SW->client message path (the same one zl:scripting and zl:findLoad
-   use) and answers the devtools caller with the bridge's serialized
-   reply. The SW never touches page DOM; the bridge never sends DOM
-   objects (plain data only).
+   console / highlight / storage requests to that page's bootstrap
+   bridge over the standard SW->client message path (the same one
+   zl:scripting and zl:findLoad use) and answers the devtools caller
+   with the bridge's serialized reply. The SW never touches page DOM;
+   the bridge never sends DOM objects (plain data only).
 
    Authorization: default OFF. A session exists only after
    zl:domInspect {op:"authorize"} from a host-page sender names a live
@@ -19,6 +19,15 @@
    death (the next request fails the live check) and worker restart
    (memory-only state).
 
+   Ship 2: the authorize message optionally carries storage:true (the
+   host page's explicit storage-view grant); only a session authorized
+   with that grant relays storage requests, and the bridge refuses
+   them again independently (defense in depth). The highlight op needs
+   no grant: it draws the overlay in the inspected page itself and
+   returns no content. Strict privacy mode (zl:privacy, privacy.ts)
+   refuses the whole zl:domInspect surface before this module is ever
+   reached.
+
    Generation stamp (netlog's stampNetGeneration pattern, page-side):
    the bridge stamps one per document realm; the session pins the
    generation seen at authorize, and any reply whose generation
@@ -26,11 +35,7 @@
 
    Redaction: every string the bridge returns passes redactSecrets
    here before it reaches the devtools page (the bridge applies a
-   compact mirror of the same patterns; this side is authoritative).
-
-   Not in this slice: element highlighting, storage view, a
-   "strict" privacy mode that would disable devtools entirely
-   (documented as future work in docs/power-features.md). */
+   compact mirror of the same patterns; this side is authoritative). */
 
 import { redactSecrets } from "./diag";
 import { senderIsProxiedPath } from "./cpgate";
@@ -42,7 +47,11 @@ export interface DomInspectSession {
   /** Page generation pinned at authorize (bridge eval epoch). */
   gen: number;
   ts: number;
+  /** Ship 2: the host page's explicit storage-view grant. */
+  storage: boolean;
 }
+
+export type DomInspectOp = "snapshot" | "styles" | "console" | "highlight" | "storage";
 
 /* Bounded: a handful of concurrently inspected documents; the oldest
    session silently expires past the cap (authorize again to renew). */
@@ -52,6 +61,8 @@ const sessions = new Map<string, DomInspectSession>();
 /** Console reply cap: the bridge already bounds its ring; the engine
     refuses to forward anything larger (defense in depth). */
 const CONSOLE_ENTRIES_CAP = 128;
+/** Storage reply cap: same contract for each store view. */
+const STORAGE_ENTRIES_CAP = 128;
 /** Longest string forwarded per reply field. */
 const FIELD_CAP = 2000;
 
@@ -128,11 +139,16 @@ function relayOnce(
 
 /** Authorize an inspection session: the host already passed the
     host-only gate; the target must be a live proxied client whose
-    bridge answers the handshake. Returns the pinned page generation
-    on success so the caller (devtools) can discard stale replies. */
+    bridge answers the handshake. The optional storage grant travels in
+    the SAME authorize message (a second authorize without it re-runs
+    the handshake and drops the grant), so the page bridge and the
+    engine session can never disagree about it. Returns the pinned
+    page generation on success so the caller (devtools) can discard
+    stale replies. */
 export async function domInspectAuthorize(
   clientId: string,
   timeoutMs = 3000,
+  opts?: { storage?: boolean },
 ): Promise<{
   ok: boolean;
   error?: string;
@@ -142,23 +158,32 @@ export async function domInspectAuthorize(
   if (!client) return { ok: false, error: "no live proxied client for clientId" };
   const code = await loadInspectorSource();
   if (code === null) return { ok: false, error: "inspector bundle unavailable" };
-  const handshake = await relayOnce(client, { on: true, ctl: true, code }, timeoutMs);
+  const handshake = await relayOnce(
+    client,
+    { on: true, ctl: true, code, storage: opts?.storage === true },
+    timeoutMs,
+  );
   if (!handshake || handshake.ok !== true || typeof handshake.gen !== "number") {
     /* The page answered nothing: no bootstrap bridge (old document,
        guest realm, or a page that never loaded the new bundle). */
     return { ok: false, error: "bridge did not answer the authorize handshake" };
   }
   sessions.delete(clientId); /* re-authorize refreshes in place */
-  sessions.set(clientId, { clientId, gen: handshake.gen, ts: Date.now() });
+  sessions.set(clientId, {
+    clientId,
+    gen: handshake.gen as number,
+    ts: Date.now(),
+    storage: opts?.storage === true,
+  });
   if (sessions.size > SESSION_CAP) {
     const oldest = sessions.keys().next();
     if (!oldest.done) sessions.delete(oldest.value);
   }
-  return { ok: true, gen: handshake.gen };
+  return { ok: true, gen: handshake.gen as number };
 }
 
 /** Revoke: drop the session and tell the bridge to tear down (console
-    patch restored, ring and snapshot cache dropped). */
+    patch restored, ring, snapshot cache and highlight dropped). */
 export function domInspectRevoke(clientId: string): boolean {
   const had = sessions.delete(clientId);
   if (had) {
@@ -201,18 +226,30 @@ function gateReply(raw: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+function storageViewOk(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const view = v as { entries?: unknown; unavailable?: unknown };
+  if (Array.isArray(view.entries) && view.entries.length > STORAGE_ENTRIES_CAP) return false;
+  return true;
+}
+
 /** Relay one inspection request to the authorized client. The reply's
     generation must match the session's pinned page generation - a
     mismatch means the document navigated and the reply describes a
-    realm nobody authorized. */
+    realm nobody authorized. The storage op additionally requires the
+    session's storage grant; the highlight op may arrive without a
+    nodeId, which the bridge reads as clear. */
 export async function domInspectRequest(
   clientId: string,
-  op: "snapshot" | "styles" | "console",
+  op: DomInspectOp,
   nodeId?: number,
   timeoutMs = 5000,
 ): Promise<Record<string, unknown>> {
   const session = sessions.get(clientId);
   if (!session) return { ok: false, error: "no inspection session for clientId" };
+  if (op === "storage" && session.storage !== true) {
+    return { ok: false, error: "storage view not granted for this session" };
+  }
   const client = await liveProxiedClient(clientId);
   if (!client) {
     sessions.delete(clientId);
@@ -230,6 +267,9 @@ export async function domInspectRequest(
   }
   if (op === "console" && Array.isArray(raw.entries) && raw.entries.length > CONSOLE_ENTRIES_CAP) {
     return { ok: false, error: "bridge console reply over cap" };
+  }
+  if (op === "storage" && (!storageViewOk(raw.local) || !storageViewOk(raw.session))) {
+    return { ok: false, error: "bridge storage reply over cap" };
   }
   return gateReply(raw);
 }
