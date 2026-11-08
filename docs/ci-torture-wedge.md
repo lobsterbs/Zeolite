@@ -875,3 +875,13 @@ deterministic; only its firing is intermittent. Tracked in #514.
   wasm job; wasm is green on this head, so that was a transient
   fetch flake, not a defect. This docs-only commit is the recorded
   bounded retrigger per the operational notes.
+
+## Run 42476911749 (head 4666c108, docs-only bounded retrigger)
+
+- rust/wasm/app/compat GREEN. Browser red on the identical single
+  signature: one [FAIL] proxied frame timeout on the spa ?url=
+  openProxied (browser job 128720669220,
+  http://127.0.0.1:6002/?url=http%3A%2F%2Flocalhost%3A7141%2Fspa),
+  byte-identical to the documented first-victim rotation. #609
+  exoneration complete: two consecutive heads with #609 bytes show the
+  same single-FAIL signature as 81f6c92 without them.

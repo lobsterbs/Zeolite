@@ -67,6 +67,10 @@ const ASSETS: readonly Asset[] = [
      absorbs a missing wasm silently (matching just stays on
      @ghostery/adblocker), so the doctor is the only honest probe. */
   { name: "adblock-wasm", path: "adblock_wasm_bg.wasm", mime: "wasm", resolve: "sibling" },
+  /* #614: same contract for the cookie jar wasm - its TS fallback
+     absorbs a missing wasm silently (the jar stays on the TS body),
+     so the doctor is the only honest probe. */
+  { name: "cookies-wasm", path: "cookies_wasm_bg.wasm", mime: "wasm", resolve: "sibling" },
   /* Integration-guide contract: transport bundles live at the origin
      root even when the Service Worker itself is mounted below /zlsw/. */
   { name: "libcurl", path: "libcurl/index.mjs", mime: "script", resolve: "root" },
