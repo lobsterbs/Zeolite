@@ -39,6 +39,15 @@ function wasmGlueTestFallback(): Plugin {
 
 export default defineConfig({
   plugins: [wasm(), ...(process.env.VITEST ? [wasmGlueTestFallback()] : [])],
+  /* #551 second slice: the Ghostery list origin is a build-time
+     constant. The production default is the raw GitHub host; the
+     deterministic cosmetic e2e build overrides it with a loopback
+     fixture origin (VITE_ZL_LISTS_ORIGIN) so its checks never
+     depend on live list content. The fetch guard in ghostery.ts
+     enforces this exact value for every list fetch. */
+  define: {
+    __ZL_LISTS_ORIGIN__: JSON.stringify(process.env.VITE_ZL_LISTS_ORIGIN ?? "https://raw.githubusercontent.com"),
+  },
   /* Relative base: the engine bundle must be servable from any subpath
      (LobsterBrowse aliases the dist bundle under /zlsw/). With the
      default "/" base Vite freezes new URL(<asset>, import.meta.url)

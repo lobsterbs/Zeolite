@@ -71,6 +71,11 @@ const ASSETS: readonly Asset[] = [
      absorbs a missing wasm silently (the jar stays on the TS body),
      so the doctor is the only honest probe. */
   { name: "cookies-wasm", path: "cookies_wasm_bg.wasm", mime: "wasm", resolve: "sibling" },
+  /* #551 second slice: the compiled page cosmetic runtime, spliced
+     inline into proxied documents. The SW fetches it once per worker
+     and a missing artifact degrades to static-only cosmetics, so the
+     doctor is the only honest probe for a broken build. */
+  { name: "cosmetics-runtime", path: "cosmetics-runtime.js", mime: "script", resolve: "sibling" },
   /* Integration-guide contract: transport bundles live at the origin
      root even when the Service Worker itself is mounted below /zlsw/. */
   { name: "libcurl", path: "libcurl/index.mjs", mime: "script", resolve: "root" },

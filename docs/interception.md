@@ -47,52 +47,60 @@ Local allow entries take precedence over Ghostery. A per-site
 the local block list and Ghostery network matches for that site or
 session.
 
-## Ghostery cosmetic styles (#551, first slice)
+## Ghostery cosmetic styles (#551, second slice)
 
 When a document (destination `document`, `iframe` or `frame`) is
-served through the HTML rewrite and the Ghostery matcher is loaded and
-enabled, the engine's cosmetic filters for the document URL compile to
-one stylesheet that is spliced into the rewritten head as a single
-`<style data-zl-cosmetic>` element, after the doctype (the same splice
-the bootstrap init script rides; the wasm rewriter's `add_injection`
-only emits script tags, so the style goes through this seam instead).
-Cache-hit documents get the same treatment as fresh ones.
+served through the HTML rewrite and the adblock gate passes (the
+zl:adblock toggle, the per-site `adblock: false` override (zl:rules)
+and the shipped captcha/anti-bot allowlist each refuse cosmetics for
+the document host entirely), two arms ride the document.
 
-What applies in this slice:
+Static arm. The engine's cosmetic filters for the document URL
+compile to one stylesheet spliced into the rewritten head as a single
+`<style data-zl-cosmetic>` element, after the doctype (the wasm
+rewriter's `add_injection` only emits script tags, so the style goes
+through this seam instead). Cache-hit documents get the same
+treatment. The static arm covers hostname- and entity-anchored hide
+rules plus the engine's precompiled generic base stylesheet, capped
+at 64 KiB with the truncation reported in the per-document REWRITE
+diagnostic event.
 
-- the engine's `styles` arm for the document URL only: hostname- and
-  entity-anchored hide rules plus the engine's precompiled generic
-  base stylesheet;
-- the gate is the network-blocking gate: the zl:adblock toggle, the
-  per-site `adblock: false` override (zl:rules) and the shipped
-  captcha/anti-bot allowlist (rules.kdl `allow` entries, the same
-  compiled list the block evaluation consults) each refuse cosmetics
-  for the document host entirely.
+Dynamic arm. A page-realm runtime (dist/cosmetics-runtime.js, built
+by esbuild as a classic IIFE and size-gated at 4 KiB by CI) is
+spliced inline right after the style element. It derives class and
+id tokens from the live DOM and asks the service worker for the hide
+rules that match them over a MessageChannel port
+(`zl:cosmeticTokens`, page-message allowlisted in cpgate.ts),
+applies the returned selectors as `<style data-zl-cosmetic-dyn>`
+elements, and keeps a MutationObserver on late-inserted nodes. The
+runtime is bounded: 24 token queries per page, a 750 ms query
+debounce, 4000 elements scanned per query, 512 classes and 128 ids
+collected, 128-character tokens, a 5-second per-query timeout and a
+2-second retry for answers that arrive while the engine is still
+loading. On pagehide the runtime reports one REWRITE diagnostic row
+(query count, applied selector count) through the same bridge.
 
-What never applies in this slice, with counts in a per-document
-REWRITE diagnostic event (applied / skipped-by-exception /
-unsupported, plus a truncation flag; no selectors, no page content):
+The worker side (app/src/cosmetic-tokens.ts) never trusts the page:
+the document URL is derived from the client URL, never from the
+payload; the adblock gates are re-checked per query; per-client
+query caps and a client cap bound the work; and the engine answers
+through the wasm arm (`hidden_css`) or the TS arm
+(`getCosmeticsFilters`) with identical callerContext tagging.
 
-- scriptlets (`+js(...)`) and extended/HTML filters: counted as
-  unsupported, never executed or compiled;
-- class-, id- or href-anchored generic hides that need DOM feature
-  extraction: the service worker has no DOM at rewrite time, so those
-  rules stay dormant;
-- frame-ancestor-constrained rules (the frame chain is not tracked
-  service-worker side);
-- re-injection on dynamic DOM mutations (the engine's
-  `dom-update` lifecycle): not shipped;
-- stylesheets larger than 64 KiB are truncated at that cap and the
-  truncation is reported in the same event.
+Scriptlets and extended filters stay unsupported and counted, never
+executed: the wasm arm returns an empty scriptlet list by design
+(the page must never receive executable filter bodies). The TS arm
+parses an allowlist of defensive scriptlets (set-constant,
+abort-on-property-read, abort-on-property-write, noop) with strict
+bounds (16 scriptlets, 4 arguments, 256-character arguments,
+identifier-validated targets), and the page runtime executes
+exactly that allowlist; anything else stays an unsupported count in
+the same REWRITE event. The full scriptlet threat model is in
+docs/filter-compat.md.
 
-This is not EasyList/Ghostery cosmetic compatibility: a large share of
-every public cosmetic list (DOM-anchored and extended rules) does
-nothing here yet. The honest measure of the slice is the diagnostic
-counts, not a coverage claim.
-
-The host toggles the compiled data with the zl:adblock control message
-({ type: "zl:adblock", enabled: boolean }). Disabled rules are a
-no-op; the data stays loaded. The flag resets to enabled on SW
+The host toggles the compiled data with the zl:adblock control
+message ({ type: "zl:adblock", enabled: boolean }). Disabled rules
+are a no-op; the data stays loaded. The flag resets to enabled on SW
 restart, so the host re-sends it on boot.
 
 ## Per-site overrides (zl:rules)
@@ -224,12 +232,14 @@ where stream is a TransformStream of byte chunks. Ordering and bounds:
 
 Implemented (1.1 Oxide; zl:rules per-site overrides added on the
 deep-integration line; Ghostery network matching added on the
-Ghostery integration line; Ghostery cosmetic styles shipped as the
-#551 first slice, bounded as listed above). Honest limits: rules.kdl
-stays global (per-site compatibility stays in siteconfig.kdl; per-site
-adblock and UA arrive at runtime via zl:rules); Ghostery cosmetic
-coverage is partial by design (scriptlets, extended and DOM-anchored
-rules are counted, not applied; no dynamic re-injection); transformed
+Ghostery integration line; Ghostery cosmetic styles shipped as the #551 first
+slice, and the class- and id-anchored generic dynamic arm plus the
+defensive scriptlet allowlist as the #551 second slice, bounded as
+listed above). Honest limits: rules.kdl stays global (per-site
+compatibility stays in siteconfig.kdl; per-site adblock and UA arrive
+at runtime via zl:rules); Ghostery cosmetic coverage is partial by
+design (scriptlets beyond the defensive allowlist, extended and
+frame-anchored rules are counted, not applied); transformed
 responses are not page-cached. The streaming transform arm (#552)
 carries unknown-length and large bodies behind declared bounds; the
 buffered arm stays capped at BODY_LIMIT.

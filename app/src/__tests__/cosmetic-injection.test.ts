@@ -14,6 +14,7 @@ import {
   computeCosmeticStyles,
   cosmeticStyleTag,
   ghosteryCosmeticsForDocument,
+  parseScriptlet,
 } from "../cosmetics";
 import {
   compileRules,
@@ -63,15 +64,43 @@ describe("computeCosmeticStyles (#551)", () => {
     expect(cosmeticStyleTag(outcome!.styles)).toBe("");
   });
 
-  it("a scriptlet is counted unsupported and nothing script-shaped is injected", async () => {
-    const eng = engineFrom("example.com##+js(set-constant, a.b, 1)");
+  it("an allowlisted scriptlet parses into a runtime invocation; a foreign name stays unsupported", async () => {
+    /* #551 second slice: the four allowlisted names run in the page
+       runtime; every other name stays counted unsupported and is
+       never executed or compiled. */
+    const eng = engineFrom(
+      "example.com##+js(set-constant, a.b, 1)\nexample.com##+js(not-a-real-scriptlet, x)",
+    );
     const outcome = await computeCosmeticStyles(eng, "https://example.com/page");
     expect(outcome!.unsupported).toBe(1);
     expect(outcome!.applied).toBe(0);
+    expect(outcome!.scriptlets.length).toBe(1);
+    expect(outcome!.scriptlets[0]!.name).toBe("set-constant");
+    expect(outcome!.scriptlets[0]!.args).toEqual(["a.b", "1"]);
     expect(outcome!.styles).toBe("");
-    /* No scriptlet execution path exists in this slice: the injected
-       markup is a <style> or nothing at all. */
+    /* The static markup stays a <style> or nothing at all; scriptlets
+       ride the separate inline runtime tag, never this markup. */
     expect(cosmeticStyleTag(outcome!.styles)).not.toContain("<script");
+  });
+
+  it("parseScriptlet bounds name and args (the allowlist is the threat boundary)", () => {
+    expect(parseScriptlet("set-constant, a.b, 1")).toEqual({ name: "set-constant", args: ["a.b", "1"] });
+    expect(parseScriptlet("abort-on-property-read.js, x")).toEqual({
+      name: "abort-on-property-read",
+      args: ["x"],
+    });
+    expect(parseScriptlet("noop")).toEqual({ name: "noop", args: [] });
+    expect(parseScriptlet("alert, 1")).toBeNull();
+    expect(parseScriptlet("eval")).toBeNull();
+    expect(parseScriptlet("")).toBeNull();
+    expect(parseScriptlet(null)).toBeNull();
+    /* The fifth arg is dropped and an overlong arg truncates at
+       256 chars, never forwarded whole. */
+    const many = parseScriptlet("set-constant, k, 1, 2, 3, 4, 5");
+    expect(many!.args).toEqual(["k", "1", "2", "3"]);
+    const long = parseScriptlet("set-constant, k, " + "x".repeat(300));
+    expect(long!.args.length).toBe(2);
+    expect(long!.args[1]!.length).toBe(256);
   });
 
   it("an extended-selector rule is counted unsupported, not compiled", async () => {

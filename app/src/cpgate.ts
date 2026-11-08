@@ -55,6 +55,13 @@ export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
      OWN origin into the bounded, fail-open hybrid location pass.
      No new capability. */
   "zl:spa404",
+  /* #551 second slice: the page cosmetic runtime's token query. The
+     message names only the sender's OWN class/id tokens; the worker
+     recovers the document URL from the sender's client route (never
+     a page claim), re-applies every cosmetic gate, and answers
+     bounded stylesheet text built from filter rules. No new
+     capability: a page cannot read or aim at another document. */
+  "zl:cosmeticTokens",
 ]);
 
 /** Pathname half of the sender classification: true when a client at

@@ -368,7 +368,7 @@ async function main() {
     assert(report?.ok === true, "Doctor asset probe refused");
     const assets = report.checks.filter((c) => c.code.startsWith("assets."));
     /* #614: the cookies-wasm bundle joined the same-origin asset set */
-    eq(assets.length, 11, "asset check count");
+    eq(assets.length, 12, "asset check count");
     for (const a of assets) eq(a.status, "pass", a.code + " should be a verified local asset: " + JSON.stringify(a));
     eq(report.checks.find((c) => c.code === "worker.service-worker-allowed")?.status, "pass",
       "Service-Worker-Allowed deployment contract");

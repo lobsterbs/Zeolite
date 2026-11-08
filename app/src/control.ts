@@ -7,6 +7,7 @@ import type { JarConflictRule } from "./cookies";
 import { cookieStoreOp, documentCookieRead, documentCookieWrite, flushJarPersist, jarClear, jarClearScope, jarClientHasRoot, jarEnumeration, jarMerge, jarProfileState, jarReplace, jarSnapshot, inheritJarClient, markJarClientUnbound, registerJarNavHandle, setJarProfile, setSameSitePolicy } from "./cookies";
 import type { FacadeCookie } from "./cookies";
 import { PAGE_MESSAGES, senderIsHostPage, senderIsProxiedPath } from "./cpgate";
+import { handleCosmeticTokens } from "./cosmetic-tokens";
 import { GUEST_SCRIPT_MAX, guestRegisterHost, guestSpawn, guestTerminate, guestTerminateAll, guestUnregister, type GuestPortLike } from "./kernel/guests/executor";
 /* #477: canonical registration identity; inputs from untrusted pages
    pass the verified-client gates first (dispatch, below). */
@@ -116,6 +117,7 @@ export interface ControlMessage {
     | "zl:getTracing"
     | "zl:wsOpen"
     | "zl:docCookie"
+    | "zl:cosmeticTokens"
     | "zl:spa404"
     | "zl:getVirtualOrigin"
     | "zl:embedderOrigin"
@@ -1095,6 +1097,17 @@ case "zl:tracing":
       (viaRelay ? wsRelayBridge : wsBridge).open(port as unknown as PortLike, wsUrl, Array.isArray(msg.protocols) ? msg.protocols : [], wsHeaders);
       break;
     }
+    case "zl:cosmeticTokens": {
+      /* #551 second slice: the page cosmetic runtime asks for its
+         document's dynamic hide stylesheet with the DOM tokens it
+         collected. The handler derives the document URL from the
+         sender's own client route, re-applies every cosmetic gate,
+         bounds the token arrays and the per-client query budget,
+         and replies on the transferred port (one bounded DIAG row
+         per client at the done report or the first refusal). */
+      e.waitUntil(handleCosmeticTokens(e));
+      break;
+    }
     case "zl:docCookie": {
       /* 1.6 Hydride: single-channel document.cookie sync. The port
          is transferred once and kept; the initial message and every
@@ -1723,7 +1736,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:captchaTrace", "zl:domInspect", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:cosmeticTokens", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:captchaTrace", "zl:domInspect", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
 ]);
 
 
