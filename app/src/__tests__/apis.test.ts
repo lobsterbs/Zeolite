@@ -37,6 +37,7 @@ const mkExt = (permissions: string[]): ExtensionRecord =>
     commands: {},
     contentSecurityPolicy: null,
     sidebarAction: null,
+    declarativeNetRequest: null,
     state: "running",
     enabled: true,
     installTime: Date.now(),
