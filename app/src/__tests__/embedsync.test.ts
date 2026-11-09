@@ -187,19 +187,20 @@ describe("embedder popup routing (#416)", () => {
        answers the limited facade instead of null. */
     const facade = e.open("https://accounts.example/signin", "_blank", "noopener") as { name: string };
     expect(facade).toBeTruthy();
-    expect(facade.name).toBe("_blank");
+    /* native window.name for a _blank popup is the empty string */
+    expect(facade.name).toBe("");
     expect(e.nativeOpen).not.toHaveBeenCalled(); expect(e.parent.postMessage).not.toHaveBeenCalled();
     await e.register();
     expect(e.parent.postMessage).toHaveBeenCalledWith(
-      { lb: "navigate", data: { href: "https://accounts.example/signin", newTab: true, clientId: "client-one" } }, "https://app.example");
+      { lb: "navigate", data: expect.objectContaining({ href: "https://accounts.example/signin", newTab: true, clientId: "client-one", name: "" }) }, "https://app.example");
     expect(e.nativeOpen).not.toHaveBeenCalled();
   });
   it("routes relative and blank window.open requests into host tabs", async () => {
     const e = setup(); await e.register(); e.open("../signin"); e.open();
     expect(e.parent.postMessage).toHaveBeenCalledWith(
-      { lb: "navigate", data: { href: "https://site.example/signin", newTab: true, clientId: "client-one" } }, "https://app.example");
+      { lb: "navigate", data: expect.objectContaining({ href: "https://site.example/signin", newTab: true, clientId: "client-one", name: "" }) }, "https://app.example");
     expect(e.parent.postMessage).toHaveBeenCalledWith(
-      { lb: "navigate", data: { href: "", newTab: true, blank: true, clientId: "client-one" } }, "https://app.example");
+      { lb: "navigate", data: expect.objectContaining({ href: "", newTab: true, blank: true, clientId: "client-one" }) }, "https://app.example");
     expect(e.nativeOpen).not.toHaveBeenCalled();
   });
   it("decodes engine links and suppresses the click/auxclick pair", async () => {
@@ -215,7 +216,7 @@ describe("embedder popup routing (#416)", () => {
     expect(decodes[0][0]).toEqual({ type: "zl:decodeRoutes", routes: [anchor.href] });
     (decodes[0][1][0] as MessagePort).postMessage({ ok: true, dests: ["https://accounts.example/login"] }); await tick();
     expect(e.parent.postMessage).toHaveBeenCalledWith(
-      { lb: "navigate", data: { href: "https://accounts.example/login", newTab: true, clientId: "client-one" } }, "https://app.example");
+      { lb: "navigate", data: expect.objectContaining({ href: "https://accounts.example/login", newTab: true, clientId: "client-one", name: "" }) }, "https://app.example");
     expect(e.nativeOpen).not.toHaveBeenCalled();
   });
   it("preserves standalone fallback after an explicit no-embedder reply", async () => {

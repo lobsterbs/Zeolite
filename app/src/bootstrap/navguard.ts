@@ -482,8 +482,9 @@ export function applyNavGuard(
       w.open = function (this: AnyRecord, u?: string | URL, t?: string, f?: string) {
         const s = u == null ? undefined : typeof u === "string" ? u : u.href;
         if (!/^_(self|top|parent)$/i.test(t ?? "") &&
-            embedPopup(w, s ?? "", () => (OW as AnyRecord).call(this, s == null ? u : rewire(s), t, f)))
-            return popupFacade(w, t);
+            embedPopup(w, s ?? "", () => (OW as AnyRecord).call(this, s == null ? u : rewire(s), t, f), false,
+              t == null || t[0] === "_" ? "" : t))
+            return popupFacade(w);
         if (s == null) return (OW as AnyRecord).call(this, u, t, f);
         const d = destAbs(s);
         if (!d) return (OW as AnyRecord).call(this, rewire(s), t, f);
@@ -555,7 +556,7 @@ export function applyNavGuard(
       if (driven.has(n)) { ev.preventDefault(); return; }
       if (popup && embedPopup(w, href, () => {
         if (typeof OW === "function") (OW as AnyRecord).call(w, rewire(href), "_blank", "noopener");
-      })) {
+      }, false, tgt[0] === "_" ? "" : tgt)) {
         ev.preventDefault();
         driven.add(n);
         setTimeout(() => driven.delete(n));

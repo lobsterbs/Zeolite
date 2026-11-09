@@ -26,7 +26,7 @@ import { LISTENER_SOURCE } from "./scripting";
 import { PAGE_BRIDGE_SOURCE } from "./pagebridge";
 import { ACTION } from "./action";
 import { pageCallList, pageNamespaceList } from "./pageapi";
-import { resolvePackageI18n } from "./i18n";
+import { recordI18n, resolvePackageI18n, substituteCss } from "./i18n";
 import type { ExtensionRecord } from "./types";
 
 export const EXT_ROUTE = "/zl-ext/";
@@ -84,6 +84,16 @@ const MIME: Record<string, string> = {
   ttf: "font/ttf",
   txt: "text/plain; charset=utf-8",
 };
+
+/* #523: Firefox substitutes __MSG_<name>__ in package CSS files
+   (locale-dependent CSS, MDN Internationalization) against the
+   record's resolved _locales; the memo is keyed by the per-install
+   record so a reload re-resolves and an uninstall drops it. */
+async function cssAssetResponse(rec: ExtensionRecord, bytes: Uint8Array, path: string): Promise<Response> {
+  if (path.slice(-4) !== ".css") return assetResponse(bytes, path);
+  const res = await recordI18n(rec, (p) => extensions.getResource(rec.id, p, { fromWeb: false }));
+  return assetResponse(new TextEncoder().encode(substituteCss(new TextDecoder().decode(bytes), res)), path);
+}
 
 function assetResponse(bytes: Uint8Array, path: string): Response {
   const ext = (path.split(".").pop() ?? "").toLowerCase();
@@ -375,7 +385,7 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
       return notFound();
     }
     const bytes = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
-    return bytes ? assetResponse(bytes, sr.path) : notFound();
+    return bytes ? await cssAssetResponse(rec, bytes, sr.path) : notFound();
   }
 
   if (sr.kind === "pagejs") {
@@ -424,12 +434,12 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
     registerPageClient(ctx?.resultingClientId, sr.id);
     const own = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
     if (!own) return notFound();
-    return isHtmlPath(sr.path) ? htmlWithPageScript(own, sr.id) : assetResponse(own, sr.path);
+    return isHtmlPath(sr.path) ? htmlWithPageScript(own, sr.id) : await cssAssetResponse(rec, own, sr.path);
   }
   if (!nav && pageExt === sr.id) {
     /* Subresource of a served extension page: full package access. */
     const own = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
-    return own ? assetResponse(own, sr.path) : notFound();
+    return own ? await cssAssetResponse(rec, own, sr.path) : notFound();
   }
   /* #504: a non-navigation fetch with a valid page token for exactly
      this (extension, path) serves one asset without the WAR gate.
@@ -440,7 +450,7 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
     const tok = url.searchParams.get("zlPageTok") ?? "";
     if (tok && checkPageToken(sr.id, sr.path, tok)) {
       const own = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
-      return own ? assetResponse(own, sr.path) : notFound();
+      return own ? await cssAssetResponse(rec, own, sr.path) : notFound();
     }
   }
 
@@ -456,5 +466,5 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
     pageUrl: ctx?.pageUrl ?? null,
     fromExtensionId: pageClientOf(ctx?.clientId),
   });
-  return bytes ? assetResponse(bytes, sr.path) : notFound();
+  return bytes ? await cssAssetResponse(rec, bytes, sr.path) : notFound();
 }

@@ -4,9 +4,9 @@ import { extensions } from "../manager";
 import { buildApi } from "../runtime";
 import { ExtensionMessenger } from "../messaging";
 import { ExtensionStorageArea } from "../storage";
-import { serveExtensionAsset, EXT_ROUTE } from "../serve";
+import { serveExtensionAsset, EXT_ROUTE, CS_ROUTE } from "../serve";
 import { PAGE_BRIDGE_SOURCE } from "../pagebridge";
-import { messagesFromJson, resolvePackageI18n, i18nGetMessage, makeI18nNs } from "../i18n";
+import { messagesFromJson, resolvePackageI18n, i18nGetMessage, makeI18nNs, substituteCss } from "../i18n";
 import type { ExtensionRecord } from "../types";
 
 const enc = new TextEncoder();
@@ -100,5 +100,54 @@ describe("chrome.i18n (#560)", () => {
     expect(PAGE_BRIDGE_SOURCE).toContain("getMessage");
     expect(PAGE_BRIDGE_SOURCE).toContain("getUILanguage");
     expect(PAGE_BRIDGE_SOURCE).toContain("getAcceptLanguages");
+  });
+});
+
+describe("CSS __MSG_ substitution (#523)", () => {
+  it("substitutes message tokens case-folded and keeps unresolved literals", () => {
+    const res = { locale: "en", messages: messagesFromJson({ greeting: { message: "hi" }, EDGE: { message: "left-edge" } }) };
+    expect(substituteCss("a{content:'__MSG_greeting__'}", res)).toBe("a{content:'hi'}");
+    expect(substituteCss("a{__MSG_EDGE__:0}", res)).toBe("a{left-edge:0}");
+    expect(substituteCss("a{content:'__MSG_missing__'}", res)).toBe("a{content:'__MSG_missing__'}");
+    expect(substituteCss("a{content:__MSG_noend}", res)).toBe("a{content:__MSG_noend}");
+    expect(substituteCss("body{}", res)).toBe("body{}");
+  });
+
+  it("resolves the predefined @@ messages, including bidi for an RTL locale", () => {
+    const ltr = { locale: "en-US", messages: {} };
+    const ar = { locale: "ar", messages: {} };
+    expect(substituteCss("body{direction:__MSG_@@bidi_dir__;padding-__MSG_@@bidi_start_edge__:0}", ltr))
+      .toBe("body{direction:ltr;padding-left:0}");
+    expect(substituteCss("body{direction:__MSG_@@bidi_dir__;padding-__MSG_@@bidi_start_edge__:0}", ar))
+      .toBe("body{direction:rtl;padding-right:0}");
+    expect(i18nGetMessage({ locale: "en", messages: {} }, "@@ui_locale")).toBe("en");
+    expect(i18nGetMessage({ locale: "en", messages: {}, id: "abc@x" }, "@@extension_id")).toBe("abc@x");
+  });
+
+  it("serves content-script CSS substituted from the package locales", async () => {
+    const manifest = {
+      manifest_version: 2,
+      name: "CssMsg " + seq++,
+      version: "1.0",
+      permissions: [],
+      default_locale: "en",
+      content_scripts: [{ matches: ["https://a.example/*"], js: ["cs.js"], css: ["cs.css"] }],
+    };
+    const files: Record<string, string> = {
+      "_locales/en/messages.json": JSON.stringify({ color: { message: "teal" } }),
+      "cs.js": "var a = 1;",
+      "cs.css": "div{color:__MSG_color__;border:1px solid __MSG_missing__}",
+    };
+    const m = new Map<string, Uint8Array>([["manifest.json", enc.encode(JSON.stringify(manifest))]]);
+    for (const [k, v] of Object.entries(files)) m.set(k, enc.encode(v));
+    await extensions.startup();
+    const { id } = await extensions.installFiles(m);
+    const url = "https://sw.example" + CS_ROUTE + id + "/cs.css";
+    const res = await serveExtensionAsset(new Request(url), new URL(url), {
+      nav: false,
+      pageUrl: "https://a.example/page.html",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("div{color:teal;border:1px solid __MSG_missing__}");
   });
 });
