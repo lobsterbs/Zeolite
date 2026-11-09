@@ -39,6 +39,7 @@ function ext(enabled: boolean, cs: ContentScriptSpec[]): ExtensionRecord {
     commands: {},
     contentSecurityPolicy: null,
     sidebarAction: null,
+    declarativeNetRequest: null,
     state: "running",
     enabled,
     installTime: 0,
