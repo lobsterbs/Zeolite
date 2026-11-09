@@ -1050,3 +1050,22 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - Actions API rerun-failed-jobs and workflow_dispatch are 403 for the
   push integration (checked), so the retrigger rides a commit per the
   05984eab precedent.
+
+## Runs 42609223008 + 42609227237 (head a48e054, the retrigger pair)
+
+- rust/wasm/app/compat GREEN on both runs. The two queued runs were
+  duplicates on the same push and again overlapped on the runner
+  (cancel_workflow_run is 403 for the push integration).
+- Both browser jobs closed red on the Torture battery with the same
+  contention cascade: first victim the transport redirect probe
+  (42609223008: page evaluate timed out, the [RETRY][wedge] restart
+  failed to recover; 42609227237: the 301 probe fetch never settled),
+  then the goto-timeout cascade through routing, rewriting and
+  isolation (8 fails on A, 11 on B). The Browser E2E battery passed
+  74/0 on both runs before torture; the transport paths the failing
+  checks probe are untouched by this wave.
+- Consequence recorded honestly: the popups facade suite step sits
+  after the Torture battery, so both failures skipped it again. This
+  commit moves the popups facade suite step to before the Torture
+  battery; an independent suite must not be hostage to an unrelated
+  battery flake. Its verdict rides the next checkpoint.
