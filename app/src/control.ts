@@ -1355,3 +1355,468 @@ case "zl:tracing":
           let target: Client | null = null;
           for (const c of cs) {
             try {
+              const cu = new URL(c.url, self.location.origin);
+              if (decodeClientUrl(cu) === msg.dest) {
+                target = c;
+                break;
+              }
+            } catch { /* not a routable client URL: skip */ }
+          }
+          if (!target) {
+            finish({ ok: false, error: "find: no proxied page at dest" });
+            return;
+          }
+          target.postMessage(
+            { type: "zl:findLoad", cmd: msg.cmd, pattern: msg.pattern, options: msg.options, code },
+            [mc.port2],
+          );
+        })(),
+      );
+      break;
+    }
+    case "zl:downloads":
+      /* 1.7 Sulfide: registry snapshot, newest first. */
+      reply({ ok: true, downloads: DL.snapshot() });
+      break;
+    case "zl:cancelDownload": {
+      const id = msg.id;
+      if (typeof id !== "string") {
+        reply({ ok: false, error: "missing id" });
+        break;
+      }
+      reply({ ok: DL.cancel(id) });
+      break;
+    }
+    case "zl:pauseDownload": {
+      const id = msg.id;
+      if (typeof id !== "string") {
+        reply({ ok: false, error: "missing id" });
+        break;
+      }
+      /* #118: pause severs like cancel but keeps the entry resumable. */
+      reply({ ok: DL.pause(id) });
+      break;
+    }
+    case "zl:resumeDownload": {
+      const id = msg.id;
+      if (typeof id !== "string") {
+        reply({ ok: false, error: "missing id" });
+        break;
+      }
+      /* #118: async - the Range request goes through the wisp tunnel. */
+      e.waitUntil(
+        DL.resume(id).then(
+          (r) => reply({ ok: r.ok, error: r.error }),
+          (err) => reply({ ok: false, error: String(err) }),
+        ),
+      );
+      break;
+    }
+    case "zl:saveDownload": {
+      const id = msg.id;
+      if (typeof id !== "string") {
+        reply({ ok: false, error: "missing id" });
+        break;
+      }
+      /* #118: the UI host owns the save; the blob crosses the
+         MessageChannel by structured clone. */
+      e.waitUntil(
+        DL.assemble(id).then(
+          (a) =>
+            reply(
+              a
+                ? { ok: true, blob: a.blob, filename: a.filename, mime: a.mime }
+                : { ok: false, error: "no buffered artifact for this entry" },
+            ),
+          (err) => reply({ ok: false, error: String(err) }),
+        ),
+      );
+      break;
+    }
+    case "zl:exportSession": {
+      /* 1.7 Sulfide: encrypted session export (cookies + tabs +
+         caller extras). The passphrase only ever lives in this
+         message; the blob carries ciphertext. */
+      const pass = msg.passphrase;
+      if (typeof pass !== "string" || pass.length < 8) {
+        reply({ ok: false, error: "passphrase must be at least 8 characters" });
+        break;
+      }
+      e.waitUntil(
+        (async () => {
+          try {
+            reply({
+              ok: true,
+              blob: await encryptSession(pass, {
+                version: ZEOLITE_VERSION,
+                created: Date.now(),
+                cookies: [...jarSnapshot((e.source as { id?: string } | null)?.id)],
+                tabs: TABS.list(),
+                extra: msg.extra ?? null,
+              }),
+            });
+          } catch (err) {
+            reply({ ok: false, error: String(err) });
+          }
+        })(),
+      );
+      break;
+    }
+    case "zl:importSession": {
+      const pass = msg.passphrase;
+      if (typeof pass !== "string" || msg.blob === null || typeof msg.blob !== "object") {
+        reply({ ok: false, error: "missing passphrase or blob" });
+        break;
+      }
+      e.waitUntil(
+        (async () => {
+          try {
+            const data = (await decryptSession(pass, msg.blob)) as {
+              cookies?: Array<[string, unknown[]]>;
+              extra?: unknown;
+            };
+            if (!Array.isArray(data.cookies)) throw new Error("no cookies in session blob");
+            /* 2.2 Arsenide: merge mode with a per-cookie conflict rule;
+               replace stays the default so existing callers are
+               unchanged. */
+            const cid = (e.source as { id?: string } | null)?.id;
+            if (msg.mode === "merge") {
+              const rule: JarConflictRule =
+                msg.rule === "import-wins" || msg.rule === "keep-newest" ? msg.rule : "keep-existing";
+              const counts = jarMerge(data.cookies, rule, cid);
+              /* #254: the imported session is durable before the ack. */
+              await flushJarPersist();
+              reply({ ok: true, extra: data.extra ?? null, merged: counts });
+            } else {
+              jarReplace(data.cookies, cid);
+              /* #254: the imported session is durable before the ack. */
+              await flushJarPersist();
+              reply({ ok: true, extra: data.extra ?? null });
+            }
+          } catch (err) {
+            reply({ ok: false, error: String(err) });
+          }
+        })(),
+      );
+      break;
+    }
+    case "zl:sameSite":
+      /* 2.2 Arsenide: opt-in SameSite policy knob on the jar. Unknown
+         values fall back to "off" and the reply reports the effective
+         policy so the caller cannot believe a bogus knob landed. */
+      reply({ ok: true, policy: setSameSitePolicy(msg.policy) });
+      break;
+    case "zl:teardown":
+      e.waitUntil(
+        (async () => {
+          // Close every bridged WebSocket first: no dangling streams.
+          wsBridge.closeAll();
+          // 1.4 Boride: cookies do not survive an engine switch.
+          jarClear();
+          // #539: learned transit evidence does not survive teardown.
+          adaptiveEvidenceReset();
+          // #254: the empty jar is durable before the ack.
+          await flushJarPersist();
+          // Drop every cache this SW owns, then unregister. Existing
+          // pages lose their controller on next navigation; the adapter
+          // also reloads them.
+          const names = await caches.keys();
+          await Promise.all(names.map((n) => caches.delete(n)));
+          reply({ ok: true });
+          /* Control-plane torture fix: the reply already said ok:true,
+             so an unregister rejection here used to escape the
+             waitUntil promise as an unhandled rejection the browser
+             logs after the event lifetime ended. It stays a bounded
+             diagnostic instead: the caches are dropped, the jar is
+             cleared and durable, and the operator sees why the
+             registration survived. */
+          try {
+            await self.registration.unregister();
+          } catch (err) {
+            DIAG.emit({
+              category: "SERVICE_WORKER",
+              severity: "warning",
+              cause: "failure",
+              message: "teardown unregister failed",
+              technicalReason: String(err).slice(0, 160),
+            });
+          }
+        })(),
+      );
+      break;
+    case "zl:getNetLog": {
+      // Delta sync: the devtools page sends the last seq it has seen and
+      // gets only newer entries, so polling stays cheap at any ring size.
+      const since = (msg as { since?: number }).since ?? 0;
+      const clientId = msg.clientId === undefined ? undefined : String(msg.clientId).slice(0, 256);
+      const scoped = clientId === undefined ? null : netLogSince(0, clientId);
+      reply({ entries: netLogSince(since, clientId), lastSeq: netLogCursor(), generation: netLogGeneration(), clientId: clientId ?? null,
+          version: ZEOLITE_VERSION, stats: scoped === null ? { ...transitStats(), adaptive: adaptiveEvidenceSnapshot(), locationTarget: locationTargetSnapshot() } : {
+            native: scoped.filter(x => x.transport === "NativeTransit").length,
+            fallback: scoped.filter(x => x.transport === "RewriteFallback").length,
+            fallbacks: scoped.filter(x => x.fallbackReason).map(x => ({ ts: x.ts, url: x.dest, reason: x.fallbackReason, traceId: x.traceId })),
+          } });
+      break;
+    }
+    case "zl:getDiag": {
+      /* UI -> SW: diagnostics delta poll. Same cursor protocol as
+         zl:getNetLog so the devtools page can poll both cheaply. */
+      const since = (msg as { since?: number }).since ?? 0;
+      const clientId = msg.clientId === undefined ? undefined : String(msg.clientId).slice(0, 256);
+      reply({ ok: true, generation: netLogGeneration(), clientId: clientId ?? null, ...DIAG.snapshot(since, clientId) });
+      break;
+    }
+    case "zl:privacy": {
+      /* #550 ship 2: the strict privacy toggle. Host-only by the #41
+         gate (never in PAGE_MESSAGES): a proxied page must not read or
+         flip the operator privacy mode. Memory-only, like every other
+         privacy-relevant state: a worker restart clears it and the
+         host page re-declares intent. */
+      const strict = (msg as { strict?: unknown }).strict === true;
+      setStrictPrivacy(strict);
+      reply({ ok: true, strict });
+      break;
+    }
+    case "zl:domInspect": {
+      /* #550 Tier 2 DOM inspection, first slice. Host-only by the
+         dispatch gate above (not in PAGE_MESSAGES): a proxied page
+         must never open an inspection session, not even for itself.
+         authorize/revoke manage the session; snapshot/styles/console
+         relay one bounded request to the client's bootstrap bridge.
+         Replies carry the page generation the session pinned - the
+         engine discards stale generations, the devtools page also
+         discards replies whose generation no longer matches. */
+      const op = msg.op;
+      const cid = typeof msg.clientId === "string" ? msg.clientId : "";
+      if (!cid || cid.length > 256) {
+        reply({ ok: false, error: "bad zl:domInspect clientId" });
+        break;
+      }
+      if (op === "authorize") {
+        /* Ship 2: the storage grant rides the authorize handshake, so
+           the engine session and the page bridge can never disagree. */
+        const storage = (msg as { storage?: unknown }).storage === true;
+        e.waitUntil(
+          domInspectAuthorize(cid, 3000, { storage }).then((r) => reply(r), (err) => reply({ ok: false, error: String(err) })),
+        );
+      } else if (op === "revoke") {
+        reply({ ok: domInspectRevoke(cid) });
+      } else if (op === "snapshot" || op === "styles" || op === "console" || op === "highlight" || op === "storage") {
+        const nodeId = typeof msg.nodeId === "number" && msg.nodeId >= 0 && msg.nodeId <= 100000
+          ? Math.floor(msg.nodeId)
+          : undefined;
+        e.waitUntil(
+          domInspectRequest(cid, op, nodeId).then(
+            (r) => reply(r),
+            (err) => reply({ ok: false, error: String(err) }),
+          ),
+        );
+      } else {
+        reply({ ok: false, error: "bad zl:domInspect op" });
+      }
+      break;
+    }
+    default:
+      reply({ ok: false, error: "unknown message" });
+  }
+}
+
+export async function handleControlEvent(
+  e: ExtendableMessageEvent,
+  deps: ControlDeps,
+): Promise<void> {
+  /* Issue #17: the restored route shape settles asynchronously; a
+     cold-start ping must not report the default shape mid-restore.
+     Registry-dependent answers also wait for the restart-safe
+     init, so a just-restarted worker serves real state. */
+  const msg = e.data as ControlMessage;
+  const port = e.ports[0];
+  const reply = (payload: unknown) => port?.postMessage(payload);
+  /* #550 ship 2: strict privacy mode refuses every diagnostic surface
+     that can name pages, URLs or page content. The toggle itself is
+     never refused, so the host can always leave the mode; the refused
+     list is data in privacy.ts, kept out of PAGE_MESSAGES so a proxied
+     page can neither read nor set it. */
+  if (isStrictPrivacy() && STRICT_REFUSED.has(String(msg?.type))) {
+    reply({ ok: false, error: "strict privacy mode: diagnostic surface refused" });
+    return;
+  }
+  /* #495: Doctor must answer even when boot is wedged. It is never
+     reachable from a proxied page, and it avoids dispatchCore's
+     legacy cookie-context bookkeeping and all outbound traffic by
+     default. The host owns any optional MCP exposure. */
+  if (msg?.type === "zl:doctor") {
+    if (senderIsProxiedPage(e)) {
+      reply({ ok: false, error: "host-only control message" });
+      return;
+    }
+    const boot = await observeDoctorBoot(deps.ready);
+    let clientControl: "pass" | "fail" | "unknown" | undefined;
+    if (msg.clientId !== undefined) {
+      if (typeof msg.clientId !== "string" || msg.clientId.length < 1 || msg.clientId.length > 256) {
+        clientControl = "fail";
+      } else {
+        try {
+          const selected = await self.clients.get(msg.clientId);
+          if (!selected?.url) clientControl = "fail";
+          else {
+            const u = new URL(selected.url);
+            clientControl = u.origin === self.location.origin &&
+              senderIsProxiedPath(u.pathname, u.search) ? "pass" : "fail";
+          }
+        } catch {
+          clientControl = "unknown";
+        }
+      }
+    }
+    const scriptUrl = self.location?.href;
+    const assets = msg.probeAssets === true ?
+      await probeDoctorAssets(scriptUrl ?? "", fetch, 1500, self.registration?.scope) : [];
+    const report = buildDoctor({
+      engineVersion: ZEOLITE_VERSION,
+      boot,
+      scriptUrl,
+      registrationScope: self.registration?.scope,
+      expectedScope: typeof msg.expectedScope === "string" && msg.expectedScope.length <= 1024 ? msg.expectedScope : undefined,
+      expectedVersion: typeof msg.expectedVersion === "string" && msg.expectedVersion.length <= 96 ? msg.expectedVersion : undefined,
+      degraded: getEngineDegraded() !== null,
+      transport: transportState(),
+      selectedEngine: currentEngine(),
+      relay: relayAvailable(),
+      alternateWisp: altConfigured(),
+      primaryWisp: primaryWispUrl(),
+      policy: policyDoctorState(),
+      rules: rulesDoctorState(),
+      siteconfig: siteconfigDoctorState(),
+      clientControl,
+      routeCustody: routeCodec(),
+    }, assets);
+    reply({ ...report, kdl: msg.format === "kdl" ? doctorKdl(report) : undefined });
+    return;
+  }
+  /* #494: live request identity is checked by the worker, never
+     inferred from a user-supplied tab label. Unlike legacy getDiag,
+     a missing client or trace fails closed; no global-ring fallback.
+     This is deliberately a request-scoped V1 exporter, not a claim
+     of document-lifetime isolation. */
+  if (msg?.type === "zl:exportDiagnostics") {
+    if (senderIsProxiedPage(e)) {
+      reply({ ok: false, error: "host-only control message" });
+      return;
+    }
+    const id = msg.clientId;
+    const trace = msg.traceId;
+    if (typeof id !== "string" || id.length < 1 || id.length > 256 ||
+        typeof trace !== "string" || trace.length > 64 ||
+        !/^zl-t[a-z0-9]+-[a-z0-9]+$/.test(trace) ||
+        traceClient(trace) !== id) {
+      reply({ ok: false, status: "identity-unavailable" });
+      return;
+    }
+    let client: Client | undefined;
+    try { client = await self.clients.get(id); }
+    catch { /* client enumeration unavailable or stale: fail closed */ }
+    let valid = false;
+    if (client?.url) {
+      try {
+        const u = new URL(client.url);
+        valid = u.origin === self.location.origin &&
+          senderIsProxiedPath(u.pathname, u.search);
+      } catch { /* client URL is not an attributable proxied page */ }
+    }
+    if (!valid) {
+      reply({ ok: false, status: "identity-unavailable" });
+      return;
+    }
+    const report = buildCompatibilityReport({
+      clientId: id, traceId: trace, engineVersion: ZEOLITE_VERSION,
+      generation: netLogGeneration(), now: Date.now(),
+      diagnostics: DIAG.eventsSince(0, id),
+      network: netLogSince(0, id),
+      tracing: tracingSnapshot(0).entries,
+    });
+    reply({ ok: true, ...report, kdl: compatibilityKdl(report) });
+    return;
+  }
+  /* #451: per-attempt captcha trace snapshot. Host-only like the two
+     exports above (a proxied page must not read other sessions'
+     challenge activity); read-only, so no boot gating either. */
+  if (msg?.type === "zl:captchaTrace") {
+    if (senderIsProxiedPage(e)) {
+      reply({ ok: false, error: "host-only control message" });
+      return;
+    }
+    reply({ ok: true, ...CAPTCHA_TRACE.snapshot() });
+    return;
+  }
+  await deps.ready;
+
+  /* Bug-scout (#41): a proxied page must not drive the control plane
+     (read the net log, flip the jar, tear the engine down). Page-facing
+     messages only; everything else needs a host sender. #48:
+     extension-origin pages are extension code, not host pages - the
+     sole exception is zl:extPage, and only from the client registered
+     as that exact extension's page (the case re-checks it). */
+  if (senderIsProxiedPage(e) && !PAGE_MESSAGES.has(String(msg?.type))) {
+    const src = e.source as Client | null;
+    const srcId = src && src.url ? src.id : "";
+    const isExtPageCall =
+      msg?.type === "zl:extPage" &&
+      typeof msg?.extId === "string" &&
+      srcId !== "" &&
+      pageClientOf(srcId) === msg.extId;
+    if (!isExtPageCall) {
+      reply({ ok: false, error: "host-only control message" });
+      return;
+    }
+  }
+
+    if (msg && EXT_CONTROL_TYPES.has(msg.type)) {
+    await dispatchExtControl(msg, { e, reply });
+  } else {
+    await dispatchCore(msg, { e, reply, port, persistRoute: deps.persistRoute });
+  }
+
+}
+
+// Registry of the core zl: message types (#90): exactly the labels the
+// switch in dispatchCore below handles. Plain data, so it survives the
+// minified build intact; control.test.ts pins it against that switch, so
+// the dispatch and the registry can never drift apart.
+export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:cosmeticTokens", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:captchaTrace", "zl:domInspect", "zl:privacy", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
+]);
+
+
+/** #250: the message listener that keeps the event alive for the
+    whole handler. waitUntil is called synchronously inside the
+    listener (the browser only honors a lifetime extension made
+    there); a handler error is caught so it can never surface as an
+    unhandled rejection: recorded as a RUNTIME diag and, when the
+    message carried a reply port, answered with a structured
+    error. */
+export function messageListener(deps: ControlDeps) {
+  return (e: ExtendableMessageEvent): void => {
+    e.waitUntil(
+      handleControlEvent(e, deps).catch((err) => {
+        DIAG.failure({
+          category: "RUNTIME",
+          cause: "failure",
+          message: "control-plane message handler failed",
+          technicalReason: String(err),
+        });
+        try {
+          (e.ports[0] as PortLike | undefined)?.postMessage({ ok: false, error: "control handler failed" });
+        } catch {
+          /* reply port already dead: nothing to answer */
+        }
+      })
+        /* #254: keep jar persistence alive for the whole message
+           event; flushJarPersist never throws. */
+        .then(() => (e.data as ControlMessage)?.type === "zl:doctor" ||
+          (e.data as ControlMessage)?.type === "zl:exportDiagnostics" ||
+          (e.data as ControlMessage)?.type === "zl:captchaTrace" ? undefined : flushJarPersist()),
+    );
+  };
+}
+
