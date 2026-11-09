@@ -256,3 +256,13 @@ that the full service-worker pipeline or a live site passed the compat suite.
 controlled bridge) against direct Chromium for UTF-8/binary sends while
 CLOSING/CLOSED. Discarded writes add bytes without transmission. The browser
 CI job gates this fixture; it does not measure lower-transport network drain.
+
+# Embedded popup facade suite (#416/#428/#553)
+
+`node suite/e2e/embedded-popups.mjs` drives real Chromium against local HTTPS
+fixtures with a fake engine controller: the synchronous facade return, name
+reuse, pid correlation across every op, host popupState closed reports, the
+close/focus/postMessage relay ops, invalid-targetOrigin rejection and
+fail-closed blocked-popup semantics. Random ports never collide with the
+other suites; the browser CI job gates it. Host-side delivery of relayed
+messages into tabs ships with the LobsterBrowse integration.
