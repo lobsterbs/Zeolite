@@ -610,6 +610,21 @@ jobs:
             grep -E "^\[FAIL\]|HARNESS-ERROR" browser.out | head -20 | while IFS= read -r l; do echo "::error::E2E $l"; done
             exit 1
           fi
+      - name: Embedded popup facade suite (#416/#428/#553)
+        # Real-Chromium regression for the synchronous embedded
+        # window.open facade: the return contract, name reuse, the
+        # pid correlation across every op, host popupState reports
+        # flipping closed, the close/focus/postMessage relay ops,
+        # invalid-targetOrigin rejection, and fail-closed
+        # blocked-popup semantics. Random ports never collide with
+        # the other suites.
+        run: |
+          node suite/e2e/embedded-popups.mjs 2>&1 | tee popups.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "AssertionError|HARNESS-ERROR" popups.out | head -20 | while IFS= read -r l; do echo "::error::POPUPS $l"; done
+            exit 1
+          fi
       - name: Torture suite (issue #92)
         run: |
           node suite/e2e/torture.mjs 2>&1 | tee torture.out
@@ -853,20 +868,5 @@ jobs:
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
             grep -E "^\[FAIL\]|HARNESS-ERROR" diff.out | head -20 | while IFS= read -r l; do echo "::error::DIFF $l"; done
-            exit 1
-          fi
-      - name: Embedded popup facade suite (#416/#428/#553)
-        # Real-Chromium regression for the synchronous embedded
-        # window.open facade: the return contract, name reuse, the
-        # pid correlation across every op, host popupState reports
-        # flipping closed, the close/focus/postMessage relay ops,
-        # invalid-targetOrigin rejection, and fail-closed
-        # blocked-popup semantics. Random ports never collide with
-        # the other suites.
-        run: |
-          node suite/e2e/embedded-popups.mjs 2>&1 | tee popups.out
-          code=${PIPESTATUS[0]}
-          if [ "$code" -ne 0 ]; then
-            grep -E "AssertionError|HARNESS-ERROR" popups.out | head -20 | while IFS= read -r l; do echo "::error::POPUPS $l"; done
             exit 1
           fi
