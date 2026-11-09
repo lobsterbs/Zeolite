@@ -1069,3 +1069,27 @@ deterministic; only its firing is intermittent. Tracked in #514.
   commit moves the popups facade suite step to before the Torture
   battery; an independent suite must not be hostage to an unrelated
   battery flake. Its verdict rides the next checkpoint.
+
+## Runs 42711886479 + 42712252102 + 42713012248 (heads 8295bf6, 76abb1e2, b29ec93f, the #521 DNR wave)
+
+- 42711886479 (8295bf6) and 42712252102 (76abb1e2) both closed red on the
+  app job typecheck, and both reds are push-pipeline defects, not engine
+  defects: 8295bf6 committed control.ts and request.ts truncated at
+  63958 and 63950 bytes (the source reader feeding the push silently
+  truncates near 64 KiB; 76abb1e2 restored both byte-exact, codeload
+  md5-verified for all 19 slice files), and 76abb1e2 then hit
+  TS2352/TS2741 because the ExtensionRecord fixture line
+  (declarativeNetRequest: null) in apis.test.ts and
+  content-scripts.test.ts was left out of the 19-file push; b29ec93f
+  ships both one-line fixtures byte-exact.
+- 42713012248 (b29ec93f) is the wave verdict: rust/wasm/app/compat
+  GREEN (the app job includes the 29 dnr.test.ts cases), browser green
+  through the Browser E2E battery and the popups facade suite, red only
+  at the Torture battery with the documented img#uni direct-oracle
+  flake (direct model failed to load img#uni, fixture regression class;
+  identical to the 42531541831 and 42499184109 signatures). The engine
+  paths the wave touched (request.ts DNR hooks) were exercised by the
+  green E2E battery.
+- Pipeline rule recorded: any pushed file over ~63 KiB must be read in
+  line chunks (the reader truncates silently at 63958 bytes), and every
+  push is followed by a codeload tarball md5 sweep of all pushed files.
