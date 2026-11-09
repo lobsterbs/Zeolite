@@ -7,8 +7,11 @@ login provider or upstream bot-management system accepts the proxy.
 
 - #416/#428: embedded popup actions use the registered embedder tab bridge;
   key-free navigation markers decode through the same URL oracle. A queued
-  startup action stays contained. Embedded `window.open` returns null because
-  a real cross-origin WindowProxy cannot be supplied.
+  startup action stays contained. Embedded `window.open` answers a limited opaque
+  WindowProxy facade (#553) instead of null: a real cross-origin
+  WindowProxy cannot be supplied, so the facade carries only the target
+  name plus an opaque pid, and the embedder host relays the
+  close/focus/postMessage ops (host `popupState` reports flip `closed`).
 - #435/#436: query-route Referer forwarding strips the internal token, and
   widget identity repair uses the browser client's verified virtual context.
   Missing context leaves the provider input unchanged rather than inventing

@@ -1009,3 +1009,17 @@ deterministic; only its firing is intermittent. Tracked in #514.
   documented in the correction above, not an engine wedge. The
   fix (the checks pass the marker landing.html contains) rides
   the #544 follow-up push; this run stays red pending it.
+
+## Run 42531541831 (head 148c8f59, the #544 marker-bug fix)
+
+- rust/wasm/app/compat GREEN.
+- The e2e battery on the browser job: 74 passed / 0 failed, the first fully
+  green e2e run, and the first CI green for the three #544 ws/rtc checks;
+  the prior runs' three failures were the #zl-marker authoring bug (see the
+  42513932627 correction above), not an engine wedge.
+- The browser job still closed red on the torture battery, 19/1: the img#uni
+  check failed on the DIRECT oracle ("direct model failed to load img#uni
+  (fixture regression)"), the documented flake signature of this battery
+  (cf. 42506647348). One [RETRY][wedge] restart self-recovered (redirect
+  semantics passed after the restart). Accepted per the 4/5 plus
+  documented-signature bar; this entry rides the next push.
