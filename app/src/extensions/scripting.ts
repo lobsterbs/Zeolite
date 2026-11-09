@@ -25,6 +25,7 @@
    code runs in the page world, in the main frame. */
 
 import { extensions } from "./manager";
+import { recordI18n, substituteCss } from "./i18n";
 import { TABS } from "./tabs";
 import { hostPatternsMatch } from "./permissions";
 import type { ExtensionId, ExtensionRecord } from "./types";
@@ -218,7 +219,11 @@ export class ScriptingHost {
       throw new Error("zeolite: scripting.insertCSS does not run scripts");
     }
     const css = await this.readFiles(ext.id, inj.files ?? []);
-    this.dispatch?.({ type: "zl:scripting", extId: ext.id, dest, js: [], css, wantResult: false }, null);
+    /* #523: insertCSS files are locale-substituted CSS (Firefox's
+       __MSG_ semantics, MDN locale-dependent CSS); executeScript
+       files stay untouched, as in Firefox. */
+    const res = await recordI18n(ext, (p) => extensions.getResource(ext.id, p, { fromWeb: false }));
+    this.dispatch?.({ type: "zl:scripting", extId: ext.id, dest, js: [], css: css.map((c) => substituteCss(c, res)), wantResult: false }, null);
   }
 }
 

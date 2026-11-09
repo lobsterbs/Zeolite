@@ -331,13 +331,21 @@ jobs:
         # legacy-alias delete (a live second constructor on real
         # Chromium, an ICE egress bypass) rides bootstrap.js via
         # navguard.ts; measured 49819, baseline 49800.
+        # Raised 50000 -> 51200 for #553 slice 2: the popup pid
+        # correlation protocol rides bootstrap.js - lb:navigate
+        # carries pid+name, the lb:popupClose/lb:popupFocus/
+        # lb:popupMessage relay ops with targetOrigin validation,
+        # and the inbound lb:popupState host reports flip closed
+        # (navguard passes the popup name); measured 51030,
+        # baseline 49819. The #523 CSS __MSG_ substitution is
+        # SW-side (serve/scripting), not bootstrap-resident.
         # resolves lazily (virtual-origin marker + injected vpath
         # at call time) so a page's relative register() lands on the
         # page's virtual URL; measured 41310, baseline 41025.
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 50000 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 50000)"; exit 1; fi
+          if [ "$SIZE" -ge 51200 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 51200)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command
@@ -845,5 +853,20 @@ jobs:
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
             grep -E "^\[FAIL\]|HARNESS-ERROR" diff.out | head -20 | while IFS= read -r l; do echo "::error::DIFF $l"; done
+            exit 1
+          fi
+      - name: Embedded popup facade suite (#416/#428/#553)
+        # Real-Chromium regression for the synchronous embedded
+        # window.open facade: the return contract, name reuse, the
+        # pid correlation across every op, host popupState reports
+        # flipping closed, the close/focus/postMessage relay ops,
+        # invalid-targetOrigin rejection, and fail-closed
+        # blocked-popup semantics. Random ports never collide with
+        # the other suites.
+        run: |
+          node suite/e2e/embedded-popups.mjs 2>&1 | tee popups.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "AssertionError|HARNESS-ERROR" popups.out | head -20 | while IFS= read -r l; do echo "::error::POPUPS $l"; done
             exit 1
           fi
