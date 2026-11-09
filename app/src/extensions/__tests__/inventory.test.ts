@@ -12,7 +12,7 @@ const enc = new TextEncoder();
 const ALL_NS_PERMISSIONS = [
   "storage", "tabs", "notifications", "contextMenus", "downloads", "cookies",
   "webRequest", "webRequestBlocking", "webNavigation", "alarms", "management",
-  "browsingData",
+  "browsingData", "declarativeNetRequest",
 ];
 
 function pkg(name: string, permissions: string[]): Map<string, Uint8Array> {

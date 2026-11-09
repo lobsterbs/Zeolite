@@ -67,6 +67,18 @@ export interface SidebarActionSpec {
   defaultIcon: Record<string, string>;
 }
 
+/* #521: manifest declarative_net_request.rule_resources entries; the
+   DNR registry loads the referenced package files lazily. */
+export interface DnrRulesetSpec {
+  id: string;
+  path: string;
+  enabled: boolean;
+}
+
+export interface DnrManifestSpec {
+  ruleResources: DnrRulesetSpec[];
+}
+
 export interface ThemeSpec {
   colors: Record<string, unknown>;
   images: Record<string, unknown>;
@@ -115,6 +127,9 @@ export interface ExtensionRecord {
   commands: Record<string, unknown>;
   contentSecurityPolicy: string | null;
   sidebarAction: SidebarActionSpec | null;
+  /* #521: parsed declarative_net_request rulesets; null when the
+     manifest declares none. */
+  declarativeNetRequest: DnrManifestSpec | null;
   state: ExtensionState;
   enabled: boolean;
   installTime: number;

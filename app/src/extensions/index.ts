@@ -11,7 +11,7 @@ export type { ManifestDiagnostics, ParsedExtension } from "./manifest";
 export { ExtensionManager as Manager } from "./manager";
 export { COMPAT, compatReport } from "./compat";
 export type { CompatEntry, CompatLevel } from "./compat";
-export type { ExtensionRecord, ExtensionId, ExtensionState } from "./types";
+export type { DnrManifestSpec, DnrRulesetSpec, ExtensionRecord, ExtensionId, ExtensionState } from "./types";
 export { buildApi } from "./runtime";
 export type { ApiDeps } from "./runtime";
 export { ExtensionMessenger } from "./messaging";
@@ -67,6 +67,8 @@ export type {
 } from "./webrequest";
 export { ALARMS, AlarmRegistry } from "./alarms";
 export type { Alarm, AlarmCreateInfo, AlarmListener } from "./alarms";
+export { DNR, DnrRegistry, GUARANTEED_MINIMUM_STATIC_RULES, MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES, MAX_NUMBER_OF_ENABLED_STATIC_RULESETS, MAX_NUMBER_OF_STATIC_RULESETS } from "./dnr";
+export type { DnrExtView, DnrPermProvider, DnrModifyHeaderOp, DnrRequestFacts } from "./dnr";
 export { MGMT, ManagementEvents, infoOf } from "./management";
 export type { ManagementInfo, MgmtListener } from "./management";
 export { MENUS, ContextMenusHost } from "./contextmenus";

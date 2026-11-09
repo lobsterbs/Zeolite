@@ -18,6 +18,10 @@ const CALLBACK_METHODS = new Set([
   "notifications.create", "notifications.update", "notifications.clear", "notifications.getAll",
   "cookies.get", "cookies.getAll", "cookies.set", "cookies.remove",
   "alarms.get", "alarms.getAll", "alarms.clear", "alarms.clearAll",
+  "declarativeNetRequest.updateDynamicRules", "declarativeNetRequest.getDynamicRules",
+  "declarativeNetRequest.updateSessionRules", "declarativeNetRequest.getSessionRules",
+  "declarativeNetRequest.updateEnabledRulesets", "declarativeNetRequest.getEnabledRulesets",
+  "declarativeNetRequest.getAvailableStaticRuleCount",
   "management.getSelf", "management.get", "management.getAll", "management.setEnabled", "management.uninstall", "management.uninstallSelf",
   ...["local", "sync", "session"].flatMap((area) =>
     ["get", "set", "remove", "clear", "getBytesInUse"].map((method) => "storage." + area + "." + method)),

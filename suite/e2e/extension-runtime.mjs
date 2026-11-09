@@ -77,6 +77,11 @@ const CRAFTED = {
     'manifest.json': JSON.stringify({ manifest_version: 2, name: 'zl-menu', version: '1.0', description: 'w15: context menu registration', permissions: ['contextMenus'], background: { scripts: ['bg.js'] } }, null, 2),
     'bg.js': 'try { browser.contextMenus.create({ id: "zl-menu-test", title: "Zeolite w15 menu", contexts: ["page"] }); } catch (e) { console.log("zl-menu create err: " + e); }',
   },
+  'zl-dnr': {
+    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'zl-dnr', version: '1.0', description: 'w15: declarativeNetRequest session block via an attribute bridge', permissions: ['declarativeNetRequest'], background: { scripts: ['bg.js'] }, content_scripts: [{ matches: ['https://example.com/*'], js: ['cs.js'], run_at: 'document_idle' }] }, null, 2),
+    'bg.js': 'browser.runtime.onMessage.addListener(async (m) => { if (!m || m.type !== "dnrcmd") return; try { if (m.cmd === "arm") { await browser.declarativeNetRequest.updateSessionRules({ addRules: [{ id: 1, priority: 1, condition: { urlFilter: "wikipedia", resourceTypes: ["main_frame"] }, action: { type: "block" } }] }); } else if (m.cmd === "disarm") { await browser.declarativeNetRequest.updateSessionRules({ removeRuleIds: [1] }); } else { return { ok: false, err: "unknown cmd" }; } const rules = await browser.declarativeNetRequest.getSessionRules(); return { ok: true, rules: rules.length }; } catch (e) { return { ok: false, err: String(e) }; } });',
+    'cs.js': '(async () => { const D = document.documentElement; for (;;) { await new Promise((r) => setTimeout(r, 300)); const cmd = D.getAttribute("data-zl-dnr-cmd"); if (!cmd) continue; D.removeAttribute("data-zl-dnr-cmd"); try { const r = await browser.runtime.sendMessage({ type: "dnrcmd", cmd }); D.setAttribute("data-zl-dnr", JSON.stringify(r)); } catch (e) { D.setAttribute("data-zl-dnr", JSON.stringify({ ok: false, err: String(e) })); } } })();',
+  },
 };
 
 let browser = null, host = null, consoleBuf = [];
@@ -282,6 +287,39 @@ async function main() {
     if (!attr) throw new Error('content-script fixture attribute missing on wikipedia');
     await pg2.close();
     return 'wikipedia: annotator + fixture attribute present';
+  });
+
+  await check('dnr: a session block rule cancels the main_frame navigate before render (#521)', async () => {
+    if (!fr) throw new Error('no frame');
+    const bridge = async (want) => {
+      for (let i = 0; i < 40; i++) {
+        const v = await Promise.race([fr.evaluate('document.documentElement.getAttribute(String.fromCharCode(100,97,116,97,45,122,108,45,100,110,114))'), sleep(4000).then(() => null)]) ?? '';
+        if (v && v.includes(want)) return v;
+        await sleep(500);
+      }
+      throw new Error('dnr bridge never reported ' + want);
+    };
+    await fr.evaluate('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,122,108,45,100,110,114,45,99,109,100), "arm")');
+    const armedRaw = await bridge('"rules":1');
+    const armed = JSON.parse(armedRaw);
+    if (!armed || !armed.ok || armed.rules !== 1) throw new Error('arm reply: ' + armedRaw);
+    const hb = await ctl({ type: 'zl:navHandle', dest: 'https://www.wikipedia.org/' });
+    if (!hb.ok) throw new Error('navHandle failed: ' + JSON.stringify(hb));
+    const pgb = await ctx.newPage();
+    const rb = await pgb.goto(ENGINE + hb.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    if (!rb || rb.status() !== 403) throw new Error('blocked navigate status: ' + (rb ? rb.status() : 'null'));
+    await pgb.close();
+    await fr.evaluate('document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,122,108,45,100,110,114,45,99,109,100), "disarm")');
+    const disRaw = await bridge('"rules":0');
+    const dis = JSON.parse(disRaw);
+    if (!dis || !dis.ok || dis.rules !== 0) throw new Error('disarm reply: ' + disRaw);
+    const hc = await ctl({ type: 'zl:navHandle', dest: 'https://www.wikipedia.org/' });
+    if (!hc.ok) throw new Error('navHandle failed: ' + JSON.stringify(hc));
+    const pgc = await ctx.newPage();
+    const rc = await pgc.goto(ENGINE + hc.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    if (!rc || rc.status() !== 200) throw new Error('unblocked navigate status: ' + (rc ? rc.status() : 'null'));
+    await pgc.close();
+    return 'armed -> 403 blocked; disarmed -> 200';
   });
 
   await check('ext pages: options and popup pages serve real content through zl:openExtPage', async () => {
