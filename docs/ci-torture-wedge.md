@@ -1023,3 +1023,30 @@ deterministic; only its firing is intermittent. Tracked in #514.
   (cf. 42506647348). One [RETRY][wedge] restart self-recovered (redirect
   semantics passed after the restart). Accepted per the 4/5 plus
   documented-signature bar; this entry rides the next push.
+
+## Runs 42594133968 + 42594187249 (heads 2dcc8702 / 030e19b, the #553 slice 2 + #523 CSS wave)
+
+- rust/wasm/app/compat GREEN on both runs (the app job includes the raised
+  51200 bootstrap gate, measured 51030, and the full vitest battery,
+  278 files / 3000 tests).
+- The two runs executed CONCURRENTLY (two pushes minutes apart), the
+  documented runner-load condition. Both browser jobs closed red on the
+  Browser E2E battery with the identical #545-class signature: first victim
+  the network-inspector worker initiator (#545, "worker fetch initiator
+  timeout"), followed by the goto-timeout cascade (shared worker relay,
+  SharedWorker identities #453, localStorage/sessionStorage,
+  document.cookie, upstream Set-Cookie, cookieStore #534 - 30 s goto
+  timeouts on 6002/?url=7101/dir/page.html) with mid-run recovery (the
+  later #534 and #96 passthrough checks passed). 7 fails on 42594187249,
+  9 on 42594133968. Failure messages match the documented 42484780007
+  cluster (first victim #545 worker-fetch initiator); none of the failing
+  checks touch the popup facade, navguard or CSS substitution paths.
+- Consequence recorded honestly: the E2E step failure skipped every later
+  browser-job step, so the new "Embedded popup facade suite
+  (#416/#428/#553)" step has not executed on CI yet (local real-Chromium
+  run: 26/26, Chromium 131.0.6778.33, zero native tabs, standalone native
+  fallback intact). This retrigger commit re-runs the tree
+  contention-free; its verdict rides the next checkpoint.
+- Actions API rerun-failed-jobs and workflow_dispatch are 403 for the
+  push integration (checked), so the retrigger rides a commit per the
+  05984eab precedent.
