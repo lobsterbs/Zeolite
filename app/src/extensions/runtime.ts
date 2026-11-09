@@ -40,6 +40,13 @@ import type { ExtensionStorageArea, StorageValue } from "./storage";
 import type { ExtensionMessenger, MessageListener, ConnectListener, MessageSender, ExtensionPort } from "./messaging";
 import { ALARMS } from "./alarms";
 import type { Alarm, AlarmCreateInfo } from "./alarms";
+import {
+  DNR,
+  GUARANTEED_MINIMUM_STATIC_RULES,
+  MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES,
+  MAX_NUMBER_OF_ENABLED_STATIC_RULESETS,
+  MAX_NUMBER_OF_STATIC_RULESETS,
+} from "./dnr";
 import { MGMT, infoOf } from "./management";
 import type { MgmtListener } from "./management";
 import type { ExtensionManager } from "./manager";
@@ -848,6 +855,32 @@ export function buildApi(
       })()
     : undefined;
 
+  /* #521: declarativeNetRequest over the engine's own fetch
+     pipeline. Mounted with "declarativeNetRequest" or
+     "declarativeNetRequestWithHostAccess" so feature detection
+     answers honestly. The live per-extension view (enabled state,
+     host permissions, declared static rulesets) comes from the
+     provider control.ts wires over the manager singleton, so rules
+     registered in one context apply to the whole tunnel and persisted
+     dynamic rules hydrate at worker boot even before any background
+     runs. */
+  const dnrNs =
+    ext.permissions.includes("declarativeNetRequest") ||
+    ext.permissions.includes("declarativeNetRequestWithHostAccess")
+      ? {
+          MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES: MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES,
+          GUARANTEED_MINIMUM_STATIC_RULES: GUARANTEED_MINIMUM_STATIC_RULES,
+          MAX_NUMBER_OF_STATIC_RULESETS: MAX_NUMBER_OF_STATIC_RULESETS,
+          MAX_NUMBER_OF_ENABLED_STATIC_RULESETS: MAX_NUMBER_OF_ENABLED_STATIC_RULESETS,
+          updateDynamicRules: (u: unknown) => DNR.updateDynamicRules(ext.id, u),
+          getDynamicRules: () => Promise.resolve(DNR.getDynamicRules(ext.id)),
+          updateSessionRules: (u: unknown) => Promise.resolve(DNR.updateSessionRules(ext.id, u)),
+          getSessionRules: () => Promise.resolve(DNR.getSessionRules(ext.id)),
+          updateEnabledRulesets: (u: unknown) => DNR.updateEnabledRulesets(ext.id, u),
+          getEnabledRulesets: () => Promise.resolve(DNR.getEnabledRulesets(ext.id)),
+          getAvailableStaticRuleCount: () => DNR.getAvailableStaticRuleCount(ext.id),
+        }
+      : undefined;
   /* alarms: in-memory timers in the shared worker context (see
      ./alarms); mounted only with the "alarms" permission so feature
      detection answers honestly. */
@@ -955,6 +988,7 @@ export function buildApi(
     permissions: permissionsNs,
     ...(isApiDetached("management") ? {} : { management: managementNs }),
     ...(webRequestNs && !isApiDetached("webRequest") ? { webRequest: webRequestNs } : {}),
+    ...(dnrNs && !isApiDetached("declarativeNetRequest") ? { declarativeNetRequest: dnrNs } : {}),
     ...(alarmsNs && !isApiDetached("alarms") ? { alarms: alarmsNs } : {}),
     ...(actionNs ? { action: actionNs } : {}),
     ...(browserActionNs ? { browserAction: browserActionNs } : {}),

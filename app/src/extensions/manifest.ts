@@ -14,11 +14,14 @@ import type {
   ActionSpec,
   BackgroundSpec,
   ContentScriptSpec,
+  DnrManifestSpec,
+  DnrRulesetSpec,
   ExtensionRecord,
   ExternallyConnectableSpec,
   OptionsSpec,
   SidebarActionSpec,
 } from "./types";
+import { MAX_NUMBER_OF_STATIC_RULESETS } from "./dnr";
 
 export interface ManifestDiagnostics {
   errors: string[];
@@ -78,6 +81,8 @@ const KNOWN_FIELDS = new Set([
      on the record (no theme or spellcheck host yet — compat.ts says
      so); developer is plain metadata; lwt_* ride static themes. */
   "theme", "dictionaries", "developer", "lwt_background", "lwt_alpha",
+  /* #521: parsed into the record's declarativeNetRequest field. */
+  "declarative_net_request",
 ]);
 
 /** #524: Firefox accepts a GUID ({8-4-4-4-12} hex) or an id that looks
@@ -122,6 +127,49 @@ function parseContentScripts(v: unknown, diags: ManifestDiagnostics): ContentScr
     });
   }
   return out;
+}
+
+/* #521: declarative_net_request.rule_resources. Static rulesets are
+   package files the DNR registry loads lazily; the manifest only has
+   to name them honestly. */
+function parseDnr(v: unknown, diags: ManifestDiagnostics): DnrManifestSpec | null {
+  if (v === undefined || v === null) return null;
+  if (!isObj(v)) {
+    diags.warnings.push("declarative_net_request: not an object, ignored");
+    return null;
+  }
+  if (v.rule_resources !== undefined && !Array.isArray(v.rule_resources)) {
+    diags.warnings.push("declarative_net_request.rule_resources: not an array, ignored");
+    return null;
+  }
+  const entries = Array.isArray(v.rule_resources) ? v.rule_resources.filter(isObj) : [];
+  const seen = new Set<string>();
+  const ruleResources: DnrRulesetSpec[] = [];
+  for (const rr of entries) {
+    const id = typeof rr.id === "string" ? rr.id : "";
+    if (id.length === 0 || seen.has(id)) {
+      diags.warnings.push("declarative_net_request.rule_resources: entry without a unique non-empty id ignored");
+      continue;
+    }
+    if (typeof rr.path !== "string" || rr.path.length === 0) {
+      diags.warnings.push("declarative_net_request.rule_resources: entry " + id + " without a path ignored");
+      continue;
+    }
+    if (rr.enabled === undefined) {
+      diags.warnings.push("declarative_net_request.rule_resources: entry " + id + " without enabled, treated as true");
+    } else if (typeof rr.enabled !== "boolean") {
+      diags.warnings.push("declarative_net_request.rule_resources: entry " + id + " enabled is not a boolean, treated as true");
+    }
+    seen.add(id);
+    ruleResources.push({ id, path: rr.path, enabled: rr.enabled !== false });
+  }
+  if (ruleResources.length > MAX_NUMBER_OF_STATIC_RULESETS) {
+    diags.warnings.push(
+      "declarative_net_request.rule_resources: capped at " + MAX_NUMBER_OF_STATIC_RULESETS + " rulesets (engine-defined quota)",
+    );
+    ruleResources.length = MAX_NUMBER_OF_STATIC_RULESETS;
+  }
+  return { ruleResources };
 }
 
 function parseBackground(
@@ -358,6 +406,7 @@ export function parseManifest(
         ? cspRaw.extension_pages
         : null;
 
+  const declarativeNetRequest = parseDnr(raw.declarative_net_request, diags);
   const sidebarRaw = isObj(raw.sidebar_action) ? raw.sidebar_action : null;
   const sidebarAction: SidebarActionSpec | null = sidebarRaw
     ? {
@@ -398,6 +447,7 @@ export function parseManifest(
     commands: isObj(raw.commands) ? (raw.commands as Record<string, unknown>) : {},
     contentSecurityPolicy: csp,
     sidebarAction,
+    declarativeNetRequest,
     unsupportedFields: diags.unsupportedFields,
     warnings: diags.warnings,
   };

@@ -72,6 +72,7 @@ export const NAMESPACE_COMPAT: Record<string, string[]> = {
   browsingData: ["browsingData.*"],
   cookies: ["cookies.*"],
   contextMenus: ["contextMenus.*"],
+  declarativeNetRequest: ["declarativeNetRequest.*"],
   downloads: ["downloads.*"],
   extension: ["chrome.extension (MV2)"],
   i18n: ["chrome.i18n"],

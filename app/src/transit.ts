@@ -44,7 +44,8 @@ export type FallbackReason =
    CDN_CGI_NATIVE is the same explainable demotion for Cloudflare's
    challenge namespace: those bytes serve verbatim. */
 export type NativeReason = "NON_DOCUMENT_RESOURCE" | "POLICY_NATIVE" | "CDN_CGI_NATIVE" | "CF_CHALLENGE_VERBATIM";
-export type BlockReason = "BLOCKED_RULES" | "BLOCKED_INTERCEPT" | "BLOCKED_WEBREQUEST" | "BLOCKED_CSP";
+export type BlockReason = "BLOCKED_RULES" | "BLOCKED_INTERCEPT" | "BLOCKED_WEBREQUEST" | "BLOCKED_CSP"
+  | "BLOCKED_DNR";
 export type TransitReason = FallbackReason | NativeReason | BlockReason;
 
 export interface OriginContext {

@@ -23,6 +23,7 @@ import { normalizeExtensionPath } from "./origin";
 import { globToRegExp } from "./content-scripts";
 import { hostPatternsMatch } from "./permissions";
 import { ALARMS } from "./alarms";
+import { DNR } from "./dnr";
 import { ACTION } from "./action";
 import { dropSessionAccess } from "./storage";
 import type { ExtensionId, ExtensionRecord } from "./types";
@@ -218,6 +219,9 @@ export class ExtensionManager {
     /* #520: a fresh install of the same identity starts from the
        Firefox default session access level (trusted contexts only). */
     dropSessionAccess(id);
+    /* #521: the declarativeNetRequest rule registry entry plus its
+       persisted dynamic rules and enabled static-ruleset snapshot. */
+    await DNR.drop(id);
   }
 
   async setEnabled(id: ExtensionId, enabled: boolean): Promise<void> {
