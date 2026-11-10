@@ -180,12 +180,14 @@ describe("matching (#521)", () => {
     DNR.updateSessionRules("e1", {
       addRules: [blockRule(1, "api", { requestMethods: ["post"], resourceTypes: ["xmlhttprequest"] })],
     });
-    /* The engine surfaces fetch/XHR as "other", so a rule typed
-       "xmlhttprequest" honestly never matches a tunnel fetch: the
-       documented divergence, asserted here as the contract. */
-    expect(await DNR.decideRequest(facts("https://api.net/v1", { method: "POST", type: "other" }))).toBe(false);
+    /* Tunnel fetch/XHR surfaces as type "xmlhttprequest" (wrType
+       maps sec-fetch-dest "empty" there), so a rule typed
+       "xmlhttprequest" matches a tunnel fetch, as in a real browser. */
+    expect(await DNR.decideRequest(facts("https://api.net/v1", { method: "POST", type: "xmlhttprequest" }))).toBe(true);
+    expect(await DNR.decideRequest(facts("https://api.net/v1", { method: "get", type: "xmlhttprequest" }))).toBe(false);
     DNR.updateSessionRules("e1", { removeRuleIds: [1] });
     DNR.updateSessionRules("e1", { addRules: [blockRule(2, "api", { requestMethods: ["get"], resourceTypes: ["other"] })] });
+    /* A truly unknown destination still reports "other" honestly. */
     expect(await DNR.decideRequest(facts("https://api.net/v1", { method: "get", type: "other" }))).toBe(true);
     expect(await DNR.decideRequest(facts("https://api.net/v1", { method: "POST", type: "other" }))).toBe(false);
   });
