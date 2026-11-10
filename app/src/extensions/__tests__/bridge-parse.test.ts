@@ -10,19 +10,25 @@ import { PAGE_BRIDGE_SOURCE } from "../pagebridge";
    script dies with a SyntaxError before any content script runs
    (that exact bug shipped: BRIDGE_SOURCE had a bare newline escape
    where it needed a doubled one, so no declared content script ever
-   executed). */
+   executed). #517: the bridge and the scripting listener are served
+   as invoked IIFEs taking (cfg, auth); the channel secret must be an
+   argument, never a global a page script could read. */
+
+function bridgeBody(cfg: unknown, auth: string): string {
+  return BRIDGE_SOURCE + ")(" + JSON.stringify(cfg) + "," + JSON.stringify(auth) + ");";
+}
+
 describe("served extension sources parse", () => {
-  it("bridge payload compiles with its cfg prefix", () => {
-    const body =
-      "var ZL_CS_CFG = " +
-      JSON.stringify({
+  it("bridge payload compiles in its invoked (cfg, auth) form", () => {
+    const body = bridgeBody(
+      {
         ext: "a".repeat(32),
         js: ["/zl-cs/" + "a".repeat(32) + "/cs.js"],
         css: [],
         runAt: "document_idle",
-      }) +
-      ";\n" +
-      BRIDGE_SOURCE;
+      },
+      "channel-secret",
+    );
     expect(() => new Function(body)).not.toThrow();
   });
 
@@ -33,8 +39,16 @@ describe("served extension sources parse", () => {
     expect(BRIDGE_SOURCE).toContain("'\"use strict\";\\n' + code");
   });
 
-  it("scripting listener compiles", () => {
-    expect(() => new Function(LISTENER_SOURCE)).not.toThrow();
+  it("bridge takes cfg and auth as arguments, never a global", () => {
+    expect(BRIDGE_SOURCE.startsWith("(function (cfg, auth) {")).toBe(true);
+    expect(BRIDGE_SOURCE).not.toContain("ZL_CS_CFG");
+    expect(BRIDGE_SOURCE).toContain("auth: auth");
+  });
+
+  it("scripting listener compiles in its invoked (auth) form", () => {
+    expect(LISTENER_SOURCE.startsWith("(function (auth) {")).toBe(true);
+    expect(LISTENER_SOURCE).toContain("auth: auth");
+    expect(() => new Function(LISTENER_SOURCE + ")(\"channel-secret\");")).not.toThrow();
   });
 
   it("extension-page bridge compiles with its cfg prefix", () => {
