@@ -393,6 +393,13 @@ export function parseManifest(
     diags.warnings.push("options: page path missing");
   }
 
+  /* #523: the devtools_page path; the devtools.* surface mounts only
+     for clients bound as this extension's devtools page. */
+  const devtoolsPage =
+    typeof raw.devtools_page === "string" && raw.devtools_page.trim() !== ""
+      ? raw.devtools_page
+      : null;
+
   const ecRaw = isObj(raw.externally_connectable) ? raw.externally_connectable : null;
   const externallyConnectable: ExternallyConnectableSpec | null = ecRaw
     ? { ids: strArr(ecRaw.ids), matches: strArr(ecRaw.matches) }
@@ -440,6 +447,7 @@ export function parseManifest(
     background: parseBackground(raw.background, mv, diags),
     action: parseAction(raw, mv),
     options,
+    devtoolsPage,
     icons: iconMap(raw.icons),
     webAccessibleResources: war.globs,
     webAccessibleScoped: war.scoped,

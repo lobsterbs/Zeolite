@@ -107,6 +107,9 @@ export interface ExtensionRecord {
   background: BackgroundSpec | null;
   action: ActionSpec | null;
   options: OptionsSpec | null;
+  /* #523: devtools_page path; the devtools.* surface mounts only for
+     clients bound as this extension's devtools page. */
+  devtoolsPage?: string | null;
   icons: Record<string, string>;
   webAccessibleResources: string[];
   /* #51: MV3 web_accessible_resources entries whose "matches" are set;
