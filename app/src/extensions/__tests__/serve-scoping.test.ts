@@ -97,24 +97,43 @@ describe("content-script asset scoping (#285)", () => {
     const onSite = csUrl(id, "/__bridge.js", cfg);
     const res = await serveExtensionAsset(onSite.req, onSite.url, {
       nav: false,
+      clientId: "client-csbridge-1",
       pageUrl: "https://a.example/page.html",
     });
     expect(res.status).toBe(200);
     const body = await res.text();
-    const parsed = JSON.parse(/^var ZL_CS_CFG = (\{.*?\});\n/.exec(body)![1]);
+    /* #517: the body is the invoked bridge IIFE taking (cfg, auth);
+       the channel secret rides in the argument list, never a global
+       the page could read. */
+    const m = /\}\)\((\{.*\}),("[0-9a-f-]{36}")\);$/.exec(body);
+    expect(m).not.toBeNull();
+    const parsed = JSON.parse(m![1]);
     /* bg.js is in the package but not declared in any matching entry:
        dropped. */
     expect(parsed.js).toEqual([CS_ROUTE + id + "/cs.js"]);
     expect(parsed.css).toEqual([CS_ROUTE + id + "/cs.css"]);
     expect(parsed.runAt).toBe("document_end");
+    expect(body.startsWith("(function (cfg, auth) {")).toBe(true);
+    expect(body).not.toContain("ZL_CS_CFG");
+    /* #517: single use. The same client refetching the same bridge
+       (a page script trying to read the secret out of the body)
+       fails closed. */
+    const again = await serveExtensionAsset(onSite.req, onSite.url, {
+      nav: false,
+      clientId: "client-csbridge-1",
+      pageUrl: "https://a.example/page.html",
+    });
+    expect(again.status).toBe(404);
     /* Same forged cfg from a non-matching page: empty config. */
     const offSite = csUrl(id, "/__bridge.js", cfg);
     const off = await serveExtensionAsset(offSite.req, offSite.url, {
       nav: false,
+      clientId: "client-csbridge-2",
       pageUrl: "https://b.example/page.html",
     });
     expect(off.status).toBe(200);
-    const offBody = JSON.parse(/^var ZL_CS_CFG = (\{.*?\});\n/.exec(await off.text())![1]);
+    const offM = /\}\)\((\{.*\}),("[0-9a-f-]{36}")\);$/.exec(await off.text())!;
+    const offBody = JSON.parse(offM[1]);
     expect(offBody.js).toEqual([]);
     expect(offBody.css).toEqual([]);
   });
