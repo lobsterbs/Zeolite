@@ -13,8 +13,10 @@
    The vocabulary is fixed and every record states only what was
    actually observed: a stage that was not observable is either absent
    (never seen) or explicitly `unknown` (markUnknown) - never guessed.
-   Provider class is derived ONLY from URL classification (the same
-   host rules as request.ts isChallengeFrameUrl); no request bodies,
+   Provider class is derived ONLY from URL classification (the
+   challenge-host rules of request.ts, or the call site's own
+   fixed classification when a record carries no URL); no request
+   bodies,
    tokens, site keys, cookies or answers are ever recorded, and every
    URL/note passes redactSecrets on entry.
 
@@ -106,7 +108,12 @@ export function classifyProvider(url: string): CaptchaProvider {
   }
   if (u.protocol !== "https:" && u.protocol !== "http:") return "unknown";
   const h = u.hostname;
-  if ((h === "www.google.com" || h === "www.recaptcha.net" || h === "recaptcha.net") && u.pathname.startsWith("/recaptcha/")) {
+  /* #451 follow-up: the recaptcha payload host serves only recaptcha
+     assets; non-recaptcha paths on it stay unclassified. */
+  if (
+    (h === "www.google.com" || h === "www.recaptcha.net" || h === "recaptcha.net" || h === "www.gstatic.com") &&
+    u.pathname.startsWith("/recaptcha/")
+  ) {
     return "recaptcha";
   }
   if (h === "challenges.cloudflare.com") return "turnstile";
@@ -127,6 +134,11 @@ export interface CaptchaObservation extends CaptchaObservationBase {
   outcome?: CaptchaOutcome;
   transport?: string;
   unknown?: boolean;
+  /** #451 follow-up: provider classification when the call site
+      knows it and the record carries no URL (verify-family records
+      stay URL-less: sitekeys ride the provider path). Same fixed
+      vocabulary as classifyProvider; never guessed. */
+  provider?: CaptchaProvider;
 }
 
 class CaptchaTrace {
@@ -146,7 +158,7 @@ class CaptchaTrace {
       attemptId the record landed in, or null when it was dropped. */
   observe(a: CaptchaObservation): string | null {
     const now = a.ts ?? Date.now();
-    const provider = a.url ? classifyProvider(a.url) : "unknown";
+    const provider = a.provider ?? (a.url ? classifyProvider(a.url) : "unknown");
     let att = this.findAttempt(a, provider, now);
     if (!att) {
       /* A trace id already mapped to a closed attempt stays with that

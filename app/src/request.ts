@@ -42,7 +42,7 @@ import { runRequestInterception, runResponseInterception, BODY_LIMIT, type Inter
 import { DIAG, classifyStageFailure, type DiagStage } from "./diag";
 /* #451: per-attempt CAPTCHA tracing rides the existing CHALLENGE emit
    points below; no new interception logic. */
-import { CAPTCHA_TRACE, outcomeOf } from "./captcha-trace";
+import { CAPTCHA_TRACE, outcomeOf, type CaptchaProvider } from "./captcha-trace";
 /* #90: the adoptResponse seam lives in ./downloads; the downloads
    subsystem owns its own state and the request engine stays unaware
    of download tracking internals. */
@@ -95,7 +95,7 @@ const CSPREG = newCspRegistry();
    through the recorded map of the owning page. */
 const MAPS = newImportmapRegistry();
 import { classifyServeFailure, literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome, recordServeFailure } from "./adaptive-evidence";
-import { spoolBody, SpoolHandle, SpoolUnavailableError } from "./bodyspool";
+import { spoolBody, spoolFromReader, SpoolHandle, SpoolUnavailableError } from "./bodyspool";
 
 import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, rootedPageGrant, serveExtensionAsset, serveRootedExtPage, DNR } from "./extensions";
 
@@ -963,16 +963,30 @@ export function replayCapTrips(): number {
     one-shot/memory paths with an explicit DIAG event. */
 export async function replayableInit(
   init: { method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal },
-  opts: { relayPossible?: boolean; hopReplay?: boolean; spoolAuthorized?: boolean } = {},
+  opts: {
+    relayPossible?: boolean;
+    relayFilePossible?: boolean;
+    hopReplay?: boolean;
+    spoolAuthorized?: boolean;
+  } = {},
 ): Promise<{ method: string; headers: Headers; body?: BodyInit | null; signal?: AbortSignal; spool?: SpoolHandle }> {
   const body = init.body;
   if (body == null || typeof (body as ReadableStream).getReader !== "function") return init;
-  /* #556: only the hop path spools. The relay carries string and
-     ArrayBuffer bodies only, so a spooled File would gain nothing
-     there; the hop chain replays a File on every hop. */
-  const spoolEligible = opts.hopReplay === true && opts.spoolAuthorized === true;
-  const trySpool = async (): Promise<SpoolHandle | null> => {
-    if (!spoolEligible) return null;
+  /* #556 relay follow-up: the hop chain replays a spooled File on
+     every hop, and a relay-routed request hands the File to the
+     embedder across the port (structured clone). The gates differ
+     per call site: an announced over-cap body spools upfront for
+     hop OR relay (the announced length already exceeds the memory
+     cap), an unannounced body spools upfront only for the hop
+     chain - a relay body keeps the memory-buffer fast path and
+     hands the live reader to the spool only on overflow. A
+     wisp-routed request never spools: the wasm artifact carries
+     strings/ArrayBuffers and transport-body.ts bounds its own
+     materialized copy, so the memory paths keep serving it. */
+  const hopSpoolable = opts.spoolAuthorized === true && opts.hopReplay === true;
+  const relaySpoolable = opts.spoolAuthorized === true && opts.relayFilePossible === true;
+  const trySpool = async (eligible: boolean): Promise<SpoolHandle | null> => {
+    if (!eligible) return null;
     try {
       return await spoolBody(body as ReadableStream<Uint8Array>);
     } catch (err) {
@@ -995,10 +1009,12 @@ export async function replayableInit(
   const clRaw = init.headers?.get("content-length") ?? "";
   if (/^\d+$/.test(clRaw)) {
     if (Number(clRaw) > replayBodyCap()) {
-      /* #556: the hop chain replays an over-cap streamed body through
-         the OPFS spool (default-on; zl:config spoolUploads false
-         opts out) instead of surfacing the redirect to the page. */
-      const spool = await trySpool();
+      /* #556: the hop chain (and, since the relay follow-up, a
+         relay-routed request) replays an over-cap streamed body
+         through the OPFS spool (default-on; zl:config spoolUploads
+         false opts out) instead of surfacing the redirect to the
+         page. */
+      const spool = await trySpool(hopSpoolable || relaySpoolable);
       if (spool) {
         /* The announced length is replaced by the spooled truth,
            never the page's claim: the File carries what actually
@@ -1023,8 +1039,10 @@ export async function replayableInit(
        the spool is authorized (default-on since the #556 follow-up;
        zl:config spoolUploads false opts out): even a chunked upload
        becomes replayable without a memory copy, and the spool cap (not
-       the 32 MiB memory cap) bounds it. */
-    const spool = await trySpool();
+       the 32 MiB memory cap) bounds it. #556 relay follow-up: the
+       upfront spool stays hop-only - a relay body buffers in memory
+       and reaches the spool through the overflow handover below. */
+    const spool = await trySpool(hopSpoolable);
     if (spool) return { ...init, body: spool.file, spool };
   }
   const reader = (body as ReadableStream<Uint8Array>).getReader();
@@ -1035,6 +1053,23 @@ export async function replayableInit(
     if (done) break;
     total += value.byteLength;
     if (total > replayBodyCap()) {
+      /* #556 relay follow-up: on a spool-eligible request the
+         overflow hands the live reader plus every buffered prefix
+         chunk (the overflowing one included) to the OPFS spool - the
+         same cap/budget accounting as stream bytes - so the relay
+         carries the File instead of the request dying at the memory
+         cap, and no content-length is invented for it (the spooled
+         truth speaks on the wire). The spool refused or is over its
+         own cap: the stream is consumed, so the honest error strand
+         stands exactly as before. */
+      if (hopSpoolable || relaySpoolable) {
+        try {
+          const spool = await spoolFromReader(reader, { prefix: [...parts, value] });
+          return { ...init, body: spool.file, spool };
+        } catch (err) {
+          if (!(err instanceof SpoolUnavailableError)) throw err;
+        }
+      }
       replayCapTripCount++;
       DIAG.emit({
         category: "TRANSPORT",
@@ -1059,33 +1094,12 @@ export async function replayableInit(
   return { ...init, body: buf.buffer };
 }
 
-/* #556: measured transport ceiling for one request body. The vendored
-   artifact full-buffers every body into the wasm heap before the socket
-   sees it; 16 MiB bodies kill the renderer process deterministically,
-   8 MiB ride fine. The spool copy path honors the ceiling with an
-   honest failure instead of a crash. */
-const TRANSPORT_BODY_BOUND = 8 * 1024 * 1024;
-
-/** Materialize the spooled replay source as the one transport-proven
-    body shape (an ArrayBuffer). Throws before any bytes leave when
-    the spooled body exceeds the measured transport ceiling, so the
-    caller serves the honest error strand instead of a renderer
-    crash. Exported for the replay-body regression tests. */
-export async function spoolTransportCopy(spool: SpoolHandle): Promise<ArrayBuffer> {
-  if (spool.bytes > TRANSPORT_BODY_BOUND) {
-    replayCapTripCount++;
-    DIAG.emit({
-      category: "TRANSPORT",
-      severity: "warning",
-      message: "spooled body over the transport body bound; serving the honest error strand",
-    });
-    throw new Error(
-      "zeolite: spooled body exceeds the transport body bound; streaming uploads need transport streaming support",
-    );
-  }
-  return await spool.file.arrayBuffer();
-}
-
+/* #556 relay follow-up: spoolTransportCopy moved to the transport
+   seam (app/src/transport-body.ts, materializeBlobBody). The hop
+   chain now carries the spooled File itself: the relay port takes
+   it by structured clone, and the wisp dispatches materialize their
+   own bounded copy. The measured ceiling (8 MiB rides, 16 MiB kills
+   the renderer) lives with the copy that enforces it. */
 
 async function upstreamFetch(
   dest: string,
@@ -1121,32 +1135,32 @@ async function upstreamFetch(
      strings/ArrayBuffers too, so the same replay buffering gate
      applies. */
   const wispPossible = !!rule && rule.route === "wisp" && altConfigured();
-  init = await replayableInit(init, { relayPossible: relayPossible || wispPossible });
-  if (rule && rule.route === "relay") {
-    const rr = await relayFetch(dest, init, traceId);
-    if (rr) {
-      traceDecision({ subsystem: "policy", rule: rule.id, original: dest, result: "relay", resource: rtype, traceId });
-      relayRecord();
-      return rr;
-    }
-    DIAG.emit({
-      traceId,
-      requestId: traceId,
-      category: "TRANSPORT",
-      cause: "proxy",
-      severity: "warning",
-      stage: "UPSTREAM_REQUEST",
-      message: 'policy route "relay" without an embedder channel: fetch falls back to the wisp transport',
-      url: dest,
-    });
-  }
-  /* #168: hosts the operator routed "wisp" ride the secondary wasm
-     client through the announced public endpoint (the brave-search
-     class: the relay transport is refused, the wasm ClientHello is
-     accepted). No endpoint announced, or a failed wisp-route fetch:
-     fall through to the default path, never a silent gap. */
-  if (rule && rule.route === "wisp") {
-    if (!wispPossible) {
+  /* #556 relay follow-up: a relay-routed request may hand the
+     embedder a spooled File body (structured clone over the port),
+     so the pure relay signal gates the spool eligibility here; a
+     wisp-routed request keeps the memory-buffer paths (the artifact
+     carries strings/ArrayBuffers; transport-body.ts bounds the
+     materialized copy it makes from a File). The spool rides the
+     same default-on zl:config spoolUploads authorization as the
+     hop chain. */
+  init = await replayableInit(init, {
+    relayPossible: relayPossible || wispPossible,
+    relayFilePossible: relayPossible,
+    spoolAuthorized: spoolUploadsEnabled(),
+  });
+  /* The spooled File outlives the dispatch (the relay clones it
+     onto the port at post time; wisp materializes its bounded copy
+     inside the fetch) and is released once this fetch settles - a
+     failed release only leaks a file the orphan sweep reclaims. */
+  const reqSpool = (init as { spool?: SpoolHandle }).spool;
+  try {
+    if (rule && rule.route === "relay") {
+      const rr = await relayFetch(dest, init, traceId);
+      if (rr) {
+        traceDecision({ subsystem: "policy", rule: rule.id, original: dest, result: "relay", resource: rtype, traceId });
+        relayRecord();
+        return rr;
+      }
       DIAG.emit({
         traceId,
         requestId: traceId,
@@ -1154,34 +1168,17 @@ async function upstreamFetch(
         cause: "proxy",
         severity: "warning",
         stage: "UPSTREAM_REQUEST",
-        message: 'policy route "wisp" without an announced public endpoint: fetch falls back to the default transport',
+        message: 'policy route "relay" without an embedder channel: fetch falls back to the wisp transport',
         url: dest,
       });
-    } else {
-      try {
-        const wr = await altWispFetch(dest, init, traceId);
-        traceDecision({ subsystem: "policy", rule: rule.id, original: dest, result: "wisp", resource: rtype, traceId });
-        wispRecord();
-        return wr;
-      } catch (err) {
-        /* #444: a failed alternate transport may already have delivered
-           the write. An outer fallback must honor the same replay gate
-           as the transport's own retry, including one-shot bodies and
-           cancellation. Only engine-owned pre-dispatch evidence permits a
-           replayable non-idempotent method to try another endpoint. */
-        if (
-          init.signal?.aborted ||
-          (err instanceof Error && err.name === "AbortError") ||
-          !canReplayAfterFailure(init, err)
-        ) {
-          DIAG.emit({
-            traceId, requestId: traceId, category: "TRANSPORT", cause: "proxy",
-            severity: "warning", stage: "UPSTREAM_REQUEST", url: dest,
-            message: 'policy route "wisp" failed: fallback refused because delivery is unknown, the body is one-shot, or the caller cancelled',
-            technicalReason: String(err),
-          });
-          throw err;
-        }
+    }
+    /* #168: hosts the operator routed "wisp" ride the secondary wasm
+       client through the announced public endpoint (the brave-search
+       class: the relay transport is refused, the wasm ClientHello is
+       accepted). No endpoint announced, or a failed wisp-route fetch:
+       fall through to the default path, never a silent gap. */
+    if (rule && rule.route === "wisp") {
+      if (!wispPossible) {
         DIAG.emit({
           traceId,
           requestId: traceId,
@@ -1189,16 +1186,54 @@ async function upstreamFetch(
           cause: "proxy",
           severity: "warning",
           stage: "UPSTREAM_REQUEST",
-          message: 'policy route "wisp" fetch failed: falling back to the default transport',
-          technicalReason: String(err),
+          message: 'policy route "wisp" without an announced public endpoint: fetch falls back to the default transport',
           url: dest,
         });
+      } else {
+        try {
+          const wr = await altWispFetch(dest, init, traceId);
+          traceDecision({ subsystem: "policy", rule: rule.id, original: dest, result: "wisp", resource: rtype, traceId });
+          wispRecord();
+          return wr;
+        } catch (err) {
+          /* #444: a failed alternate transport may already have delivered
+             the write. An outer fallback must honor the same replay gate
+             as the transport's own retry, including one-shot bodies and
+             cancellation. Only engine-owned pre-dispatch evidence permits a
+             replayable non-idempotent method to try another endpoint. */
+          if (
+            init.signal?.aborted ||
+            (err instanceof Error && err.name === "AbortError") ||
+            !canReplayAfterFailure(init, err)
+          ) {
+            DIAG.emit({
+              traceId, requestId: traceId, category: "TRANSPORT", cause: "proxy",
+              severity: "warning", stage: "UPSTREAM_REQUEST", url: dest,
+              message: 'policy route "wisp" failed: fallback refused because delivery is unknown, the body is one-shot, or the caller cancelled',
+              technicalReason: String(err),
+            });
+            throw err;
+          }
+          DIAG.emit({
+            traceId,
+            requestId: traceId,
+            category: "TRANSPORT",
+            cause: "proxy",
+            severity: "warning",
+            stage: "UPSTREAM_REQUEST",
+            message: 'policy route "wisp" fetch failed: falling back to the default transport',
+            technicalReason: String(err),
+            url: dest,
+          });
+        }
       }
     }
+    /* #226: thread the trace id so cooldown relay failures are
+       attributed in the diagnostics ring. */
+    return wispTransport.fetch(dest, init, traceId, { isolated });
+  } finally {
+    if (reqSpool) void reqSpool.release().catch(() => {});
   }
-  /* #226: thread the trace id so cooldown relay failures are
-     attributed in the diagnostics ring. */
-  return wispTransport.fetch(dest, init, traceId, { isolated });
 }
 
 /** #290 residual (2026-10-20 sorry-page report): recovery candidates
@@ -3781,6 +3816,26 @@ export function handleFetch(e: FetchEvent): void {
         /* #451: the challenge iframe/frame navigation was observed. */
         CAPTCHA_TRACE.observe({ attemptId: rtid, clientId: e.resultingClientId || e.clientId, stage: "FRAME_HANDSHAKE", url: target, note: "challenge widget frame engine-routed" });
       }
+      /* #451 follow-up: the request seam for non-navigation
+         challenge traffic. A verify-family request is the
+         SUBMISSION stage and stays URL-less (the sitekey rides
+         the provider path; the provider field carries the
+         classification); every other challenge-host request is
+         the ASSET_LOAD stage. ClientId correlation merges these
+         into the frame attempt the merge window holds open. */
+      if (e.request.mode !== "navigate") {
+        const provider = challengeHostHint(target);
+        if (provider) {
+          const verify = isCaptchaVerifyUrl(target);
+          CAPTCHA_TRACE.observe({
+            clientId: e.resultingClientId || e.clientId,
+            provider,
+            stage: verify ? "SUBMISSION" : "ASSET_LOAD",
+            ...(verify ? {} : { url: target }),
+            note: verify ? "verify-family request observed" : "challenge asset request observed",
+          });
+        }
+      }
 
       if (siteDisabled(target)) {
         /* #31: a disabled-site navigation lands on the error page
@@ -4578,6 +4633,18 @@ export function handleFetch(e: FetchEvent): void {
           let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
             ? undefined
             : e.request.body;
+          /* #556 relay follow-up: when the body spooled, the File IS
+             the chain body and the spool file must outlive the loop
+             (307/308 replay it on every hop). Every chain exit below
+             releases it; a failed release only leaks a file the
+             ten-minute orphan sweep reclaims. */
+          let hopSpool: SpoolHandle | null = null;
+          const releaseHopSpool = (): void => {
+            const s = hopSpool;
+            if (!s) return;
+            hopSpool = null;
+            e.waitUntil(s.release().catch(() => {}));
+          };
           /* 2026-10-14 report: buffer a stream body ONCE before the hop
              loop so 307/308 (and every other body-carrying hop) can
              replay it; the only one-shot case left is an announced
@@ -4598,29 +4665,15 @@ export function handleFetch(e: FetchEvent): void {
             );
             hopBody = buffered.body ?? null;
             if (buffered.spool) {
-              /* #556: the vendored transport adapter refuses a File body
-                 (its socket plumbing throws Failed to fetch), and it
-                 full-buffers whatever it carries into the wasm heap
-                 anyway, so materialize the one proven body shape from
-                 the spool once per chain, bounded by the measured
-                 transport ceiling; over it the request fails honestly
-                 instead of crashing the renderer. #514 audit: the
-                 release rides the same finally as the copy, so a copy
-                 over the transport bound frees the spool file and its
-                 live budget immediately instead of stranding up to
-                 256 MiB against the 512 MiB budget until the ten-minute
-                 orphan sweep. */
-              try {
-                hopBody = await spoolTransportCopy(buffered.spool);
-              } finally {
-                /* The spool file is dead weight once the body is
-                   materialized (the hops replay the ArrayBuffer, never
-                   the File); the fetch event settles only after the
-                   response stream reaches the page, so releasing here
-                   never races a live hop. A failed release only leaks
-                   a file the orphan sweep reclaims. */
-                e.waitUntil(buffered.spool.release().catch(() => {}));
-              }
+              /* #556 relay follow-up: the spooled File IS the chain
+                 body. The relay port carries it to the embedder by
+                 structured clone, and every wisp dispatch materializes
+                 its own bounded copy (transport-body.ts), so the chain
+                 pays no eager full-body copy up front and the honest
+                 over-bound failure fires at the dispatch, not the
+                 chain entry. */
+              hopBody = buffered.spool.file;
+              hopSpool = buffered.spool;
             }
           }
           /* The navigation TTFB deadline must abort the upstream fetch,
@@ -4635,12 +4688,21 @@ export function handleFetch(e: FetchEvent): void {
             else reqSignal.addEventListener("abort", () => navAbort!.abort(reqSignal!.reason), { once: true });
           }
           const hopSignal = navAbort ? navAbort.signal : reqSignal;
-          let resp = await withDeadline(
-            upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
-            reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
-            "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
-            navAbort ?? undefined,
-          );
+          let resp: Response;
+          try {
+            resp = await withDeadline(
+              upstreamFetch(hopUrl, { method: hopMethod, headers: sendHeaders, body: hopBody, signal: hopSignal }, policy, rtype, traceId),
+              reqCtx.navigation ? NAV_TTFB_DEADLINE_MS : 0,
+              "navigation upstream timeout: no first byte within " + NAV_TTFB_DEADLINE_MS + "ms",
+              navAbort ?? undefined,
+            );
+          } catch (err) {
+            /* #556 relay follow-up: the chain ended before any hop
+               could replay; free the spool file and its live budget
+               now instead of stranding them on the orphan sweep. */
+            releaseHopSpool();
+            throw err;
+          }
           for (let hops = 0; resp.status >= 300 && resp.status < 400 && hops < MAX_REDIRECT_HOPS; hops++) {
             /* Capture this hop's Set-Cookie against the URL it came from.
                #35: any admission also pushes the jar view to the
@@ -4746,8 +4808,12 @@ export function handleFetch(e: FetchEvent): void {
               if (ghosteryResponse) {
                 WEBREQ.completed({ ...wrDetails, url: hopUrl, statusCode: 200 });
                 if (e.request.mode === "navigate") WEBNAV.completed(hopUrl);
+                /* #556 relay follow-up: the chain ends here; the
+                   spooled hop body is dead weight. */
+                releaseHopSpool();
                 return ghosteryResponse;
               }
+              releaseHopSpool();
               return navOutcome(e, url, 403, "blocked", "zeolite: redirect hop blocked");
             }
             /* #186: per-host rule headers apply to the hop target and
@@ -4802,6 +4868,9 @@ export function handleFetch(e: FetchEvent): void {
                 message: "redirect re-issue hop " + reIssueHop + " failed upstream (redirected by " + redirectedBy + ")",
                 technicalReason: String(err),
               });
+              /* #556 relay follow-up: no later hop can replay the
+                 spooled body; release before the honest failure. */
+              releaseHopSpool();
               throw err;
             }
           }
@@ -4811,6 +4880,13 @@ export function handleFetch(e: FetchEvent): void {
              first body byte gets the same IDLE bound: a document that
              keeps sending bytes stays alive, one that stalls errors
              into the honest failure path. */
+          /* #556 relay follow-up: the hop loop is over, so no
+             upstreamFetch can replay the spooled body again; the
+             fetch event settles only after the response stream
+             reaches the page, and the request body was fully
+             consumed by the last dispatch, so releasing here never
+             races a live hop. */
+          releaseHopSpool();
           resp = withBodyStallDeadline(resp, BODY_STALL_DEADLINE_MS, traceId, target);
           curStage = "UPSTREAM_RESPONSE";
           /* #134: runtime-built module asset names (React chunks mint
@@ -5023,6 +5099,30 @@ export function handleFetch(e: FetchEvent): void {
           if (isPassChallenge(target) || (hopUrl !== target && isPassChallenge(hopUrl)))
             /* #451: the pass-challenge response outcome, status class only. */
             CAPTCHA_TRACE.observe({ attemptId: traceId, stage: "VERIFY_OUTCOME", outcome: outcomeOf(resp.status), url: target, note: "challenge pass-through response" });
+          /* #451 follow-up: the response seam. Every challenge-host
+             response carries its HTTP outcome class: a verify-family
+             response closes the attempt (VERIFY_OUTCOME), a challenge
+             frame reports the handshake outcome, everything else is
+             the asset outcome. Records state the outcome class only;
+             verify-family records stay URL-less for the same
+             sitekey reason as the request seam. */
+          {
+            const ctUrl = hopUrl !== target && challengeHostHint(hopUrl) ? hopUrl : target;
+            const provider = challengeHostHint(ctUrl);
+            if (provider) {
+              const verify = isCaptchaVerifyUrl(ctUrl);
+              const frame = e.request.destination === "iframe" || e.request.destination === "frame";
+              CAPTCHA_TRACE.observe({
+                attemptId: traceId,
+                clientId: e.resultingClientId || e.clientId,
+                provider,
+                stage: verify ? "VERIFY_OUTCOME" : frame ? "FRAME_HANDSHAKE" : "ASSET_LOAD",
+                outcome: outcomeOf(resp.status),
+                ...(verify ? {} : { url: ctUrl }),
+                note: verify ? "verify-family response outcome" : frame ? "challenge frame response outcome" : "challenge asset response outcome",
+              });
+            }
+          }
           const headers = stripHostile(resp.headers);
           /* Issue #2: engine routes serve their own origin. The preserved
              target ACAO (e.g. "https://excalidraw.com") fails the CORS
@@ -6506,6 +6606,50 @@ export function isChallengeFrameUrl(target: string): boolean {
   return (
     h === "challenges.cloudflare.com" || h === "hcaptcha.com" || h === "newassets.hcaptcha.com"
   );
+}
+
+/** #451 follow-up: challenge-provider classification for non-frame
+    traffic (the trace's request and response seams). Broader than
+    isChallengeFrameUrl on purpose: the widget's ASSET loads (the
+    recaptcha payload host) and verify exchanges are challenge stages
+    without being challenge frames, while ordinary google/gstatic
+    traffic stays out of the trace. */
+export function challengeHostHint(target: string): CaptchaProvider | null {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  const h = u.hostname;
+  if (h === "www.google.com" || h === "www.recaptcha.net" || h === "recaptcha.net" || h === "www.gstatic.com") {
+    return u.pathname.startsWith("/recaptcha/") ? "recaptcha" : null;
+  }
+  if (h === "challenges.cloudflare.com") return "turnstile";
+  if (h === "hcaptcha.com" || h === "newassets.hcaptcha.com") return "hcaptcha";
+  return null;
+}
+
+/** #451 follow-up: the browser-side verify exchange of a challenge
+    provider (the answer a human submits). Only the human-answer
+    endpoints count: challenge retrieval (anchor, reload, getcaptcha)
+    is an ASSET_LOAD stage, and server-side siteverify calls never
+    cross the engine (they ride the site's own backend). Detection
+    and human solving only - the trace observes, it never solves. */
+export function isCaptchaVerifyUrl(target: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return false;
+  }
+  const h = u.hostname;
+  const p = u.pathname;
+  if (h === "www.google.com" || h === "www.recaptcha.net" || h === "recaptcha.net") {
+    return p.startsWith("/recaptcha/api2/userverify") || p.startsWith("/recaptcha/api/userverify");
+  }
+  return h === "hcaptcha.com" && p.startsWith("/checkcaptcha");
 }
 
 /** The virtual origin of the page that embedded a recaptcha frame:
