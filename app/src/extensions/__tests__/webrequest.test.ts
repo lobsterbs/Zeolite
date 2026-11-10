@@ -129,6 +129,7 @@ describe("WebRequestRegistry", () => {
     expect(wrType("iframe")).toBe("sub_frame");
     expect(wrType("style")).toBe("stylesheet");
     expect(wrType("script")).toBe("script");
+    expect(wrType("empty")).toBe("xmlhttprequest");
     expect(wrType("nonsense")).toBe("other");
   });
 
