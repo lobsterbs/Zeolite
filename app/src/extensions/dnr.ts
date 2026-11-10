@@ -17,9 +17,10 @@
      loaded lazily; invalid static rules are silently ignored, exactly as
      Firefox documents).
    - Resource types: the engine reports webRequest types via wrType();
-     fetch and XHR both merge to "other" there, so rules typed
-     "xmlhttprequest" never match a tunnel fetch - a documented
-     divergence from a real browser, not a bug to fix here.
+     fetch and XHR surface as "xmlhttprequest" there (sec-fetch-dest
+     "empty"), so rules typed "xmlhttprequest" match a tunnel fetch as
+     they would in a real browser; truly unknown destinations report
+     "other".
    - Quota constants are engine-defined approximations of the documented
      Chrome values (MDN fixes no cross-browser numbers): dynamic+session
      combined cap 5000, guaranteed minimum static rules 5000, max 100
@@ -62,8 +63,8 @@ export const MAX_NUMBER_OF_ENABLED_STATIC_RULESETS = 50;
 
 /* Firefox resource-type vocabulary for rule conditions. The engine maps
    a request destination onto one of these via wrType(); a rule typed
-   with something the engine cannot distinguish (fetch vs XHR both
-   surface as "other") never matches, honestly. */
+   with something the engine cannot distinguish reports "other" and
+   only matches rules typed "other", honestly. */
 const RESOURCE_TYPES = new Set([
   "main_frame", "sub_frame", "stylesheet", "script", "image", "imageset",
   "font", "object", "xmlhttprequest", "ping", "csp_report", "media",
