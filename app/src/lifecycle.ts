@@ -34,6 +34,7 @@ import { senderIsHostPage } from "./cpgate";
 import type { ActionOp } from "./extensions/action";
 import type { DownloadOp } from "./extensions/downloads";
 import type { NotifyOp } from "./extensions/notifications";
+import type { DevtoolsOp } from "./extensions/devtools";
 import type { ScriptingMessage } from "./extensions/scripting";
 import type { TabMessage, TabsOp } from "./extensions/tabs";
 
@@ -170,6 +171,7 @@ export interface DispatchHosts {
   downloads: { setDispatch(fn: ((op: DownloadOp) => void) | null): void };
   notify: { setDispatch(fn: ((op: NotifyOp) => void) | null): void };
   action: { setDispatch(fn: ((op: ActionOp) => void) | null): void };
+  devtools: { setDispatch(fn: ((op: DevtoolsOp) => void) | null): void };
 }
 
 /** #243: wire the five dispatch seams with host-only and
@@ -236,6 +238,11 @@ export function wireDispatchers(
   hosts.action.setDispatch((op) =>
     each((c) => {
       if (isHostClient(c)) c.postMessage({ type: "zl:actionOp", op });
+    }),
+  );
+  hosts.devtools.setDispatch((op) =>
+    each((c) => {
+      if (isHostClient(c)) c.postMessage({ type: "zl:devtoolsOp", op });
     }),
   );
 }

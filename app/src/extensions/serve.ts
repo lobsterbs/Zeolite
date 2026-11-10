@@ -26,6 +26,7 @@ import { LISTENER_SOURCE } from "./scripting";
 import { PAGE_BRIDGE_SOURCE } from "./pagebridge";
 import { ACTION } from "./action";
 import { pageCallList, pageNamespaceList } from "./pageapi";
+import { devtoolsBindingOf, registerDevtoolsClient } from "./devtools";
 import { recordI18n, resolvePackageI18n, substituteCss } from "./i18n";
 import type { ExtensionRecord } from "./types";
 
@@ -179,12 +180,21 @@ function isCfg(v: unknown): v is CsCfg {
    WAR gate. 5-minute TTL, in-memory only: tokens die with the
    worker, and a token never crosses extensions or paths. */
 const PAGE_TOKEN_TTL = 5 * 60 * 1000;
-const pageTokens = new Map<string, { extId: string; path: string; minted: number }>();
+const pageTokens = new Map<string, { extId: string; path: string; minted: number; devtoolsTabId?: number }>();
 
-export function mintPageToken(extId: string, path: string): string {
+export function mintPageToken(extId: string, path: string, devtoolsTabId?: number): string {
   const tok = crypto.randomUUID();
-  pageTokens.set(tok, { extId, path, minted: Date.now() });
+  pageTokens.set(tok, { extId, path, minted: Date.now(), ...(devtoolsTabId !== undefined ? { devtoolsTabId } : {}) });
   return tok;
+}
+
+/* #523: the inspected-tab binding carried by a devtools open token.
+   Null unless the token was minted for exactly this (extension, path)
+   as a devtools open. */
+export function pageTokenDevtoolsTab(extId: string, path: string, token: string): number | null {
+  const e = pageTokens.get(token);
+  if (!e || e.extId !== extId || e.path !== path || typeof e.devtoolsTabId !== "number") return null;
+  return e.devtoolsTabId;
 }
 
 export function checkPageToken(extId: string, path: string, token: string): boolean {
@@ -205,13 +215,17 @@ export function checkPageToken(extId: string, path: string, token: string): bool
     declares no such page. */
 export function extPageOpenUrl(
   rec: ExtensionRecord,
-  which: "options" | "popup",
+  which: "options" | "popup" | "devtools",
   tabId?: number | null,
 ): string | null {
   if (!rec.enabled) return null;
+  if (which === "devtools" && typeof tabId !== "number") return null;
   let raw: string | null | undefined = null;
   if (which === "options") {
     raw = rec.options?.page;
+  } else if (which === "devtools") {
+    /* #523: the devtools_page opens bound to the inspected tab. */
+    raw = rec.devtoolsPage ?? null;
   } else {
     const kind = rec.action?.kind;
     raw = kind ? (ACTION.popupFor(rec, kind, tabId) ?? rec.action?.defaultPopup) : rec.action?.defaultPopup;
@@ -219,7 +233,7 @@ export function extPageOpenUrl(
   if (!raw) return null;
   const norm = normalizeExtensionPath(raw.startsWith("/") ? raw : "/" + raw);
   if (!norm) return null;
-  return norm + "?zlExt=" + rec.id + "&zlPageTok=" + mintPageToken(rec.id, norm);
+  return norm + "?zlExt=" + rec.id + "&zlPageTok=" + mintPageToken(rec.id, norm, which === "devtools" ? (tabId as number) : undefined);
 }
 
 /* Registered extension-page clients, keyed by the SW-observed client
@@ -486,9 +500,14 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
            answer runtime.getManifest synchronously (Chrome parity;
            extension pages read it during boot). */
         manifest: rec.manifest,
-        calls: pageCallList(rec),
+        calls: pageCallList(rec, devtoolsBindingOf(ctx?.clientId) !== null),
         ns: pageNamespaceList(rec),
         i18n: { locale: i18n.locale, messages: i18n.messages },
+        /* #523: a devtools page client learns its inspected tab here;
+           the SW-side calls verify the binding independently. */
+        ...(devtoolsBindingOf(ctx?.clientId)
+          ? { devtoolsTabId: devtoolsBindingOf(ctx?.clientId)!.tabId }
+          : {}),
       }) +
       ";\n" +
       PAGE_BRIDGE_SOURCE;
@@ -510,6 +529,11 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
   const pageExt = pageClientOf(ctx?.clientId);
   if (nav && (checkPageToken(sr.id, sr.path, url.searchParams.get("zlPageTok") ?? "") || pageExt === sr.id)) {
     registerPageClient(ctx?.resultingClientId, sr.id);
+    /* #523: a navigation granted with a devtools open token binds the
+       client as the extension's devtools page for the inspected tab. */
+    const dtok = url.searchParams.get("zlPageTok") ?? "";
+    const dtab = dtok ? pageTokenDevtoolsTab(sr.id, sr.path, dtok) : null;
+    if (dtab !== null) registerDevtoolsClient(ctx?.resultingClientId, sr.id, dtab);
     const own = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
     if (!own) return notFound();
     return isHtmlPath(sr.path) ? htmlWithPageScript(own, sr.id) : await cssAssetResponse(rec, own, sr.path);
