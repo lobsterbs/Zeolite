@@ -227,6 +227,57 @@ function pushVbase(clientId: string, resultingClientId: string, vbase: string): 
   })();
 }
 
+/* #643: a deliberate block (rules, intercept handler, CSP) answers
+   the page a bare network error, and a site that retries a blocked
+   endpoint produces a console storm of identical net::ERR_FAILED
+   lines that reads as a dead service worker. On the FIRST block per
+   (client, destination) the engine posts a zl:blockedNotice to the
+   requesting client; the page-side watcher (BLOCKED_NOTICE_WATCHER,
+   pageload.ts) logs one console marker per destination. The matched
+   rule name is deliberately not included: the requester already
+   knows the destination it fetched, but a rule name would let a
+   page fingerprint the engine ruleset; DIAG and the netLog keep
+   that for the embedder. Bounded: 256 keys, insertion-order
+   eviction. Fire-and-forget: a notice never delays or fails the
+   block it reports. */
+export type BlockedNoticeBy = "rules" | "intercept" | "csp";
+
+const blockedNoticeSeen = new Map<string, true>();
+const BLOCKED_NOTICE_CAP = 256;
+
+function deliverBlockedNotice(clientId: string, msg: unknown): void {
+  void (async () => {
+    try {
+      const client = await raceBoot(
+        self.clients.get(clientId),
+        "blocked notice client lookup",
+        PRE_DEADLINE_BOUND_MS,
+      );
+      client?.postMessage(msg);
+    } catch {
+      /* no client: the block verdict stands on its own */
+    }
+  })();
+}
+
+export function blockedPageNotice(
+  clientId: string | null | undefined,
+  dest: string,
+  by: BlockedNoticeBy,
+  deliver: (clientId: string, msg: unknown) => void = deliverBlockedNotice,
+): boolean {
+  if (!clientId || !dest) return false;
+  const key = clientId + "|" + dest;
+  if (blockedNoticeSeen.has(key)) return false;
+  if (blockedNoticeSeen.size >= BLOCKED_NOTICE_CAP) {
+    const oldest = blockedNoticeSeen.keys().next().value;
+    if (oldest !== undefined) blockedNoticeSeen.delete(oldest);
+  }
+  blockedNoticeSeen.set(key, true);
+  deliver(clientId, { type: "zl:blockedNotice", dest, by });
+  return true;
+}
+
 export function withDeadline<T>(
   p: Promise<T>,
   ms: number,
@@ -4182,7 +4233,13 @@ export function handleFetch(e: FetchEvent): void {
              cannot distinguish the synthetic 403 from a real origin
              403, so non-navigate blocked requests answer with a
              network error; navigations keep the honest engine page. */
-          if (e.request.mode !== "navigate") return Response.error();
+          if (e.request.mode !== "navigate") {
+            /* #643: the first block per (client, destination) posts the
+               page console marker; a blocked endpoint retry storm stays
+               readable as a deliberate engine decision. */
+            blockedPageNotice(e.clientId, target, ruleDec.action === "block" ? "rules" : "intercept");
+            return Response.error();
+          }
           return navOutcome(e, url, 403, "blocked", "zeolite: request blocked");
         }
         if (ruleDec.url || ic.url) target = destUpgraded(ic.url ?? ruleDec.url ?? target);
@@ -4226,6 +4283,9 @@ export function handleFetch(e: FetchEvent): void {
               transport: cspDecision.mode,
               fallbackReason: reasonOf(cspDecision),
             });
+            /* #643: the CSP seam answers the same bare network error;
+               the marker fires once per (client, destination). */
+            blockedPageNotice(e.clientId, target, "csp");
             return Response.error();
           }
         }
