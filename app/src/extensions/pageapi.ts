@@ -10,6 +10,7 @@
    a namespace absent without its permission simply does not resolve. */
 
 import { MESSENGER, getExtensionContext } from "./context";
+import { DEVTOOLS } from "./devtools";
 import type { ExtensionRecord } from "./types";
 
 export const PAGE_APIS = new Set([
@@ -23,6 +24,9 @@ export const PAGE_APIS = new Set([
   "action",
   "browserAction",
   "pageAction",
+  /* #523: devtools.* calls walk the devtools host, never the shared
+     context; the binding check lives there. */
+  "devtools",
 ]);
 
 export interface ExtPageCall {
@@ -37,7 +41,7 @@ function msgOf(err: unknown): string {
 /* The dotted call list served to the page bridge in __page.js. Same
    surface handleExtPageCall enforces, computed from the live
    permissions so feature detection on the page answers honestly. */
-export function pageCallList(rec: ExtensionRecord): string[] {
+export function pageCallList(rec: ExtensionRecord, isDevtoolsPage = false): string[] {
   const calls: string[] = ["runtime.getManifest", "runtime.sendMessage"];
   if (rec.permissions.includes("storage")) {
     for (const area of ["local", "sync", "session"]) {
@@ -80,6 +84,11 @@ export function pageCallList(rec: ExtensionRecord): string[] {
       calls.push("action." + op);
     }
   }
+  if (isDevtoolsPage) {
+    /* #523: mounted only when the served client is a registered
+       devtools page of this extension. */
+    calls.push("devtools.inspectedWindow.eval", "devtools.inspectedWindow.reload", "devtools.panels.create");
+  }
   return calls;
 }
 
@@ -100,6 +109,7 @@ export async function handleExtPageCall(
   rec: ExtensionRecord,
   senderUrl: string | null,
   call: ExtPageCall,
+  senderClientId?: string,
 ): Promise<{ ok: boolean; response?: unknown; error?: string }> {
   const rawPath = Array.isArray(call.path) ? call.path : null;
   if (!rawPath || rawPath.length === 0 || rawPath.some((s) => typeof s !== "string")) {
@@ -117,6 +127,11 @@ export async function handleExtPageCall(
     if (seg === "connect") {
       return { ok: false, error: "ports are not supported in extension pages" };
     }
+  }
+  if (path[0] === "devtools") {
+    /* #523: devtools.* never mounts in the shared context; the call
+       walks the devtools host against the sender's client binding. */
+    return DEVTOOLS.handleDevtoolsCall(rec, senderClientId, path, args);
   }
   if (path[0] === "runtime" && path[1] === "sendMessage") {
     try {

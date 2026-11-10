@@ -229,6 +229,29 @@ export class ScriptingHost {
     const res = await recordI18n(ext, (p) => extensions.getResource(ext.id, p, { fromWeb: false }));
     this.dispatch?.({ type: "zl:scripting", extId: ext.id, dest, js: [], css: css.map((c) => substituteCss(c, res)), wantResult: false }, null);
   }
+
+  /* #523: devtools.inspectedWindow.eval rides the same channel and the
+     SAME checks as executeScript: the scripting permission plus a host
+     permission for the inspected tab (stricter than Firefox, which
+     requires neither, because the engine's page-execution primitive is
+     the scripting listener). The expression's completion value is the
+     result; evalInFunction evaluates the expression AS a function
+     (Firefox's option). A page exception rejects with Firefox's
+     "Exception: " text. */
+  async evalExpression(ext: ExtensionRecord, tabId: number, expr: string, evalInFunction: boolean): Promise<unknown> {
+    if (typeof expr !== "string" || expr.trim() === "") {
+      throw new Error("zeolite: inspectedWindow.eval requires an expression string");
+    }
+    const dest = this.check(ext, tabId);
+    const msg: ScriptingMessage = evalInFunction
+      ? { type: "zl:scripting", extId: ext.id, dest, js: [], css: [], wantResult: true, func: expr, args: [] }
+      : { type: "zl:scripting", extId: ext.id, dest, js: [expr], css: [], wantResult: true };
+    const results = await this.runWithResults(msg);
+    const r = results[0];
+    if (!r) throw new Error("zeolite: inspectedWindow.eval produced no result");
+    if (typeof r.error === "string") throw new Error("Exception: " + r.error);
+    return r.result;
+  }
 }
 
 export const SCRIPTING = new ScriptingHost();

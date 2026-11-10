@@ -117,6 +117,13 @@ export const PAGE_BRIDGE_SOURCE = `(function () {
   if (browser.extension && browser.extension.inIncognitoContext === undefined) {
     browser.extension.inIncognitoContext = false;
   }
+  /* #523: a devtools page client learns its inspected tab id from the
+     served config; the SW-side calls verify the binding independently. */
+  if (cfg.devtoolsTabId !== undefined) {
+    browser.devtools = browser.devtools || {};
+    browser.devtools.inspectedWindow = browser.devtools.inspectedWindow || {};
+    browser.devtools.inspectedWindow.tabId = cfg.devtoolsTabId;
+  }
   /* #560: chrome.i18n in the page world. The SW embeds the package
      resolved _locales in ZL_PAGE_CFG; getMessage expands $NAME$
      placeholders first (their content may itself carry $n), then
