@@ -8,6 +8,10 @@
    verifies it is the intended target page, then runs the code in a
    Function scope with the same content-script API surface.
 
+   #517: the listener authenticates its zl:ext posts with the same
+   per-client single-use channel secret the bridge uses (#336); it
+   is served per client, so the secret never reaches page scripts.
+
    Permission model: "scripting" plus a host permission for the
    target tab's URL, enforced HERE. The page listener trusts only
    the service worker (ev.source === controller) but cannot
@@ -237,7 +241,7 @@ export const SCRIPTING = new ScriptingHost();
    executed unit - the func's return value or the file's completion
    value (eval's completion value), errors as entries. */
 export const LISTENER_SOURCE = [
-  "(function () {",
+  "(function (auth) {",
   "  \"use strict\";",
   "  var ctl = navigator.serviceWorker && navigator.serviceWorker.controller;",
   "  if (!ctl) return;",
@@ -253,7 +257,7 @@ export const LISTENER_SOURCE = [
   "        if (d.ok) resolve(d.response);",
   "        else reject(new Error(d.error || \"zeolite: extension messaging failed\"));",
   "      };",
-  "      ctl.postMessage({ type: \"zl:ext\", extId: ext, msg: req }, [mc.port2]);",
+  "      ctl.postMessage({ type: \"zl:ext\", extId: ext, auth: auth, msg: req }, [mc.port2]);",
   "    });",
   "  }",
   "  function api(ext) {",
@@ -321,5 +325,5 @@ export const LISTENER_SOURCE = [
   "      try { ev.ports[0].postMessage({ results: out }); } catch (e2) { /* the caller stopped waiting */ }",
   "    }",
   "  });",
-  "})();",
+  "}",
 ].join("\n");

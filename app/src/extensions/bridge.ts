@@ -11,6 +11,11 @@
      the SW addresses the page by destination, only the controlling
      service worker is trusted, and replies travel back as
      zl:ext __zlTabReply/__zlTabError control messages;
+   - authenticates every zl:ext post with the per-page channel
+     secret (#517, #336): minted once per (client, extension, config)
+     at serve time, single-use, alive only in this closure, so page
+     scripts on the same page cannot forge storage or messaging ops
+     as the extension;
    - loads the declared js files and executes each in a Function scope
      with only (browser, chrome) exposed - the page cannot reach the
      API object, and the scripts cannot reach the engine global scope
@@ -22,9 +27,8 @@
    injected into <head> by the rewriter), document_end waits for
    DOMContentLoaded, document_idle waits for load + idle. */
 
-export const BRIDGE_SOURCE = `(function () {
+export const BRIDGE_SOURCE = `(function (cfg, auth) {
   "use strict";
-  var cfg = ZL_CS_CFG;
   var origin = location.origin;
   var csListeners = [];
   function ctl() {
@@ -47,7 +51,7 @@ export const BRIDGE_SOURCE = `(function () {
         if (d.ok) resolve(d.response);
         else reject(new Error(d.error || "zeolite: extension messaging failed"));
       };
-      c.postMessage({ type: "zl:ext", extId: cfg.ext, msg: req }, [mc.port2]);
+      c.postMessage({ type: "zl:ext", extId: cfg.ext, auth: auth, msg: req }, [mc.port2]);
     });
   }
   function storageArea(name) {
@@ -66,7 +70,7 @@ export const BRIDGE_SOURCE = `(function () {
       if (done) return;
       done = true;
       var c = ctl();
-      if (c) c.postMessage({ type: "zl:ext", extId: cfg.ext, msg: { __zlTabReply: nonce, response: response } });
+      if (c) c.postMessage({ type: "zl:ext", extId: cfg.ext, auth: auth, msg: { __zlTabReply: nonce, response: response } });
     };
   }
   function apiObject() {
@@ -117,7 +121,7 @@ export const BRIDGE_SOURCE = `(function () {
       if (m.dest !== dest) return;
       var nonce = m.payload.nonce;
       if (csListeners.length === 0) {
-        c.postMessage({ type: "zl:ext", extId: cfg.ext, msg: { __zlTabError: nonce, error: "zeolite: could not establish connection. Receiving end does not exist" } });
+        c.postMessage({ type: "zl:ext", extId: cfg.ext, auth: auth, msg: { __zlTabError: nonce, error: "zeolite: could not establish connection. Receiving end does not exist" } });
         return;
       }
       var send = replyOnce(nonce);
@@ -141,7 +145,7 @@ export const BRIDGE_SOURCE = `(function () {
     var report = function () {
       var c = ctl();
       if (!c) return;
-      c.postMessage({ type: "zl:ext", extId: cfg.ext, msg: { __zlDomLoaded: (window.__ZL && window.__ZL.dest) || document.baseURI } });
+      c.postMessage({ type: "zl:ext", extId: cfg.ext, auth: auth, msg: { __zlDomLoaded: (window.__ZL && window.__ZL.dest) || document.baseURI } });
     };
     if (document.readyState !== "loading") report();
     else document.addEventListener("DOMContentLoaded", report);
@@ -190,5 +194,4 @@ export const BRIDGE_SOURCE = `(function () {
     else window.addEventListener("load", function () { idle(function () { runScripts(js, 0); }); });
   }
   start();
-})();
-`;
+}`;

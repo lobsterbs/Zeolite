@@ -303,6 +303,57 @@ export async function serveRootedExtPage(
   return htmlWithPageScript(own, grant.extId);
 }
 
+/* #517/#336: content-script channel secrets. The bridge and the
+   scripting listener authenticate every zl:ext post with a secret
+   minted at serve time for one (client, extension) pair; page
+   scripts share the page's client id but never see the secret (it
+   exists only inside the single-use served script body and the
+   receiver's closure), so a zl:ext post without it is a page
+   forgery, not a content script. csAuths is LRU-bounded: a live
+   bridge's successful post refreshes its entry. csServed enforces
+   single use per served script (key: client|ext|cfg or
+   client|__scripting); its eviction past the cap lets a refetch
+   mint a fresh secret, which is the documented residual. */
+const CS_AUTH_CAP = 512;
+const CS_SERVED_CAP = 1024;
+const csAuths = new Map<string, { clientId: string; extId: string | null }>();
+const csServed = new Map<string, string>();
+
+export function mintCsAuth(clientId: string, extId: string | null): string {
+  const secret = crypto.randomUUID();
+  if (csAuths.size >= CS_AUTH_CAP) {
+    const oldest = csAuths.keys().next().value;
+    if (oldest !== undefined) csAuths.delete(oldest);
+  }
+  csAuths.set(secret, { clientId, extId });
+  return secret;
+}
+
+export function csAuthOk(
+  clientId: string | undefined,
+  extId: string,
+  auth: unknown,
+): boolean {
+  if (typeof auth !== "string" || auth === "" || !clientId) return false;
+  const b = csAuths.get(auth);
+  if (!b || b.clientId !== clientId) return false;
+  /* extId null binds the scripting listener: it posts for whatever
+     extension the SW's own injection named, and the SW-side host
+     verification still applies downstream. */
+  if (b.extId !== null && b.extId !== extId) return false;
+  csAuths.delete(auth);
+  csAuths.set(auth, b);
+  return true;
+}
+
+function rememberServed(serveKey: string, secret: string): void {
+  if (csServed.size >= CS_SERVED_CAP) {
+    const oldest = csServed.keys().next().value;
+    if (oldest !== undefined) csServed.delete(oldest);
+  }
+  csServed.set(serveKey, secret);
+}
+
 export interface ServeCtx {
   nav: boolean;
   clientId?: string;
@@ -320,13 +371,24 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
   const sr = parseServePath(url.pathname);
   if (!sr) return notFound();
   if (sr.kind === "listener") {
-    /* Engine-global scripting listener; not tied to one extension. */
-    return new Response(LISTENER_SOURCE, {
-      headers: {
-        "content-type": "text/javascript; charset=utf-8",
-        "cache-control": "no-store",
+    /* Engine-global scripting listener; not tied to one extension.
+       #517: served per client with the same single-use channel
+       secret as the bridge (binding extId null: the listener posts
+       for whatever extension the SW's own injection named). */
+    if (req.method !== "GET" || !ctx?.clientId) return notFound();
+    const lkey = ctx.clientId + "|__scripting";
+    if (csServed.has(lkey)) return notFound();
+    const auth = mintCsAuth(ctx.clientId, null);
+    rememberServed(lkey, auth);
+    return new Response(
+      LISTENER_SOURCE + ")(" + JSON.stringify(auth) + ");",
+      {
+        headers: {
+          "content-type": "text/javascript; charset=utf-8",
+          "cache-control": "no-store",
+        },
       },
-    });
+    );
   }
   const rec = extensions.get(sr.id);
   if (!rec || !rec.enabled) return notFound();
@@ -363,11 +425,27 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
       cfg.runAt === "document_start" || cfg.runAt === "document_end"
         ? cfg.runAt
         : "document_idle";
+    /* #517/#336: the channel secret. Minted once per (client,
+       extension, config): the secret exists only in this response
+       body and then in the bridge's closure, so a page script
+       cannot read it by refetching (the second request fails
+       closed) and cannot forge zl:ext ops by posting as the
+       bridge. No client id (never observed for a controlled
+       subresource) fails closed: the bridge would be
+       unauthenticated. */
+    if (req.method !== "GET" || !ctx?.clientId) return notFound();
+    const serveKey =
+      ctx.clientId + "|" + sr.id + "|" + JSON.stringify({ js, css, runAt });
+    if (csServed.has(serveKey)) return notFound();
+    const auth = mintCsAuth(ctx.clientId, sr.id);
+    rememberServed(serveKey, auth);
     const body =
-      "var ZL_CS_CFG = " +
+      BRIDGE_SOURCE +
+      ")(" +
       JSON.stringify({ ext: sr.id, js, css, runAt }) +
-      ";\n" +
-      BRIDGE_SOURCE;
+      "," +
+      JSON.stringify(auth) +
+      ");";
     return new Response(body, {
       headers: {
         "content-type": "text/javascript; charset=utf-8",

@@ -15,7 +15,7 @@ import { extensions } from "./manager";
 import { NOTIFY } from "./notifications";
 import { normalizeExtensionPath } from "./origin";
 import { handleExtPageCall } from "./pageapi";
-import { EXT_ROUTE, extPageOpenUrl, mintPageToken, pageClientOf } from "./serve";
+import { csAuthOk, EXT_ROUTE, extPageOpenUrl, mintPageToken, pageClientOf } from "./serve";
 import type { ExtensionRecord } from "./types";
 import type { ExtensionStorageArea } from "./storage";
 import { contentScriptMayUseSession } from "./storage";
@@ -71,10 +71,17 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
       /* Content-script bridge traffic from a controlled page. Real
          host verification: the sender page's destination must match
          the extension's declared content-script patterns. */
-      const em = msg as { extId?: string; msg?: unknown };
+      const em = msg as { extId?: string; auth?: unknown; msg?: unknown };
       const extId = em.extId;
-      if (!extId) {
-        reply({ ok: false, error: "missing extId" });
+      /* #517/#336: the sender must present the channel secret its
+         bridge or scripting listener was served with. Page scripts
+         share the page's client id, so without the secret this is a
+         page forgery, not a content script. A bridge served by a
+         replaced worker refuses honestly until the page reloads. */
+      const src = e.source as Client | null;
+      const srcId = src ? src.id : "";
+      if (!extId || !csAuthOk(srcId || undefined, extId, em.auth)) {
+        reply({ ok: false, error: "zeolite: content-script channel not authenticated (reload the page for a fresh bridge)" });
         break;
       }
       e.waitUntil(
