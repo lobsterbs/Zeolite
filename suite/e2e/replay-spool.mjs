@@ -35,13 +35,19 @@
      spool fails with the same honest 502 (the read loop discards
      and throws before any transport copy), pinning the documented
      limitation until the artifact streams uploads.
+   - the relay arm (#556 follow-up): on a second engine instance
+     with a default-relay policy.kdl and a harness crediting relay
+     port, a spooled over-cap File body crosses to the embedder by
+     structured clone and rides the embedder native stack upstream,
+     byte-identical against the direct oracle.
 
-   Run: node suite/e2e/replay-spool.mjs (engine on 6025, fixtures on
-   7125/7126 - never colliding with the other suites). */
+   Run: node suite/e2e/replay-spool.mjs (engines on 6025 and 6027,
+   fixtures on 7125/7126 - never colliding with the other suites). */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright";
 import { startFixture } from "./fixtures.mjs";
@@ -52,6 +58,10 @@ const FX_B = 7126;
 const ENGINE = "http://127.0.0.1:" + ENGINE_PORT;
 const ORIGIN_A = "http://127.0.0.1:" + FX_A;
 const ORIGIN_B = "http://127.0.0.1:" + FX_B;
+/* #556 relay follow-up: a second engine instance on a port no other
+   suite uses; its static tree carries a default-relay policy.kdl. */
+const RELAY_ENGINE_PORT = 6027;
+const RELAY_ENGINE = "http://127.0.0.1:" + RELAY_ENGINE_PORT;
 const MI = 1024 * 1024;
 /* one byte over the default 32 MiB replay cap */
 const OVER_DEFAULT_CAP = 32 * MI + 1;
@@ -66,6 +76,9 @@ let browser = null;
 let context = null;
 let fixtureA = null;
 let fixtureB = null;
+let engine2Proc = null;
+let engine2Err = [];
+let relayStaticDir = null;
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
@@ -97,10 +110,10 @@ async function waitFor(label, timeoutMs, fn) {
   }
   throw new Error("timeout waiting for " + label + (last ? "; last error: " + last : ""));
 }
-async function frameWith(pg, sel) {
+async function frameWith(pg, sel, engineOrigin = ENGINE) {
   for (const f of pg.frames()) {
     try {
-      if (!f.url().startsWith(ENGINE + "/j/")) continue;
+      if (!f.url().startsWith(engineOrigin + "/j/")) continue;
       if ((await f.locator(sel).count()) > 0) return f;
     } catch {}
   }
@@ -120,12 +133,15 @@ async function evalIn(frame, label, js, timeoutMs = 30000) {
     }),
   ]);
 }
-async function startEngine() {
+/* #556 relay follow-up: the suite runs a second engine instance for
+   the relay arm; both instances share the spawn recipe. */
+async function startEngineOn(port, staticDir, errs, setProc) {
   const bin = resolve("target/release/zeolite-server");
   if (!existsSync(bin)) {
     throw new Error("zeolite-server not built: " + bin + " (cargo build -p zeolite-server --release)");
   }
-  engineProc = spawn(bin, ["--port", String(ENGINE_PORT), "--static", resolve("app/dist")], {
+  const origin = "http://127.0.0.1:" + port;
+  const proc = spawn(bin, ["--port", String(port), "--static", staticDir], {
     env: {
       ...process.env,
       ZL_TEST_ALLOW_PRIVATE_DESTS: "1",
@@ -133,16 +149,21 @@ async function startEngine() {
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  engineProc.stdout.on("data", (c) => engineErr.push(String(c)));
-  engineProc.stderr.on("data", (c) => engineErr.push(String(c)));
-  await waitFor("engine on " + ENGINE, 60000, async () => {
+  setProc(proc);
+  proc.stdout.on("data", (c) => errs.push(String(c)));
+  proc.stderr.on("data", (c) => errs.push(String(c)));
+  await waitFor("engine on " + origin, 60000, async () => {
     try {
-      const r = await fetch(ENGINE + "/");
+      const r = await fetch(origin + "/");
       return r.status === 200;
     } catch {
       return false;
     }
   });
+}
+
+async function startEngine() {
+  await startEngineOn(ENGINE_PORT, resolve("app/dist"), engineErr, (p) => (engineProc = p));
 }
 
 /* zl:config push with an ack echo assertion: the spool authorization
@@ -325,6 +346,149 @@ async function main() {
     return "pinned: the wisp transport ceiling is documented, the failure is honest";
   });
 
+  /* ---- #556 relay follow-up: the spooled File rides the embedder relay ---- */
+
+  await check("relay: a spooled over-cap File body crosses to the embedder relay and rides upstream byte-identical", async () => {
+    /* A second engine instance serves a default-relay policy.kdl from
+       its own static tree, so once the harness host page registers a
+       crediting relay port every upstream fetch of that engine asks
+       the embedder native stack. The handler below is the honest
+       crediting relay: zl:fetchRelay out, a native fetch with the
+       structured-clone body, head/chunk/end back, zl:relayCredit
+       honored, and the non-relay frames on the port (the
+       registration ack) tolerated. The probe stays CORS-simple (a
+       text/plain POST, no preflight) so the fixture ACAO * echo is
+       readable from the engine origin. */
+    relayStaticDir = mkdtempSync(join(tmpdir(), "zl-relay-static-"));
+    const distDir = resolve("app/dist");
+    for (const ent of readdirSync(distDir)) symlinkSync(join(distDir, ent), join(relayStaticDir, ent));
+    writeFileSync(
+      join(relayStaticDir, "policy.kdl"),
+      'rule "relay-all" { route "relay" reason "#556 e2e: default relay for the relay arm" }' + String.fromCharCode(10),
+    );
+    await startEngineOn(RELAY_ENGINE_PORT, relayStaticDir, engine2Err, (p) => (engine2Proc = p));
+
+    const host = await context.newPage();
+    await host.goto(RELAY_ENGINE + "/");
+    try {
+      await waitFor("engine2 SW controller", 15000, () =>
+        host.evaluate(() => navigator.serviceWorker.controller !== null).catch(() => false),
+      );
+    } catch {
+      /* First-ever load on a fresh origin: the SW claims on the next
+         navigation, so reload once like the engine boot does. */
+      await host.reload();
+      await waitFor("engine2 SW controller after reload", 30000, () =>
+        host.evaluate(() => navigator.serviceWorker.controller !== null).catch(() => false),
+      );
+    }
+    const ack = await host.evaluate(
+      () =>
+        new Promise((res, rej) => {
+          const ctl = navigator.serviceWorker.controller;
+          if (!ctl) return rej(new Error("no controller"));
+          const ch = new MessageChannel();
+          const send = (msg) => {
+            try {
+              ch.port1.postMessage(msg);
+            } catch {}
+          };
+          /* #470 crediting: chunks only while granted bytes remain. */
+          const credit = new Map();
+          const pending = new Map();
+          window.__zlRelayStats = { fetches: 0, files: 0, fileBytes: 0 };
+          const pump = (rid) => {
+            const q = pending.get(rid);
+            if (!q) return;
+            while (q.length) {
+              const chunk = q[0];
+              const have = credit.get(rid) ?? 0;
+              if (have < chunk.byteLength) return;
+              credit.set(rid, have - chunk.byteLength);
+              q.shift();
+              send({ type: "zl:relayChunk", rid, bytes: chunk });
+            }
+            pending.delete(rid);
+            credit.delete(rid);
+            send({ type: "zl:relayEnd", rid });
+          };
+          ch.port1.onmessage = (e) => {
+            const m = e.data;
+            if (m?.ok === true && !m.type) {
+              res(m); /* the registration ack rides the same port */
+              return;
+            }
+            if (m?.type === "zl:relayCredit") {
+              credit.set(m.rid, (credit.get(m.rid) ?? 0) + m.bytes);
+              pump(m.rid);
+              return;
+            }
+            if (m?.type !== "zl:fetchRelay") return;
+            window.__zlRelayStats.fetches++;
+            if (m.body instanceof File) {
+              window.__zlRelayStats.files++;
+              window.__zlRelayStats.fileBytes += m.body.size;
+            }
+            (async () => {
+              try {
+                const r = await fetch(m.dest, { method: m.method, headers: m.headers, body: m.body ?? undefined, redirect: "follow" });
+                send({ type: "zl:relayHead", rid: m.rid, status: r.status, statusText: r.statusText, headers: Array.from(r.headers.entries()) });
+                const buf = new Uint8Array(await r.arrayBuffer());
+                const chunks = [];
+                for (let i = 0; i < buf.length; i += 65536) chunks.push(buf.subarray(i, Math.min(i + 65536, buf.length)));
+                if (chunks.length === 0) {
+                  send({ type: "zl:relayEnd", rid: m.rid });
+                  return;
+                }
+                pending.set(m.rid, chunks);
+                pump(m.rid);
+              } catch (err) {
+                send({ type: "zl:relayError", rid: m.rid, error: String(err?.message ?? err), delivery: "definitely-not-delivered" });
+              }
+            })();
+          };
+          ctl.postMessage({ type: "zl:relayRegister", credits: 1 }, [ch.port2]);
+          setTimeout(() => rej(new Error("relay registration ack timeout")), 8000);
+        }),
+    );
+    assert(ack?.ok === true, "zl:relayRegister was refused: " + JSON.stringify(ack));
+    const cfg = await pushConfig(host, { replayCapMb: TIGHT_CAP_MB, spoolUploads: true });
+    eq(cfg.replayCapMb, TIGHT_CAP_MB, "engine2 did not echo the tightened replay cap");
+
+    const relPage = await context.newPage();
+    await relPage.goto(RELAY_ENGINE + "/?url=" + encodeURIComponent(ORIGIN_A + "/dir/page.html"));
+    const relFrame = await waitFor("engine2 proxied frame", 45000, () => frameWith(relPage, "#zl-marker", RELAY_ENGINE));
+
+    /* The direct oracle and the proxied probe: the same deterministic
+       bytes as a CORS-simple text/plain POST straight to the echo. */
+    const echoJs = (n) =>
+      "async () => { const u8 = new Uint8Array(" + n + "); for (let i = 0; i < u8.length; i++) u8[i] = (i * 7 + 13) & 255; " +
+      'const r = await fetch("/api/echohash", { method: "POST", body: new Blob([u8], { type: "text/plain" }) }); ' +
+      "return JSON.stringify({ status: r.status, body: await r.text() }); }";
+    const directPg = await context.newPage();
+    await directPg.goto(ORIGIN_A + "/dir/landing.html");
+    const direct = JSON.parse(await directPg.evaluate("(" + echoJs(OVER_TIGHT_CAP) + ")()"));
+    await directPg.close();
+    const proxied = JSON.parse(await evalIn(relFrame, "relay spool probe", echoJs(OVER_TIGHT_CAP), 120000));
+
+    eq(proxied.status, 200, "the relayed spooled upload did not reach the echo");
+    const d = JSON.parse(direct.body);
+    const p = JSON.parse(proxied.body);
+    eq(p.sha256, d.sha256, "relay spool: SHA-256 of the File body diverged from the direct oracle");
+    eq(p.bytes, OVER_TIGHT_CAP, "relay spool: the echoed byte count is not the upload size");
+    eq(p.bytes, d.bytes, "relay spool: the echoed byte count diverged from the direct oracle");
+    eq(p.method, "POST", "relay spool: the echo method is not POST");
+    eq(p.contentType, d.contentType, "relay spool: the content type diverged from the direct oracle");
+    const stats = await waitFor(
+      "the relay handler to observe the File body",
+      10000,
+      () => host.evaluate(() => (window.__zlRelayStats && window.__zlRelayStats.files >= 1 ? window.__zlRelayStats : null)),
+    );
+    assert(stats.files >= 1, "the upload never crossed to the relay handler as a File");
+    eq(stats.fileBytes, OVER_TIGHT_CAP, "the File that crossed to the relay was not the full spooled body");
+    return "spooled File crossed by structured clone, " + stats.fileBytes + " bytes, SHA-256 equal to the direct oracle";
+  });
+
   const failed = results.filter((r) => !r.ok);
   console.log("");
   console.log("== replay-spool summary: " + (results.length - failed.length) + " passed, " + failed.length + " failed ==");
@@ -353,5 +517,11 @@ main()
     } catch {}
     try {
       if (engineProc) engineProc.kill();
+    } catch {}
+    try {
+      if (engine2Proc) engine2Proc.kill();
+    } catch {}
+    try {
+      if (relayStaticDir) rmSync(relayStaticDir, { recursive: true, force: true });
     } catch {}
   });

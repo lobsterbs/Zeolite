@@ -53,7 +53,8 @@ vi.mock("../transform", () => ({
   workerPrelude: async () => "",
 }));
 
-import { handleFetch, replayCapTrips, replayableInit, spoolTransportCopy } from "../request";
+import { handleFetch, replayCapTrips, replayableInit } from "../request";
+import { materializeBlobBody, TRANSPORT_BODY_BOUND } from "../transport-body";
 import { DIAG } from "../diag";
 import { encodeDestLegacy } from "../codec";
 import { setReplayCapMb, setSpoolUploads, spoolUploadsEnabled } from "../swstate";
@@ -319,36 +320,138 @@ describe("replayableInit configured cap (zl:config replayCapMb, #556)", () => {
   });
 });
 
-describe("spoolTransportCopy (#556 hop transport body)", () => {
+describe("materializeBlobBody (#556: the bounded copy moved to the transport seam)", () => {
   afterEach(() => {
     setSpoolRootForTests(null);
   });
 
-  it("materializes the spooled replay source as a byte-exact ArrayBuffer", async () => {
+  it("materializes a spooled File body as a byte-exact ArrayBuffer", async () => {
     setSpoolRootForTests(spoolTestRoot());
     const out = await replayableInit(
       { method: "POST", headers: new Headers(), body: streamOf(["hello", "-" , "spool"]) },
       { hopReplay: true, spoolAuthorized: true },
     );
     expect(out.spool).toBeDefined();
-    const buf = await spoolTransportCopy(out.spool!);
-    expect(buf).toBeInstanceOf(ArrayBuffer);
-    expect(buf.byteLength).toBe("hello-spool".length);
-    expect(new TextDecoder().decode(new Uint8Array(buf))).toBe("hello-spool");
+    const init = { body: out.spool!.file as BodyInit };
+    await materializeBlobBody(init);
+    expect(init.body).toBeInstanceOf(ArrayBuffer);
+    expect((init.body as ArrayBuffer).byteLength).toBe("hello-spool".length);
+    expect(new TextDecoder().decode(new Uint8Array(init.body as ArrayBuffer))).toBe("hello-spool");
     await out.spool!.release();
   });
 
-  it("throws the honest error before reading when the spooled body exceeds the transport bound", async () => {
-    const before = replayCapTrips();
-    const handle = {
-      file: new File(["x"], "x.body"),
-      bytes: 8 * 1024 * 1024 + 1,
-      release: async () => {},
-    };
-    await expect(spoolTransportCopy(handle)).rejects.toThrow(
-      "spooled body exceeds the transport body bound"
+  it("throws the honest error before reading when the body exceeds the transport bound", async () => {
+    const before = DIAG.snapshot(0).events.length;
+    const init = { body: new File([new Uint8Array(TRANSPORT_BODY_BOUND + 1)], "big.body") as BodyInit };
+    await expect(materializeBlobBody(init)).rejects.toThrow(
+      "request body exceeds the transport body bound"
     );
-    expect(replayCapTrips()).toBe(before + 1);
+    /* the strand is counted in the diag ring, never silent */
+    const events = DIAG.snapshot(0).events.slice(before);
+    expect(events.some((e) => /transport body bound/.test(e.message))).toBe(true);
+  });
+
+  it("leaves string, ArrayBuffer and absent bodies untouched", async () => {
+    const s = { body: "str" as BodyInit };
+    await materializeBlobBody(s);
+    expect(s.body).toBe("str");
+    const ab = { body: new Uint8Array([1, 2, 3]).buffer as BodyInit };
+    await materializeBlobBody(ab);
+    expect((ab.body as ArrayBuffer).byteLength).toBe(3);
+    const none = { body: undefined as BodyInit | undefined };
+    await materializeBlobBody(none);
+    expect(none.body).toBeUndefined();
+  });
+});
+
+/* #556 relay follow-up: a relay-routed request may hand the embedder
+   a spooled File body across the port (structured clone), so the
+   relay signal - and only the relay signal - opens the spool paths
+   for non-hop requests; the wisp routes keep the documented memory
+   paths and the transport seam bounds its own copy. */
+describe("replayableInit relay File routing (#556 relay follow-up)", () => {
+  afterEach(() => {
+    setSpoolRootForTests(null);
+    setReplayCapMb(32);
+  });
+
+  it("spools an announced over-cap body for a relay-routed request and corrects the length", async () => {
+    setSpoolRootForTests(spoolTestRoot());
+    const out = await replayableInit(
+      {
+        method: "POST",
+        headers: new Headers({ "content-length": String(64 * 1024 * 1024) }),
+        body: streamOf(["relayme"]),
+      },
+      { relayFilePossible: true, spoolAuthorized: true },
+    );
+    expect(out.body).toBeInstanceOf(File);
+    expect(out.spool).toBeDefined();
+    /* the announced length is replaced by the spooled truth */
+    expect(out.headers.get("content-length")).toBe("7");
+    const bytes = new Uint8Array(await (out.body as File).arrayBuffer());
+    expect(new TextDecoder().decode(bytes)).toBe("relayme");
+    await out.spool!.release();
+  });
+
+  it("keeps the memory-buffer fast path for an unannounced relay body (no spool)", async () => {
+    setSpoolRootForTests(spoolTestRoot());
+    const out = await replayableInit(
+      { method: "POST", headers: new Headers(), body: streamOf(["ab"]) },
+      { relayPossible: true, relayFilePossible: true, spoolAuthorized: true },
+    );
+    expect(out.body).toBeInstanceOf(ArrayBuffer);
+    expect(out.spool).toBeUndefined();
+  });
+
+  it("spools the overflow prefix when an unannounced relay body passes the memory cap", async () => {
+    setReplayCapMb(1);
+    setSpoolRootForTests(spoolTestRoot());
+    const out = await replayableInit(
+      {
+        method: "POST",
+        headers: new Headers(),
+        body: streamOf(["a".repeat(512 * 1024), "b".repeat(512 * 1024 + 1)]),
+      },
+      { relayPossible: true, relayFilePossible: true, spoolAuthorized: true },
+    );
+    /* the overflowing chunk rode the prefix handover: nothing lost */
+    expect(out.body).toBeInstanceOf(File);
+    expect(out.spool).toBeDefined();
+    expect(out.spool!.bytes).toBe(512 * 1024 + 512 * 1024 + 1);
+    expect(out.headers.get("content-length")).toBeNull();
+    const bytes = new Uint8Array(await (out.body as File).arrayBuffer());
+    expect(bytes.length).toBe(1024 * 1024 + 1);
+    expect(new TextDecoder().decode(bytes.slice(0, 5))).toBe("aaaaa");
+    expect(new TextDecoder().decode(bytes.slice(-1))).toBe("b");
+    await out.spool!.release();
+  });
+
+  it("fails honestly at the memory cap when the spool is unavailable (the stream is consumed)", async () => {
+    setReplayCapMb(1);
+    setSpoolRootForTests(null);
+    await expect(
+      replayableInit(
+        {
+          method: "POST",
+          headers: new Headers(),
+          body: streamOf(["a".repeat(512 * 1024), "b".repeat(512 * 1024 + 1)]),
+        },
+        { relayPossible: true, relayFilePossible: true, spoolAuthorized: true },
+      ),
+    ).rejects.toThrow("request body exceeds the replay buffer cap");
+  });
+
+  it("never spools for a wisp-routed request (relayFilePossible stays unset)", async () => {
+    setSpoolRootForTests(spoolTestRoot());
+    const init = {
+      method: "POST",
+      headers: new Headers({ "content-length": String(64 * 1024 * 1024) }),
+      body: streamOf(["x"]),
+    };
+    const out = await replayableInit(init, { relayPossible: true, spoolAuthorized: true });
+    /* wisp keeps the documented paths: one-shot streaming, never a File */
+    expect(out).toBe(init);
   });
 });
 
@@ -450,12 +553,16 @@ describe("hop loop replays over-cap spooled bodies (#556 follow-up)", () => {
       "https://site.example/final",
     ]);
     expect(hopMock.inits.map((i) => i?.method)).toEqual(["POST", "POST", "POST"]);
-    /* every re-issue carried the full spooled body, byte-identical:
-       the announced length was replaced by the spooled truth */
+    /* #556 relay follow-up: every hop carried the spooled File itself
+       (the relay port takes it by structured clone; a wisp dispatch
+       materializes its own bounded copy via transport-body.ts),
+       byte-identical: the announced length was replaced by the
+       spooled truth */
     for (const init of hopMock.inits) {
-      expect(init?.body).toBeInstanceOf(ArrayBuffer);
-      expect(await sha256(init?.body)).toBe(expected);
-      expect((init?.body as ArrayBuffer).byteLength).toBe(N);
+      expect(init?.body).toBeInstanceOf(File);
+      const bytes = new Uint8Array(await (init?.body as File).arrayBuffer());
+      expect(await sha256(bytes)).toBe(expected);
+      expect((init?.body as File).size).toBe(N);
     }
   };
 

@@ -87,7 +87,7 @@ vi.mock("../transform", () => ({
 }));
 
 import { CAPTCHA_TRACE, classifyProvider, outcomeOf } from "../captcha-trace";
-import { isChallengeFrameUrl } from "../request";
+import { isChallengeFrameUrl, challengeHostHint, isCaptchaVerifyUrl } from "../request";
 import { handleControlEvent, type ControlMessage } from "../control";
 import { handleFetch } from "../request";
 import { encodeDestLegacy } from "../codec";
@@ -104,13 +104,16 @@ describe("provider classification (#451)", () => {
     expect(classifyProvider("https://challenges.cloudflare.com/turnstile/v0/g/x")).toBe("turnstile");
     expect(classifyProvider("https://hcaptcha.com/getcaptcha/abc")).toBe("hcaptcha");
     expect(classifyProvider("https://newassets.hcaptcha.com/captcha/v1/hcaptcha.html")).toBe("hcaptcha");
+    /* #451 follow-up: the recaptcha payload host serves only recaptcha assets */
+    expect(classifyProvider("https://www.gstatic.com/recaptcha/releases/abc/api.js")).toBe("recaptcha");
+    expect(classifyProvider("https://www.gstatic.com/angular/x.js")).toBe("unknown");
     expect(classifyProvider("https://www.google.com/maps/embed/v1?key=k")).toBe("unknown");
     expect(classifyProvider("https://example.com/recaptcha/api2/anchor")).toBe("unknown");
     expect(classifyProvider("not a url")).toBe("unknown");
     expect(classifyProvider("data:text/html,x")).toBe("unknown");
   });
 
-  it("never disagrees with isChallengeFrameUrl about challenge hosts (pin, no drift)", () => {
+  it("keeps frame-host agreement and asset-only classification separate (pin, no drift)", () => {
     const corpus = [
       "https://www.google.com/recaptcha/api2/anchor?ar=1&k=KEY",
       "https://www.recaptcha.net/recaptcha/api2/bframe?x=1",
@@ -125,6 +128,32 @@ describe("provider classification (#451)", () => {
     for (const u of corpus) {
       expect(classifyProvider(u) !== "unknown").toBe(isChallengeFrameUrl(u));
     }
+    /* #451 follow-up: the widget payload host classifies as recaptcha
+       traffic without being a challenge frame URL - the frame gate
+       stays narrow, the trace covers the asset stage. */
+    expect(classifyProvider("https://www.gstatic.com/recaptcha/releases/abc/api.js")).toBe("recaptcha");
+    expect(isChallengeFrameUrl("https://www.gstatic.com/recaptcha/releases/abc/api.js")).toBe(false);
+  });
+
+  /* #451 follow-up: the request/response seam classifications */
+  it("classifies challenge traffic hosts, narrow on the shared hosts", () => {
+    expect(challengeHostHint("https://www.google.com/recaptcha/api.js")).toBe("recaptcha");
+    expect(challengeHostHint("https://www.gstatic.com/recaptcha/releases/x/api.js")).toBe("recaptcha");
+    expect(challengeHostHint("https://hcaptcha.com/getcaptcha/abc")).toBe("hcaptcha");
+    expect(challengeHostHint("https://challenges.cloudflare.com/turnstile/v0/g/x")).toBe("turnstile");
+    expect(challengeHostHint("https://www.google.com/maps/embed/v1?key=k")).toBeNull();
+    expect(challengeHostHint("https://www.gstatic.com/angular/x.js")).toBeNull();
+    expect(challengeHostHint("not a url")).toBeNull();
+  });
+
+  it("verify-family is the human-answer exchange only", () => {
+    expect(isCaptchaVerifyUrl("https://www.google.com/recaptcha/api2/userverify?k=K")).toBe(true);
+    expect(isCaptchaVerifyUrl("https://www.recaptcha.net/recaptcha/api/userverify")).toBe(true);
+    expect(isCaptchaVerifyUrl("https://hcaptcha.com/checkcaptcha/abc")).toBe(true);
+    expect(isCaptchaVerifyUrl("https://www.google.com/recaptcha/api2/anchor?ar=1")).toBe(false);
+    expect(isCaptchaVerifyUrl("https://hcaptcha.com/getcaptcha/abc")).toBe(false);
+    expect(isCaptchaVerifyUrl("https://challenges.cloudflare.com/turnstile/v0/x")).toBe(false);
+    expect(isCaptchaVerifyUrl("https://example.com/recaptcha/api2/userverify")).toBe(false);
   });
 
   it("maps observed statuses into the fixed outcome vocabulary", () => {
@@ -360,9 +389,13 @@ describe("challenge emit points feed the trace (#451)", () => {
     const a = s.attempts[0]!;
     expect(a.provider).toBe("turnstile");
     expect(a.clientId).toBe("chal-1-new");
-    expect(a.stages.map((r) => r.stage)).toEqual(["FRAME_HANDSHAKE"]);
+    /* #451 follow-up: the frame observation plus the response seam's
+       outcome-bearing handshake record, one attempt */
+    expect(a.stages.map((r) => r.stage)).toEqual(["FRAME_HANDSHAKE", "FRAME_HANDSHAKE"]);
     expect(a.stages[0]!.url).not.toContain("token=LEAK8");
     expect(a.stages[0]!.url).toContain("[redacted]");
+    expect(a.stages[1]!.outcome).toBe("200");
+    expect(a.stages[1]!.url).toContain("challenges.cloudflare.com");
   });
 
   it("a recaptcha anchor frame merges the co= repair and the frame observation into one attempt", async () => {
@@ -375,13 +408,15 @@ describe("challenge emit points feed the trace (#451)", () => {
     const served = await armed[0]!;
     expect(served.status).toBe(200);
     const s = snap();
-    /* one flow, not two: the co= repair (frame destination -> handshake)
-       and the #129 frame observation land in the same attempt */
+    /* one flow, not three: the co= repair (frame destination ->
+       handshake), the #129 frame observation and the #451 response
+       seam's outcome record land in the same attempt */
     expect(s.attempts.length).toBe(1);
     const a = s.attempts[0]!;
     expect(a.provider).toBe("recaptcha");
     expect(a.attemptId).not.toBe("");
-    expect(a.stages.map((r) => r.stage)).toEqual(["FRAME_HANDSHAKE", "FRAME_HANDSHAKE"]);
+    expect(a.stages.map((r) => r.stage)).toEqual(["FRAME_HANDSHAKE", "FRAME_HANDSHAKE", "FRAME_HANDSHAKE"]);
+    expect(a.stages[2]!.outcome).toBe("200");
     /* recorded URLs passed through the shared redaction gate (the
        redaction contract test above pins the secret classes); here the
        non-secret shape is recorded verbatim. */
@@ -397,8 +432,50 @@ describe("challenge emit points feed the trace (#451)", () => {
     await armed[0]!;
     const s = snap();
     expect(s.attempts.length).toBe(1);
-    expect(s.attempts[0]!.stages.map((r) => r.stage)).toEqual(["ASSET_LOAD"]);
+    /* #451 follow-up: the co= repair, the request seam and the
+       response seam's outcome record, one attempt */
+    expect(s.attempts[0]!.stages.map((r) => r.stage)).toEqual([
+      "ASSET_LOAD",
+      "ASSET_LOAD",
+      "ASSET_LOAD",
+    ]);
     expect(s.attempts[0]!.provider).toBe("recaptcha");
+    expect(s.attempts[0]!.stages[2]!.outcome).toBe("200");
+  });
+
+  /* #451 follow-up: the request/response seam pair for a
+     verify-family exchange - SUBMISSION observed URL-less (the
+     sitekey rides the provider path), then the outcome class
+     closes the attempt. */
+  it("a verify-family request records SUBMISSION then closes on the response outcome", async () => {
+    const verify = "https://www.google.com/recaptcha/api2/userverify?k=KEY&v=V";
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy(verify), "cors", "empty", "");
+    handleFetch(ev);
+    await armed[0]!;
+    const s = snap();
+    expect(s.attempts.length).toBe(1);
+    const a = s.attempts[0]!;
+    expect(a.provider).toBe("recaptcha");
+    expect(a.stages.map((r) => r.stage)).toEqual(["SUBMISSION", "VERIFY_OUTCOME"]);
+    /* verify-family records stay URL-less */
+    expect(a.stages.every((r) => r.url === undefined)).toBe(true);
+    expect(a.stages[1]!.outcome).toBe("200");
+    expect(a.closed).toBe(true);
+  });
+
+  /* #451 follow-up: the gstatic payload host is an asset stage */
+  it("an asset-host script load records ASSET_LOAD with its response outcome", async () => {
+    const js = "https://www.gstatic.com/recaptcha/releases/abc/api.js";
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy(js), "no-cors", "script", "");
+    handleFetch(ev);
+    await armed[0]!;
+    const s = snap();
+    expect(s.attempts.length).toBe(1);
+    const a = s.attempts[0]!;
+    expect(a.provider).toBe("recaptcha");
+    expect(a.stages.map((r) => r.stage)).toEqual(["ASSET_LOAD", "ASSET_LOAD"]);
+    expect(a.stages[0]!.url).toContain("gstatic.com");
+    expect(a.stages[1]!.outcome).toBe("200");
   });
 });
 

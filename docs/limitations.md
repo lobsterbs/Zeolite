@@ -231,10 +231,17 @@ Failure behavior, fail-honest on every branch:
   next spool, bounded per sweep.
 
 Redirects on spooled bodies follow with byte-identical replay (pinned
-by suite/e2e/replay-spool.mjs, which also pins the opted-out 502 and
-the production ceiling). Bodies above the transport ceiling remain
-impossible until the artifact streams uploads from a read callback,
-which is the remaining #556 work.
+by suite/e2e/replay-spool.mjs, which also pins the opted-out 502, the
+production ceiling and the relay arm). Bodies above the transport
+ceiling remain impossible on the wisp transport until the artifact
+streams uploads from a read callback, which is the remaining #556
+work; a relay-routed request is different: the spooled File crosses
+to the embedder by structured clone and rides the embedder native
+stack, so a relayed upload is bounded by the spool cap instead of the
+8 MiB wisp copy bound (pinned by the relay arm of the same suite).
+The deployed LobsterBrowse relay caps its JSON envelope at about
+23 MiB, which is the effective relayed-upload ceiling of that
+deployment.
 
 ## SharedWorker identity is scoped, not a separate origin
 
@@ -363,6 +370,23 @@ Every cap trip is counted (replayCapTrips in app/src/request.ts) and
 logged, and every script-body mask (the #158/#159 honesty layer) is
 counted and logged with the requested path, referrer and resolved
 route.
+## CAPTCHA stage tracing observes HTTP stages only
+
+The bounded per-attempt trace (zl:captchaTrace, #451) reports what
+the engine actually observed on the wire: bootstrap, asset loads,
+frame handshakes, verify-family submissions and their HTTP outcome
+classes, correlated per attempt. The page-side message handshake
+(postMessage between the provider frames and the parent) is not
+observable from the service worker, so a widget whose HTTP stages
+are all green but whose messages fail appears as a missing token
+with every observed stage green and the handshake stage unknown -
+never guessed. The trace is detection and human solving only (the
+no-bypass rule stands); site keys, tokens, cookies and answers are
+never recorded, and verify-family records stay URL-less.
+suite/e2e/captcha-stages.mjs compares the direct and the proxied
+real-browser behavior per provider with the public test keys and
+skips honestly when the sandbox has no provider egress.
+
 ## Subresource integrity is engine-verified, not browser-native
 
 The rewriter drops integrity attributes (rewritten bodies can never
