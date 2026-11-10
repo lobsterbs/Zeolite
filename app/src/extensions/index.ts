@@ -47,6 +47,8 @@ export type { ExtPageCall } from "./pageapi";
 export { TABS, TabRegistry, tabView, changeView } from "./tabs";
 export type { UiTab, TabsEvent, TabsOp, TabsListener, TabChangeInfo, TabMessage } from "./tabs";
 export { SCRIPTING, ScriptingHost, LISTENER_SOURCE } from "./scripting";
+export { DEVTOOLS, registerDevtoolsClient, devtoolsBindingOf, devtoolsTabOf } from "./devtools";
+export type { DevtoolsOp, DevtoolsPanel, DevtoolsBinding } from "./devtools";
 export type { ScriptingInjection, ScriptingMessage } from "./scripting";
 export { WEBNAV, NavigationRegistry } from "./webnavigation";
 export type { NavigationCommitted, NavigationListener, NavigationInfo, NavigationKind } from "./webnavigation";
