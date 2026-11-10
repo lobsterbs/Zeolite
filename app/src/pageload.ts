@@ -68,12 +68,32 @@ export const SPA404_WATCHER =
   "function s(){setTimeout(q,800);setTimeout(q,2500)}" +
   'if(document.readyState==="complete")s();else addEventListener("load",s)})();';
 
+/** #643: the deliberate-block console marker watcher. A rules,
+    intercept or CSP block answers the page a bare network error, and
+    a retrying site produces a console storm that reads as a dead
+    worker. The engine posts zl:blockedNotice to the requesting
+    client on the first block per (client, destination); this
+    watcher logs one console.warn per destination per page. Static
+    source only: the destination arrives at runtime from the engine,
+    never in the injected script (the #32 leak property holds). */
+export const BLOCKED_NOTICE_WATCHER =
+  "(function(){try{" +
+  "var seen=new Set();" +
+  "var ns=navigator.serviceWorker;if(ns&&ns.addEventListener)ns.addEventListener(\"message\",function(e){" +
+  "var d=e&&e.data?e.data:null;if(!d||d.type!==\"zl:blockedNotice\")return;" +
+  "var u=String(d.dest||\"\");if(!u||seen.has(u))return;" +
+  "if(seen.size>=64){var f=seen.values().next().value;if(f!==undefined)seen.delete(f)}" +
+  "seen.add(u);" +
+  "var by=String(d.by||\"engine\");" +
+  "console.warn(\"[zeolite] blocked by \"+by+\": \"+u+\" (retry storms expected)\");" +
+  "});}catch(e){}})();";
+
 /** The inline init script spliced into the rewritten stream head
     AFTER the doctype (quirks fix; it used to ride the very first
     chunk, before the doctype, which forced quirks mode on every
     proxied document). An active fingerprint profile rides the same
     splice (1.8). #236 adds the hostless vpath the virtual location
-    seeds from. #456 gate 4 adds the own-404 watcher. */
+    seeds from. #456 gate 4 adds the own-404 watcher. #643 adds the deliberate-block console marker watcher. */
 export function initScript(dest: string, fpScript: string | null): string {
   const virtualPath = vPath(dest);
   let hash = "";
@@ -94,6 +114,7 @@ export function initScript(dest: string, fpScript: string | null): string {
     `<script>window.__ZL=${JSON.stringify({ site: siteToken(dest), vpath: virtualPath })};</script>` +
     fragmentFix +
     `<script>${SPA404_WATCHER}</script>` +
+    `<script>${BLOCKED_NOTICE_WATCHER}</script>` +
     (fpScript ? `<script>${fpScript}</script>` : "")
   );
 }
