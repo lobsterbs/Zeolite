@@ -147,7 +147,7 @@ describe("initSplicePoint (quirks fix)", () => {
   });
 
   it("skips leading BOM, whitespace and comments", () => {
-    expect(initSplicePoint("ï»¿<!doctype html><p>")).toBe(16);
+    expect(initSplicePoint("﻿<!doctype html><p>")).toBe(16);
     expect(initSplicePoint("  \n\t<!doctype html><p>")).toBe(19);
     expect(initSplicePoint("<!-- hi -->\n<!doctype html><p>")).toBe(27);
     expect(initSplicePoint("<!--a--><!--b--><!doctype html>")).toBe(31);
