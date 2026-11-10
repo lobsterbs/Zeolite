@@ -19,8 +19,9 @@
    scripts) are NOT booted eagerly. They follow a service-worker-ish
    lifecycle: stopped until an event arrives, woken on demand by
    wakeExtension() (extension messages, menu clicks), terminated
-   after 30s idle via idleTerminate(). Termination drops the
-   extension's messenger listeners so the next wake re-executes the
+   after 30s idle via idleTerminate(). Termination fires
+   runtime.onSuspend to the background's listeners first, then drops
+   the extension's messenger listeners so the next wake re-executes the
    script; shared-context event listeners (tabs.onUpdated etc.) are
    registered against engine singletons and survive termination -
    that is a documented limitation (see ./compat), faked away
@@ -188,6 +189,20 @@ export function backgroundIsServiceWorker(rec: ExtensionRecord): boolean {
 const swRunning = new Set<ExtensionId>();
 const idleTimers = new Map<ExtensionId, ReturnType<typeof setTimeout>>();
 
+/* runtime.onSuspend: the event object lives on the runtime API (built
+   in ./runtime, which imports this module, so the registration comes
+   to us through this hook instead of an import cycle). The context
+   cache keeps the same api object across wakes, so the registered
+   listeners persist like every other shared-context event (the
+   documented limitation). */
+const suspendEvents = new Map<ExtensionId, { _listeners: Set<() => void> }>();
+
+/** runtime.ts: register the live onSuspend event surface of a
+    service-worker background so the termination path can dispatch it. */
+export function registerSuspendEvent(id: ExtensionId, ev: { _listeners: Set<() => void> }): void {
+  suspendEvents.set(id, ev);
+}
+
 function armIdleTimer(id: ExtensionId): void {
   const prev = idleTimers.get(id);
   if (prev) clearTimeout(prev);
@@ -204,6 +219,19 @@ export function idleTerminate(id: ExtensionId): void {
     idleTimers.delete(id);
   }
   if (!swRunning.delete(id)) return;
+  /* runtime.onSuspend fires before teardown; listener errors never
+     block it, and async cleanup is not guaranteed to complete (the
+     documented caveat: the worker is going away now). */
+  const suspend = suspendEvents.get(id);
+  if (suspend) {
+    for (const l of [...suspend._listeners]) {
+      try {
+        l();
+      } catch {
+        /* one bad listener must not break the teardown */
+      }
+    }
+  }
   MESSENGER.clear(id);
   const rec = extensions.get(id);
   if (rec && rec.state === "running") extensions.setState(id, "installed", null);
