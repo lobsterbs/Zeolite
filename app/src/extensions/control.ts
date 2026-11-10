@@ -459,7 +459,7 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
           : Promise.resolve();
       e.waitUntil(
         wake
-          .then(() => handleExtPageCall(erec, srcUrl, call))
+          .then(() => handleExtPageCall(erec, srcUrl, call, srcId))
           .then(safeRpcReply)
           .catch((err: unknown) => safeRpcReply({ ok: false, error: String(err) })),
       );
@@ -473,11 +473,18 @@ export async function dispatchExtControl(msg: ControlMessage, ctx: ExtCtx): Prom
          because extension page worlds dispatch their boot on
          location.pathname; the token grants the first navigation and
          registered page clients self-navigate without one. */
-      const op = msg as { extId?: unknown; which?: unknown };
-      const which = op.which === "popup" ? "popup" : "options";
+      const op = msg as { extId?: unknown; which?: unknown; tabId?: unknown };
+      const which = op.which === "popup" ? "popup" : op.which === "devtools" ? "devtools" : "options";
       const extId = typeof op.extId === "string" ? op.extId : "";
       const orec = extId ? extensions.get(extId) : null;
-      const url = orec ? extPageOpenUrl(orec, which) : null;
+      /* #523: a devtools open carries the inspected tab id. */
+      const url = orec
+        ? extPageOpenUrl(
+            orec,
+            which,
+            which === "devtools" && typeof op.tabId === "number" ? op.tabId : undefined,
+          )
+        : null;
       if (!url) {
         reply({ ok: false, error: "no such " + which + " page" });
         break;
