@@ -50,7 +50,7 @@ import {
 import { MGMT, infoOf } from "./management";
 import type { MgmtListener } from "./management";
 import type { ExtensionManager } from "./manager";
-import { bootEnabled, bootExtension, idleTerminate, backgroundIsServiceWorker } from "./background";
+import { bootEnabled, bootExtension, idleTerminate, backgroundIsServiceWorker, registerSuspendEvent } from "./background";
 import { browsingDataRemoveCache, browsingDataRemoveCookies, browsingDataRemoveDownloads, browsingDataRemoveIndexedDB, browsingDataRemoveServiceWorkers, browsingDataSettings, browsingDataUnreachable, type BrowsingDataOptions } from "./browsingdata";
 import { chromeApi } from "./chrome";
 import { extPageOpenUrl, pageClientsOf } from "./serve";
@@ -351,6 +351,15 @@ export function buildApi(
       hasListener: (l: L) => offs.has(l),
     };
   }
+  /* runtime.onSuspend: dispatched by idleTerminate just before a
+     service-worker background is torn down. The event object is
+     handed to the background runtime here so the termination path can
+     reach the listeners the scripts registered; only service-worker
+     backgrounds are ever terminated, so only they register. */
+  const onSuspendEvent = makeEvent<() => void>();
+  if (sender.context === "background" && backgroundIsServiceWorker(ext)) {
+    registerSuspendEvent(ext.id, onSuspendEvent);
+  }
   const runtime = {
     id: ext.id,
     getManifest: (): Record<string, unknown> =>
@@ -449,9 +458,11 @@ export function buildApi(
     get lastError(): null {
       return null;
     },
-    /* Register-only until the background runtime phase fires them. */
+    /* Register-only until the background runtime phase fires them;
+       onSuspend is dispatched by idleTerminate at teardown. */
     onInstalled: makeEvent<(details: unknown) => void>(),
     onStartup: makeEvent<() => void>(),
+    onSuspend: onSuspendEvent,
     /* #573: Chrome exposes the external messaging event surfaces on
        runtime. TM-class background boot registers every listener
        surface (onMessage, onConnect, onConnectExternal) during
