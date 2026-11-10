@@ -59,8 +59,11 @@ export type HeadersReceivedListener = (d: WrReceiveDetails) => void | { response
 export type CompletedListener = (d: WrCompletedDetails) => void;
 export type ErrorOccurredListener = (d: WrErrorDetails) => void;
 
-/** sec-fetch-dest -> webRequest resource type. Honest mapping: an
-    unknown destination reports "other" rather than a guess. */
+/** sec-fetch-dest -> webRequest resource type. Honest mapping:
+    sec-fetch-dest "empty" is what browsers send for fetch()/XHR (and
+    reqDest() reports it when the header is absent), so it surfaces as
+    "xmlhttprequest"; a truly unknown destination reports "other"
+    rather than a guess. */
 export function wrType(destHeader: string): string {
   switch (destHeader.toLowerCase()) {
     case "document":
@@ -85,6 +88,8 @@ export function wrType(destHeader: string): string {
       return "media";
     case "websocket":
       return "websocket";
+    case "empty":
+      return "xmlhttprequest";
     default:
       return "other";
   }
