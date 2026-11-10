@@ -1131,3 +1131,23 @@ deterministic; only its firing is intermittent. Tracked in #514.
   host). This retrigger commit re-runs the tree contention-free;
   the replay-spool verdict rides the next checkpoint.
 
+
+## Runs 42788503560 + 42789644132 + 42807411475 (heads 9a1a3556, 35a3780c, the #556/#451 retrigger pair)
+
+- 42788503560 (9a1a3556, the previous ledger retrigger): browser red at
+  step 16, Browser E2E, with the documented #545-class signature
+  (worker fetch initiator timeout leading the goto-timeout cascade);
+  rust/wasm/app/compat green.
+- 42789644132 (35a3780c): browser red at step 18, Torture.
+- 42807411475 (35a3780c): the browser job is green through step 16
+  (Browser E2E) and step 17 (popups facade) for the first time in this
+  stretch, then red at step 18 Torture with the documented redirect-probe
+  first victim ("fetch never settled") and the goto-timeout cascade;
+  steps 19 through 22 were skipped, so the replay-spool #556 step still
+  has no CI verdict.
+- Engine bytes stay exonerated per the identical-bytes rotation record:
+  35a3780c differs from 9a1a3556 by docs bytes only, yet the three runs
+  present three different first victims (step 16, step 18, step 18 with
+  steps 16 and 17 green). This docs-only commit is the recorded bounded
+  retrigger per the operational notes; the replay-spool verdict rides
+  the next checkpoint.
