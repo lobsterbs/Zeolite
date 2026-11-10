@@ -112,6 +112,34 @@ export interface SpoolHandle {
   release(): Promise<void>;
 }
 
+/* #556 relay follow-up: the sink (storage root, directory, file,
+   writable) is acquired BEFORE any stream is locked, so a spool that
+   cannot open keeps the caller's stream intact for the documented
+   one-shot behavior. */
+interface SpoolSink {
+  dir: SpoolDir;
+  fh: SpoolFileHandle;
+  writable: SpoolWritable;
+  name: string;
+}
+
+async function spoolSink(): Promise<SpoolSink> {
+  const root = await spoolRoot();
+  if (!root) throw new SpoolUnavailableError("no OPFS storage root for the replay spool");
+  try {
+    const dir = await root.getDirectoryHandle(SPOOL_DIR, { create: true });
+    await sweepOrphans(dir);
+    const name = "zl-" + Date.now() + "-" + (spoolSeq++) + ".body";
+    const fh = await dir.getFileHandle(name, { create: true });
+    const writable = await fh.createWritable();
+    return { dir, fh, writable, name };
+  } catch (err) {
+    /* Storage failed before a byte was read: the caller still owns
+       an intact stream and keeps the documented one-shot behavior. */
+    throw new SpoolUnavailableError("replay spool unavailable: " + String(err));
+  }
+}
+
 /** Write the whole stream to one OPFS file, bounded. Throws
     SpoolUnavailableError before consuming anything when storage is
     absent; throws after cleanup once the cap or the live budget is
@@ -121,26 +149,33 @@ export async function spoolBody(
   stream: ReadableStream<Uint8Array>,
   opts: { cap?: number; totalBudget?: number } = {},
 ): Promise<SpoolHandle> {
+  /* #556 relay follow-up: the sink opens before the stream is
+     locked, so the unavailable path leaves the stream intact. */
+  const sink = await spoolSink();
+  return spoolToSink(sink, stream.getReader(), opts);
+}
+
+/** #556 relay follow-up: the replay-cap overflow seam in request.ts
+    hands over a reader it has already pulled bytes through plus the
+    buffered prefix, so the spool owns the remaining stream exactly
+    once and the prefix bytes stay counted by the same cap/budget
+    accounting as stream bytes. The reader arrives pre-locked, so
+    a storage failure here is unrecoverable: the stream is consumed. */
+export async function spoolFromReader(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  opts: { cap?: number; totalBudget?: number; prefix?: Uint8Array[] } = {},
+): Promise<SpoolHandle> {
+  return spoolToSink(await spoolSink(), reader, opts);
+}
+
+async function spoolToSink(
+  sink: SpoolSink,
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  opts: { cap?: number; totalBudget?: number; prefix?: Uint8Array[] },
+): Promise<SpoolHandle> {
   const cap = opts.cap ?? REPLAY_SPOOL_CAP;
   const budget = opts.totalBudget ?? TOTAL_SPOOL_BUDGET;
-  const root = await spoolRoot();
-  if (!root) throw new SpoolUnavailableError("no OPFS storage root for the replay spool");
-  let dir: SpoolDir;
-  let fh: SpoolFileHandle;
-  let writable: SpoolWritable;
-  let name = "";
-  try {
-    dir = await root.getDirectoryHandle(SPOOL_DIR, { create: true });
-    await sweepOrphans(dir);
-    name = "zl-" + Date.now() + "-" + (spoolSeq++) + ".body";
-    fh = await dir.getFileHandle(name, { create: true });
-    writable = await fh.createWritable();
-  } catch (err) {
-    /* Storage failed before a byte was read: the caller still owns
-       an intact stream and keeps the documented one-shot behavior. */
-    throw new SpoolUnavailableError("replay spool unavailable: " + String(err));
-  }
-  const reader = stream.getReader();
+  const { dir, fh, writable, name } = sink;
   let total = 0;
   /* #628: reserved mirrors exactly the bytes this spool has added
      to the shared in-flight counter, so every exit path rolls back
@@ -161,16 +196,23 @@ export async function spoolBody(
     }
     await dir.removeEntry(name).catch(() => undefined);
   };
+  /* #556 relay follow-up: one ingest path for the prefix bytes the
+     caller already buffered and the stream remainder, so cap and
+     budget accounting is identical for both sources. */
+  const ingest = async (value: Uint8Array): Promise<void> => {
+    total += value.byteLength;
+    if (total > cap) throw new SpoolCapError("replay spool cap exceeded at " + total + " of " + cap + " bytes");
+    reserved += value.byteLength;
+    inFlightSpooledBytes += value.byteLength;
+    if (liveSpooledBytes + inFlightSpooledBytes > budget) throw new SpoolCapError("replay spool live budget exceeded at " + total + " bytes");
+    await writable.write(value);
+  };
   try {
+    for (const chunk of opts.prefix ?? []) await ingest(chunk);
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      total += value.byteLength;
-      if (total > cap) throw new SpoolCapError("replay spool cap exceeded at " + total + " of " + cap + " bytes");
-      reserved += value.byteLength;
-      inFlightSpooledBytes += value.byteLength;
-      if (liveSpooledBytes + inFlightSpooledBytes > budget) throw new SpoolCapError("replay spool live budget exceeded at " + total + " bytes");
-      await writable.write(value);
+      await ingest(value);
     }
     await writable.close();
   } catch (err) {

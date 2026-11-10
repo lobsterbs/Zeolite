@@ -18,8 +18,12 @@
      embedder-side by design.
    - response bodies stream over the port; request bodies use the
      existing bounded replay buffer at the upstream choke point.
-   - ponytail: GET/HEAD and string/ArrayBuffer bodies only; a stream
-     body cannot ride the port, so such requests fall back to wisp.
+   - ponytail: string/ArrayBuffer/File bodies; #556 relay follow-up:
+     a File body (the OPFS replay spool) crosses by structured clone
+     and the embedder carries it upstream with its own stack, so a
+     spooled upload rides the relay at the spool cap instead of the
+     8 MiB wisp-transport copy bound. A stream body still cannot
+     ride the port, so such requests fall back to wisp.
    - the relay header deadline is bounded. Idempotent delivery may
      fall back (#382); unknown POST/PATCH delivery fails without
      replay (#442). Large/multipart uploads have a finite 10min bound. */
@@ -222,7 +226,14 @@ export const RELAY_CREDIT_BYTES = 2 * 1024 * 1024;
     and multipart uploads get a finite budget matching the host relay. */
 export function relayHeaderDeadlineMs(init: { headers: Headers; body?: BodyInit | null }): number {
   const body = init.body;
-  const size = typeof body === "string" ? body.length : body instanceof ArrayBuffer ? body.byteLength : 0;
+  const size =
+    typeof body === "string"
+      ? body.length
+      : body instanceof ArrayBuffer
+        ? body.byteLength
+        : body instanceof Blob
+          ? body.size
+          : 0;
   return body != null && (size > 512 * 1024 || /^multipart\/form-data\b/i.test(init.headers.get("content-type") ?? ""))
     ? RELAY_UPLOAD_HEADER_DEADLINE_MS : RELAY_HEADER_DEADLINE_MS;
 }
@@ -287,7 +298,16 @@ async function relayFetchRaw(
   const crediting = hostCredits;
   if (!port) return null;
   const body = init.body;
-  if (body !== undefined && body !== null && typeof body !== "string" && !(body instanceof ArrayBuffer)) {
+  if (
+    body !== undefined &&
+    body !== null &&
+    typeof body !== "string" &&
+    !(body instanceof ArrayBuffer) &&
+    !(body instanceof Blob)
+  ) {
+    /* #556 relay follow-up: a File/Blob body (the spooled replay
+       source) rides the port by structured clone; every other
+       non-string body still falls back to wisp as before. */
     return null;
   }
   /* #145: an aborted caller must not keep an embedder fetch alive.
