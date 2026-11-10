@@ -119,3 +119,20 @@ rule "delta-relay" {
   route "relay"
   reason "#149: TLS connect refused at test egress, embedder relay"
 }
+
+// #642: Google risk-rejects the sign-in flow from datacenter egress
+// (triple-proven on #633; no engine defect remains on the sign-in path).
+// The fix class is a trusted egress for the sign-in hosts (option (a) on
+// #642): an operator hosts an auth-capable wisp endpoint at a trusted IP,
+// points the LB server env SCRAMJET_WISP_URL at it, uncomments the rule
+// below and re-pins the dist. KEEP THIS RULE COMMENTED on the shared
+// deployments: the deployment wisp endpoint is password-authed and the
+// wasm client cannot authenticate, so an active rule would carry the
+// sign-in hosts onto a refused transport and break sign-in outright.
+// Extend the host set (myaccount.google.com, www.google.com documents)
+// only with captured evidence that the wall applies there too.
+// rule "google-signin-wisp" {
+//   match host="accounts.google.com"
+//   route "wisp"
+//   reason "#642: trusted egress for the sign-in hosts (operator-armed wisp)"
+// }
