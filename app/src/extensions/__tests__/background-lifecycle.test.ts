@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
 import { extensions, ExtensionManager } from "../manager";
-import { MESSENGER } from "../context";
+import { MESSENGER, getExtensionContext } from "../context";
 import {
   bootEnabled,
   bootExtension,
@@ -129,5 +129,49 @@ describe("bootInstalled (install into a live worker)", () => {
     const { id } = await extensions.installFiles(bad);
     await bootInstalled(id);
     expect(extensions.get(id)?.state).toBe("error");
+  });
+});
+
+/* runtime.onSuspend: dispatched by idleTerminate just before a
+   service-worker background is torn down. */
+describe("runtime.onSuspend", () => {
+  it("fires to the worker's listeners just before idle teardown", async () => {
+    await extensions.startup();
+    const { id } = await extensions.installFiles(swPkg("SwSuspend"));
+    await wakeExtension(id);
+    const rec = extensions.get(id)!;
+    const ctx = await getExtensionContext(rec);
+    const rt = ctx.api.browser.runtime as unknown as {
+      onSuspend: { addListener: (l: () => void) => void };
+    };
+    const flags: string[] = [];
+    rt.onSuspend.addListener(() => { flags.push("ok"); });
+    rt.onSuspend.addListener(() => { throw new Error("bad listener"); });
+    idleTerminate(id);
+    /* A throwing listener must not block the others or the teardown. */
+    expect(flags).toEqual(["ok"]);
+    expect(extensions.get(id)?.state).toBe("installed");
+    await expect(MESSENGER.sendMessage(id, bgSender(id), "ping")).rejects.toThrow(
+      /Receiving end does not exist/,
+    );
+  });
+
+  it("is exposed on the runtime surface but never fired for script backgrounds", async () => {
+    await extensions.startup();
+    const { id } = await extensions.installFiles(scriptPkg("ScriptSuspend"));
+    await bootEnabled();
+    const rec = extensions.get(id)!;
+    const ctx = await getExtensionContext(rec);
+    const rt = ctx.api.browser.runtime as unknown as {
+      onSuspend: { addListener: (l: () => void) => void };
+    };
+    expect(typeof rt.onSuspend.addListener).toBe("function");
+    let fired = false;
+    rt.onSuspend.addListener(() => { fired = true; });
+    /* A script background is never in the running-SW set, so
+       idleTerminate is a no-op for it and onSuspend never fires. */
+    idleTerminate(id);
+    expect(fired).toBe(false);
+    expect(extensions.get(id)?.state).toBe("running");
   });
 });
