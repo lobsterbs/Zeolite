@@ -1093,3 +1093,41 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - Pipeline rule recorded: any pushed file over ~63 KiB must be read in
   line chunks (the reader truncates silently at 63958 bytes), and every
   push is followed by a codeload tarball md5 sweep of all pushed files.
+
+## Runs 42775836349 + 42775865493 + 42775886942 (heads 31ac3442, 469cd648, 70379d56, the #556/#451 body-routing wave)
+
+- 42775836349 (31ac3442) and 42775886942 (70379d56, the wave head):
+  rust, wasm, app and compat GREEN on both runs. The Browser E2E
+  battery (step 16) is GREEN on the head run, the first browser-job
+  green past that step since 42711886479, so the request-seam paths
+  the wave touched (the spool gates, transport-body
+  materialization, the relay Blob/File gate, the CAPTCHA trace
+  emits) are exercised green end to end.
+- 42775865493 (469cd648) is red on the app job typecheck and the
+  red is a one-commit bisect window, not an engine defect and not a
+  push defect: the pre-wave replay-body.test.ts still imported
+  spoolTransportCopy from ../request, 469cd648 moved that export
+  into the transport module, and the updated test file rode the
+  follow-up commit 70379d56, where the app job is GREEN. Lesson
+  recorded: a moved export and its test update ride the same
+  commit.
+- 42775886942 (70379d56): the browser job is green through the
+  Browser E2E battery and the popups facade suite, then red at the
+  Torture battery with the documented cascade: first victim the
+  transport redirect probe ("torture probe: page evaluate timed
+  out"), the [RETRY][wedge] restart failed to recover, then the
+  goto-timeout cascade through routing, rewriting and isolation
+  (10 fails). The signature matches 42713012248 (the pre-wave head
+  b29ec93f, which hit the same Torture step red) and the
+  42609223008/42609227237 cluster.
+- Consequence recorded honestly: the Torture red skipped every
+  later browser step, so the relay arm of the #556 replay-spool
+  suite has not executed on CI on this push. The local sprite run
+  of the same suite is the standing verdict until the retrigger:
+  its engine and service worker verified alive and the proxied
+  frame loads, but the 45 s frame deadline missed while a
+  concurrent 3-worker browser crawl ran on the shared host (the
+  local twin of this wedge; the same flow loads in ~14 s on a quiet
+  host). This retrigger commit re-runs the tree contention-free;
+  the replay-spool verdict rides the next checkpoint.
+
