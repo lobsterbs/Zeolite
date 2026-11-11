@@ -86,5 +86,21 @@ describe("document stall bound and consumer cancel (#200/#201)", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(cancelled).toBe(true);
   });
+
+  /* 2026-11-11 YouTube repro: the wrapper's diag emitted one fixed
+     "body stall deadline" message for every rejection, masking the
+     real transport error (relay zl:relayError, abort). The stream
+     must keep surfacing the ORIGINAL error to the page, and the
+     wrapper must not swallow it. */
+  it("preserves the upstream error through the wrapper", async () => {
+    const boom = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("relay response queue limit exceeded"));
+      },
+    });
+    const resp = new Response(boom, { status: 200, headers: { "content-type": "application/javascript" } });
+    const wrapped = withBodyStallDeadline(resp, 60, "t8", "https://x.example/big.js");
+    await expect(wrapped.text()).rejects.toThrow(/relay response queue limit exceeded/);
+  });
 });
 

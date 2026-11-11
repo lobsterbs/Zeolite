@@ -178,6 +178,16 @@ export function withBodyStallDeadline(resp: Response, ms: number, traceId: strin
         controller.enqueue(chunk.value);
       } catch (err) {
         clearTimeout(timer);
+        /* The deadline timer rejects with its own message; anything
+           else is an UPSTREAM rejection racing the timer (relay
+           zl:relayError, abort, protocol fault). Emitting one fixed
+           message for both masked the real cause: the YouTube watch
+           repro (2026-11-11) showed three over-cap script bodies die
+           0.3-2.4s after RAW_BODY_CAP, all logged as "body stall
+           deadline" with the actual transport error discarded. The
+           stall text stays for the genuine timer hit only; every
+           other rejection names itself in technicalReason. */
+        const stalled = err instanceof Error && err.message.startsWith("body stall: no bytes");
         DIAG.emit({
           traceId,
           requestId: traceId,
@@ -185,7 +195,10 @@ export function withBodyStallDeadline(resp: Response, ms: number, traceId: strin
           cause: "proxy",
           severity: "warning",
           stage: "UPSTREAM_RESPONSE",
-          message: "body stall deadline: upstream stopped sending, stream errored for the page",
+          message: stalled
+            ? "body stall deadline: upstream stopped sending, stream errored for the page"
+            : "upstream body errored mid-stream (surfaces through the body stall wrapper)",
+          technicalReason: String(err),
           url,
         });
         try {

@@ -199,6 +199,34 @@ describe("cspGate: destination mapping and default-src fallback (#527)", () => {
     expect(cspGate(reg, undefined, "script", "https://evil.example/a.js").blocked).toBe(false);
     expect(cspGate(reg, "c1", "script", "::::").blocked).toBe(false);
   });
+
+  /* Live repro (2026-11-11): perplexity.ai serves a Cloudflare
+     challenge whose orchestrate script lives at
+     /cdn-cgi/challenge-platform/...; the gate blocked it by
+     default-src and the page died white. The transport layer's
+     CDN_CGI_NATIVE verbatim invariant must hold at this seam too. */
+  it("never gates the Cloudflare /cdn-cgi/ edge namespace (challenge verbatim invariant)", () => {
+    const reg = newCspRegistry();
+    cspSetClient(reg, "c1", planned("default-src 'self'"));
+    expect(
+      cspGate(reg, "c1", "script", "https://www.perplexity.ai/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=x").blocked,
+    ).toBe(false);
+    expect(cspGate(reg, "c1", "script", "https://site.example/cdn-cgi/x.js").blocked).toBe(false);
+    /* A merely similar path is not the namespace and still gates. */
+    expect(cspGate(reg, "c1", "script", "https://evil.example/cdn-cgi-mimic/x.js").blocked).toBe(true);
+  });
+
+  /* CSP3: an explicit directive replaces default-src for its request
+     class. script-src 'nonce-...' is present but unverifiable at the
+     fetch seam, so the degrade is a false allow; the old fallback to
+     default-src was a false block for every nonce-gated document. */
+  it("an unsupported explicit directive disables the default-src fallback", () => {
+    const reg = newCspRegistry();
+    cspSetClient(reg, "c1", planned("script-src 'nonce-x'; default-src 'self'"));
+    expect(cspGate(reg, "c1", "script", "https://evil.example/a.js").blocked).toBe(false);
+    /* default-src still governs classes with no explicit directive. */
+    expect(cspGate(reg, "c1", "image", "https://evil.example/a.png").blocked).toBe(true);
+  });
 });
 
 describe("engineCspMarker (#527)", () => {
