@@ -1,4 +1,5 @@
 import { installWispAuthSocket } from "./wisp-auth";
+import { blobUploadController, type UploadController } from "./upload-stream";
 
 /* libcurl-transport adapter (vendored seam).
 
@@ -396,6 +397,20 @@ async function getEpoxy(cfg: { websocket: string }): Promise<EpoxyFetchClient> {
  * constructor, returning the named bindings directly. Verified
  * against the real 2.1 MB @mercuryworkshop/libcurl-transport bundle
  * inside a live service worker. */
+/* #556: whether the loaded vendored bundle carries the fork's
+   streaming upload seam (_http_set_upload_stream + _http_pause). Set
+   at bundle load; false until then and for stock bundles. The
+   transport-gate workflow greps the same exports in CI, so a bundle
+   that loses the seam flips this off and requests fall back to the
+   bounded materialized copy instead of failing. */
+let bundleUploadSeam = false;
+
+/** #556: Blob/File bodies ride the fork's streaming upload read
+    callback instead of the bounded materializeBlobBody copy. */
+export function uploadStreamingSupported(): boolean {
+  return bundleUploadSeam;
+}
+
 async function loadBundle(url: string): Promise<{ LibcurlClient?: unknown; default?: unknown }> {
   /* Module-scope shadowing: this module exports its own fetch(),
    * so a bare fetch() here would recurse into the uninitialized
@@ -407,6 +422,7 @@ async function loadBundle(url: string): Promise<{ LibcurlClient?: unknown; defau
   if (!tail || tail.index === undefined) {
     throw new Error("zeolite: vendored libcurl bundle has no trailing export list");
   }
+  bundleUploadSeam = src.includes("_http_set_upload_stream") && src.includes("_http_pause");
   const body = src.slice(0, tail.index);
   const factory = new Function(`${body}\nreturn { LibcurlClient, default: LibcurlClient };`);
   return factory() as { LibcurlClient?: unknown; default?: unknown };
@@ -1022,9 +1038,14 @@ function curlParams(
   headersObj: Record<string, string>,
   body: BodyInit | null,
   signal: AbortSignal | undefined,
+  upload?: UploadController,
 ): Record<string, unknown> {
   const params: Record<string, unknown> = { method, headers: headersObj, body, redirect: "manual", signal };
   if (remote.protocol === "http:") params._libcurl_http_version = 1.1;
+  /* #556: the fork's streaming upload read callback; the fork ignores
+     params.body once the read callback is armed. JSON.stringify drops
+     the callback functions and keeps chunkSize/contentLength. */
+  if (upload) params.upload = upload;
   return params;
 }
 
@@ -1041,6 +1062,14 @@ export async function libcurlRequest(
   headers: RawHeaders,
   signal: AbortSignal | undefined,
 ): Promise<TransferrableResponse> {
+  /* #556: a Blob/File body (the replay spool's shape) rides the fork's
+     streaming upload read callback when the bundle supports it: no
+     contiguous wasm buffer, so the measured renderer ceiling does not
+     apply. Bundles without the seam keep the caller's
+     materializeBlobBody bound. */
+  const upload = body instanceof Blob && bundleUploadSeam
+    ? blobUploadController(body)
+    : undefined;
   const pooled = (c as LibcurlClientLike & { session?: unknown }).session as
     | { close_now?: unknown; options?: Record<string, unknown>; constructor?: unknown }
     | undefined;
@@ -1070,7 +1099,7 @@ export async function libcurlRequest(
       for (const [key, value] of headers) headersObj[key] = value;
       const payload = await pooledSession.fetch(
         remote.href,
-        curlParams(remote, method, headersObj, body, signal),
+        curlParams(remote, method, headersObj, body, signal, upload),
       );
       return {
         body: payload.body as TransferrableResponse["body"],
@@ -1079,6 +1108,11 @@ export async function libcurlRequest(
         statusText: payload.statusText,
       };
     }
+    /* #556: the wrapper request has no upload seam; a Blob body here
+       (only reachable when the seam exists but the pooled session is
+       missing, a drift case the transport gate catches in CI) is
+       materialized honestly. */
+    if (body instanceof Blob) body = await body.arrayBuffer();
     return c.request(remote, method, body, headers, signal);
   }
   const Ctor = pooled.constructor as FreshSessionCtor;

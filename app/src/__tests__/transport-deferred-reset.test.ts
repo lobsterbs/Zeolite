@@ -18,6 +18,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("../libcurl-transport-vendored", () => ({
+  uploadStreamingSupported: () => false,
   init: async () => {},
   fetch: () => {
     h.calls++;

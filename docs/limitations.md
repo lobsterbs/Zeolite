@@ -198,10 +198,15 @@ realities shape the over-cap behavior:
   requests, so a page upload always reaches the engine as an unannounced
   stream and discovers the cap (32 MiB default, zl:config replayCapMb,
   range 1 to 32) mid-read.
-- The vendored transport artifact full-buffers every request body into
-  its wasm heap before the socket sees it. Measured through the engine:
-  8 MiB uploads ride, 16 MiB uploads kill the renderer process
-  deterministically. The ceiling is independent of the spool.
+- The stock vendored transport artifact full-buffers every request body
+  into its wasm heap before the socket sees it. Measured through the
+  engine: 8 MiB uploads ride, 16 MiB uploads kill the renderer process
+  deterministically. The ceiling is independent of the spool. The
+  vendored fork of the artifact (#556, vendor/libcurljs/FORK-NOTES.md)
+  streams Blob/File bodies through a wasm read callback in 64 KiB
+  chunks with pause/continue backpressure instead, which removes the
+  contiguous-buffer ceiling; the adapter feature-detects the seam in
+  the served bundle and keeps the bounded copy when it is absent.
 - Over-cap upload staging rides Origin Private File System storage by
   default (#556): an over-cap streamed body is written once to a spool
   file (per-request cap 256 MiB, live budget 512 MiB across concurrent
@@ -226,19 +231,22 @@ Failure behavior, fail-honest on every branch:
   file is deleted and the budget returned. The engine never silently
   retries and never re-issues a POST/PATCH after delivery-unknown.
 - A spooled body above the measured 8 MiB transport ceiling fails with
-  the honest 502 naming the bound instead of crashing the renderer.
+  the honest 502 naming the bound instead of crashing the renderer
+  (only when the served bundle lacks the streaming upload seam; with
+  the seam, the body streams from the spool file through the read
+  callback and no full copy exists).
 - Orphaned spool files (a worker killed mid-chain) are swept by the
   next spool, bounded per sweep.
 
 Redirects on spooled bodies follow with byte-identical replay (pinned
 by suite/e2e/replay-spool.mjs, which also pins the opted-out 502, the
-production ceiling and the relay arm). Bodies above the transport
-ceiling remain impossible on the wisp transport until the artifact
-streams uploads from a read callback, which is the remaining #556
-work; a relay-routed request is different: the spooled File crosses
-to the embedder by structured clone and rides the embedder native
-stack, so a relayed upload is bounded by the spool cap instead of the
-8 MiB wisp copy bound (pinned by the relay arm of the same suite).
+production ceiling and the relay arm). With the streaming upload seam
+vendored, bodies above the old transport ceiling stream from the spool
+through the wasm read callback on the wisp transport too; a
+relay-routed request is different: the spooled File crosses to the
+embedder by structured clone and rides the embedder native stack, so a
+relayed upload is bounded by the spool cap instead of the wisp copy
+bound (pinned by the relay arm of the same suite).
 The deployed LobsterBrowse relay caps its JSON envelope at about
 23 MiB, which is the effective relayed-upload ceiling of that
 deployment.

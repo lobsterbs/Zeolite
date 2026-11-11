@@ -6,6 +6,7 @@ const h = vi.hoisted(() => ({
 }));
 const fetcher = () => new Promise<Response>((resolve, reject) => h.pending.push({ resolve, reject }));
 vi.mock("../libcurl-transport-vendored", () => ({
+  uploadStreamingSupported: () => false,
   init: async () => { h.inits++; }, fetch: () => fetcher(), altFetch: () => fetcher(),
   reset: () => { h.primaryResets++; }, altReset: () => { h.altResets++; },
   isConnectClassError: () => true, setEngine: () => {}, currentEngine: () => "libcurl",

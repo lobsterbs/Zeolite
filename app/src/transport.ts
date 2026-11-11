@@ -34,6 +34,7 @@ import {
 } from "./libcurl-transport-vendored";
 import { relayAvailable, relayFetch, relayHeaderDeadlineMs, RelayDeliveryUnknownError } from "./relayfetch";
 import { materializeBlobBody } from "./transport-body";
+import { uploadStreamingSupported } from "./libcurl-transport-vendored";
 
 export { currentEngine, openWebSocket, altRegister, altConfigured, altEndpoint, type TransportEngine };
 
@@ -513,9 +514,15 @@ async function wispFetch(dest: string, init?: RequestInit, traceId?: string, opt
     /* #556: a Blob/File body never reaches the vendored artifact (it
        refuses File bodies and full-buffers what it carries into the
        wasm heap); one bounded copy here, honest over the measured
-       bound. The cooldown relay arm above already carried File bodies
-       across the port when a channel existed. */
-    await materializeBlobBody(init ?? {});
+       bound. With the fork's streaming upload seam (#556) the libcurl
+       engine streams Blob bodies through the wasm read callback
+       instead, so the bound applies only when the seam is absent (or
+       the epoxy engine is selected: it has no upload seam). The
+       cooldown relay arm above already carried File bodies across the
+       port when a channel existed. */
+    if (!(currentEngine() === "libcurl" && uploadStreamingSupported())) {
+      await materializeBlobBody(init ?? {});
+    }
     /* #415: remember which client generation serves this request */
     const curlGen = curlGeneration;
     try {
@@ -651,8 +658,11 @@ export async function altWispFetch(dest: string, init?: RequestInit, traceId?: s
   /* #415: remember which alt client generation serves this request */
   const altGen = altGeneration;
   try {
-    /* #556: same Blob-body bound as the primary wisp path. */
-    await materializeBlobBody(init ?? {});
+    /* #556: same Blob-body bound as the primary wisp path; the fork's
+       streaming upload seam (#556) lifts it for the libcurl engine. */
+    if (!(currentEngine() === "libcurl" && uploadStreamingSupported())) {
+      await materializeBlobBody(init ?? {});
+    }
     try {
       return await fetchWithDeadline(zlAltFetch, dest, init, "wisp-route", traceId);
     } catch (err) {

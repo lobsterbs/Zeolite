@@ -14,6 +14,7 @@ const mock = vi.hoisted(() => ({
 }));
 
 vi.mock("../libcurl-transport-vendored", () => ({
+  uploadStreamingSupported: () => false,
   init: async () => {
     mock.initCalls++;
     if (mock.failInit) throw new Error("init boom");

@@ -14,8 +14,11 @@
       renderer process while 8 MiB rides fine. The spool removes the
       engine-side memory copies, but the artifact copy remains, so
       production-size (32 MiB) uploads cannot ride the wisp transport
-      today. The artifact streaming work (curl read callback) is the
-      remaining #556 item.
+      today with the stock artifact. The #556 fork
+      (vendor/libcurljs, FORK-NOTES.md) adds the streaming read
+      callback; the adapter feature-detects it in the served bundle
+      and streams Blob/File bodies through it once it is vendored,
+      with the bounded copy as the fallback.
 
    What this suite proves, at transport-safe sizes:
 
@@ -35,6 +38,11 @@
      spool fails with the same honest 502 (the read loop discards
      and throws before any transport copy), pinning the documented
      limitation until the artifact streams uploads.
+   - the multi-chunk streamed body: an 8 KiB x 512 ReadableStream
+     upload over the tightened cap replays byte-identical against the
+     buffered direct oracle, exercising the spool write path in many
+     chunks (and, once the forked artifact is vendored, the wasm read
+     callback's pause/continue path).
    - the relay arm (#556 follow-up): on a second engine instance
      with a default-relay policy.kdl and a harness crediting relay
      port, a spooled over-cap File body crosses to the embedder by
@@ -195,6 +203,36 @@ async function pushConfig(pg, fields) {
    (or PUT) to the redirect endpoint, resolving the followed echo
    record. The same function string runs in the direct oracle page
    and in the proxied frame. */
+/* #556: the multi-chunk probe: the body rides a ReadableStream that
+   yields n bytes in chunk-size pieces, so the engine's spool (and,
+   with the forked artifact, the wasm read callback) sees many small
+   chunks instead of one buffer. The byte pattern matches probeJs
+   exactly ((i * 7 + 13) & 255 over the whole body), so a buffered
+   direct oracle is a valid SHA-256 comparison target. */
+function probeJsStream(path, method, n, chunk, headers) {
+  return `async () => {
+    const chunkSize = ${chunk};
+    let sent = 0;
+    const body = new ReadableStream({
+      pull(controller) {
+        if (sent >= ${n}) { controller.close(); return; }
+        const take = Math.min(chunkSize, ${n} - sent);
+        const piece = new Uint8Array(take);
+        for (let i = 0; i < take; i++) piece[i] = ((sent + i) * 7 + 13) & 255;
+        sent += take;
+        controller.enqueue(piece);
+      },
+    });
+    const r = await fetch(${JSON.stringify(path)}, {
+      method: ${JSON.stringify(method)},
+      headers: ${JSON.stringify(headers ?? {})},
+      body,
+      duplex: "half",
+    });
+    return JSON.stringify({ status: r.status, loc: r.headers.get("location") ?? "", body: await r.text() });
+  }`;
+}
+
 function probeJs(path, method, n, headers) {
   return `async () => {
     const u8 = new Uint8Array(${n});
@@ -303,6 +341,23 @@ async function main() {
     compareEcho(direct, proxied, "307 over-cap POST with Authorization", "POST", OVER_TIGHT_CAP);
     assert(JSON.parse(proxied.body).authorization === "Bearer zl-tok", "Authorization was lost on the replay");
     return "Authorization preserved, SHA-256 equal";
+  });
+
+  /* ---- the multi-chunk streamed body (pause/continue class) ---- */
+
+  await check("spool multi-chunk stream: an 8 KiB x 512 streamed body over the tightened cap replays byte-identical", async () => {
+    /* The direct oracle sends the same bytes buffered; the SHA-256
+       comparison proves the chunked stream survived the spool and the
+       replay exactly. 512 chunks also exceeds the wasm read-callback
+       scratch buffer (64 KiB) many times over, so the forked
+       artifact's pause/continue path is exercised once it is
+       vendored; with the stock artifact the bounded copy path pins
+       the same bytes. */
+    const n = 512 * 8 * 1024;
+    const direct = await probeDirect(307, "POST", n);
+    const proxied = JSON.parse(await evalIn(prox.frame, "multi-chunk stream probe 307", probeJsStream("/api/redirbody/307", "POST", n, 8 * 1024), 90000));
+    compareEcho(direct, proxied, "307 multi-chunk streamed POST", "POST", n);
+    return "streamed in 512 chunks; SHA-256 equal to the buffered direct oracle";
   });
 
   /* ---- the below-cap matrix at the default cap ---- */
