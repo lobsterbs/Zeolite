@@ -43,7 +43,7 @@ jobs:
       - name: Verify the streaming-upload seam exports survive
         run: |
           cd vendor/libcurljs/client/out
-          for fn in _http_get_info _http_set_options _http_set_cookie_jar; do
+          for fn in _http_get_info _http_set_options _http_set_cookie_jar _http_set_upload_stream _http_pause; do
             grep -q "$fn" libcurl_full.mjs || { echo "::error::MISSING export $fn"; exit 1; }
           done
           echo "seam exports verified"
