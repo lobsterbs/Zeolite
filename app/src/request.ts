@@ -121,6 +121,10 @@ export function initEngine(ready: Promise<void>): void {
    surfaces 3xx; the loop follows). Past the cap the 3xx is surfaced to
    the page with a mapped Location instead of looping forever. */
 const MAX_REDIRECT_HOPS = 10;
+/* #521 slice 2: bounded re-evaluation for declarativeNetRequest
+   redirects; past the cap the request proceeds with the last target
+   and a warning row, never an unbounded loop. */
+const DNR_REDIRECT_HOPS = 5;
 /* 2.3: a navigate-mode upstream fetch carries a first-byte deadline
    (#107: the http-entry 301 strand could hang as a committed blank
    frame - respondWith had answered, so the browser committed an
@@ -4061,33 +4065,76 @@ export function handleFetch(e: FetchEvent): void {
            rules and transport on the same 403 blocked strand the
            webRequest path uses; allow only carves exceptions out of
            the same extension's own rules, so the cross-extension
-           verdict is block-or-nothing. */
-        if (await DNR.decideRequest({ ...wrDetails, initiator })) {
+           verdict is block-or-nothing. Slice 2: a redirect verdict
+           re-enters this pipeline with the target reassigned to the
+           redirect destination (re-proxied, never a native
+           navigation), bounded by DNR_REDIRECT_HOPS re-evaluations.
+           webRequest listeners keep seeing the URL the page asked
+           for; the redirect is engine-internal. */
+        let dnrTarget = target;
+        let dnrHops = 0;
+        for (;;) {
+          const dnrVerdict = await DNR.decideRequestVerdict({ ...wrDetails, url: dnrTarget, initiator });
+          if (dnrVerdict.kind === "none") break;
+          if (dnrVerdict.kind === "block") {
+            DIAG.emit({
+              category: "BLOCKED",
+              cause: "blocked",
+              severity: "info",
+              message: "request cancelled by extension declarativeNetRequest",
+              stage: "REQUEST_INTERCEPTED",
+              url: dnrTarget,
+              traceId,
+              requestId: traceId,
+            });
+            const dnrDecision: TransitDecision = { mode: "Blocked", reason: "BLOCKED_DNR" };
+            netLogPush({
+              method: e.request.method, traceId,
+              path: internalUrl,
+              dest: dnrTarget,
+              status: 403,
+              rtype: classifyRtype(dest, ""),
+              ms: Date.now() - t0,
+              bytes: -1,
+              verdict: "blocked",
+              transport: dnrDecision.mode,
+              fallbackReason: reasonOf(dnrDecision),
+              detail: mkDetail(),
+            });
+            return navOutcome(e, url, 403, "blocked", "zeolite: request blocked by declarativeNetRequest");
+          }
+          /* #521 slice 2: redirect. The new destination becomes the
+             proxied target; re-evaluation is bounded so a redirect
+             cycle degrades to proceeding with the last target plus a
+             warning row, never an unbounded loop. */
+          dnrHops++;
+          if (dnrHops > DNR_REDIRECT_HOPS) {
+            DIAG.emit({
+              category: "REWRITE",
+              severity: "warning",
+              message: "declarativeNetRequest redirect hop cap reached; proceeding with the last target",
+              url: dnrTarget,
+              technicalReason: "hops=" + dnrHops,
+            });
+            break;
+          }
           DIAG.emit({
-            category: "BLOCKED",
-            cause: "blocked",
+            category: "REWRITE",
             severity: "info",
-            message: "request cancelled by extension declarativeNetRequest",
-            stage: "REQUEST_INTERCEPTED",
-            url: target,
-            traceId,
-            requestId: traceId,
+            message: "request redirected by extension declarativeNetRequest",
+            url: dnrTarget,
+            technicalReason: "to=" + dnrVerdict.url,
           });
-          const dnrDecision: TransitDecision = { mode: "Blocked", reason: "BLOCKED_DNR" };
-          netLogPush({
-            method: e.request.method, traceId,
-            path: internalUrl,
-            dest: target,
-            status: 403,
-            rtype: classifyRtype(dest, ""),
-            ms: Date.now() - t0,
-            bytes: -1,
-            verdict: "blocked",
-            transport: dnrDecision.mode,
-            fallbackReason: reasonOf(dnrDecision),
-            detail: mkDetail(),
-          });
-          return navOutcome(e, url, 403, "blocked", "zeolite: request blocked by declarativeNetRequest");
+          dnrTarget = dnrVerdict.url;
+        }
+        if (dnrTarget !== target) {
+          target = dnrTarget;
+          /* The transport decision was computed from the pre-redirect
+             destination; the redirect changed it, so it is recomputed
+             on the same seam. The destination classification (dest)
+             deliberately stays the original request's: the rule
+             matched on what the page asked for. */
+          decision = decideTransport(target, dest);
         }
         /* webRequest.onBeforeRequest: a blocking listener can cancel the
            request before cache or transport. */
