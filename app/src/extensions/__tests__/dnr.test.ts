@@ -82,12 +82,15 @@ afterEach(() => {
 });
 
 describe("rule validation (#521)", () => {
-  it("rejects redirect and upgradeScheme with the honest no-seam reason", () => {
+  it("accepts a well-formed redirect, refuses upgradeScheme and hostile redirect shapes (#521 slice 2)", () => {
+    const v = validateRule({ id: 1, condition: { urlFilter: "x" }, action: { type: "redirect", redirect: { url: "https://clean.example/x" } } });
+    expect(v.actionType).toBe("redirect");
+    expect(v.redirectUrl).toBe("https://clean.example/x");
     expect(() => validateRule({ id: 1, condition: { urlFilter: "x" }, action: { type: "redirect", redirect: {} } })).toThrow(
-      /no internal redirect re-entry seam/,
+      /redirect'\.url/,
     );
     expect(() => validateRule({ id: 1, condition: { urlFilter: "x" }, action: { type: "upgradeScheme" } })).toThrow(
-      /no internal redirect re-entry seam/,
+      /scheme-upgrade seam/,
     );
   });
 
@@ -534,6 +537,6 @@ describe("browser.declarativeNetRequest surface (#521)", () => {
       (ns.updateDynamicRules as (u: unknown) => Promise<void>)({
         addRules: [{ id: 1, condition: { urlFilter: "x" }, action: { type: "redirect", redirect: {} } }],
       }),
-    ).rejects.toThrow(/no internal redirect re-entry seam/);
+    ).rejects.toThrow(/redirect'\.url/);
   });
 });

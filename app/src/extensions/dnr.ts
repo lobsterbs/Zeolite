@@ -5,12 +5,13 @@
    documented ordering: webRequest observers see DNR-modified headers).
 
    Slice 1 scope, honestly cut:
-   - Actions: block, allow, modifyHeaders (request + response headers).
-     redirect/upgradeScheme are REFUSED at validation: the engine has no
-     internal re-entry seam for a declarative redirect, and answering one
-     with a synthetic Response.redirect would leak the tunnel by
-     navigating natively. allowAllRequests is REFUSED: the engine keeps no
-     per-document rule state to honor its frame-scoped semantics.
+   - Actions: block, allow, modifyHeaders (request + response headers)
+     and, since slice 2, redirect: the engine re-enters its own pipeline
+     with the redirect target as the new proxied destination, so the
+     redirect never navigates natively and cannot leak the tunnel.
+     upgradeScheme is REFUSED at validation (no scheme-upgrade seam), and
+     allowAllRequests is REFUSED: the engine keeps no per-document rule
+     state to honor its frame-scoped semantics.
    - Rules: session (in-memory), dynamic (persisted per extension to
      IndexedDB, #594's alarms pattern) and static rulesets (package files
      named by the manifest's declarative_net_request.rule_resources,
@@ -31,9 +32,11 @@
      action class order is allow > allowAllRequests > block >
      upgradeScheme > redirect > modifyHeaders; at equal priority AND
      equal action, session > dynamic > static (Firefox tie-break).
-   - Across extensions, block beats allow, so the engine-level verdict is
-     block-or-nothing (allow only carves exceptions out of the same
-     extension's own lower-priority-class block).
+   - Across extensions, block beats allow and redirect alike, so the
+     engine-level verdict is block-or-nothing (allow only carves
+     exceptions out of the same extension's own lower-priority-class
+     block). A redirect survives only when no extension blocks, and the
+     first extension in provider order whose best rule redirects wins.
    - modifyHeaders from an extension applies only when that extension's
      best matching rule is a modifyHeaders one and its host permissions
      cover the request URL (and, for sub_frame requests, the initiator
@@ -115,12 +118,18 @@ export interface DnrExtView {
   staticRulesets: DnrRulesetSpec[];
 }
 
+/* The engine-visible verdict for one request: no match, a block, or a
+   redirect to an absolute http(s) destination (slice 2: the redirect
+   re-enters the engine pipeline, never a native navigation). */
+export type DnrVerdict = { kind: "none" } | { kind: "block" } | { kind: "redirect"; url: string };
+
 export type DnrPermProvider = () => DnrExtView[];
 
 interface NormRule {
   id: number;
   priority: number;
-  actionType: "block" | "allow" | "modifyHeaders";
+  actionType: "block" | "allow" | "modifyHeaders" | "redirect";
+  redirectUrl: string | null;
   requestHeaders: DnrModifyHeaderOp[];
   responseHeaders: DnrModifyHeaderOp[];
   urlRe: RegExp | null;
@@ -211,14 +220,38 @@ export function validateRule(v: unknown): NormRule {
   const actionRaw = v.action;
   if (!isObj(actionRaw)) throw new Error("zeolite: rule.action must be an object");
   const actionType = actionRaw.type;
-  if (actionType === "redirect" || actionType === "upgradeScheme") {
-    throw new Error("zeolite: rule action '" + actionType + "' is not supported: the engine has no internal redirect re-entry seam, and a synthetic redirect would leak the tunnel");
+  if (actionType === "upgradeScheme") {
+    throw new Error("zeolite: rule action 'upgradeScheme' is not supported: the engine has no scheme-upgrade seam, and a synthetic redirect would leak the tunnel");
   }
   if (actionType === "allowAllRequests") {
     throw new Error("zeolite: rule action 'allowAllRequests' is not supported: the engine keeps no per-document rule state");
   }
-  if (actionType !== "block" && actionType !== "allow" && actionType !== "modifyHeaders") {
-    throw new Error("zeolite: rule.action.type must be block, allow, modifyHeaders, redirect or upgradeScheme");
+  if (actionType !== "block" && actionType !== "allow" && actionType !== "modifyHeaders" && actionType !== "redirect") {
+    throw new Error("zeolite: rule.action.type must be block, allow, modifyHeaders or redirect");
+  }
+  /* #521 slice 2: redirect re-enters the engine pipeline (the new
+     destination becomes the proxied target, never a native
+     navigation), so an absolute http(s) redirect.url is safe to
+     accept. transform and regexSubstitution stay refused: the engine
+     does not re-derive destinations from patterns. */
+  let redirectUrl: string | null = null;
+  if (actionType === "redirect") {
+    const rd = actionRaw.redirect;
+    if (!isObj(rd)) throw new Error("zeolite: rule action 'redirect' requires a redirect object");
+    if (rd.transform !== undefined || rd.regexSubstitution !== undefined) {
+      throw new Error("zeolite: rule action 'redirect' supports only an absolute redirect.url; transform and regexSubstitution are not supported");
+    }
+    if (typeof rd.url !== "string") throw new Error("zeolite: rule action 'redirect'.url must be a string");
+    let ru: URL;
+    try {
+      ru = new URL(rd.url);
+    } catch {
+      throw new Error("zeolite: rule action 'redirect'.url must be an absolute URL");
+    }
+    if (ru.protocol !== "https:" && ru.protocol !== "http:") {
+      throw new Error("zeolite: rule action 'redirect'.url must be an http(s) URL");
+    }
+    redirectUrl = rd.url;
   }
   const conditionRaw = v.condition;
   if (conditionRaw !== undefined && !isObj(conditionRaw)) {
@@ -278,6 +311,7 @@ export function validateRule(v: unknown): NormRule {
     id,
     priority,
     actionType,
+    redirectUrl,
     requestHeaders: validateHeaderOps(actionRaw.requestHeaders, "requestHeaders"),
     responseHeaders: validateHeaderOps(actionRaw.responseHeaders, "responseHeaders"),
     urlRe,
@@ -434,11 +468,16 @@ export class DnrRegistry {
     return entry;
   }
 
-  /** Engine hook: true when any enabled extension's best matching rule
-      is a block its permissions allow. Async only because static
+  /** Engine hook: the full verdict for one request. A block from any
+      enabled extension wins immediately (block beats redirect across
+      extensions); a redirect is taken from the first extension in
+      provider order whose best matching rule redirects. With the
+      WithHostAccess permission, block and redirect alike require a
+      host permission on the request URL. Async only because static
       rulesets load lazily on first use. */
-  async decideRequest(f: DnrRequestFacts): Promise<boolean> {
+  async decideRequestVerdict(f: DnrRequestFacts): Promise<DnrVerdict> {
     const views = this.provider?.() ?? [];
+    let redirect: string | null = null;
     for (const v of views) {
       if (!v.enabled) continue;
       const dyn = this.dynamic.get(v.id);
@@ -451,14 +490,26 @@ export class DnrRegistry {
       }
       if (!dyn && !ses && !(st && st.length > 0)) continue;
       const best = this.bestMatch(f, v, st);
-      if (best !== null && best.actionType === "block") {
+      if (best === null) continue;
+      if (best.actionType === "block") {
         /* With the WithHostAccess permission even a block requires a
            host permission on the request URL. */
         if (v.withHostAccess && !hostPatternsMatch(v.hosts, f.url)) continue;
-        return true;
+        return { kind: "block" };
+      }
+      if (best.actionType === "redirect" && redirect === null) {
+        if (v.withHostAccess && !hostPatternsMatch(v.hosts, f.url)) continue;
+        redirect = best.redirectUrl;
       }
     }
-    return false;
+    return redirect !== null ? { kind: "redirect", url: redirect } : { kind: "none" };
+  }
+
+  /** Engine hook: true when any enabled extension's best matching rule
+      is a block its permissions allow. Async only because static
+      rulesets load lazily on first use. */
+  async decideRequest(f: DnrRequestFacts): Promise<boolean> {
+    return (await this.decideRequestVerdict(f)).kind === "block";
   }
 
   /** Host-permission gate for header operations: the request URL
