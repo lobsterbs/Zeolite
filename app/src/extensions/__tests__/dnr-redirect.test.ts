@@ -65,7 +65,9 @@ describe("declarativeNetRequest redirect validation (#521 slice 2)", () => {
     expect(() => validateRule({ id: 1, action: { type: "redirect", redirect: { url: "javascript:alert(1)" } } })).toThrow(/http\(s\)/);
     expect(() => validateRule({ id: 1, action: { type: "redirect", redirect: { url: "https://x.test/", transform: { host: "y.test" } } } })).toThrow(/transform/);
     expect(() => validateRule({ id: 1, action: { type: "redirect", redirect: { url: "https://x.test/", regexSubstitution: "z" } } })).toThrow(/regexSubstitution/);
-    expect(() => validateRule({ id: 1, action: { type: "upgradeScheme", redirect: { url: "https://x.test/" } } })).toThrow(/upgradeScheme/);
+    expect(() => validateRule({ id: 1, action: { type: "upgradeScheme", redirect: { url: "https://x.test/" } } })).toThrow(
+      /does not take a redirect/,
+    );
   });
 });
 

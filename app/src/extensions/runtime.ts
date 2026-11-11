@@ -46,6 +46,7 @@ import {
   MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES,
   MAX_NUMBER_OF_ENABLED_STATIC_RULESETS,
   MAX_NUMBER_OF_STATIC_RULESETS,
+  type DnrMatchedRule,
 } from "./dnr";
 import { MGMT, infoOf } from "./management";
 import type { MgmtListener } from "./management";
@@ -890,6 +891,20 @@ export function buildApi(
           updateEnabledRulesets: (u: unknown) => DNR.updateEnabledRulesets(ext.id, u),
           getEnabledRulesets: () => Promise.resolve(DNR.getEnabledRulesets(ext.id)),
           getAvailableStaticRuleCount: () => DNR.getAvailableStaticRuleCount(ext.id),
+          /* #521 slice 3: the debugging surface requires the
+             declarativeNetRequestFeedback permission (Chrome's
+             documented gate); absent otherwise so feature detection
+             answers honestly. */
+          ...(ext.permissions.includes("declarativeNetRequestFeedback")
+            ? {
+                getMatchedRules: () => DNR.getMatchedRules(),
+                onRuleMatchedDebug: {
+                  addListener: (l: (m: DnrMatchedRule) => void) => DNR.onRuleMatchedDebug.addListener(l),
+                  removeListener: (l: (m: DnrMatchedRule) => void) => DNR.onRuleMatchedDebug.removeListener(l),
+                  hasListener: (l: (m: DnrMatchedRule) => void) => DNR.onRuleMatchedDebug.hasListener(l),
+                },
+              }
+            : {}),
         }
       : undefined;
   /* alarms: in-memory timers in the shared worker context (see

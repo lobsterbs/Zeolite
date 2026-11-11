@@ -9,9 +9,15 @@
      and, since slice 2, redirect: the engine re-enters its own pipeline
      with the redirect target as the new proxied destination, so the
      redirect never navigates natively and cannot leak the tunnel.
-     upgradeScheme is REFUSED at validation (no scheme-upgrade seam), and
-     allowAllRequests is REFUSED: the engine keeps no per-document rule
-     state to honor its frame-scoped semantics.
+     upgradeScheme (slice 3) rides the slice-2 redirect seam: the
+     upgraded target (http -> https, ws -> wss, same host) re-enters
+     the engine pipeline, so no synthetic native navigation and no
+     tunnel leak. allowAllRequests (slice 3) arms a bounded,
+     TTL-scoped frame bypass keyed on the document origin the engine
+     facts carry (the initiator origin for requests generated from
+     the matched document; Chrome's true frame-subtree identity is
+     unavailable), silencing the OWNING extension's rules on those
+     requests; other extensions keep their verdicts.
    - Rules: session (in-memory), dynamic (persisted per extension to
      IndexedDB, #594's alarms pattern) and static rulesets (package files
      named by the manifest's declarative_net_request.rule_resources,
@@ -154,7 +160,13 @@ const MATCHED_LOG_MAX = 500;
 interface NormRule {
   id: number;
   priority: number;
-  actionType: "block" | "allow" | "modifyHeaders" | "redirect";
+  actionType:
+    | "block"
+    | "allow"
+    | "modifyHeaders"
+    | "redirect"
+    | "upgradeScheme"
+    | "allowAllRequests";
   redirectUrl: string | null;
   requestHeaders: DnrModifyHeaderOp[];
   responseHeaders: DnrModifyHeaderOp[];
@@ -248,14 +260,18 @@ export function validateRule(v: unknown): NormRule {
   const actionRaw = v.action;
   if (!isObj(actionRaw)) throw new Error("zeolite: rule.action must be an object");
   const actionType = actionRaw.type;
-  if (actionType === "upgradeScheme") {
-    throw new Error("zeolite: rule action 'upgradeScheme' is not supported: the engine has no scheme-upgrade seam, and a synthetic redirect would leak the tunnel");
+  if (
+    actionType !== "block" && actionType !== "allow" && actionType !== "modifyHeaders" &&
+    actionType !== "redirect" && actionType !== "upgradeScheme" && actionType !== "allowAllRequests"
+  ) {
+    throw new Error(
+      "zeolite: rule.action.type must be block, allow, modifyHeaders, redirect, upgradeScheme or allowAllRequests",
+    );
   }
-  if (actionType === "allowAllRequests") {
-    throw new Error("zeolite: rule action 'allowAllRequests' is not supported: the engine keeps no per-document rule state");
-  }
-  if (actionType !== "block" && actionType !== "allow" && actionType !== "modifyHeaders" && actionType !== "redirect") {
-    throw new Error("zeolite: rule.action.type must be block, allow, modifyHeaders or redirect");
+  /* #521 slice 3: upgradeScheme takes no payload (the upgrade target
+     is derived from the request URL); allowAllRequests likewise. */
+  if ((actionType === "upgradeScheme" || actionType === "allowAllRequests") && actionRaw.redirect !== undefined) {
+    throw new Error("zeolite: rule action '" + actionType + "' does not take a redirect object");
   }
   /* #521 slice 2: redirect re-enters the engine pipeline (the new
      destination becomes the proxied target, never a native
@@ -369,6 +385,14 @@ function domainMatches(host: string, domain: string): boolean {
   return host === domain || host.endsWith("." + domain);
 }
 
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 function matchRule(r: NormRule, f: DnrRequestFacts): boolean {
   const host = hostOf(f.url);
   if (host === null) return false;
@@ -391,6 +415,34 @@ function matchRule(r: NormRule, f: DnrRequestFacts): boolean {
     }
   }
   return true;
+}
+
+/* ---- #521 slice 3: allowAllRequests frame bypass ---- */
+
+/* Chrome scopes allowAllRequests to the matched frame's subtree. The
+   engine request facts carry no frame ids, so the bypass keys on the
+   document ORIGIN the facts do carry: the initiator origin for
+   requests generated from the matched document (subresources and
+   descendant-frame loads) and the request URL origin for the matched
+   main_frame/sub_frame load itself. Documented divergence: a
+   different document on the same origin inherits the bypass until it
+   expires, and the TTL stands in for frame destruction. */
+const BYPASS_TTL_MS = 10 * 60_000;
+const BYPASS_MAX_ORIGINS = 256;
+
+/** The upgradeScheme target: the same URL over https (ws over wss).
+    Already-secure or non-special schemes have no effect (null). */
+function upgradeSchemeTarget(url: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (u.protocol === "http:") u.protocol = "https:";
+  else if (u.protocol === "ws:") u.protocol = "wss:";
+  else return null;
+  return u.href;
 }
 
 /* ---- registry ---- */
@@ -418,6 +470,9 @@ export class DnrRegistry {
      onRuleMatchedDebug listeners. */
   private readonly matchedLog: DnrMatchedRule[] = [];
   private readonly matchedListeners = new Set<(m: DnrMatchedRule) => void>();
+  /* #521 slice 3: per-extension allowAllRequests frame bypass:
+     origin -> { priority, until }. */
+  private readonly frameBypass = new Map<ExtensionId, Map<string, { priority: number; until: number }>>();
 
   setPermProvider(p: DnrPermProvider): void {
     this.provider = p;
@@ -425,13 +480,22 @@ export class DnrRegistry {
 
   /* Source ranks for the equal-priority equal-action tie-break:
      session beats dynamic beats static (Firefox). */
-  private bestMatch(f: DnrRequestFacts, v: DnrExtView, st: NormRule[] | null): { rule: NormRule; source: DnrMatchSource } | null {
+  private bestMatch(
+    f: DnrRequestFacts,
+    v: DnrExtView,
+    st: NormRule[] | null,
+    bypass: { priority: number } | null,
+  ): { rule: NormRule; source: DnrMatchSource } | null {
     let best: NormRule | null = null;
     let bestRank = 0;
     let bestClass = 0;
     let bestSource: DnrMatchSource = "dynamic";
     const consider = (r: NormRule, rank: number): void => {
       if (!matchRule(r, f)) return;
+      /* #521 slice 3: a live allowAllRequests bypass of higher or
+         equal priority silences this extension's rules on the
+         request (Chrome: the extension has no effect on it). */
+      if (bypass !== null && r.priority <= bypass.priority) return;
       const cls = ACTION_CLASS[r.actionType] ?? 9;
       const cur = best;
       if (
@@ -506,11 +570,14 @@ export class DnrRegistry {
 
   /** Engine hook: the full verdict for one request. A block from any
       enabled extension wins immediately (block beats redirect across
-      extensions); a redirect is taken from the first extension in
-      provider order whose best matching rule redirects. With the
-      WithHostAccess permission, block and redirect alike require a
-      host permission on the request URL. Async only because static
-      rulesets load lazily on first use. */
+      extensions); a redirect or scheme upgrade is taken from the
+      first extension in provider order whose best matching rule
+      redirects or upgrades (slice 3: upgradeScheme rides this
+      seam). With the WithHostAccess permission, block, upgradeScheme
+      and redirect alike require a host permission on the request
+      URL. An allowAllRequests match arms the frame bypass and lets
+      the request proceed. Async only because static rulesets load
+      lazily on first use. */
   async decideRequestVerdict(f: DnrRequestFacts): Promise<DnrVerdict> {
     const views = this.provider?.() ?? [];
     let redirect: string | null = null;
@@ -525,7 +592,16 @@ export class DnrRegistry {
         st = entry.rules;
       }
       if (!dyn && !ses && !(st && st.length > 0)) continue;
-      const best = this.bestMatch(f, v, st);
+      /* #521 slice 3: a live allowAllRequests bypass minted by this
+         extension silences its own equal-or-lower-priority rules on
+         requests generated from the bypassed document. */
+      const bypass = this.liveBypass(v, f);
+      if (bypass !== null && f.type === "sub_frame") {
+        /* the subframe document joins the bypassed subtree: its own
+           subresources are generated from it. */
+        this.armBypass(v.id, originOf(f.url), bypass.priority);
+      }
+      const best = this.bestMatch(f, v, st, bypass);
       if (best === null) continue;
       if (best.rule.actionType === "block") {
         /* With the WithHostAccess permission even a block requires a
@@ -533,6 +609,29 @@ export class DnrRegistry {
         if (v.withHostAccess && !hostPatternsMatch(v.hosts, f.url)) continue;
         this.recordMatch(v, best.rule, best.source, f, "block");
         return { kind: "block" };
+      }
+      /* #521 slice 3: upgradeScheme rides the slice-2 redirect seam
+         (same host, https scheme, engine-internal re-entry); the
+         host-permission gate is identical to block/redirect. An
+         already-secure target has no effect. */
+      if (best.rule.actionType === "upgradeScheme" && redirect === null) {
+        if (v.withHostAccess && !hostPatternsMatch(v.hosts, f.url)) continue;
+        const up = upgradeSchemeTarget(f.url);
+        if (up !== null) {
+          this.recordMatch(v, best.rule, best.source, f, "redirect", up);
+          redirect = up;
+        }
+      }
+      /* #521 slice 3: allowAllRequests arms the frame bypass and lets
+         the request proceed. Only a main_frame or sub_frame match
+         arms (MDN scopes the action to those types); on other types
+         it acts as plain allow. Other extensions keep their
+         verdicts. */
+      if (best.rule.actionType === "allowAllRequests") {
+        if (v.withHostAccess && !hostPatternsMatch(v.hosts, f.url)) continue;
+        if (f.type === "main_frame" || f.type === "sub_frame") {
+          this.armBypass(v.id, originOf(f.url), best.rule.priority);
+        }
       }
       if (best.rule.actionType === "redirect" && redirect === null) {
         if (v.withHostAccess && !hostPatternsMatch(v.hosts, f.url)) continue;
@@ -589,8 +688,9 @@ export class DnrRegistry {
   }
 
   /** #521 introspection: fires for every engine-visible match (the
-      effective block or redirect verdict). Engine-defined surface:
-      no declarativeNetRequestFeedback permission gate. */
+      effective block or redirect verdict). The API mount gates this
+      on the declarativeNetRequestFeedback permission (Chrome's
+      documented gate); the registry itself stays ungated. */
   readonly onRuleMatchedDebug = {
     addListener: (l: (m: DnrMatchedRule) => void): void => {
       this.matchedListeners.add(l);
@@ -600,6 +700,39 @@ export class DnrRegistry {
     },
     hasListener: (l: (m: DnrMatchedRule) => void): boolean => this.matchedListeners.has(l),
   };
+
+  /* ---- #521 slice 3: allowAllRequests frame bypass ---- */
+
+  /** The live bypass this extension minted for the document the
+      request is generated from (the initiator origin), if any. */
+  private liveBypass(v: DnrExtView, f: DnrRequestFacts): { priority: number; until: number } | null {
+    const map = this.frameBypass.get(v.id);
+    if (!map || map.size === 0) return null;
+    const initOrigin = f.initiator ? originOf(f.initiator) : null;
+    if (initOrigin === null) return null;
+    const e = map.get(initOrigin);
+    if (!e || e.until <= Date.now()) return null;
+    return e;
+  }
+
+  /** Arm (or refresh) the frame bypass for one origin. Bounded:
+      drop-oldest past BYPASS_MAX_ORIGINS; delete-then-set refreshes
+      recency (the #229/#358 LRU rule). */
+  private armBypass(id: ExtensionId, origin: string | null, priority: number): void {
+    if (origin === null) return;
+    let map = this.frameBypass.get(id);
+    if (!map) {
+      map = new Map();
+      this.frameBypass.set(id, map);
+    }
+    map.delete(origin);
+    map.set(origin, { priority, until: Date.now() + BYPASS_TTL_MS });
+    while (map.size > BYPASS_MAX_ORIGINS) {
+      const oldest = map.keys().next().value;
+      if (oldest === undefined) break;
+      map.delete(oldest);
+    }
+  }
 
   /** Host-permission gate for header operations: the request URL
       always, the initiator origin too for sub_frame requests. */
@@ -617,7 +750,8 @@ export class DnrRegistry {
       const ses = this.session.get(v.id);
       const cached = v.staticRulesets.length > 0 ? this.staticCache.get(v.id) : null;
       if (!dyn && !ses && !(cached && cached.rules.length > 0)) continue;
-      const best = this.bestMatch(f, v, cached ? cached.rules : null);
+      const bypass = this.liveBypass(v, f);
+      const best = this.bestMatch(f, v, cached ? cached.rules : null, bypass);
       if (best === null || best.rule.actionType !== "modifyHeaders") continue;
       if (!this.modifyAllowed(v, f)) continue;
       const ops = pick(best.rule);
@@ -823,6 +957,7 @@ export class DnrRegistry {
     this.session.delete(id);
     this.enabledStatic.delete(id);
     this.staticCache.delete(id);
+    this.frameBypass.delete(id);
     try {
       const db = await openDb();
       await idbDelete(db, STORE_DNR, id);
@@ -847,6 +982,7 @@ export class DnrRegistry {
     this.inflight.clear();
     this.matchedLog.length = 0;
     this.matchedListeners.clear();
+    this.frameBypass.clear();
   }
 }
 
