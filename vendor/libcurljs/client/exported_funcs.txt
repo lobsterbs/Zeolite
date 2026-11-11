@@ -33,7 +33,4 @@ tls_socket_set_options
 recv_from_socket
 send_to_socket
 
-http_set_upload_stream
-http_pause
-
 free
