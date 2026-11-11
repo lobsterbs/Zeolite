@@ -21,30 +21,41 @@ stream spooled bodies; this fork is the library-side enabler.
   scratch buffer) and upload_buf_size.
 - client/libcurl/http.c: upload_read_callback implements
   CURLOPT_READFUNCTION; http_set_upload_stream(handle, js_fn,
-  chunk_size) arms it (CURLOPT_UPLOAD, chunked
-  INFILESIZE_LARGE = -1); http_pause(handle, bits) exposes
-  curl_easy_pause so the JS side can resume a paused transfer.
+  chunk_size, infilesize) arms it (CURLOPT_UPLOAD, INFILESIZE_LARGE =
+  infilesize, chunked when negative); http_pause(handle, bits) exposes
+  curl_easy_pause so the JS side can resume a paused transfer; a -2
+  read return maps to CURL_READFUNC_ABORT.
 - client/libcurl/request.c: the scratch buffer is freed in
   finish_request and in request_cleanup.
 - client/exported_funcs.txt: http_set_upload_stream and http_pause
   exported.
 - client/javascript/http.js: request_async accepts
-  params.upload = { read, chunkSize }. read(bufPtr, max) is invoked
-  SYNCHRONOUSLY from inside the transfer loop: write at most max bytes
-  into the wasm heap at bufPtr, return the count, 0 for EOF, or -1 to
-  pause the transfer. Pump an async source into a JS-side queue and
-  pause when the queue runs dry, then resume with _http_pause(handle, 0)
-  (CURLPAUSE_CONT) once data arrives. The function pointer is removed
-  from the table in finish_callback (no table growth leak).
+  params.upload = { read, chunkSize, contentLength }. read(view, max)
+  is invoked SYNCHRONOUSLY from inside the transfer loop with a
+  Module.HEAPU8 view of the scratch buffer: write at most max bytes
+  into the view, return the count, 0 for EOF, -1 to pause the
+  transfer, or -2 to abort it. The fork wires params.upload.resume to
+  http_pause(handle, 0) (CURLPAUSE_CONT) so the caller resumes a
+  paused transfer without touching the handle; the function pointer is
+  removed from the table in finish_callback (no table growth leak).
+  create_options skips body materialization when the seam is armed.
 
 ## Protocol notes
 
 - The read callback stays synchronous on purpose: libcurl.js drives
   curl_multi from a non-blocking JS loop, so an async callback cannot
   block the transfer. The pause/continue protocol is the bridge.
-- Chunked transfer-encoding is used (INFILESIZE -1). Servers that
-  reject chunked bodies need a known length; a future option can pass
-  INFILESIZE explicitly.
+- read(view, max) returns the count, 0 for EOF, -1 to pause (the fork
+  wires params.upload.resume to http_pause(handle, CURLPAUSE_CONT) so
+  the caller never touches the handle), or -2 to abort
+  (CURL_READFUNC_ABORT: a failed source surfaces as
+  CURLE_ABORTED_BY_CALLBACK, never as a silently truncated upload).
+- A non-negative params.upload.contentLength rides INFILESIZE_LARGE so
+  known-length bodies avoid chunked framing; negative or absent keeps
+  INFILESIZE -1 (chunked).
+- create_options skips the Request.arrayBuffer() materialization when
+  params.upload.read is armed; the header dict defaults (User-Agent,
+  Content-Type from the Blob) are built without it.
 - The method still comes from the "method" JSON option
   (CURLOPT_CUSTOMREQUEST); with CURLOPT_UPLOAD that keeps POST a POST.
 
@@ -65,14 +76,18 @@ for libcurl_full.mjs and re-vendor app/public/libcurl/index.mjs.
 
 ## Zeolite integration (remaining work, issue #556)
 
-1. Point the vendored bundle at this fork's build output.
-2. app/src/request.ts: replace the one-shot body read with a
-   queue-backed read callback wired to the spool (the #556 curl read
-   callback item), pausing on backpressure.
-3. Keep the one-shot path for small bodies (under one chunk) to avoid
-   regressing the common case.
-4. Byte-exact regression: the #556 replay-spool harness already proves
-   4 MiB bodies; extend it to a multi-chunk body larger than the wasm
+1. Point the vendored bundle at this fork's build output (re-vendor
+   app/public/libcurl/index.mjs from "./build.sh release single_file").
+2. app/src: arm params.upload = { read, chunkSize, contentLength } for
+   Blob/File bodies in the vendored adapter
+   (libcurl-transport-vendored.ts) when the bundle source carries the
+   seam; the queue-backed controller (app/src/upload-stream.ts) reads
+   the spool File in chunks, returns -1 when the queue runs dry and
+   calls resume() on refill, -2 on a failed read.
+3. Keep the one-shot path for non-Blob bodies (strings/ArrayBuffers)
+   and for bundles without the seam (feature-detected at load).
+4. Byte-exact regression: the #556 replay-spool harness proves 4 MiB
+   bodies; extend it to a multi-chunk body larger than the wasm scratch
    buffer to prove the pause/continue path.
 5. License: this fork stays AGPL-3.0 like upstream; Zeolite already
    vendors the same license.

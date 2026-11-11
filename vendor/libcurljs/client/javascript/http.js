@@ -92,7 +92,20 @@ class HTTPSession extends CurlSession {
          an async source into a JS-side queue and pause when it runs
          dry. */
       if (params.upload && params.upload.read) {
-        upload_fn = Module.addFunction((bufPtr, max) => params.upload.read(bufPtr, max) | 0, "iii");
+        const up = params.upload;
+        /* #556 fork: the callback receives a Uint8Array view of the wasm
+           heap scratch buffer (Module.HEAPU8.subarray, fresh per call so
+           memory growth cannot leave a stale view); it writes at most
+           max bytes into the view and returns the count. */
+        upload_fn = Module.addFunction((bufPtr, max) => up.read(Module.HEAPU8.subarray(bufPtr, bufPtr + max), max) | 0, "iii");
+        /* #556 fork resume seam: the caller pumps an async source; when
+           read() returns -1 (paused) it refills and calls up.resume() to
+           continue the transfer (curl_easy_pause, CURLPAUSE_CONT). The
+           handle never leaves this closure; after finish_callback it is
+           null and resume() is an honest no-op. */
+        up.resume = () => {
+          if (http_handle != null) c_func(_http_pause, [http_handle, 0]);
+        };
       }
       else {
         body_ptr = body ? allocate_array(body) : null;
@@ -194,6 +207,26 @@ class HTTPSession extends CurlSession {
 
   static async create_options(params) {
     let body = null;
+    /* #556 fork: a streaming upload must not be materialized. The
+       default path pulls the whole body through Request.arrayBuffer()
+       into one contiguous Uint8Array before request_async ever runs,
+       which is exactly what the upload seam exists to avoid. Build the
+       header dict and defaults and keep the body null; request_async
+       ignores it when params.upload.read is armed. */
+    if (params.upload && params.upload.read) {
+      let headers = params.headers || {};
+      if (headers instanceof Headers) {
+        headers = Object.fromEntries(headers);
+      }
+      params.headers = new HeadersDict(headers);
+      if (params.body instanceof Blob && params.body.type && !params.headers["Content-Type"]) {
+        params.headers["Content-Type"] = params.body.type;
+      }
+      if (!params.headers["User-Agent"]) {
+        params.headers["User-Agent"] = navigator.userAgent;
+      }
+      return null;
+    }
     if (params.body instanceof ReadableStream) {
       params.duplex = "half";
     }
