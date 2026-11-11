@@ -13,13 +13,10 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@ghostery/adblocker", () => ({
   FiltersEngine: {
-    /* calls the configured fetcher like the real prebuilt loader, so
-       the hanging test fetch keeps the load observably in progress */
-    fromPrebuiltAdsAndTracking: async (f: typeof fetch) => {
-      await f(
-        "https://raw.githubusercontent.com/ghostery/adblocker/master/packages/adblocker/assets/ads.json",
-        { method: "GET" },
-      );
+    /* the arm's own guarded list fetches call the configured
+       fetcher, so a hanging test fetch keeps the load observably
+       in progress before parse is ever reached */
+    parse: async () => {
       return {
         getFilters: () => ({ networkFilters: new Array(1200), cosmeticFilters: [] }),
         match: () => ({ match: false }),
@@ -103,11 +100,7 @@ describe("ghostery idle-gated list load (#577)", () => {
     settle(streams);
     vi.doMock("@ghostery/adblocker", () => ({
       FiltersEngine: {
-        fromPrebuiltAdsAndTracking: async (f: typeof fetch) => {
-          await f(
-            "https://raw.githubusercontent.com/ghostery/adblocker/master/packages/adblocker/assets/ads.json",
-            { method: "GET" },
-          );
+        parse: async () => {
           throw new Error("list origin unreachable");
         },
       },

@@ -13,7 +13,7 @@ const cap = vi.hoisted(() => ({
 
 vi.mock("@ghostery/adblocker", () => ({
   FiltersEngine: {
-    fromPrebuiltAdsAndTracking: async () => {
+    parse: async () => {
       const count = cap.filtersPerLoad[cap.filtersPerLoad.length - 1] ?? 0;
       return {
         getFilters: () => ({ networkFilters: new Array(count), cosmeticFilters: [] }),

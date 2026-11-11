@@ -17,7 +17,8 @@ use wasm_bindgen::prelude::*;
 mod resources;
 
 /// A request the canary probe must block when the engine parsed a real
-/// filter list. Chosen so no legitimate browsing pattern can produce it.
+/// filter list. Probed as an xhr request so it exercises the unscoped
+/// ||doubleclick.net^$xhr rule uBlock Origin ships in filters-2021.
 const CANARY_URL: &str = "https://adserver.doubleclick.net/adj/zeolite";
 const CANARY_SOURCE: &str = "https://example.com/";
 
@@ -154,7 +155,7 @@ impl AdblockEngine {
     /// True only when the engine blocks the doubleclick canary request,
     /// which proves a real filter list was loaded and applied.
     pub fn canary_blocks(&self) -> bool {
-        self.check_network(CANARY_URL, CANARY_SOURCE, "script", "get")
+        self.check_network(CANARY_URL, CANARY_SOURCE, "xhr", "get")
             .is_some_and(|d| d.matched)
     }
 }
@@ -206,5 +207,22 @@ impl WasmAdblock {
 
     pub fn canary_blocks(&self) -> bool {
         self.inner.canary_blocks()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /* The canary must block under a uBlock Origin rule shape: the
+    unscoped ||doubleclick.net^$xhr rule uAssets ships in
+    filters-2021. This proves the probe exercises the xhr arm of
+    the engine and that a $redirect rule counts as a block. */
+    #[test]
+    fn canary_blocks_on_ubo_doubleclick_xhr_rule() {
+        let engine =
+            AdblockEngine::from_lists(&[String::from("||doubleclick.net^$xhr,redirect=noop.txt")])
+                .unwrap();
+        assert!(engine.canary_blocks());
     }
 }

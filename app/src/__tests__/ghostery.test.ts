@@ -5,14 +5,12 @@
 import { describe, expect, it, vi } from "vitest";
 
 const cap = vi.hoisted(() => ({
-  listFetch: null as typeof fetch | null,
   inits: [] as unknown[],
 }));
 
 vi.mock("@ghostery/adblocker", () => ({
   FiltersEngine: {
-    fromPrebuiltAdsAndTracking: async (f: typeof fetch) => {
-      cap.listFetch = f;
+    parse: async () => {
       return {
         getFilters: () => ({ networkFilters: new Array(1200), cosmeticFilters: [] }),
         match: () => ({          match: true,
@@ -27,7 +25,12 @@ vi.mock("@ghostery/adblocker", () => ({
 
 import { applyRules, loadRules } from "../rules";
 import { streamAlive, streamDone } from "../streams-alive";
-import { configureGhostery, ghosteryBlock, ghosteryLoadInProgress } from "../ghostery";
+import {
+  configureGhostery,
+  ghosteryBlock,
+  ghosteryListFetcher,
+  ghosteryLoadInProgress,
+} from "../ghostery";
 
 const LIST_URL =
   "https://raw.githubusercontent.com/ghostery/adblocker/master/packages/adblocker/assets/ads.json";
@@ -52,7 +55,7 @@ async function prime(): Promise<void> {
 describe("ghostery list fetch guard", () => {
   it("reaches only Ghostery's asset directory, GET only, manual redirects", async () => {
     await prime();
-    const f = cap.listFetch!;
+    const f = ghosteryListFetcher();
     await expect(f("https://evil.example/lists.txt", {})).rejects.toThrow(TypeError);
     await expect(f(LIST_URL, { method: "POST" })).rejects.toThrow(TypeError);
     const resp = await f(LIST_URL, { method: "GET" });
