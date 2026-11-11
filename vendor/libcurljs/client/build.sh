@@ -22,7 +22,7 @@ WASM_FILE="$OUT_DIR/libcurl.wasm"
 CURRENT_EMCC_VER="$(emcc --version)"
 LAST_EMCC_VER="$(cat "$BUILD_DIR/emcc_version.txt" || emcc --version)"
 if [ ! "$CURRENT_EMCC_VER" = "$LAST_EMCC_VER" ]; then
-  echo "triggering a full rebuild since we're on a different emcg version"
+  echo "triggering a full rebuild since we're on a different emcc version"
   rm -rf "$BUILD_DIR"
 fi
 mkdir -p "$BUILD_DIR"
@@ -102,14 +102,7 @@ sed -i "s/__wisp_version__/$WISP_VERSION/" $OUT_FILE
 
 
 #js files are inserted in reverse order
-sed -i "/__extra_libraries__/r $JAVSCRIPT_DIR/ftp.js" $OUT_FILE
-sed -i "/__extra_libraries__/r $JAVSCRIPT_DIR/tls_socket.js" $OUT_FILE
-sed -i "/__extra_libraries__/r $JAVSCRIPT_DIR/ws_polyfill.js" $OUT_FILE
-sed -i "/__extra_libraries__/r $JAVSCRIPT_DIR/websocket.js" $OUT_FILE
-sed -i "/__extra_libraries__/r $JAVSCRIPT_DIR/http.js" $OUT_FILE
-sed -i "/__extra_libraries__/r $JAVSCRIPT_DIR/session.js" $OUT_FILE
-
-sed -i "/__extra_libraries__/r $JAVSCCRIPT_DIR/copyright.js" $OUT_FILE
+sed -i "/__extra_libraries__/r $JAVSCRIPT_DIR/copyright.js" $OUT_FILE
 sed -i "/__extra_libraries__/r $JAVSCRIPT_DIR/messages.js" $OUT_FILE
 sed -i "/__extra_libraries__/r $JAVSCRIPT_DIR/util.js" $OUT_FILE
 sed -i "/__extra_libraries__/r $JAVSCRIPT_DIR/logger.js" $OUT_FILE
@@ -123,3 +116,4 @@ python3 tools/patch_js.py $FRAGMENTS_DIR $OUT_FILE
 #generate es6 module
 cp $OUT_FILE $ES6_FILE
 sed -i 's/const libcurl = /export const libcurl = /' $ES6_FILE
+
