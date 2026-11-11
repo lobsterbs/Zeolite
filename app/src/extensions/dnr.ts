@@ -125,6 +125,32 @@ export type DnrVerdict = { kind: "none" } | { kind: "block" } | { kind: "redirec
 
 export type DnrPermProvider = () => DnrExtView[];
 
+/* Where a matched rule lives: the registry collapses the static
+   cache across a package's enabled rulesets, so static matches
+   also carry the concrete ruleset id on the rule itself. */
+type DnrMatchSource = "session" | "dynamic" | "static";
+
+/* One recorded engine-visible DNR match: the payload of
+   getMatchedRules and onRuleMatchedDebug (#521). Chrome's tabId
+   and minMatchId filters are not provided: the engine request
+   facts carry no tab id. */
+export interface DnrMatchedRule {
+  extensionId: string;
+  ruleId: number;
+  rulesetId: string;
+  source: DnrMatchSource;
+  url: string;
+  method: string;
+  type: string;
+  kind: "block" | "redirect";
+  redirectUrl?: string;
+  timestamp: number;
+}
+
+/* Bounded introspection log: enough for a debug session, small
+   enough that a chatty ruleset cannot grow it without limit. */
+const MATCHED_LOG_MAX = 500;
+
 interface NormRule {
   id: number;
   priority: number;
@@ -140,6 +166,8 @@ interface NormRule {
   excludedInitiatorDomains: Set<string> | null;
   requestMethods: Set<string> | null;
   raw: unknown;
+  /* static rules carry the ruleset id they loaded from (#521) */
+  rulesetId?: string;
 }
 
 /* ---- validation ---- */
@@ -386,6 +414,10 @@ export class DnrRegistry {
      so tests (and the boot path) can await a settled store. */
   private hydrated = false;
   private readonly inflight = new Set<Promise<void>>();
+  /* #521 introspection: the bounded match log and the
+     onRuleMatchedDebug listeners. */
+  private readonly matchedLog: DnrMatchedRule[] = [];
+  private readonly matchedListeners = new Set<(m: DnrMatchedRule) => void>();
 
   setPermProvider(p: DnrPermProvider): void {
     this.provider = p;
@@ -393,10 +425,11 @@ export class DnrRegistry {
 
   /* Source ranks for the equal-priority equal-action tie-break:
      session beats dynamic beats static (Firefox). */
-  private bestMatch(f: DnrRequestFacts, v: DnrExtView, st: NormRule[] | null): NormRule | null {
+  private bestMatch(f: DnrRequestFacts, v: DnrExtView, st: NormRule[] | null): { rule: NormRule; source: DnrMatchSource } | null {
     let best: NormRule | null = null;
     let bestRank = 0;
     let bestClass = 0;
+    let bestSource: DnrMatchSource = "dynamic";
     const consider = (r: NormRule, rank: number): void => {
       if (!matchRule(r, f)) return;
       const cls = ACTION_CLASS[r.actionType] ?? 9;
@@ -409,12 +442,13 @@ export class DnrRegistry {
         best = r;
         bestRank = rank;
         bestClass = cls;
+        bestSource = rank === 0 ? "session" : rank === 1 ? "dynamic" : "static";
       }
     };
     for (const r of this.session.get(v.id)?.values() ?? []) consider(r, 0);
     for (const r of this.dynamic.get(v.id)?.values() ?? []) consider(r, 1);
     for (const r of st ?? []) consider(r, 2);
-    return best;
+    return best === null ? null : { rule: best, source: bestSource };
   }
 
   private effectiveEnabled(v: DnrExtView, rs: DnrRulesetSpec): boolean {
@@ -454,7 +488,9 @@ export class DnrRegistry {
           if (arr === null) continue;
           for (const item of arr) {
             try {
-              rules.push(validateRule(item));
+              const nr = validateRule(item);
+              nr.rulesetId = rs.id;
+              rules.push(nr);
             } catch {
               /* an invalid static rule is silently ignored */
             }
@@ -491,15 +527,17 @@ export class DnrRegistry {
       if (!dyn && !ses && !(st && st.length > 0)) continue;
       const best = this.bestMatch(f, v, st);
       if (best === null) continue;
-      if (best.actionType === "block") {
+      if (best.rule.actionType === "block") {
         /* With the WithHostAccess permission even a block requires a
            host permission on the request URL. */
         if (v.withHostAccess && !hostPatternsMatch(v.hosts, f.url)) continue;
+        this.recordMatch(v, best.rule, best.source, f, "block");
         return { kind: "block" };
       }
-      if (best.actionType === "redirect" && redirect === null) {
+      if (best.rule.actionType === "redirect" && redirect === null) {
         if (v.withHostAccess && !hostPatternsMatch(v.hosts, f.url)) continue;
-        redirect = best.redirectUrl;
+        this.recordMatch(v, best.rule, best.source, f, "redirect", best.rule.redirectUrl ?? undefined);
+        redirect = best.rule.redirectUrl;
       }
     }
     return redirect !== null ? { kind: "redirect", url: redirect } : { kind: "none" };
@@ -511,6 +549,57 @@ export class DnrRegistry {
   async decideRequest(f: DnrRequestFacts): Promise<boolean> {
     return (await this.decideRequestVerdict(f)).kind === "block";
   }
+
+  /** #521 introspection: record one engine-visible match in the
+      bounded log and notify onRuleMatchedDebug listeners. Only
+      effective verdicts are recorded (the block that returned, the
+      redirect that was taken); a broken debug listener never
+      affects the pipeline. */
+  private recordMatch(v: DnrExtView, r: NormRule, source: DnrMatchSource, f: DnrRequestFacts, kind: "block" | "redirect", redirectUrl?: string): void {
+    const rec: DnrMatchedRule = {
+      extensionId: v.id,
+      ruleId: r.id,
+      rulesetId: r.rulesetId ?? (source === "dynamic" ? "_dynamic" : source === "session" ? "_session" : "_static"),
+      source,
+      url: f.url,
+      method: f.method,
+      type: f.type,
+      kind,
+      timestamp: Date.now(),
+    };
+    if (redirectUrl !== undefined) rec.redirectUrl = redirectUrl;
+    this.matchedLog.push(rec);
+    if (this.matchedLog.length > MATCHED_LOG_MAX) this.matchedLog.shift();
+    for (const l of this.matchedListeners) {
+      try {
+        l(rec);
+      } catch {
+        /* a broken debug listener is swallowed */
+      }
+    }
+  }
+
+  /** #521 introspection: the bounded log of engine-visible matches,
+      oldest first. Chrome's tabId and minMatchId filters are not
+      provided: the engine request facts carry no tab id, and the
+      log is already bounded. modifyHeaders matches are not
+      recorded. */
+  async getMatchedRules(): Promise<DnrMatchedRule[]> {
+    return this.matchedLog.slice();
+  }
+
+  /** #521 introspection: fires for every engine-visible match (the
+      effective block or redirect verdict). Engine-defined surface:
+      no declarativeNetRequestFeedback permission gate. */
+  readonly onRuleMatchedDebug = {
+    addListener: (l: (m: DnrMatchedRule) => void): void => {
+      this.matchedListeners.add(l);
+    },
+    removeListener: (l: (m: DnrMatchedRule) => void): void => {
+      this.matchedListeners.delete(l);
+    },
+    hasListener: (l: (m: DnrMatchedRule) => void): boolean => this.matchedListeners.has(l),
+  };
 
   /** Host-permission gate for header operations: the request URL
       always, the initiator origin too for sub_frame requests. */
@@ -529,9 +618,9 @@ export class DnrRegistry {
       const cached = v.staticRulesets.length > 0 ? this.staticCache.get(v.id) : null;
       if (!dyn && !ses && !(cached && cached.rules.length > 0)) continue;
       const best = this.bestMatch(f, v, cached ? cached.rules : null);
-      if (best === null || best.actionType !== "modifyHeaders") continue;
+      if (best === null || best.rule.actionType !== "modifyHeaders") continue;
       if (!this.modifyAllowed(v, f)) continue;
-      const ops = pick(best);
+      const ops = pick(best.rule);
       if (ops.length > 0) out.push({ v, ops });
     }
     return out;
@@ -756,6 +845,8 @@ export class DnrRegistry {
     this.provider = null;
     this.hydrated = false;
     this.inflight.clear();
+    this.matchedLog.length = 0;
+    this.matchedListeners.clear();
   }
 }
 
