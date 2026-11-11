@@ -648,7 +648,7 @@ export function startFixture(port) {
 <img id="crlf"${"\r\n"} src="img.png" alt="c">
 <img id="unq" src=img.png alt="u">
 <img id="spaced"    src   =   "img.png" alt="s">
-<img id="uni" src="unicode/Ã¥.png" alt="n">
+<img id="uni" src="unicode/å.png" alt="n">
 <img id="ss" srcset="img.png 1x, img.png 2x" alt="x">
 <iframe id="fru" src="inner.html"></iframe>
 <a id="relimg" href="./img.png">m</a>
