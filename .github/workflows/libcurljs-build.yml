@@ -18,21 +18,21 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
         with:
           ref: libcurljs-fork
-      - name: Install emsdk
+      # apt emscripten, matching upstream ading2210/libcurl.js CI
+      # (build.yaml): emsdk latest (7.0.0) removed the allocate and
+      # ALLOC_NORMAL runtime methods the 0.7.5 build exports.
+      - name: Install emscripten
         run: |
-          git clone --depth 1 https://github.com/emscripten-core/emsdk.git /tmp/emsdk
-          cd /tmp/emsdk
-          ./emsdk install latest
-          ./emsdk activate latest
+          sudo apt-get update
+          sudo apt-get install -y make cmake emscripten autoconf automake libtool pkg-config wget xxd
       - name: Build dependencies and libcurl.js (release + single file)
         run: |
-          source /tmp/emsdk/emsdk_env.sh
           cd vendor/libcurljs/client
           # push_files-created blobs are mode 100644; restore the exec bit the
           # vendored scripts need (all_deps.sh execs tools/*.sh, build.sh re-execs itself)
