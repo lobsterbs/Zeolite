@@ -1151,3 +1151,17 @@ deterministic; only its firing is intermittent. Tracked in #514.
   steps 16 and 17 green). This docs-only commit is the recorded bounded
   retrigger per the operational notes; the replay-spool verdict rides
   the next checkpoint.
+
+## Run 43012244273 (head 12b69ed9, the #514 fixture mojibake fix)
+
+- browser red at step 18 Torture with the documented redirect-probe first
+  victim ("proxied redirect probe failed on code 301: fetch never settled")
+  followed by the goto-timeout cascade (redirect chains, unicode routing,
+  query/path edges, torture page); rust/wasm/app/compat green.
+- The img#uni direct-oracle failure is ABSENT from this run: the fixture
+  mojibake repair (c3 83 c2 a5 -> c3 a5 in the img#uni src) is verified
+  locally on the sprite against the same bytes at 20 passed, 0 failed
+  (torture summary clean across all six categories).
+- Engine bytes exonerated per the identical-bytes rotation record; this
+  docs-only commit is the recorded bounded retrigger per the operational
+  notes.
