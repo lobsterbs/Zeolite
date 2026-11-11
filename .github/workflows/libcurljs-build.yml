@@ -1,0 +1,58 @@
+name: libcurljs-fork-build
+
+# One-shot CI builder for the vendored libcurl.js streaming-upload fork
+# (#556). The sprite egress cannot reach storage.googleapis.com, so the
+# emsdk toolchain and the wasm build run here instead. The built bundle
+# is committed back to this branch under vendor/libcurljs/dist/.
+on:
+  push:
+    branches:
+      - libcurljs-fork
+    paths:
+      - "vendor/libcurljs/**"
+      - ".github/workflows/libcurljs-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: libcurljs-fork
+      - name: Install emsdk
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git /tmp/emsdk
+          cd /tmp/emsdk
+          ./emsdk install latest
+          ./emsdk activate latest
+      - name: Build dependencies and libcurl.js (release + single file)
+        run: |
+          source /tmp/emsdk/emsdk_env.sh
+          cd vendor/libcurljs/client
+          ./tools/all_deps.sh
+          ./build.sh all
+          ls -la out/
+      - name: Verify the streaming-upload seam exports survive
+        run: |
+          cd vendor/libcurljs/client/out
+          for fn in _http_get_info _http_set_options _http_set_cookie_jar _http_set_upload_stream _http_pause; do
+            grep -q "$fn" libcurl_full.mjs || { echo "::error::MISSING export $fn"; exit 1; }
+          done
+          echo "seam exports verified"
+          wc -c libcurl_full.mjs libcurl.mjs libcurl.wasm
+      - name: Commit the built bundle to the fork branch
+        run: |
+          git config user.name "zeolite-ci"
+          git config user.email "ci@zeolite.invalid"
+          mkdir -p vendor/libcurljs/dist
+          cp vendor/libcurljs/client/out/libcurl_full.mjs vendor/libcurljs/dist/
+          cp vendor/libcurljs/client/out/libcurl.mjs vendor/libcurljs/dist/
+          cp vendor/libcurljs/client/out/libcurl.wasm vendor/libcurljs/dist/
+          git add vendor/libcurljs/dist
+          git commit -m "build(libcurljs): wasm build of the streaming-upload fork (#556) [run ${GITHUB_RUN_ID}]"
+          git push origin HEAD:libcurljs-fork
