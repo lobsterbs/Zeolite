@@ -61,6 +61,7 @@ CURL* create_request(const char* url, int request_id, DataCallback data_callback
 
 void request_cleanup(CURL* http_handle) {
   struct RequestInfo *request_info = get_request_info(http_handle);
+  free(request_info->upload_buf);
   curl_easy_cleanup(http_handle);
   free(request_info);
 }
@@ -75,6 +76,10 @@ void finish_request(CURLMsg *curl_msg) {
   if (request_info->headers_list != NULL) {
     curl_slist_free_all(request_info->headers_list);
   }
+  /* #556 fork: release the streaming upload scratch buffer. */
+  free(request_info->upload_buf);
+  request_info->upload_buf = NULL;
+  request_info->upload_buf_size = 0;
   (*request_info->end_callback)(request_info->request_id, error);
 }
 

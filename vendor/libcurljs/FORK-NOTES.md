@@ -1,9 +1,15 @@
 # libcurl.js fork: streaming request bodies (#556)
 
-This is a fork of ading2210/libcurl.js (0.7.5, AGPL-3.0, matching the
-version Zeolite vendors) carrying one change: a streaming upload path so
-large request bodies no longer have to exist as ONE contiguous buffer in
-wasm memory.
+This is a fork of ading2210/libcurl.js (0.7.4, commit a641cdd, AGPL-3.0)
+carrying one change: a streaming upload path so large request bodies no
+longer have to exist as ONE contiguous buffer in wasm memory.
+
+The base is 0.7.4, not 0.7.5: bisected via CI builds (2026-11-11), the
+pristine 0.7.5 dependency set (curl 8.23.0-patched) stalls every response
+through the libcurl-transport wrapper (transport init ok, upstream request
+logged, no response ever arrives), while the 0.7.4-era pins (curl
+8.17.0-patched) complete normally. The seam files are byte-identical
+between the two bases, so the rebase is exact.
 
 ## Why
 
