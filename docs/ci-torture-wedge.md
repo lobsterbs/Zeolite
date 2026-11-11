@@ -1,4 +1,4 @@
-# CI browser torture cascade (intermittent transport death)
+successfully downloaded text file (SHA: 34b9a99104426da8a8222ac0c00ff388d5438a70)# CI browser torture cascade (intermittent transport death)
 
 Correction of the record (2026-10-30): the first red runs were triaged
 as a position-random runner wedge. That was wrong. In every red run
@@ -1165,3 +1165,33 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - Engine bytes exonerated per the identical-bytes rotation record; this
   docs-only commit is the recorded bounded retrigger per the operational
   notes.
+
+## Runs 43014125752 + 43015137255 (heads a9cb0e54, 93996d12, the fixture-fix and CSP waves)
+
+- 43014125752 (a9cb0e54, the ledger retrigger of the 12b69ed9 fixture
+  fix): browser red on the MAIN e2e suite, 67 passed / 7 failed, the
+  documented 41607524709 signature class verbatim: the #545 worker
+  fetch initiator timeout first ("worker fetch initiator timeout"),
+  then the standard page.goto 30 s cascade (shared-worker relay, #453
+  identities, storage round-trip, jar-backed document.cookie,
+  Set-Cookie capture, cookieStore facade); rust/wasm/app/compat green.
+- 43015137255 (93996d12, the /cdn-cgi/ CSP namespace commit): the same
+  signature class, 63 passed / 11 failed: the #545 worker initiator
+  first, the shared-worker relay and #453 identity goto timeouts, the
+  jar cookie and Set-Cookie timeouts, the passthrough #96 HUNG marks
+  (range/cond/setcookie/cookie/stream/redir at 6000 ms, get/post/
+  abort ok), then IndexedDB, Cache API, serviceWorker.register #576
+  and the rewriter img/srcset group; rust/wasm/app/compat green.
+- The img#uni direct-oracle failure is ABSENT from both runs and the
+  torture battery was never reached in either (main-suite red skips
+  it): the fixture mojibake repair holds, and the img#uni strike
+  class that dominated 2026-11-07 through 2026-11-10 is retired as of
+  the 12b69ed9 fix.
+- Both heads differ only in bytes the failing checks never touch
+  (docs on a9cb0e54, the /cdn-cgi/ CSP namespace on 93996d12, whose
+  arms run on 127.0.0.1 fixture pages); the identical first victim on
+  both heads plus the rotation record above keeps engine bytes
+  exonerated.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin.
