@@ -13,9 +13,11 @@ struct RequestInfo {
   EndCallback end_callback;
   /* #556 fork: streaming upload state. upload_fn is a JS function
      pointer (an emscripten table index registered with addFunction)
-     with signature int read(char* buf, int max): it writes at most max
-     bytes into buf and returns the count, 0 for EOF, or -1 to pause
-     the transfer until the JS side resumes it via http_pause. */
+     with signature int read(char* buf, int max): the JS side sees buf
+     as a Uint8Array heap view, writes at most max bytes into it and
+     returns the count, 0 for EOF, -1 to pause the transfer (resumed
+     via http_pause), or -2 to abort it (CURLE_ABORTED_BY_CALLBACK,
+     never a truncated upload). */
   void* upload_fn;
   char* upload_buf;
   int upload_buf_size;
