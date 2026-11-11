@@ -1,5 +1,4 @@
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -79,56 +78,6 @@ void http_set_options(CURL* http_handle, const char* json_params, const char* bo
   }
 
   request_info->headers_list = headers_list;
-}
-
-/* #556 fork: streaming upload. Instead of one contiguous
-   CURLOPT_POSTFIELDS buffer, the JS side registers a read callback
-   (see types.h) and curl pulls chunks through upload_read_callback
-   while the transfer loop runs. The JS callback receives a Uint8Array
-   view of the scratch buffer (the JS side wraps bufPtr with
-   Module.HEAPU8.subarray, fresh per call). A -1 return pauses the
-   transfer (CURL_READFUNC_PAUSE) so the JS side can refill
-   asynchronously and resume it with http_pause; a -2 return aborts it
-   (CURL_READFUNC_ABORT) so a failed source surfaces as an error
-   instead of a silently truncated upload. This keeps the callback
-   synchronous and therefore works with the non-blocking multi loop
-   libcurl.js runs. */
-typedef int (*js_upload_read_fn)(char* buf, int max);
-
-static size_t upload_read_callback(char* buffer, size_t size, size_t nitems, void* arg) {
-  struct RequestInfo* request_info = (struct RequestInfo*) arg;
-  if (request_info->upload_fn == NULL || request_info->upload_buf == NULL) return 0;
-  size_t max_bytes = size * nitems;
-  if (max_bytes > (size_t) request_info->upload_buf_size)
-    max_bytes = (size_t) request_info->upload_buf_size;
-  if (max_bytes == 0) return 0;
-  int n = ((js_upload_read_fn) request_info->upload_fn)(request_info->upload_buf, (int) max_bytes);
-  if (n == -1) return (size_t) CURL_READFUNC_PAUSE;
-  if (n == -2) return (size_t) CURL_READFUNC_ABORT;
-  if (n <= 0) return 0;
-  if ((size_t) n > max_bytes) n = (int) max_bytes;
-  memcpy(buffer, request_info->upload_buf, (size_t) n);
-  return (size_t) n;
-}
-
-void http_set_upload_stream(CURL* http_handle, int js_fn, int chunk_size, double infilesize) {
-  struct RequestInfo* request_info = get_request_info(http_handle);
-  request_info->upload_fn = (void*) (intptr_t) js_fn;
-  if (request_info->upload_buf == NULL || request_info->upload_buf_size < chunk_size) {
-    free(request_info->upload_buf);
-    request_info->upload_buf = malloc(chunk_size);
-  }
-  request_info->upload_buf_size = chunk_size;
-  curl_easy_setopt(http_handle, CURLOPT_READFUNCTION, upload_read_callback);
-  curl_easy_setopt(http_handle, CURLOPT_READDATA, request_info);
-  curl_easy_setopt(http_handle, CURLOPT_UPLOAD, 1L);
-  /* #556 fork: a known upload length rides INFILESIZE (no chunked
-     framing); a negative value keeps the chunked INFILESIZE -1. */
-  curl_easy_setopt(http_handle, CURLOPT_INFILESIZE_LARGE, (curl_off_t) infilesize);
-}
-
-void http_pause(CURL* http_handle, int bits) {
-  curl_easy_pause(http_handle, bits);
 }
 
 void http_set_cookie_jar(CURL* http_handle, const char* filename) {
