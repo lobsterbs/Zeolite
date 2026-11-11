@@ -1,3 +1,4 @@
+
 /* Zeolite DevTools page: network inspector + per-request detail view +
    opt-in rewrite tracing + diagnostics feed (1.2 Halide). This page is
    served by the engine origin, so it is controlled by the same SW and
@@ -257,9 +258,27 @@ function post(msg: unknown, onReply: (data: any) => void): boolean {
   return true;
 }
 
+/* #648: a redundant or never-activated registration leaves this page
+   controller-less forever (the byte-churn redeploy class: the served
+   sw.js changes bytes, the old worker goes redundant, and nothing
+   re-registers it). Re-register the sibling sw.js so the update check
+   heals it; bounded to one attempt per 10s, failures stay silent (the
+   status line keeps the honest waiting text). */
+let lastRegAttempt = 0;
+function ensureController(): void {
+  const sw = navigator.serviceWorker;
+  if (!sw) return;
+  const now = Date.now();
+  if (now - lastRegAttempt < 10000) return;
+  lastRegAttempt = now;
+  sw.register(new URL("sw.js", location.href).href, { scope: "/", type: "module" })
+    .catch(() => undefined);
+}
+
 function tick(): void {
   if (!navigator.serviceWorker?.controller) {
     paused.textContent = "waiting for the service worker... (open a proxied page first)";
+    ensureController();
     return;
   }
   paused.textContent = "";
