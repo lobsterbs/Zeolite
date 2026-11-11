@@ -45,7 +45,7 @@ vi.mock("../adblockwasm", () => ({
 
 vi.mock("@ghostery/adblocker", () => ({
   FiltersEngine: {
-    fromPrebuiltAdsAndTracking: async () => {
+    parse: async () => {
       cap.tsLoads += 1;
       return {
         getFilters: () => ({ networkFilters: new Array(1200), cosmeticFilters: [] }),
@@ -65,9 +65,6 @@ import {
   ghosteryLoadInProgress,
   wasmAdblockEngine,
 } from "../ghostery";
-import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 
 interface Fresh {
   configureGhostery: typeof import("../ghostery").configureGhostery;
@@ -226,21 +223,32 @@ describe("ghostery wasm arm preference (#613)", () => {
     expect(cap.tsLoads).toBe(2);
   });
 
-  it("the wasm list URL set mirrors the installed dependency's adsAndTrackingLists", () => {
-    /* A dependency bump that changes the list set must fail here
-       instead of silently shipping a weaker engine. */
-    const require = createRequire(import.meta.url);
-    const pkg = require.resolve("@ghostery/adblocker/package.json");
-    const text = readFileSync(join(dirname(pkg), "dist/commonjs/fetch.js"), "utf8");
-    const ads = text.slice(text.indexOf("exports.adsLists = ["), text.indexOf("exports.adsAndTrackingLists = ["));
-    const tracking = text.slice(text.indexOf("exports.adsAndTrackingLists = ["), text.indexOf("exports.fullLists = ["));
-    const block = ads + tracking;
-    const pieces = block.split(String.fromCharCode(96)).filter((s) => s.startsWith("${" + "PREFIX}/"));
-    const prefix = "https://raw.githubusercontent.com/ghostery/adblocker/master/packages/adblocker/assets";
-    const tok = "${" + "PREFIX" + "}";
-    const urls = pieces.map((s) => prefix + s.slice(tok.length));
-    expect(urls.length).toBeGreaterThan(10);
-    expect(urls.length).toBe(WASM_LIST_URLS.length);
-    expect([...WASM_LIST_URLS]).toEqual(urls);
+  it("the wasm list URL set is the uBlock Origin default set", () => {
+    /* uBlock Origin lists only: the uAssets uBO files plus the
+       EasyList and EasyPrivacy subscriptions uBO enables by default.
+       No other publisher (Peter Lowe or otherwise) may creep back
+       in; a set change fails here. */
+    expect(WASM_LIST_URLS.length).toBe(13);
+    for (const u of WASM_LIST_URLS) {
+      expect(u.endsWith(".txt")).toBe(true);
+      expect(u.includes("peter-lowe")).toBe(false);
+    }
+    for (const f of [
+      "easylist.txt",
+      "easyprivacy.txt",
+      "filters.txt",
+      "filters-2020.txt",
+      "filters-2021.txt",
+      "filters-2022.txt",
+      "filters-2023.txt",
+      "filters-2024.txt",
+      "badware.txt",
+      "privacy.txt",
+      "quick-fixes.txt",
+      "resource-abuse.txt",
+      "unbreak.txt",
+    ]) {
+      expect(WASM_LIST_URLS.some((u) => u.endsWith("/" + f))).toBe(true);
+    }
   });
 });

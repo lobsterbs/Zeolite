@@ -9,7 +9,7 @@ import requestSrc from "../request.ts?raw";
 
 vi.mock("@ghostery/adblocker", () => ({
   FiltersEngine: {
-    fromPrebuiltAdsAndTracking: async () => {
+    parse: async () => {
       throw new Error("list host down");
     },
   },

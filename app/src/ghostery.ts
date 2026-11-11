@@ -1,4 +1,4 @@
-/* Ghostery's EasyList-compatible network filter engine. The matcher
+/* The uBlock Origin default filter set network engine. The matcher
    lives only in service-worker memory: proxied documents share the
    app origin today, so persisted matcher data would be writable by
    untrusted page scripts. List downloads use the engine's
@@ -31,7 +31,7 @@ import { loadInflight } from "./loadstate";
 import { activeStreams, firstStreamSettled } from "./streams-alive";
 
 const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
-/* #500: sanity floor for a parsed ads+tracking engine. Any single
+/* #500: sanity floor for a parsed filter engine. Any single
    real list parses to tens of thousands of network filters; a junk
    or truncated body parses to a handful. Below this the matcher
    counts as empty or partial and is never installed. */
@@ -53,16 +53,16 @@ declare const __ZL_LISTS_ORIGIN__: string;
 const LISTS_ORIGIN = __ZL_LISTS_ORIGIN__;
 const LISTS_PATH = "/ghostery/adblocker/master/packages/adblocker/assets/";
 
-/* #613: the raw-list URL set for the Rust/WASM arm, mirroring the
-   @ghostery/adblocker 2.20.1 adsAndTrackingLists the TS fallback
-   downloads through this same guarded fetcher. Kept as a literal so
-   the module never reaches into the dependency's dist internals;
-   the ghostery-wasm-arm test pins set equality against the installed
-   package, so a dependency bump that changes the set fails the
-   suite instead of silently shipping a weaker engine. */
+/* #613: the raw-list URL set for BOTH arms: the Rust/WASM engine
+   downloads these through the guarded fetcher and the TS fallback
+   parses the same bodies. The set is uBlock Origin's default
+   subscription list: the uAssets uBO files plus the EasyList and
+   EasyPrivacy subscriptions uBO enables out of the box; no other
+   publisher ships. Kept as a literal so the module never reaches
+   into the dependency's dist internals; the ghostery-wasm-arm test
+   pins the set. */
 export const WASM_LIST_URLS: readonly string[] = [
   LISTS_ORIGIN + LISTS_PATH + "easylist/easylist.txt",
-  LISTS_ORIGIN + LISTS_PATH + "peter-lowe/serverlist.txt",
   LISTS_ORIGIN + LISTS_PATH + "ublock-origin/badware.txt",
   LISTS_ORIGIN + LISTS_PATH + "ublock-origin/filters-2020.txt",
   LISTS_ORIGIN + LISTS_PATH + "ublock-origin/filters-2021.txt",
@@ -220,14 +220,20 @@ async function loadEngine(force = false): Promise<void> {
         }
       }
       if (!installed) {
-        const fresh = await FiltersEngine.fromPrebuiltAdsAndTracking(fetchLists!);
+        /* The TS fallback parses the same list bodies the wasm arm
+           mirrors; the dependency's own prebuilt set is deliberately
+           not used, so both arms always decide from one list set. */
+        const bodies = await Promise.all(WASM_LIST_URLS.map(fetchListsText));
+        const fresh = await FiltersEngine.parse(bodies.join("\n"), {
+          enableCompression: false,
+        });
         /* #500: a list host can answer 200 with a junk or truncated
            body (captive portal, HTML error page) and the parser turns
            that into an engine with zero or a handful of network
            filters. No fetch failed, so the #381 load-failure row
            never fires, and the matcher runs with a near-zero block
            rate - the exact live symptom reported from relay-only
-           deployments. The ads+tracking set parses to tens of
+           deployments. The uBO default set parses to tens of
            thousands of network filters; anything under the sanity
            floor is junk, not a partial real load. One DIAG names the
            condition and junk never installs: the previously loaded
@@ -359,6 +365,14 @@ export function configureGhostery(fetcher: typeof fetch): void {
     }
     return response;
   };
+}
+
+/** Test and diagnostics seam: the guarded list fetcher (#381). The
+    URL and method guard lives in the wrapper configureGhostery
+    installs, so tests exercise the exact production surface. */
+export function ghosteryListFetcher(): typeof fetch {
+  if (!fetchLists) throw new Error("configureGhostery has not run");
+  return fetchLists;
 }
 
 /** The loaded matcher, or null while the list load is pending/failed.
