@@ -343,11 +343,29 @@ export function cspGate(
     return { blocked: false };
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return { blocked: false };
+  /* Wave-55 parity (#414): Cloudflare's /cdn-cgi/ edge namespace
+     (challenge-platform orchestrate, assets) serves verbatim by
+     transport invariant (transit.ts CDN_CGI_NATIVE /
+     CF_CHALLENGE_VERBATIM). This gate runs pre-transport, so without
+     the exemption it would block the exact scripts the verbatim
+     invariant exists to deliver: a direct browser runs the challenge
+     platform because Cloudflare coordinates the page's policy with
+     it, and the engine's parsed view of that policy must never gate
+     the namespace (live: perplexity.ai challenge orchestrate blocked
+     by default-src, the page died white). */
+  if (u.pathname.startsWith("/cdn-cgi/")) return { blocked: false };
   const explicit = plan.sources.get(directive);
   if (explicit) {
     for (const s of explicit) if (sourceMatches(s, u, plan)) return { blocked: false, directive };
     return { blocked: true, directive };
   }
+  /* CSP3: an explicit directive replaces default-src for its request
+     class. A directive marked unsupported (nonce/hash/strict-dynamic)
+     is present but unverifiable at this seam, so the degrade must be
+     a false allow: falling through to default-src here was a false
+     block for every nonce-gated document (challenge pages carry
+     script-src 'nonce-...'; the fetch seam cannot see the nonce). */
+  if (plan.unsupported.includes(directive)) return { blocked: false, directive };
   if (plan.defaultSrc) {
     for (const s of plan.defaultSrc) if (sourceMatches(s, u, plan)) return { blocked: false, directive: "default-src" };
     return { blocked: true, directive: "default-src" };
@@ -369,3 +387,4 @@ export function engineCspMarker(plan: CspEnginePlan): string | null {
   if (plan.unsupported.length) segs.push("engine-unsupported " + plan.unsupported.join(","));
   return segs.length ? segs.join("; ") : null;
 }
+
