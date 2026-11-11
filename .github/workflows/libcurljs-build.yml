@@ -34,7 +34,10 @@ jobs:
         run: |
           source /tmp/emsdk/emsdk_env.sh
           cd vendor/libcurljs/client
-          ./tools/all_deps.sh
+          # push_files-created blobs are mode 100644; restore the exec bit the
+          # vendored scripts need (all_deps.sh execs tools/*.sh, build.sh re-execs itself)
+          chmod +x build.sh tools/*.sh
+          bash tools/all_deps.sh
           ./build.sh all
           ls -la out/
       - name: Verify the streaming-upload seam exports survive
