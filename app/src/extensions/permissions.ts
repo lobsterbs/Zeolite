@@ -18,8 +18,8 @@ export const KNOWN_PERMISSIONS: ReadonlySet<string> = new Set([
   "nativeMessaging", "geolocation", "clipboardRead", "clipboardWrite",
   "find", "browserSettings", "browsingData", "identity", "themes",
   "topSites", "webNavigation", "devtools", "dns", "pkcs11", "proxy",
-  /* #521: DNR permission family (feedback is accepted at install but
-     getMatchedRules/onRuleMatchedDebug are absent, compat.ts). */
+  /* #521: DNR permission family (feedback gates the
+     getMatchedRules/onRuleMatchedDebug debug surface, runtime.ts). */
   "declarativeNetRequest", "declarativeNetRequestWithHostAccess",
   "declarativeNetRequestFeedback",
   "sessions", "sidebarAction", "tabHide", "userScripts",

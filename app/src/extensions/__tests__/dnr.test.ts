@@ -82,20 +82,29 @@ afterEach(() => {
 });
 
 describe("rule validation (#521)", () => {
-  it("accepts a well-formed redirect, refuses upgradeScheme and hostile redirect shapes (#521 slice 2)", () => {
+  it("accepts a well-formed redirect and hostile redirect shapes are refused (#521 slice 2)", () => {
     const v = validateRule({ id: 1, condition: { urlFilter: "x" }, action: { type: "redirect", redirect: { url: "https://clean.example/x" } } });
     expect(v.actionType).toBe("redirect");
     expect(v.redirectUrl).toBe("https://clean.example/x");
     expect(() => validateRule({ id: 1, condition: { urlFilter: "x" }, action: { type: "redirect", redirect: {} } })).toThrow(
       /redirect'\.url/,
     );
-    expect(() => validateRule({ id: 1, condition: { urlFilter: "x" }, action: { type: "upgradeScheme" } })).toThrow(
-      /scheme-upgrade seam/,
-    );
   });
 
-  it("rejects allowAllRequests (no per-document rule state)", () => {
-    expect(() => validateRule({ id: 1, condition: {}, action: { type: "allowAllRequests" } })).toThrow(/per-document rule state/);
+  it("accepts upgradeScheme and allowAllRequests without payloads (#521 slice 3)", () => {
+    const up = validateRule({ id: 1, priority: 2, condition: { urlFilter: "x" }, action: { type: "upgradeScheme" } });
+    expect(up.actionType).toBe("upgradeScheme");
+    expect((up.raw as { priority: number }).priority).toBe(2);
+    expect(validateRule({ id: 2, condition: {}, action: { type: "allowAllRequests" } }).actionType).toBe("allowAllRequests");
+  });
+
+  it("refuses payloads on upgradeScheme and allowAllRequests (#521 slice 3)", () => {
+    expect(() =>
+      validateRule({ id: 1, condition: {}, action: { type: "upgradeScheme", redirect: { url: "https://x.test/" } } }),
+    ).toThrow(/does not take a redirect/);
+    expect(() =>
+      validateRule({ id: 2, condition: {}, action: { type: "allowAllRequests", redirect: { url: "https://x.test/" } } }),
+    ).toThrow(/does not take a redirect/);
   });
 
   it("rejects bad ids, priorities and conditions", () => {
