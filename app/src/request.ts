@@ -3741,6 +3741,40 @@ export function handleFetch(e: FetchEvent): void {
         target = arFixed;
       }
 
+      /* #634: the token exchange must present the SAME redirect_uri
+         the #431 authorize seam wrote (RFC 6749 4.1.3; AAD enforces
+         it with AADSTS50011). MSAL sends it in the urlencoded POST
+         body, so the body value is rewritten here with the identical
+         match set and the identical honest-fallback rule. A body that
+         never reads or never decodes passes through unchanged. */
+      let tokenBodyOverride: string | undefined;
+      if (
+        e.request.method === "POST" &&
+        isAuthorizeTokenEndpoint(target) &&
+        (e.request.headers.get("content-type") ?? "").includes("application/x-www-form-urlencoded")
+      ) {
+        try {
+          const raw = await e.request.clone().text();
+          const fixed = virtualAuthorizeTokenBody(raw, e.request.referrer, self.location.origin, initiator);
+          if (fixed !== raw) {
+            tokenBodyOverride = fixed;
+            const tbid = DIAG.trace(e.resultingClientId || e.clientId);
+            DIAG.emit({
+              traceId: tbid,
+              requestId: tbid,
+              category: "REWRITE",
+              severity: "info",
+              stage: "REQUEST_INTERCEPTED",
+              message: "token redirect_uri virtualized to the page origin",
+              url: target,
+            });
+          }
+        } catch {
+          /* An unreadable body passes through unchanged (no-cors and
+             opaque shapes); the honest-fallback rule holds. */
+        }
+      }
+
       /* #565: the Disqus Universal Embed Code loader names the
          page in t_u= (t_i=) from the document URL (LegacyUnforgeable,
          the #112 co= class): on a virtualized page the parameter
@@ -4750,9 +4784,16 @@ export function handleFetch(e: FetchEvent): void {
              one-shot and surfaces with a mapped Location (#556). */
           let hopUrl = target;
           let hopMethod = e.request.method;
+          /* #634: a rewritten token body replaces the stream body; the
+             stale content-length the page announced no longer matches,
+             and the transport derives the length from the body it is
+             handed. */
           let hopBody: BodyInit | undefined | null = ["GET", "HEAD"].includes(e.request.method)
             ? undefined
-            : e.request.body;
+            : tokenBodyOverride !== undefined
+              ? tokenBodyOverride
+              : e.request.body;
+          if (tokenBodyOverride !== undefined) sendHeaders.delete("content-length");
           /* #556 relay follow-up: when the body spooled, the File IS
              the chain body and the spool file must outlive the loop
              (307/308 replay it on every hop). Every chain exit below
@@ -6514,6 +6555,64 @@ export function virtualAuthorizeRedirect(target: string, referrer: string, engin
   return u.href.replace(
     m[0],
     m[1] + "redirect_uri=" + encodeURIComponent(parent + du.pathname + (du.search || "")),
+  );
+}
+
+/** #634: the OAuth2 token exchange presents the redirect_uri the
+    authorize step used (RFC 6749 4.1.3: they MUST be identical, and
+    AAD enforces it with AADSTS50011). The #431 seam rewrites the
+    authorize request's redirect_uri, so the token request's body
+    value must be rewritten identically or every login the seam
+    touches dies at the exchange: AAD binds the code to the page
+    origin at authorize, then the page's MSAL presents the engine
+    origin in the urlencoded POST body and is refused. Same match
+    set, same honest-fallback rule: only a body redirect_uri whose
+    origin names THIS deployment is ours to fix, and a value that
+    never decodes to a page origin passes through unchanged. */
+export function virtualAuthorizeTokenBody(body: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  const m = /(^|&)redirect_uri=([^&]*)/.exec(body);
+  if (!m || !m[2]) return body;
+  let dec: string;
+  try {
+    dec = decodeURIComponent(m[2].replace(/\+/g, "%20"));
+  } catch {
+    return body;
+  }
+  let du: URL;
+  let eo: URL;
+  try {
+    du = new URL(dec);
+    eo = new URL(engineOrigin);
+  } catch {
+    return body;
+  }
+  if (du.origin !== eo.origin) return body;
+  const parent = referrerOrigin(referrer, initiator);
+  if (!parent) return body;
+  const fixed = encodeURIComponent(parent + du.pathname + (du.search || ""));
+  return body.slice(0, m.index) + m[1] + "redirect_uri=" + fixed + body.slice(m.index + m[0].length);
+}
+
+/** The token-endpoint shape the #634 body seam serves: the same
+    Microsoft host set as the #431 authorize seam, the v2 token path
+    and MSA's legacy oauth20_token.srf form. */
+export function isAuthorizeTokenEndpoint(target: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return false;
+  }
+  if (!/^https?:$/.test(u.protocol)) return false;
+  if (
+    u.host !== "login.microsoftonline.com" &&
+    u.host !== "login.microsoft.com" &&
+    u.host !== "login.live.com"
+  )
+    return false;
+  return (
+    (u.pathname.includes("/oauth2/") && u.pathname.endsWith("/token")) ||
+    u.pathname.endsWith("/oauth20_token.srf")
   );
 }
 
