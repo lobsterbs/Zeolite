@@ -2582,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-core"
-version = "3.0.1"
+version = "3.4.2"
 dependencies = [
  "bytes",
  "thiserror 2.0.21",
@@ -2590,7 +2590,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-extensions"
-version = "3.0.1"
+version = "3.4.2"
 dependencies = [
  "ed25519-dalek",
  "pbkdf2",
@@ -2637,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "zeolite-adblock"
-version = "3.0.1"
+version = "3.4.2"
 dependencies = [
  "adblock",
  "serde",
@@ -2647,15 +2647,15 @@ dependencies = [
 
 [[package]]
 name = "zeolite-config"
-version = "3.0.1"
+version = "3.4.2"
 
 [[package]]
 name = "zeolite-cookies"
-version = "3.0.1"
+version = "3.4.2"
 
 [[package]]
 name = "zeolite-cookies-wasm"
-version = "3.0.1"
+version = "3.4.2"
 dependencies = [
  "js-sys",
  "serde_json",
@@ -2665,11 +2665,11 @@ dependencies = [
 
 [[package]]
 name = "zeolite-csp"
-version = "3.0.1"
+version = "3.4.2"
 
 [[package]]
 name = "zeolite-rewriter"
-version = "3.0.1"
+version = "3.4.2"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
@@ -2682,7 +2682,7 @@ dependencies = [
 
 [[package]]
 name = "zeolite-seam-wasm"
-version = "3.0.1"
+version = "3.4.2"
 dependencies = [
  "wasm-bindgen",
  "zeolite-config",
@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "zeolite-server"
-version = "3.0.1"
+version = "3.4.2"
 dependencies = [
  "axum",
  "bytes",
@@ -2713,7 +2713,7 @@ dependencies = [
 
 [[package]]
 name = "zeolite-wisp"
-version = "3.0.1"
+version = "3.4.2"
 dependencies = [
  "bytes",
  "wasm-bindgen",
