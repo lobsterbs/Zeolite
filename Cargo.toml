@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/adblock", "crates/config", "crates/cookies", "crates/cookies-wasm", "crates/csp", "crates/seam-wasm", "crates/rewriter", "crates/wisp-wasm", "crates/zeolite-server", "crates/wisp-core", "crates/wisp-extensions"]
 
 [workspace.package]
-version = "3.0.1"
+version = "3.4.2"
 edition = "2021"
 license = "AGPL-3.0-only"
 
