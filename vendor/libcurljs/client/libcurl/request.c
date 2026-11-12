@@ -39,6 +39,12 @@ CURL* create_request(const char* url, int request_id, DataCallback data_callback
   request_info->end_callback = end_callback;
   request_info->data_callback = data_callback;
   request_info->headers_callback = headers_callback;
+  /* #556 fix: the upload fields are read (and freed) on EVERY request
+     path, not only streaming uploads; leave them uninitialized and
+     request_cleanup frees a wild pointer (the SW-scope SIGSEGV). */
+  request_info->upload_fn = NULL;
+  request_info->upload_buf = NULL;
+  request_info->upload_buf_size = 0;
 
   curl_easy_setopt(http_handle, CURLOPT_PRIVATE, request_info);
   curl_easy_setopt(http_handle, CURLOPT_URL, url);
