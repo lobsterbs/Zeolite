@@ -1,0 +1,100 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p zeolite-server --locked
+      - name: Package
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          DIR="zeolite-server-${TAG}-x86_64-linux"
+          mkdir -p "${DIR}"
+          cp target/release/zeolite-server "${DIR}/"
+          cp README.md "${DIR}/" 2>/dev/null || true
+          tar -czf "${DIR}.tar.gz" "${DIR}"
+          sha256sum "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zeolite-server-linux
+          path: |
+            zeolite-server-*-x86_64-linux.tar.gz
+            zeolite-server-*-x86_64-linux.tar.gz.sha256
+
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack (pinned prebuilt)
+        run: |
+          curl -sSfL -o /tmp/wasm-pack.tar.gz https://github.com/rustwasm/wasm-pack/releases/download/v0.13.1/wasm-pack-v0.13.1-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf /tmp/wasm-pack.tar.gz -C /tmp
+          sudo mv /tmp/wasm-pack-v0.13.1-x86_64-unknown-linux-musl/wasm-pack /usr/local/bin/wasm-pack
+      - name: Build wasm crates
+        run: |
+          build() {
+            wasm-pack build "$1" --target web --release --out-name "$2"
+            mkdir -p "app/src/$2"
+            cp "$1/pkg/$2"* "app/src/$2/"
+          }
+          build crates/rewriter rewriter_wasm
+          build crates/wisp-wasm wisp_wasm
+          build crates/seam-wasm seam_wasm
+          build crates/adblock adblock_wasm
+          build crates/cookies-wasm cookies_wasm
+      - name: Vendor transports
+        run: |
+          npm install --prefix .vendor @mercuryworkshop/libcurl-transport@2.0.6
+          mkdir -p app/public/libcurl
+          cp -r .vendor/node_modules/@mercuryworkshop/libcurl-transport/dist/. app/public/libcurl/
+          npm install --prefix .vendor @mercuryworkshop/epoxy-tls@2.1.20-1
+          mkdir -p app/public/epoxy
+          cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/full/epoxy.js app/public/epoxy/epoxy.js
+          cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/full/epoxy.wasm app/public/epoxy/epoxy.wasm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build app bundle
+        env:
+          VITE_ZEOLITE_BUILD_ID: ${{ github.run_id }}
+        run: |
+          cd app && npm install && npm run build
+          test -f dist/sw.js
+      - name: Package
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          zip -qr "zeolite-engine-${TAG}-dist.zip" app/dist
+          sha256sum "zeolite-engine-${TAG}-dist.zip" > "zeolite-engine-${TAG}-dist.zip.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zeolite-engine-dist
+          path: |
+            zeolite-engine-*-dist.zip
+            zeolite-engine-*-dist.zip.sha256
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [server, bundle]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "${TAG}" --title "${TAG}" --generate-notes
+          gh release upload "${TAG}" artifacts/zeolite-server-linux/* artifacts/zeolite-engine-dist/*
