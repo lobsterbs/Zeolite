@@ -31,9 +31,13 @@
    across engine restarts); guest fetch cookies ride the
    default-profile jar (the guest realm is not a controlled client);
    Cache API Vary handling is not modeled (entries key on the exact
-   URL); clients.matchAll()/get() enumerate the engine's live
-   virtual-client contexts (#596; worker kinds approximate the request
-   destination); clients.openWindow and notifications stay unsupported;
+   URL); clients.matchAll() answers [] unless includeUncontrolled is
+   set (the engine tracks no control relationship for guest realms, so
+   the native default is the honest empty list) and enumerates the
+   engine's live virtual-client contexts with includeUncontrolled:true
+   (#596; worker kinds approximate the request destination);
+   clients.get() resolves a snapshot entry by id;
+   clients.openWindow and notifications stay unsupported;
    guest postMessage reaches the kernel listener only (no delivery
    surface into virtual pages in this wave); XMLHttpRequest,
    WebSocket, importScripts and indexedDB stay shadowed; controllerchange
@@ -288,7 +292,7 @@ export function guestHarness(scope: string, scriptURL: string): string {
     'delete:function(name){return caCall("deleteCache",{name:String(name)}).then(function(v){return !!v;});},' +
     'match:function(req){var u=reqUrl(req);if(!u)return Promise.resolve(undefined);return caCall("storeMatch",{url:u}).then(function(hit){return hit?mkResp(hit):undefined;});}});' +
     'def("clients",{claim:function(){return Promise.resolve();},' +
-    'matchAll:function(o){var t=((o&&o.type)||"window");return clCall().then(function(list){var out=(list||[]).map(function(c){return {id:c.id,url:c.url,frameType:(c.kind==="worker"||c.kind==="sharedworker")?"none":"top-level",type:c.kind};});return out.filter(function(c){return (t==="all")?true:(c.type===t);});});},' +
+    'matchAll:function(o){var t=((o&&o.type)||"window");if(!(o&&o.includeUncontrolled))return Promise.resolve([]);return clCall().then(function(list){var out=(list||[]).map(function(c){return {id:c.id,url:c.url,frameType:(c.kind==="worker"||c.kind==="sharedworker")?"none":"top-level",type:c.kind};});return out.filter(function(c){return (t==="all")?true:(c.type===t);});});},' +
     'get:function(id){return clCall().then(function(list){var hit=(list||[]).filter(function(c){return c.id===id;})[0];return hit?{id:hit.id,url:hit.url,frameType:(hit.kind==="worker"||hit.kind==="sharedworker")?"none":"top-level",type:hit.kind}:undefined;});},' +
     'openWindow:function(){return Promise.reject(new Error("clients.openWindow is unsupported in the guest harness"));}});' +
     "var R={scope:ZL.scope,scriptURL:ZL.scriptURL,updateViaCache:\"none\",installing:null,waiting:null," +

@@ -120,7 +120,7 @@ supported, kept honest.
 | controller / controllerchange | N | The real controller is the engine worker. A virtual claim would mislead page code into trusting a controller that does not exist. |
 | page to worker messaging | S2 | A MessageChannel relay to the sandbox. Without executed code there is no receiver, so S1 ships no fake message events. |
 | fetch event routing | S2 | Longest-prefix match over (site id, scope) inside the sandbox request path; a virtual fetch handler sees only requests of its own site. |
-| install / activate / skipWaiting / clients | S2 | Emulated with hard budgets: waitUntil is bounded, clients.claim reaches only pages of its own site, clients.matchAll()/get() enumerate the engine's live virtual contexts (#596). |
+| install / activate / skipWaiting / clients | S2 | Emulated with hard budgets: waitUntil is bounded, clients.claim reaches only pages of its own site, clients.matchAll() answers [] unless includeUncontrolled is set (the engine tracks no control relationship for guest realms) and enumerates the engine's live virtual contexts with it; clients.get() resolves a snapshot entry (#596). |
 | Cache API (caches) | S2 | Origin-scoped and quota-bounded, shared by registrations on that virtual origin, separate from the engine page cache. |
 | push / BackgroundSync / PeriodicSync | N | Requires real browser infrastructure the engine cannot emulate honestly. |
 
@@ -327,9 +327,12 @@ over getter-only accessors like a real Worker realm".
   bridge; identical bytes answer no-change, changed bytes resolve
   the caller and replace the realm (terminate + spawn over the
   same record) with the site caches preserved.
-- clients (#596): claim() resolves, matchAll()/get() enumerate the
-  engine's live virtual-client contexts (id, url, frameType; worker
-  kinds approximate the request destination), openWindow() rejects.
+- clients (#596): claim() resolves, matchAll() answers [] unless
+  includeUncontrolled is set (native default; the engine tracks no
+  control relationship for guest realms) and enumerates the engine's
+  live virtual-client contexts with it (id, url, frameType; worker
+  kinds approximate the request destination), get() resolves a
+  snapshot entry by id, openWindow() rejects.
   registration.unregister() is truthful: it drives the kernel
   terminate arm and resolves true once the round-trip fired.
 
@@ -379,8 +382,9 @@ over getter-only accessors like a real Worker realm".
   fetch exceeds it and the engine path serves the request.
 - clients.openWindow() and notifications stay unsupported; guest
   postMessage reaches the kernel listener only; no delivery surface
-  into virtual pages. matchAll()/get() enumerate live contexts, with a
-  worker-kind approximation riding the request destination.
+  into virtual pages. matchAll() answers [] unless
+  includeUncontrolled is set and enumerates live contexts with it,
+  with a worker-kind approximation riding the request destination.
 - XMLHTTPRequest, WebSocket, importScripts and indexedDB stay
   shadowed; controllerchange and push are never dispatched.
 - A page fetch before the realm serves is plain engine traffic
