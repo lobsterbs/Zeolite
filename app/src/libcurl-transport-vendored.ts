@@ -1121,7 +1121,12 @@ export async function libcurlRequest(
   try {
     const headersObj: Record<string, string> = {};
     for (const [key, value] of headers) headersObj[key] = value;
-    payload = await session.fetch(remote.href, curlParams(remote, method, headersObj, body, signal));
+    /* #556: the fresh session must carry the streaming upload controller
+       too: POST is non-idempotent, so Blob uploads always ride this
+       path; dropping the controller would silently fall back to the
+       fork bundle Request.arrayBuffer() materialization, the
+       contiguous-wasm-buffer class the seam exists to avoid. */
+    payload = await session.fetch(remote.href, curlParams(remote, method, headersObj, body, signal, upload));
   } catch (err) {
     session.close_now();
     throw err;
