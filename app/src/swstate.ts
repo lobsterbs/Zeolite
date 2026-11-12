@@ -43,7 +43,7 @@ export function withBuildId(base: string, buildId: string | null | undefined): s
 }
 export const ZEOLITE_BUILD_ID =
   ((import.meta.env.VITE_ZEOLITE_BUILD_ID as string | undefined) || "").trim();
-export const ZEOLITE_VERSION = withBuildId("3.0.1 Diamond", ZEOLITE_BUILD_ID);
+export const ZEOLITE_VERSION = withBuildId("3.4.2 Ferrierite", ZEOLITE_BUILD_ID);
 
 /* ---- Per-client virtual contexts (issue #33) ------------------------ */
 

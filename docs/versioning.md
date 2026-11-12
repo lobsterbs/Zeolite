@@ -25,12 +25,12 @@ or **1.3 Carbide**.
   build: CI stamps `VITE_ZEOLITE_BUILD_ID` (the workflow run id,
   the same id the dist publish step writes into the "engine
   bundle: build <id>" commit) onto the bundle build step, so a
-  CI-built worker answers "3.0.1 Diamond (build <id>)" in zl:ping,
+  CI-built worker answers "3.4.2 Ferrierite (build <id>)" in zl:ping,
   the doctor KDL, the console banner and the zl:engineUpdate
   broadcast. Local and vitest builds stay bare: the build id is a
   build stamp, not a version bump, and never gates compatibility.
 
-Current release: **3.0.1 Diamond** (cargo `3.0.1`). The 2.x line opened a
+Current release: **3.4.2 Ferrierite** (cargo `3.4.2`). Ferrierite is the zeolite-mineral family name the rules give to further 3.x minors; 3.2 and 3.3 were never cut, so no substances were consumed between Natrolite and Ferrierite. The 2.x line opened a
 new substance family; the roadmap's 1.x -ide sequence is complete.
 2.1 Halogen's gates landed with the 2.0 version string still in the
 code; no 2.1 release was cut, the string moved at 2.2 Arsenide.
