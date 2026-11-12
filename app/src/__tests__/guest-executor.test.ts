@@ -361,13 +361,19 @@ describe("guest clients facade (#596)", () => {
     const guestPort = new FakePort();
     listeners["message"][0]({ data: { zl: "harnessPort" }, ports: [guestPort] });
     const clients = fakeSelf.clients as {
-      matchAll(o?: { type?: string }): Promise<unknown[]>;
+      matchAll(o?: { type?: string; includeUncontrolled?: boolean }): Promise<unknown[]>;
       get(id: string): Promise<unknown>;
     };
     const asks = () =>
       guestPort.sent.filter((m) => (m as { zl?: string; op?: string }).op === "matchAll") as Array<{ id: number }>;
+    /* Native default (includeUncontrolled:false) answers [] with no
+       kernel round-trip: the engine tracks no control relationship. */
+    expect(await clients.matchAll()).toEqual([]);
+    expect(asks().length).toBe(0);
+    expect(await clients.matchAll({ type: "window" })).toEqual([]);
+    expect(asks().length).toBe(0);
     /* window filter drops the worker-kind client; frameType maps by kind. */
-    const winP = clients.matchAll({ type: "window" });
+    const winP = clients.matchAll({ type: "window", includeUncontrolled: true });
     guestPort.deliver({
       zl: "guestClientsResult",
       id: asks()[asks().length - 1].id,
@@ -378,7 +384,7 @@ describe("guest clients facade (#596)", () => {
     });
     expect(await winP).toEqual([{ id: "c1", url: "https://a.example/", frameType: "top-level", type: "window" }]);
     /* all returns the worker-kind client with the honest none frameType. */
-    const allP = clients.matchAll({ type: "all" });
+    const allP = clients.matchAll({ type: "all", includeUncontrolled: true });
     guestPort.deliver({
       zl: "guestClientsResult",
       id: asks()[asks().length - 1].id,
