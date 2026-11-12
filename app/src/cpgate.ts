@@ -111,6 +111,13 @@ const HOST_PATHS = new Set([
      engine origin (LB embeds it hidden). Its own traffic is
      host-only (zl:guestHost port); the page runs no guest code. */
   "/guest-host.html",
+  /* #649: the split-origin deployment serves the inspector from the
+     engine bundle mount at /zlsw/devtools.html ("/devtools.html" is a
+     404 there). Same rationale as /zlsw-register: an engine-owned
+     page whose control traffic is host-only; without this entry the
+     fail-closed gate refused every zl:getNetLog/zl:doctor poll from
+     the page it exists to serve. */
+  "/zlsw/devtools.html",
 ]);
 
 /** True only when the sender is one of the engine's own host pages:
