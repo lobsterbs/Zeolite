@@ -43,6 +43,10 @@
      buffered direct oracle, exercising the spool write path in many
      chunks (and, once the forked artifact is vendored, the wasm read
      callback's pause/continue path).
+   - the fork streaming discriminator: a 20 MiB streamed body (over
+     the 8 MiB materialization bound the stock artifact cannot cross)
+     rides the wasm read callback in 64 KiB chunks, byte-identical
+     against the buffered direct oracle.
    - the relay arm (#556 follow-up): on a second engine instance
      with a default-relay policy.kdl and a harness crediting relay
      port, a spooled over-cap File body crosses to the embedder by
@@ -360,6 +364,24 @@ async function main() {
     return "streamed in 512 chunks; SHA-256 equal to the buffered direct oracle";
   });
 
+
+  /* ---- the fork streaming discriminator (wasm read callback) ---- */
+
+  await check("fork streaming: a 20 MiB streamed body over the 8 MiB materialization bound rides the wasm read callback byte-identical", async () => {
+    /* With the stock artifact this exact request cannot succeed: the
+       upload would need one contiguous wasm buffer and the bounded
+       copy refuses bodies over TRANSPORT_BODY_BOUND (8 MiB) with the
+       honest error. A pass therefore proves the forked artifact's
+       streaming upload seam served the body: spooled File (over the
+       tightened cap) rides as a Blob into the read callback in 64 KiB
+       chunks (the fork scratch size), hundreds of pause/continue
+       cycles, SHA-256 equal to the buffered direct oracle. */
+    const n = 20 * MI;
+    const direct = await probeDirect(307, "POST", n);
+    const proxied = JSON.parse(await evalIn(prox.frame, "fork streaming probe 307", probeJsStream("/api/redirbody/307", "POST", n, 64 * 1024), 180000));
+    compareEcho(direct, proxied, "307 fork streamed 20 MiB POST", "POST", n);
+    return "20 MiB streamed through the wasm read callback; SHA-256 equal to the buffered direct oracle";
+  });
   /* ---- the below-cap matrix at the default cap ---- */
 
   await check("below-cap matrix restored cap: the knob returns the default 32", async () => {

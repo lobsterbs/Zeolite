@@ -1997,7 +1997,18 @@ async fn tcp_relay_loop(
                             if let Ok(mut t) = la.lock() {
                                 *t = Instant::now();
                             }
-                            if client_flow && budget.grant_due() {
+                            /* #556: replenish the client's send window for
+                               v1 clients too. The initial CONTINUE grants
+                               every client a 128-frame send window; a v1
+                               client that honors it (libcurl.js) starved
+                               after INITIAL_BUFFER_SIZE frames because this
+                               grant was gated on client_flow, stalling any
+                               upload past ~8 MiB mid-stream (the fixture got
+                               7 MiB, then silence). v1 clients that ignore
+                               CONTINUE discard the packet, and the #183
+                               queue caps still bound memory, so granting is
+                               safe for both. */
+                            if budget.grant_due() {
                                 let _ = send_packet(
                                     ws_tx,
                                     &Packet::Continue {
@@ -3099,6 +3110,74 @@ mod tests {
         assert!(
             continues >= 2,
             "sustained upload never earned a window replenish ({continues} grants)"
+        );
+        relay.abort();
+        echo.abort();
+    }
+
+    /// #556: the SAME replenishment must reach v1 clients. A v1 client
+    /// that honors the initial 128-frame CONTINUE (libcurl.js) starved
+    /// after INITIAL_BUFFER_SIZE DATA frames: the grant below used to be
+    /// gated on client_flow, so uploads past ~8 MiB stalled mid-stream
+    /// with the window empty and the transfer paused forever.
+    #[tokio::test]
+    async fn tcp_relay_replenishes_client_window_v1() {
+        let lst = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = lst.local_addr().unwrap();
+        let echo = tokio::spawn(async move {
+            if let Ok((mut s, _)) = lst.accept().await {
+                let (mut r, mut w) = s.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            }
+        });
+        let sock = TcpStream::connect(addr).await.unwrap();
+        let (ws_tx, mut ws_rx) = mpsc::channel::<Message>(256);
+        let window = Arc::new(Window::default());
+        let la = Arc::new(Mutex::new(Instant::now()));
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(1024);
+        let budget = Arc::new(StreamBudget::new(Arc::new(AtomicU64::new(0))));
+        let stream_id = 6u32;
+        let w = window.clone();
+        let b = budget.clone();
+        let relay = tokio::spawn(async move {
+            let (rd, wr) = sock.into_split();
+            tcp_relay_loop(rd, wr, input_rx, &ws_tx, stream_id, &w, &b, false, &la).await;
+        });
+        for i in 0..200u8 {
+            input_tx.send(vec![i; 64]).await.unwrap();
+        }
+        let mut continues = 0usize;
+        let mut frames = 0usize;
+        while frames < 200 && continues < 2 {
+            let msg = tokio::time::timeout(Duration::from_secs(5), ws_rx.recv())
+                .await
+                .expect("timeout waiting for relay output")
+                .expect("ws channel closed");
+            let bin = match msg {
+                Message::Binary(b) => b,
+                other => panic!("expected binary, got {other:?}"),
+            };
+            let mut buf = BytesMut::from(&bin[..]);
+            let frame = Frame::decode(&mut buf).unwrap().unwrap();
+            match frame.parse_packet().unwrap() {
+                Packet::Continue {
+                    stream_id,
+                    buffer_remaining,
+                } => {
+                    assert_eq!(stream_id, 6);
+                    assert_eq!(buffer_remaining, wisp_core::handshake::INITIAL_BUFFER_SIZE);
+                    continues += 1;
+                }
+                Packet::Data { stream_id, payload } => {
+                    assert_eq!(stream_id, 6);
+                    frames += payload.len() / 64;
+                }
+                other => panic!("unexpected packet {other:?}"),
+            }
+        }
+        assert!(
+            continues >= 2,
+            "v1 sustained upload never earned a window replenish ({continues} grants)"
         );
         relay.abort();
         echo.abort();
