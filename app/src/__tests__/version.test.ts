@@ -12,30 +12,30 @@ import updatesSource from "../updates.ts?raw";
 
 describe("engine build id (#617)", () => {
   it("composes the build id suffix", () => {
-    expect(withBuildId("3.0.1 Diamond", "41706739889")).toBe(
-      "3.0.1 Diamond (build 41706739889)"
+    expect(withBuildId("3.4.2 Ferrierite", "41706739889")).toBe(
+      "3.4.2 Ferrierite (build 41706739889)"
     );
   });
 
   it("stays bare when the build id is absent or blank", () => {
-    expect(withBuildId("3.0.1 Diamond", undefined)).toBe("3.0.1 Diamond");
-    expect(withBuildId("3.0.1 Diamond", null)).toBe("3.0.1 Diamond");
-    expect(withBuildId("3.0.1 Diamond", "")).toBe("3.0.1 Diamond");
-    expect(withBuildId("3.0.1 Diamond", "   ")).toBe("3.0.1 Diamond");
+    expect(withBuildId("3.4.2 Ferrierite", undefined)).toBe("3.4.2 Ferrierite");
+    expect(withBuildId("3.4.2 Ferrierite", null)).toBe("3.4.2 Ferrierite");
+    expect(withBuildId("3.4.2 Ferrierite", "")).toBe("3.4.2 Ferrierite");
+    expect(withBuildId("3.4.2 Ferrierite", "   ")).toBe("3.4.2 Ferrierite");
   });
 
   it("matches the dist commit message format (build <run id>)", () => {
-    expect(withBuildId("3.0.1 Diamond", "41706739889")).toMatch(/ \(build \d+\)$/);
+    expect(withBuildId("3.4.2 Ferrierite", "41706739889")).toMatch(/ \(build \d+\)$/);
   });
 
   it("stays bare in the pristine test env (CI stamps the build step only)", () => {
     /* vitest mirrors VITE_* env onto import.meta.env: a shell that
        already exports the stamp is honored and stays internally
        consistent; the pristine CI path is the bare string. */
-    expect(ZEOLITE_VERSION).toBe(withBuildId("3.0.1 Diamond", ZEOLITE_BUILD_ID));
+    expect(ZEOLITE_VERSION).toBe(withBuildId("3.4.2 Ferrierite", ZEOLITE_BUILD_ID));
     if (!import.meta.env.VITE_ZEOLITE_BUILD_ID) {
       expect(ZEOLITE_BUILD_ID).toBe("");
-      expect(ZEOLITE_VERSION).toBe("3.0.1 Diamond");
+      expect(ZEOLITE_VERSION).toBe("3.4.2 Ferrierite");
     }
   });
 

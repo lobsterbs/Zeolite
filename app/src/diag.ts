@@ -245,4 +245,39 @@ class Diag {
   }
 }
 
+/* #647: bounded prefix capture of an upstream error body. The caller tees the
+   response stream; this drains a bounded prefix of the diagnostic branch so an
+   export shows WHY the origin refused (an innertube 400 JSON names the bad
+   field) instead of a bare status line. Redacted by the caller like every
+   other diagnostic surface. */
+export const ERROR_BODY_CAPTURE_LIMIT = 2048;
+
+export async function captureErrorBodyPrefix(
+  stream: ReadableStream<Uint8Array>,
+  limit: number = ERROR_BODY_CAPTURE_LIMIT,
+): Promise<string> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.byteLength;
+      if (total >= limit) {
+        void reader.cancel().catch(() => {});
+        break;
+      }
+    }
+  } catch {
+    /* a partial capture is still a capture */
+  }
+  const dec = new TextDecoder();
+  let text = '';
+  for (const c of chunks) text += dec.decode(c, { stream: true });
+  text += dec.decode();
+  return text.slice(0, limit);
+}
+
 export const DIAG = new Diag();

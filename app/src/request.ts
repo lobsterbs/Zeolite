@@ -39,7 +39,7 @@ import { applyRules, loadRules, siteUaFor, type GhosteryRedirect, type ResourceT
 import { ghosteryLoadInProgress } from "./ghostery";
 import { ghosteryCosmeticsForDocument } from "./cosmetics";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
-import { DIAG, classifyStageFailure, type DiagStage } from "./diag";
+import { DIAG, classifyStageFailure, captureErrorBodyPrefix, redactSecrets, type DiagStage } from "./diag";
 /* #451: per-attempt CAPTCHA tracing rides the existing CHALLENGE emit
    points below; no new interception logic. */
 import { CAPTCHA_TRACE, outcomeOf, type CaptchaProvider } from "./captcha-trace";
@@ -5140,6 +5140,32 @@ export function handleFetch(e: FetchEvent): void {
           }
 
           DIAG.stage(traceId, "UPSTREAM_RESPONSE", { url: hopUrl, message: "upstream status " + resp.status });
+          /* #647: an upstream 4xx/5xx body carries the origin's own refusal
+             reason (an innertube 400 JSON names the bad field); tee the stream
+             and capture a bounded, redacted prefix into the ring so the export
+             explains the status instead of just counting it. The page-facing
+             branch is untouched. */
+          if (resp.status >= 400 && resp.body) {
+            try {
+              const [pageBranch, diagBranch] = resp.body.tee();
+              resp = new Response(pageBranch, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+              const statusForDiag = resp.status;
+              void captureErrorBodyPrefix(diagBranch).then((prefix) => {
+                if (!prefix) return;
+                DIAG.emit({
+                  traceId,
+                  requestId: traceId,
+                  category: "TRANSPORT",
+                  severity: "info",
+                  stage: "UPSTREAM_RESPONSE",
+                  message: "upstream " + statusForDiag + " body prefix (#647): " + redactSecrets(prefix.slice(0, 800)),
+                  url: hopUrl,
+                });
+              });
+            } catch {
+              /* tee refused: the status line alone still ships */
+            }
+          }
           /* #580: the page's own error beacon pipeline is firing even
              when the console hook reports zero - make the export show
              it. Deliberately narrow classifier (jserror / gen_204?err=);
