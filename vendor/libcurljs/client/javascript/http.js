@@ -116,7 +116,7 @@ class HTTPSession extends CurlSession {
       http_handle = this.stream_response(url, headers_callback, finish_callback, params.signal);
       c_func(_http_set_options, [http_handle, params_json, body_ptr, body_length]);
       if (upload_fn !== null) {
-        c_func(_http_set_upload_stream, [http_handle, upload_fn, params.upload.chunkSize || 65536]);
+        c_func(_http_set_upload_stream, [http_handle, upload_fn, params.upload.chunkSize || 65536, typeof params.upload.contentLength === "number" ? params.upload.contentLength : -1]);
       }
       if (this.cookie_filename && params.credentials !== "omit") {
         c_func(_http_set_cookie_jar, [http_handle, this.cookie_filename]);
