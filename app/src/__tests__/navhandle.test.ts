@@ -433,6 +433,10 @@ describe("senderIsHostPage (#170: the host gate fails closed)", () => {
        content origin; its relay/wisp/embedder registration is
        host-only control traffic and must pass the gate. */
     expect(senderIsHostPage(O + "/zlsw-register", O)).toBe(true);
+    /* #649: the split-origin deployment serves the inspector from the
+       engine bundle mount; the gate must not refuse the page it
+       exists to serve. */
+    expect(senderIsHostPage(O + "/zlsw/devtools.html", O)).toBe(true);
   });
   it("refuses proxied routes and extension code", () => {
     expect(senderIsHostPage(O + "/j/abc", O)).toBe(false);

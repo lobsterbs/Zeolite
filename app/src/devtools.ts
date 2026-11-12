@@ -283,6 +283,14 @@ function tick(): void {
   }
   paused.textContent = "";
   post({ type: "zl:getNetLog", since: lastSeq }, (data) => {
+    /* #649: a gate refusal arrives as {ok:false}; rendering it through
+       the generation-change path showed the lying "Worker restarted"
+       banner. Show the refusal honestly and keep waiting. */
+    if (data && (data as { ok?: boolean }).ok === false) {
+      paused.textContent = "inspector poll refused by the worker: " +
+        ((data as { error?: string }).error ?? "unknown");
+      return;
+    }
     const { entries: fresh, lastSeq: seq, generation, stats } = (data ?? { entries: [] }) as {
       entries: NetEntry[];
       lastSeq: number;
