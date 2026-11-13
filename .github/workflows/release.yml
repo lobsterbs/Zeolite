@@ -110,3 +110,43 @@ jobs:
           TAG="${TAG:-${GITHUB_REF#refs/tags/}}"
           gh release create "${TAG}" --title "${TAG}" --generate-notes
           gh release upload "${TAG}" artifacts/zeolite-server-linux/* artifacts/zeolite-engine-dist/*
+
+  npm:
+    runs-on: ubuntu-latest
+    needs: [bundle]
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Unpack the engine dist artifact
+        run: |
+          mkdir -p package/dist
+          cd artifacts/zeolite-engine-dist
+          unzip -q zeolite-engine-*-dist.zip
+          cp -r zeolite-engine-*-dist/. ../../package/dist/
+      - name: Write the package manifest
+        run: |
+          VER="$(grep -m1 '^version' Cargo.toml | tr -d ' " ' | cut -d= -f2 | tr -d ' ')"
+          cat > package/package.json <<JSON
+          {
+            "name": "@lobsterbs/zeolite-engine",
+            "version": "${VER}",
+            "description": "The built Zeolite engine bundle (service worker, wasm rewriter, transports) as served by LobsterBrowse.",
+            "license": "AGPL-3.0-only",
+            "files": ["dist"],
+            "publishConfig": { "access": "public" }
+          }
+          JSON
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Publish to npm (skipped until the NPM_TOKEN secret exists)
+        if: env.NPM_TOKEN != ''
+        working-directory: package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish
