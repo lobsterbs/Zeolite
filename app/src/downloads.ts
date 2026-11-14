@@ -19,6 +19,9 @@
    - DoubleClick ad artefacts (f.txt) are an upstream convention,
      not a user download: they are served untouched but not
      registered (isAdArtefact).
+   - The destination gate: only a navigation (request destination
+     "document") can put a file on disk, so attachment responses to
+     background fetches are served untouched but not registered.
    - Speed is a whole-lifetime average, not a rolling window.
    - 2.2 Arsenide: the ring persists to site-scoped IndexedDB (keyed
      by the source origin) so entries survive a service-worker
@@ -764,18 +767,30 @@ export const DL = new DownloadTracker();
     from the UPSTREAM headers, the MIME from the outgoing
     content-type. The body stays a stream: a counting passthrough
     forwards every chunk untouched, so nothing is ever buffered whole
-    and the browser keeps writing the file to disk. */
+    and the browser keeps writing the file to disk. The optional
+    destination is the fetch event's request destination: when given,
+    only a navigation ("document") registers - a background fetch
+    never reaches the browser's download machinery, so claiming it
+    would forge a row no user asked for. */
 export function adoptResponse(
   target: string,
   resp: Response,
   outHeaders: Headers,
   status: number,
+  destination?: string,
 ): Response | null {
   if (!resp.body) return null;
   if (!(outHeaders.get("content-disposition") ?? "").toLowerCase().includes("attachment")) return null;
   /* The ad artefact is served untouched (the stream keeps flowing to
      the browser); only the registration is skipped. */
   if (isAdArtefact(target, downloadFilename(target, resp.headers))) return null;
+  /* The destination gate: a download only reaches the browser's
+     disk machinery on a navigation. Attachment dispositions on
+     background fetches (fetch(), beacons, images, iframes) are an
+     upstream convention, not a user download: served untouched, not
+     registered. A caller that cannot know the destination keeps the
+     legacy behavior. */
+  if (destination !== undefined && destination !== "document") return null;
   const id = DL.begin(
     target,
     resp.headers,
