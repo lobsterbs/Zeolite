@@ -72,12 +72,48 @@ describe("relay response backpressure (#470)", () => {
     expect(creditsOf(p).map(m => m.bytes)).toEqual([RELAY_CREDIT_BYTES, 8]);
   });
 
-  it("cancels an overflowing legacy response instead of retaining unlimited bytes", async () => {
+  it("cancels an undrained overflowing legacy response instead of retaining unlimited bytes", async () => {
     const p = reg();
     const pending = relayFetch("https://api.example/read", { method: "POST", headers: new Headers() }, "t");
     const rid = p.sent[0].rid;
+    /* No reader ever pulls: this is the flood shape (a dead or hostile
+       peer pumping bytes nobody drains), and it still dies at the byte
+       bound. */
     p.reply({ type: "zl:relayChunk", rid, bytes: new Uint8Array(RELAY_CREDIT_BYTES * 2 + 1) });
     await expect(pending).rejects.toThrow("queue limit exceeded");
+    expect(p.sent.filter(m => m.type === "zl:relayCancel")).toHaveLength(1);
+  });
+
+  it("retains a body over the byte bound while the consumer drains (#644)", async () => {
+    const p = reg();
+    const pending = relayFetch("https://api.example/read", { method: "GET", headers: new Headers() }, "t");
+    const rid = p.sent[0].rid;
+    p.reply({ type: "zl:relayHead", rid, status: 200, statusText: "", headers: [] });
+    p.reply({ type: "zl:relayChunk", rid, bytes: new Uint8Array(RELAY_CREDIT_BYTES) });
+    const resp = await pending;
+    if (!resp) throw new Error("expected a relayed response");
+    /* The page starts reading (the real consumer drains while the
+       embedder keeps pumping — the YouTube over-cap shape). */
+    const text = resp.text();
+    await new Promise(r => setTimeout(r, 0));
+    p.reply({ type: "zl:relayChunk", rid, bytes: new Uint8Array(RELAY_CREDIT_BYTES + 1) });
+    p.reply({ type: "zl:relayEnd", rid });
+    expect(await text).toHaveLength(RELAY_CREDIT_BYTES * 2 + 1);
+    expect(p.sent.filter(m => m.type === "zl:relayCancel")).toHaveLength(0);
+  });
+
+  it("still kills a draining stream past the 32 MiB retention ceiling", async () => {
+    const p = reg();
+    const pending = relayFetch("https://api.example/read", { method: "GET", headers: new Headers() }, "t");
+    const rid = p.sent[0].rid;
+    p.reply({ type: "zl:relayHead", rid, status: 200, statusText: "", headers: [] });
+    p.reply({ type: "zl:relayChunk", rid, bytes: new Uint8Array(1) });
+    const resp = await pending;
+    if (!resp) throw new Error("expected a relayed response");
+    const text = resp.text();
+    await new Promise(r => setTimeout(r, 0));
+    p.reply({ type: "zl:relayChunk", rid, bytes: new Uint8Array(33 * 1024 * 1024) });
+    await expect(text).rejects.toThrow("queue limit exceeded");
     expect(p.sent.filter(m => m.type === "zl:relayCancel")).toHaveLength(1);
   });
 
