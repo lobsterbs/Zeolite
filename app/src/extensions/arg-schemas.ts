@@ -202,6 +202,14 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   "declarativeNetRequest.getEnabledRulesets": { min: 0, max: 0 },
   "declarativeNetRequest.getAvailableStaticRuleCount": { min: 0, max: 0 },
   "declarativeNetRequest.getMatchedRules": { min: 0, max: 0 },
+  /* #521 slice 4: the typed surface remainder. Firefox requires
+     isRegexSupported(regexValue) only; the engine also accepts
+     Chrome's isCaseSensitive argument and ignores it (matching stays
+     case-sensitive). */
+  "declarativeNetRequest.isRegexSupported": { min: 1, max: 2, types: [["string"], ["boolean"]], ff: [1, 1], note: "the engine also accepts Chrome's isCaseSensitive argument and ignores it" },
+  "declarativeNetRequest.getDisabledRuleIds": { min: 1, max: 1, types: [["object"]] },
+  "declarativeNetRequest.updateStaticRules": { min: 1, max: 1, types: [["object"]] },
+  "declarativeNetRequest.testMatchOutcome": { min: 1, max: 2, types: [["object"], ["object"]] },
 
   /* ---- downloads ------------------------------------------------------------ */
   "downloads.download": { min: 1, max: 1, types: [["object"]] },

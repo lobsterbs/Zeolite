@@ -54,10 +54,16 @@ import type {
 } from "./bookmarks";
 import {
   DNR,
+  DYNAMIC_RULESET_ID,
   GUARANTEED_MINIMUM_STATIC_RULES,
+  MAX_NUMBER_OF_DISABLED_STATIC_RULES,
   MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES,
+  MAX_NUMBER_OF_DYNAMIC_RULES,
   MAX_NUMBER_OF_ENABLED_STATIC_RULESETS,
+  MAX_NUMBER_OF_REGEX_RULES,
+  MAX_NUMBER_OF_SESSION_RULES,
   MAX_NUMBER_OF_STATIC_RULESETS,
+  SESSION_RULESET_ID,
   type DnrMatchedRule,
 } from "./dnr";
 import { MGMT, infoOf } from "./management";
@@ -903,6 +909,20 @@ export function buildApi(
           updateEnabledRulesets: (u: unknown) => DNR.updateEnabledRulesets(ext.id, u),
           getEnabledRulesets: () => Promise.resolve(DNR.getEnabledRulesets(ext.id)),
           getAvailableStaticRuleCount: () => DNR.getAvailableStaticRuleCount(ext.id),
+          /* #521 slice 4: the typed surface remainder - the reserved
+             ruleset ids, the remaining quota constants, the regex
+             support probe, per-ruleset static rule enable/disable and
+             the read-only match dry run. */
+          DYNAMIC_RULESET_ID,
+          SESSION_RULESET_ID,
+          MAX_NUMBER_OF_DYNAMIC_RULES,
+          MAX_NUMBER_OF_SESSION_RULES,
+          MAX_NUMBER_OF_REGEX_RULES,
+          MAX_NUMBER_OF_DISABLED_STATIC_RULES,
+          isRegexSupported: (re: unknown, caseSensitive?: unknown) => DNR.isRegexSupported(re, caseSensitive),
+          updateStaticRules: (u: unknown) => DNR.updateStaticRules(ext.id, u),
+          getDisabledRuleIds: (o: unknown) => DNR.getDisabledRuleIds(ext.id, o),
+          testMatchOutcome: (req: unknown, opts?: unknown) => DNR.testMatchOutcome(ext.id, req, opts),
           /* #521 slice 3: the debugging surface requires the
              declarativeNetRequestFeedback permission (Chrome's
              documented gate); absent otherwise so feature detection

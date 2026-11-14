@@ -12,9 +12,9 @@ ZL_UPDATE_GAPS_DOC=1 npx vitest run src/extensions/__tests__/gaps-doc.test.ts   
 
 ## Summary
 
-- Mounted namespaces: **23** (181 members), the union of the action-family fixtures
+- Mounted namespaces: **23** (191 members), the union of the action-family fixtures
 - Firefox namespaces not mounted: **40**, each with its honest reason
-- Mounted namespaces with member-level gaps: **20**
+- Mounted namespaces with member-level gaps: **19**
 - Engine extras (mounted members Firefox does not have): **4**, each justified in COMPAT
 
 The wave issues #517-#524 diff against this baseline; a namespace that gains an implementation removes its reason from `FIREFOX_UNMOUNTED_REASONS` and this document regenerates with it gone.
@@ -80,7 +80,6 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `downloads` | acceptDanger, cancel, drag, erase, getFileIcon, onCreated, onErased, open, pause, removeFile, resume, setShelfEnabled, show, showDefaultFolder |
 | `management` | install |
 | `webRequest` | MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES, filterResponseData, getSecurityInfo, handlerBehaviorChanged, onAuthRequired, onBeforeRedirect, onResponseStarted, onSendHeaders |
-| `declarativeNetRequest` | DYNAMIC_RULESET_ID, MAX_NUMBER_OF_DISABLED_STATIC_RULES, MAX_NUMBER_OF_DYNAMIC_RULES, MAX_NUMBER_OF_REGEX_RULES, MAX_NUMBER_OF_SESSION_RULES, SESSION_RULESET_ID, getDisabledRuleIds, isRegexSupported, testMatchOutcome, updateStaticRules |
 | `action` | getUserSettings, openPopup |
 | `notifications` | getPermissionLevel, onPermissionLevelChanged, onShowSettings, onShown |
 | `cookies` | getAllCookieStores |
@@ -109,7 +108,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `browsingData` | `removeCache` (method), `removeCookies` (method), `removeDownloads` (method), `removeFormData` (method), `removeHistory` (method), `removeIndexedDB` (method), `removeLocalStorage` (method), `removePasswords` (method), `removePluginData` (method), `removeServiceWorkers` (method), `settings` (method) |
 | `contextMenus` | `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
 | `cookies` | `get` (method), `getAll` (method), `onChanged` (event), `remove` (method), `set` (method) |
-| `declarativeNetRequest` | `GUARANTEED_MINIMUM_STATIC_RULES` (constant), `MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES` (constant), `MAX_NUMBER_OF_ENABLED_STATIC_RULESETS` (constant), `MAX_NUMBER_OF_STATIC_RULESETS` (constant), `getAvailableStaticRuleCount` (method), `getDynamicRules` (method), `getEnabledRulesets` (method), `getSessionRules` (method), `updateDynamicRules` (method), `updateEnabledRulesets` (method), `updateSessionRules` (method) |
+| `declarativeNetRequest` | `DYNAMIC_RULESET_ID` (constant), `GUARANTEED_MINIMUM_STATIC_RULES` (constant), `MAX_NUMBER_OF_DISABLED_STATIC_RULES` (constant), `MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES` (constant), `MAX_NUMBER_OF_DYNAMIC_RULES` (constant), `MAX_NUMBER_OF_ENABLED_STATIC_RULESETS` (constant), `MAX_NUMBER_OF_REGEX_RULES` (constant), `MAX_NUMBER_OF_SESSION_RULES` (constant), `MAX_NUMBER_OF_STATIC_RULESETS` (constant), `SESSION_RULESET_ID` (constant), `getAvailableStaticRuleCount` (method), `getDisabledRuleIds` (method), `getDynamicRules` (method), `getEnabledRulesets` (method), `getSessionRules` (method), `isRegexSupported` (method), `testMatchOutcome` (method), `updateDynamicRules` (method), `updateEnabledRulesets` (method), `updateSessionRules` (method), `updateStaticRules` (method) |
 | `downloads` | `download` (method), `onChanged` (event), `search` (method) |
 | `extension` | `getBackgroundPage` (method), `getURL` (method), `getViews` (method), `inIncognitoContext` (constant) |
 | `i18n` | `getAcceptLanguages` (method), `getMessage` (method), `getUILanguage` (method) |
