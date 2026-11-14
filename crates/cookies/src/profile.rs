@@ -19,8 +19,8 @@
 //! with identical expiry AND creation times in different buckets.
 
 use crate::jar::{
-    build_cookie, domain_match, order_key, path_match, same_identity, Cookie, Reject, StoreOutcome,
-    COOKIE_MAX_PER_DOMAIN, COOKIE_MAX_TOTAL,
+    build_cookie, domain_match, order_key, path_match, same_identity, secure_connection, Cookie,
+    Reject, StoreOutcome, COOKIE_MAX_PER_DOMAIN, COOKIE_MAX_TOTAL,
 };
 use crate::parse::{parse_set_cookie, SetCookie};
 use crate::url::Origin;
@@ -114,6 +114,23 @@ impl Profile {
             Ok(x) => x,
             Err(r) => return StoreOutcome::Rejected(r),
         };
+        /* bis 5.6 step 16 (leave secure cookies alone), the same
+        gate the flat Jar applies: the comparison spans buckets,
+        exactly like the identity/replacement steps (#337). */
+        if !fresh.secure && !secure_connection(origin) {
+            let shadow = self.buckets.values().any(|list| {
+                list.iter().any(|c| {
+                    c.secure
+                        && c.name == fresh.name
+                        && (domain_match(&c.domain, &fresh.domain)
+                            || domain_match(&fresh.domain, &c.domain))
+                        && path_match(&fresh.path, &c.path)
+                })
+            });
+            if shadow {
+                return StoreOutcome::Rejected(Reject::SecureShadow);
+            }
+        }
         let same = |c: &Cookie| same_identity(c, &fresh);
         if is_deletion {
             let mut removed_cookie: Option<Cookie> = None;

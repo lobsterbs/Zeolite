@@ -735,7 +735,10 @@ export function parseCookieDate(s: string): number | null {
       const m = /^(\d{2,4})(?!\d)/.exec(tok);
       if (m) {
         let y = Number(m[1]);
-        if (m[1].length === 2) y = y >= 70 ? 1900 + y : 2000 + y;
+        /* RFC 6265 5.1.1 steps 3-4 window the year-VALUE, not the
+           token length: "0069" is the year 69 -> 2069, "0070" -> 1970
+           (Firefox windows on the value the same way). */
+        if (y <= 99) y = y >= 70 ? 1900 + y : 2000 + y;
         year = y; foundYear = true; continue;
       }
     }
@@ -780,6 +783,9 @@ export const COOKIE_MAX_BYTES = 4096;
 export const COOKIE_MAX_PER_DOMAIN = 50;
 /** Maximum live cookies per profile across all domains. */
 export const COOKIE_MAX_TOTAL = 3000;
+/** bis Cookie Lifetime Limits: the maximum remaining cookie lifetime
+    (400 days in seconds). Longer Max-Age/Expires values cap here. */
+const COOKIE_AGE_LIMIT_SECONDS = 34560000;
 
 function cookieByteSize(name: string, value: string): number {
   const enc = new TextEncoder();
@@ -919,6 +925,9 @@ function emitWasmRejection(reason: string, name: string, responseUrl: string): v
     case "httponly":
       DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "document.cookie write refused: HttpOnly cookie" });
       return;
+    case "secure shadow":
+      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie refused: a non-secure write would shadow a secure cookie" });
+      return;
   }
 }
 
@@ -1029,8 +1038,15 @@ function admitCookieTs(
            the grammar (control characters) is ignored too, never
            ingested into the jar. */
         if (val !== "" && !/[\x00-\x1F\x7F]/.test(val)) {
-          domain = (val.startsWith(".") ? val.slice(1) : val).toLowerCase();
-          hostOnly = false;
+          /* bis 5.6 steps 7+10: cookie-domain is the value minus ONE
+             leading dot; a value that is empty after the strip is an
+             empty domain-attribute -> the cookie stays HOST-ONLY (the
+             old body minted a parent-scoped domain cookie here). */
+          const stripped = val.startsWith(".") ? val.slice(1) : val;
+          if (stripped !== "") {
+            domain = stripped.toLowerCase();
+            hostOnly = false;
+          }
         }
         break;
       }
@@ -1084,8 +1100,11 @@ function admitCookieTs(
   path = path || defaultPath(u.path);
 
   /* Isolation hard gate: the cookie may only scope the response host
-     (or a parent domain of it), and never a public suffix itself. */
-  if (!hostOnly && (isPublicSuffix(domain) || !domainMatch(u.host, domain) || (!domain.includes(".") && domain !== u.host))) {
+     (or a parent domain of it), and never a public suffix itself.
+     bis 5.6 step 9: a public-suffix domain-attribute EQUAL to the
+     canonicalized request-host degrades to an empty domain-attribute
+     (the cookie lands host-only); only the non-equal case aborts. */
+  const refuseDomain = (): SetCookieResult => {
     DIAG.emit({
       category: "COOKIE",
       cause: "blocked",
@@ -1095,6 +1114,15 @@ function admitCookieTs(
     });
     traceDecision({ subsystem: "cookies", original: responseUrl, result: "rejected:domain " + name });
     return { name, stored: false, deleted: false, rejected: "domain" };
+  };
+  if (!hostOnly) {
+    if (isPublicSuffix(domain)) {
+      if (domain !== u.host) return refuseDomain();
+      hostOnly = true;
+      domain = u.host;
+    } else if (!domainMatch(u.host, domain) || (!domain.includes(".") && domain !== u.host)) {
+      return refuseDomain();
+    }
   }
 
   /* #191: RFC 6265bis 4.1.3 name prefixes. The match is
@@ -1114,6 +1142,37 @@ function admitCookieTs(
     return { name, stored: false, deleted: false, rejected: "__Host- requires host-only and path /" };
   }
 
+  /* bis 5.6 step 16 (leave secure cookies alone): a non-Secure cookie
+     received over a non-secure connection aborts when the profile
+     already holds a Secure cookie of the same name whose domain
+     matches either way and whose path the new cookie's path
+     path-matches. Deletions abort under the same rule (the received
+     deletion cookie is what the step gates). The engine's
+     secure-connection test is isSecureOrigin, so the #191 loopback
+     grant keeps its browser-coherent power. */
+  if (!secure && !isSecureOrigin(u)) {
+    let shadowed = false;
+    for (const [key, list] of jars) {
+      if (!inProfile(key, namespace)) continue;
+      for (const c of list) {
+        if (
+          c.secure &&
+          c.name === name &&
+          (domainMatch(c.domain, domain) || domainMatch(domain, c.domain)) &&
+          pathMatch(path, c.path)
+        ) {
+          shadowed = true;
+          break;
+        }
+      }
+      if (shadowed) break;
+    }
+    if (shadowed) {
+      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie refused: a non-secure write would shadow a secure cookie" });
+      return { name, stored: false, deleted: false, rejected: "secure shadow" };
+    }
+  }
+
   const now = Date.now();
   /* RFC 6265 5.3: when Max-Age is present it alone fixes the
      expiry-time; a stale Expires must not turn a live Max-Age cookie
@@ -1122,7 +1181,15 @@ function admitCookieTs(
      A session cookie (neither attribute) is expiry 0 and never
      expires. */
   const isDeletion = maxAge !== null ? maxAge <= 0 : hasExpires && expires <= now;
-  const expiry = maxAge !== null ? now + maxAge * 1000 : expires;
+  /* bis Cookie Lifetime Limits / Expires step 4 / Max-Age step 6: a
+     lifetime longer than 400 days MUST be reduced to 400 days
+     (34560000 seconds). Deletions are unaffected. */
+  const expiry =
+    maxAge !== null
+      ? now + Math.min(maxAge, COOKIE_AGE_LIMIT_SECONDS) * 1000
+      : expires > now + COOKIE_AGE_LIMIT_SECONDS * 1000
+        ? now + COOKIE_AGE_LIMIT_SECONDS * 1000
+        : expires;
 
   /* #598: RFC 6265 6.1 byte cap - refuse the whole oversized cookie
      (browsers refuse the whole Set-Cookie). Deletions are never
