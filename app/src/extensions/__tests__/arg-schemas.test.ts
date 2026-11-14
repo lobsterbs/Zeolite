@@ -29,15 +29,16 @@ const ALL_NS_PERMISSIONS = [
   "bookmarks",
 ];
 
-/* #516 slice 5: the namespaces the argument contract covers. The
-   browserAction/pageAction aliases and chrome.extension mount on MV2
-   manifests only, so they stay out until a fixture mounts them;
-   webNavigation and webRequest mount events but no methods. */
+/* #516 slice 5: the namespaces the argument contract covers.
+   browserAction and pageAction mount on MV2 manifests only and
+   chrome.extension on MV2 records only, so their coverage is held on
+   the MV2 fixtures below; webNavigation and webRequest mount events
+   but no methods. */
 const COVERED_NAMESPACES = new Set([
-  "alarms", "action", "bookmarks", "browsingData", "contextMenus", "menus",
-  "cookies", "declarativeNetRequest", "downloads", "i18n", "management",
-  "notifications", "permissions", "runtime", "scripting", "storage", "tabs",
-  "windows",
+  "alarms", "action", "bookmarks", "browserAction", "browsingData",
+  "contextMenus", "menus", "cookies", "declarativeNetRequest", "downloads",
+  "extension", "i18n", "management", "notifications", "pageAction",
+  "permissions", "runtime", "scripting", "storage", "tabs", "windows",
 ]);
 
 async function allPermsApi() {
@@ -63,6 +64,41 @@ async function allPermsApi() {
     rec,
     { extensionId: id, context: "background", url: null } as never,
     { messenger: new ExtensionMessenger(), storage, manager: m },
+  );
+}
+
+/* The MV2 fixtures: the action-family aliases and chrome.extension
+   mount for MV2 records only, one action kind per manifest (Firefox
+   refuses both keys in one manifest). */
+async function mv2Api(actionKey: "browser_action" | "page_action") {
+  const m = new ExtensionManager();
+  await m.startup();
+  const { id } = await m.installFiles(
+    new Map([
+      [
+        "manifest.json",
+        enc.encode(JSON.stringify({
+          manifest_version: 2,
+          [actionKey]: {},
+          name: "MV2" + Math.random().toString(36).slice(2, 7),
+          version: "1.0",
+        })),
+      ],
+    ]),
+  );
+  const rec = m.get(id)!;
+  return buildApi(
+    rec,
+    { extensionId: id, context: "background", url: null } as never,
+    {
+      messenger: new ExtensionMessenger(),
+      storage: {
+        local: new ExtensionStorageArea(id, "local", "local"),
+        sync: new ExtensionStorageArea(id, "sync", "sync"),
+        session: new ExtensionStorageArea(id, "session", "session"),
+      },
+      manager: m,
+    },
   );
 }
 
@@ -122,23 +158,29 @@ describe("argument schemas (#516 slice 3)", () => {
     expect(() => validateArgs("x.y", schema, ["a", fn])).not.toThrow(); /* position 2 unchecked (null) */
   });
 
-  it("every schema path resolves to a mounted function on the full surface", async () => {
-    api = await allPermsApi();
+  it("every schema path resolves to a mounted function on some surface", async () => {
+    /* The action-family aliases and chrome.extension mount on MV2
+       records only, so a path is stale only when it resolves on NO
+       fixture (MV3 all-perms, both MV2 action kinds). */
+    const surfaces = [await allPermsApi(), await mv2Api("browser_action"), await mv2Api("page_action")];
     const stale: string[] = [];
     for (const path of Object.keys(ARG_SCHEMAS)) {
       const parts = path.split(".");
-      let obj: unknown = api.browser;
-      for (const p of parts) {
-        obj = obj && typeof obj === "object" ? (obj as Record<string, unknown>)[p] : undefined;
-      }
-      if (typeof obj !== "function") stale.push(path);
+      const mounted = surfaces.some((api) => {
+        let obj: unknown = api.browser;
+        for (const p of parts) {
+          obj = obj && typeof obj === "object" ? (obj as Record<string, unknown>)[p] : undefined;
+        }
+        return typeof obj === "function";
+      });
+      if (!mounted) stale.push(path);
     }
     expect(stale, "ARG_SCHEMAS entries that do not resolve to a mounted method").toEqual([]);
   });
 
   it("every mounted method of the covered namespaces has a schema", async () => {
-    api = await allPermsApi();
-    const mounted = coveredMethodPaths(api.browser);
+    const surfaces = [await allPermsApi(), await mv2Api("browser_action"), await mv2Api("page_action")];
+    const mounted = [...new Set(surfaces.flatMap((api) => coveredMethodPaths(api.browser)))].sort();
     const tabled = Object.keys(ARG_SCHEMAS).sort();
     const missing = mounted.filter((p) => !tabled.includes(p));
     const extra = tabled.filter((p) => !mounted.includes(p));
@@ -147,22 +189,42 @@ describe("argument schemas (#516 slice 3)", () => {
   });
 
   it("too few or too many arguments reject with a TypeError before the engine runs", async () => {
-    api = await allPermsApi();
+    const surfaces = [await allPermsApi(), await mv2Api("browser_action"), await mv2Api("page_action")];
     for (const [path, schema] of Object.entries(ARG_SCHEMAS)) {
+      const parts = path.split(".");
+      const api = surfaces.find((s) => {
+        let obj: unknown = s.browser;
+        for (const p of parts) {
+          obj = obj && typeof obj === "object" ? (obj as Record<string, unknown>)[p] : undefined;
+        }
+        return typeof obj === "function";
+      });
+      if (!api) continue;
+      const method = resolveFn(api.browser, path);
       if (schema.min > 0) {
-        expect(() => call(path, ...new Array(schema.min - 1).fill(undefined)), `${path} min arity`).toThrow(TypeError);
+        expect(() => method(...new Array(schema.min - 1).fill(undefined)), `${path} min arity`).toThrow(TypeError);
       }
       if (schema.max < 9) {
         /* arity runs before the kind check, so the filler value never matters */
-        expect(() => call(path, ...new Array(schema.max + 1).fill("x")), `${path} max arity`).toThrow(TypeError);
+        expect(() => method(...new Array(schema.max + 1).fill("x")), `${path} max arity`).toThrow(TypeError);
       }
     }
   });
 
   it("wrong kinds reject with a TypeError naming the position", async () => {
-    api = await allPermsApi();
+    const surfaces = [await allPermsApi(), await mv2Api("browser_action"), await mv2Api("page_action")];
     for (const [path, schema] of Object.entries(ARG_SCHEMAS)) {
       if (!schema.types) continue;
+      const parts = path.split(".");
+      const api = surfaces.find((s) => {
+        let obj: unknown = s.browser;
+        for (const p of parts) {
+          obj = obj && typeof obj === "object" ? (obj as Record<string, unknown>)[p] : undefined;
+        }
+        return typeof obj === "function";
+      });
+      if (!api) continue;
+      const method = resolveFn(api.browser, path);
       /* pad to max arity with values that pass their own positions */
       const args: unknown[] = [];
       for (let i = 0; i < schema.max; i++) args.push(sampleOf(schema.types[i] ?? ["any"]));
@@ -171,7 +233,7 @@ describe("argument schemas (#516 slice 3)", () => {
         if (!allowed || allowed.includes("any")) continue;
         const wrong: unknown[] = [...args];
         wrong[i] = fn; /* a function no position admits */
-        expect(() => call(path, ...wrong), `${path} position ${i + 1}`).toThrow(/must be/);
+        expect(() => method(...wrong), `${path} position ${i + 1}`).toThrow(/must be/);
       }
     }
   });
@@ -199,6 +261,31 @@ describe("argument schemas (#516 slice 3)", () => {
     const fresh = await allPermsApi();
     api = fresh;
     await expect(call("storage.local.get", "zz")).resolves.toEqual({ zz: null });
+    /* MV2 surfaces: the action-family aliases and chrome.extension
+       carry the same contract the table pins (browserAction mirrors
+       action; pageAction has no badge surface; extension shares the
+       runtime.getURL implementation). */
+    const ba = await mv2Api("browser_action");
+    await resolveFn(ba.browser, "browserAction.setTitle")({ title: "T" });
+    await expect(resolveFn(ba.browser, "browserAction.getTitle")()).resolves.toBe("T");
+    await expect(resolveFn(ba.browser, "browserAction.setBadgeText")({ text: "b" })).resolves.toBeUndefined();
+    await expect(resolveFn(ba.browser, "browserAction.getBadgeText")()).resolves.toBe("b");
+    expect(() => resolveFn(ba.browser, "browserAction.enable")("x")).toThrow(TypeError);
+    const pa = await mv2Api("page_action");
+    await expect(resolveFn(pa.browser, "pageAction.show")(1)).resolves.toBeUndefined();
+    /* pageAction visibility is per-tab: show(tabId) makes THAT tab
+       shown while the global default state stays hidden. */
+    await expect(resolveFn(pa.browser, "pageAction.isShown")({ tabId: 1 })).resolves.toBe(true);
+    await expect(resolveFn(pa.browser, "pageAction.isShown")()).resolves.toBe(false);
+    expect(() => resolveFn(pa.browser, "pageAction.show")()).toThrow(TypeError);
+    expect(() => resolveFn(pa.browser, "pageAction.setBadgeText")({ text: "b" })).toThrow(TypeError); /* unmounted member */
+    const mv2 = await mv2Api("browser_action");
+    expect(resolveFn(mv2.browser, "extension.getURL")("x")).toContain("x");
+    /* getViews and getBackgroundPage are synchronous engine methods */
+    expect(resolveFn(mv2.browser, "extension.getViews")({ windowId: 1 })).toEqual([]);
+    expect(resolveFn(mv2.browser, "extension.getBackgroundPage")()).toBeNull();
+    /* inIncognitoContext is a constant on the MV2 surface, not a method - no argument contract */
+    expect((mv2.browser as Record<string, unknown>).extension).toHaveProperty("inIncognitoContext", false);
   });
 
   it("the chrome adapter pops its trailing callback before validation", async () => {
@@ -213,6 +300,16 @@ describe("argument schemas (#516 slice 3)", () => {
     expect(() => (api.chrome as Record<string, any>).runtime.getURL()).toThrow(TypeError);
   });
 });
+
+/** Resolve a dotted method path on one surface (the sweeps and the
+    MV2 rows need a surface picker instead of the module-level api). */
+function resolveFn(browser: Record<string, unknown>, path: string): (...a: unknown[]) => unknown {
+  let obj: unknown = browser;
+  for (const p of path.split(".")) {
+    obj = obj && typeof obj === "object" ? (obj as Record<string, unknown>)[p] : undefined;
+  }
+  return obj as (...a: unknown[]) => unknown;
+}
 
 function sampleOf(kinds: string[]): unknown {
   const kind = kinds.includes("any") ? "object" : kinds[0];

@@ -4,16 +4,16 @@
    #516 slice 2 made the mounted surface self-describing against
    Firefox member by member; slice 3 added the argument contract.
    ARG_SCHEMAS is a machine-readable table: per mounted method of the
-   covered namespaces (alarms, action, bookmarks, browsingData,
-   contextMenus + menus, cookies, declarativeNetRequest, downloads,
-   i18n, management, notifications, permissions, runtime, scripting,
-   storage, tabs, windows), the accepted argument count and the JS
-   kind every position may carry. installArgValidation() wraps the
-   mounted methods so out-of-contract calls reject with a TypeError
-   before any engine work happens, and the conformance test
-   (arg-schemas.test.ts) enforces that the table covers every mounted
-   method of those namespaces 1:1 - a new method without a schema
-   fails CI.
+   covered namespaces (alarms, action, bookmarks, browserAction,
+   browsingData, contextMenus + menus, cookies, declarativeNetRequest,
+   downloads, extension, i18n, management, notifications, permissions,
+   pageAction, runtime, scripting, storage, tabs, windows), the
+   accepted argument count and the JS kind every position may carry.
+   installArgValidation() wraps the mounted methods so out-of-contract
+   calls reject with a TypeError before any engine work happens, and
+   the conformance test (arg-schemas.test.ts) enforces that the table
+   covers every mounted method of those namespaces 1:1 - a new method
+   without a schema fails CI.
 
    The table describes the MOUNTED contract (what the engine really
    accepts today). Where that deliberately differs from Firefox's
@@ -23,9 +23,7 @@
    silent. Nested storage areas are keyed by dotted path
    (storage.local.get). Honest gaps that remain open for later slices:
    Firefox's StorageArea.getKeys is not mounted (recorded here, feeds
-   #520), the MV2-only action family aliases (browserAction,
-   pageAction) and chrome.extension stay untabled until a fixture
-   mounts them, and return-value/enum validation is not covered yet. */
+   #520), and return-value/enum validation is not covered yet. */
 
 export type ArgKind = "string" | "number" | "boolean" | "object" | "array" | "function" | "null" | "any";
 
@@ -164,6 +162,48 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   "action.setPopup": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
   "action.getPopup": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
   "action.setIcon": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+
+  /* ---- browserAction (the MV2 alias of the action family) ------------
+     Mounted for MV2 browser_action manifests over actionNsFor's
+     identical contract; the conformance test covers it on the MV2
+     fixture, so the table mirrors action.* member for member. */
+  "browserAction.enable": { min: 0, max: 1, types: [["number", "null"]] },
+  "browserAction.disable": { min: 0, max: 1, types: [["number", "null"]] },
+  "browserAction.isEnabled": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "browserAction.setTitle": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "browserAction.getTitle": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "browserAction.setBadgeText": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "browserAction.getBadgeText": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "browserAction.setBadgeBackgroundColor": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "browserAction.getBadgeBackgroundColor": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "browserAction.setBadgeTextColor": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "browserAction.getBadgeTextColor": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "browserAction.setPopup": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "browserAction.getPopup": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "browserAction.setIcon": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+
+  /* ---- pageAction (MV2) ------------------------------------------------
+     Firefox mounts no badge surface and no enable/disable on it;
+     visibility is per-tab via show/hide and starts hidden, so show and
+     hide genuinely require the tabId. */
+  "pageAction.isShown": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "pageAction.show": { min: 1, max: 1, types: [["number"]] },
+  "pageAction.hide": { min: 1, max: 1, types: [["number"]] },
+  "pageAction.setTitle": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "pageAction.getTitle": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "pageAction.setPopup": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "pageAction.getPopup": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "pageAction.setIcon": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+
+  /* ---- extension (MV2 chrome.extension) --------------------------------
+     Chrome keeps this namespace on every MV2 context and removed it in
+     MV3; the engine mounts it for MV2 records only. getURL shares the
+     runtime implementation; getViews accepts Firefox's properties
+     filter and ignores it (no live page views). inIncognitoContext is
+     a constant, not a method - no argument contract. */
+  "extension.getURL": { min: 1, max: 1, types: [["string"]] },
+  "extension.getBackgroundPage": { min: 0, max: 0 },
+  "extension.getViews": { min: 0, max: 1, types: [["object"]], note: "the engine accepts Firefox's properties filter and ignores it (no live page views)" },
 
   /* ---- bookmarks ------------------------------------------------------- */
   /* Firefox shapes match everywhere; search accepts both the word
