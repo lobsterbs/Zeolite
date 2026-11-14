@@ -697,18 +697,32 @@ export function passthroughStream(
 ): ReadableStream<Uint8Array> {
   const rd = rest.getReader();
   const queue = first ? [first, ...head] : head.slice();
+  /* #644/#99: an over-cap body serves the buffered head then pumps
+     the remainder byte-identical; a slow page consumer leaves the
+     worker dispatching no events for the whole drain, so arm the
+     heartbeat the same way the rewrite seams do, and settle it on
+     every exit path (close, error, cancel). */
+  streamAlive();
   return new ReadableStream<Uint8Array>({
     async pull(c) {
       if (queue.length) {
         c.enqueue(queue.shift()!);
         return;
       }
-      const { done, value } = await rd.read();
-      if (done) c.close();
-      else c.enqueue(value);
+      try {
+        const { done, value } = await rd.read();
+        if (done) {
+          streamDone();
+          c.close();
+        } else c.enqueue(value);
+      } catch (err) {
+        streamDone();
+        throw err;
+      }
     },
     async cancel(reason) {
-      await rd.cancel(reason);
+      try { await rd.cancel(reason); }
+      finally { streamDone(); }
     },
   });
 }

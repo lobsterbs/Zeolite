@@ -26,6 +26,7 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
   };
 });
 
+import { activeStreams } from "../streams-alive";
 import { boundedBody, JS_BODY_CAP, passthroughStream } from "../transform";
 
 const enc = new TextEncoder();
@@ -86,6 +87,10 @@ describe("boundedBody (#456 buffering bound)", () => {
     const out = await readAll(passthroughStream(null, bb.head, bb.rest));
     expect(out.byteLength).toBe(JS_BODY_CAP + 1 + 4);
     expect(new TextDecoder().decode(out.subarray(JS_BODY_CAP + 1))).toBe("tail");
+    /* #644/#99: the passthrough pump arms the SW heartbeat for the
+       whole drain and settles it on close — a slow page consumer
+       would otherwise leave the worker dispatching no events. */
+    expect(activeStreams()).toBe(0);
   });
 
   it("prepends the first chunk (worker prelude shape)", async () => {

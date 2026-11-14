@@ -333,6 +333,18 @@ async function relayFetchRaw(
   let terminal = false;
   let wake: (() => void) | null = null;
   let aborted = false;
+  /* #644: a consumer that has shifted at least one chunk is a live
+     drain, not a flood. A legacy (non-crediting) embedder pumps at
+     network speed with no pacing, so a body larger than the byte
+     bound (an over-cap script through boundedBody, a 2 MiB+ base.js)
+     must be RETAINED for the drain, not cancelled: killing the stream
+     here is exactly the mid-body death the YouTube repro pinned
+     ("relay response queue limit exceeded" surfacing through the
+     body-stall wrapper). The retention ceiling still bounds memory
+     (32 MiB, the replay spool budget) and the frame bound still
+     guards the zero-byte/control-frame flood it was written for. */
+  let drainedChunks = 0;
+  const RETAIN_BYTES = 32 * 1024 * 1024;
   const cancelUpstream = () => {
     try { port.postMessage({ type: "zl:relayCancel", rid }); } catch { /* dead port: local teardown must still run */ }
   };
@@ -342,7 +354,10 @@ async function relayFetchRaw(
     const bytes = m.type === "zl:relayChunk" && !invalidChunk ? m.bytes.byteLength : 0;
     // Bound both payload memory and zero-byte/control frame floods, including
     // legacy peers that cannot participate in the credit protocol.
-    if (invalidChunk || queuedBytes + bytes > RELAY_CREDIT_BYTES * 2 || queue.length >= 4096) {
+    const liveDrain = drainedChunks > 0;
+    const byteCeiling = liveDrain ? RETAIN_BYTES : RELAY_CREDIT_BYTES * 2;
+    const frameCeiling = liveDrain ? Infinity : 4096;
+    if (invalidChunk || queuedBytes + bytes > byteCeiling || queue.length >= frameCeiling) {
       terminal = true;
       waiters.delete(rid);
       queue.length = 0;
@@ -377,7 +392,12 @@ async function relayFetchRaw(
   };
   const shift = (): RelayMsg => {
     const m = queue.shift()!;
-    if (m?.type === "zl:relayChunk") queuedBytes -= m.bytes.byteLength;
+    if (m?.type === "zl:relayChunk") {
+      queuedBytes -= m.bytes.byteLength;
+      /* #644: a shifted chunk is the reader-drain proof that flips the
+         queue bound from the flood kill to the live-drain retention. */
+      drainedChunks++;
+    }
     return m;
   };
   const take = (): Promise<RelayMsg> =>
