@@ -1,16 +1,19 @@
 /* Zeolite extension subsystem: argument schemas + validation (#516,
-   slice 3).
+   slices 3 + 5).
 
    #516 slice 2 made the mounted surface self-describing against
-   Firefox member by member; this slice adds the argument contract.
-   ARG_SCHEMAS is a machine-readable table for the first five
-   namespaces (alarms, cookies, runtime, storage, tabs): per mounted
-   method, the accepted argument count and the JS kind every position
-   may carry. installArgValidation() wraps the mounted methods so
-   out-of-contract calls reject with a TypeError before any engine
-   work happens, and the conformance test (arg-schemas.test.ts)
-   enforces that the table covers every mounted method of those five
-   namespaces 1:1 - a new method without a schema fails CI.
+   Firefox member by member; slice 3 added the argument contract.
+   ARG_SCHEMAS is a machine-readable table: per mounted method of the
+   covered namespaces (alarms, action, bookmarks, browsingData,
+   contextMenus + menus, cookies, declarativeNetRequest, downloads,
+   i18n, management, notifications, permissions, runtime, scripting,
+   storage, tabs, windows), the accepted argument count and the JS
+   kind every position may carry. installArgValidation() wraps the
+   mounted methods so out-of-contract calls reject with a TypeError
+   before any engine work happens, and the conformance test
+   (arg-schemas.test.ts) enforces that the table covers every mounted
+   method of those namespaces 1:1 - a new method without a schema
+   fails CI.
 
    The table describes the MOUNTED contract (what the engine really
    accepts today). Where that deliberately differs from Firefox's
@@ -20,8 +23,9 @@
    silent. Nested storage areas are keyed by dotted path
    (storage.local.get). Honest gaps that remain open for later slices:
    Firefox's StorageArea.getKeys is not mounted (recorded here, feeds
-   #520), the remaining namespaces get schemas in follow-up slices,
-   and return-value/enum validation is not covered yet. */
+   #520), the MV2-only action family aliases (browserAction,
+   pageAction) and chrome.extension stay untabled until a fixture
+   mounts them, and return-value/enum validation is not covered yet. */
 
 export type ArgKind = "string" | "number" | "boolean" | "object" | "array" | "function" | "null" | "any";
 
@@ -119,6 +123,126 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   /* Firefox: update(updateProperties) | update(tabId, updateProperties);
      the engine mounts the no-tab form (the single-window model). */
   "tabs.update": { min: 0, max: 2, types: [["number", "object"], ["object"]], ff: [1, 2], note: "the engine also mounts the no-tab form" },
+  /* ---- action family -----------------------------------------------------
+     The toolbar action family mounts for MV3 `action`, MV2
+     `browserAction` and MV2 `pageAction` (pageAction without badge /
+     enable-disable). Firefox requires the details object on the
+     setters and getters; the engine defaults it, so the no-arg form
+     addresses the global state. enable/disable take the genuinely
+     optional tabId. The conformance test covers `action` on the MV3
+     fixture; browserAction/pageAction mount on MV2 manifests only and
+     share actionNsFor's identical contract. */
+  "action.enable": { min: 0, max: 1, types: [["number", "null"]] },
+  "action.disable": { min: 0, max: 1, types: [["number", "null"]] },
+  "action.isEnabled": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "action.setTitle": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "action.getTitle": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "action.setBadgeText": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "action.getBadgeText": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "action.setBadgeBackgroundColor": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "action.getBadgeBackgroundColor": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "action.setBadgeTextColor": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "action.getBadgeTextColor": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "action.setPopup": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "action.getPopup": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+  "action.setIcon": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (details default to the global state)" },
+
+  /* ---- bookmarks ------------------------------------------------------- */
+  /* Firefox shapes match everywhere; search accepts both the word
+     string and the verbatim url/title object form. */
+  "bookmarks.create": { min: 1, max: 1, types: [["object"]] },
+  "bookmarks.get": { min: 1, max: 1, types: [["string", "array"]] },
+  "bookmarks.getChildren": { min: 1, max: 1, types: [["string"]] },
+  "bookmarks.getRecent": { min: 1, max: 1, types: [["number"]] },
+  "bookmarks.getTree": { min: 0, max: 0 },
+  "bookmarks.getSubTree": { min: 1, max: 1, types: [["string"]] },
+  "bookmarks.search": { min: 1, max: 1, types: [["string", "object"]] },
+  "bookmarks.move": { min: 2, max: 2, types: [["string"], ["object"]] },
+  "bookmarks.update": { min: 2, max: 2, types: [["string"], ["object"]] },
+  "bookmarks.remove": { min: 1, max: 1, types: [["string"]] },
+  "bookmarks.removeTree": { min: 1, max: 1, types: [["string"]] },
+
+  /* ---- browsingData ------------------------------------------------------ */
+  /* The engine-owned types accept the no-arg form (defaults to every
+     origin); the host-browser-owned types mount the no-arg form too
+     but the call itself rejects (browsingdata.ts unreachable). */
+  "browsingData.settings": { min: 0, max: 0 },
+  "browsingData.removeCache": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (defaults to every origin)" },
+  "browsingData.removeCookies": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (defaults to every origin)" },
+  "browsingData.removeDownloads": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (defaults to every origin)" },
+  "browsingData.removeIndexedDB": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (defaults to every origin)" },
+  "browsingData.removeFormData": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (host-browser-owned data type)" },
+  "browsingData.removeHistory": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (host-browser-owned data type)" },
+  "browsingData.removeLocalStorage": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (host-browser-owned data type)" },
+  "browsingData.removePasswords": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (host-browser-owned data type)" },
+  "browsingData.removePluginData": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (host-browser-owned data type)" },
+  /* Engine extra (Chrome parity), documented in COMPAT and the gap
+     report; Firefox has no removeServiceWorkers. */
+  "browsingData.removeServiceWorkers": { min: 0, max: 0 },
+
+  /* ---- contextMenus / menus ---------------------------------------------- */
+  /* One registry under both names; the table keys both namespaces.
+     Firefox requires createProperties and accepts a trailing callback
+     the engine does not take; update requires updateProperties. */
+  "contextMenus.create": { min: 0, max: 1, types: [["object"]], ff: [1, 2], note: "the engine also mounts the no-arg form and does not accept Firefox's trailing callback" },
+  "contextMenus.update": { min: 0, max: 2, types: [["string", "number"], ["object"]], ff: [2, 2], note: "the engine also mounts the no-props form" },
+  "contextMenus.remove": { min: 1, max: 1, types: [["string", "number"]] },
+  "contextMenus.removeAll": { min: 0, max: 0 },
+  "menus.create": { min: 0, max: 1, types: [["object"]], ff: [1, 2], note: "the engine also mounts the no-arg form and does not accept Firefox's trailing callback" },
+  "menus.update": { min: 0, max: 2, types: [["string", "number"], ["object"]], ff: [2, 2], note: "the engine also mounts the no-props form" },
+  "menus.remove": { min: 1, max: 1, types: [["string", "number"]] },
+  "menus.removeAll": { min: 0, max: 0 },
+
+  /* ---- declarativeNetRequest ----------------------------------------------- */
+  "declarativeNetRequest.updateDynamicRules": { min: 1, max: 1, types: [["object"]] },
+  "declarativeNetRequest.getDynamicRules": { min: 0, max: 0 },
+  "declarativeNetRequest.updateSessionRules": { min: 1, max: 1, types: [["object"]] },
+  "declarativeNetRequest.getSessionRules": { min: 0, max: 0 },
+  "declarativeNetRequest.updateEnabledRulesets": { min: 1, max: 1, types: [["object"]] },
+  "declarativeNetRequest.getEnabledRulesets": { min: 0, max: 0 },
+  "declarativeNetRequest.getAvailableStaticRuleCount": { min: 0, max: 0 },
+  "declarativeNetRequest.getMatchedRules": { min: 0, max: 0 },
+
+  /* ---- downloads ------------------------------------------------------------ */
+  "downloads.download": { min: 1, max: 1, types: [["object"]] },
+  "downloads.search": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (every handoff of this extension)" },
+
+  /* ---- i18n ------------------------------------------------------------------ */
+  "i18n.getAcceptLanguages": { min: 0, max: 0 },
+  "i18n.getMessage": { min: 1, max: 2, types: [["string"], ["any"]] },
+  "i18n.getUILanguage": { min: 0, max: 0 },
+
+  /* ---- management --------------------------------------------------------------- */
+  "management.getSelf": { min: 0, max: 0 },
+  "management.get": { min: 1, max: 1, types: [["string"]] },
+  "management.getAll": { min: 0, max: 0 },
+  "management.setEnabled": { min: 2, max: 2, types: [["string"], ["boolean"]] },
+  /* Engine extra (Chrome parity), documented in COMPAT and the gap
+     report; Firefox never implemented management.uninstall. */
+  "management.uninstall": { min: 1, max: 1, types: [["string"]] },
+  "management.uninstallSelf": { min: 0, max: 0 },
+
+  /* ---- notifications --------------------------------------------------------------- */
+  "notifications.create": { min: 0, max: 2, types: [["string", "object"], ["object"]], ff: [1, 2], note: "the engine also mounts the no-arg form; the call itself rejects without a usable options object" },
+  "notifications.update": { min: 2, max: 2, types: [["string"], ["object"]] },
+  "notifications.clear": { min: 1, max: 1, types: [["string"]] },
+  "notifications.getAll": { min: 0, max: 0 },
+
+  /* ---- permissions -------------------------------------------------------------------- */
+  "permissions.contains": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (an empty permission set)" },
+  "permissions.getAll": { min: 0, max: 0 },
+  "permissions.request": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (an empty permission set)" },
+  "permissions.remove": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (an empty permission set)" },
+
+  /* ---- scripting ------------------------------------------------------------------------ */
+  "scripting.executeScript": { min: 1, max: 1, types: [["object"]] },
+  "scripting.insertCSS": { min: 1, max: 1, types: [["object"]] },
+
+  /* ---- windows ----------------------------------------------------------------------------- */
+  "windows.get": { min: 1, max: 2, types: [["number"], ["object"]] },
+  "windows.getCurrent": { min: 0, max: 1, types: [["object"]] },
+  "windows.getLastFocused": { min: 0, max: 1, types: [["object"]] },
+  "windows.getAll": { min: 0, max: 1, types: [["object"]] },
 };
 
 /** Classify one argument value into the table's kind vocabulary. */

@@ -1,13 +1,12 @@
-/* #516 slice 3: the argument-schema contract (arg-schemas.ts) held
-   against the real mounted surface.
+/* #516 slices 3 + 5: the argument-schema contract (arg-schemas.ts)
+   held against the real mounted surface.
 
    Invariants:
    1. every ARG_SCHEMAS path resolves to a mounted function on the
       all-permissions surface (no stale entries, no silently skipped
       paths that should mount),
-   2. every mounted method of the five covered namespaces (alarms,
-      cookies, runtime, tabs, and the three storage areas) has a
-      schema - a new method without one fails here,
+   2. every mounted method of the covered namespaces has a schema - a
+      new method without one fails here,
    3. out-of-contract calls (wrong arity, wrong kinds) reject with a
       TypeError BEFORE the engine runs anything,
    4. valid calls pass through unchanged, and the chrome callback
@@ -26,8 +25,20 @@ const enc = new TextEncoder();
 const ALL_NS_PERMISSIONS = [
   "storage", "tabs", "notifications", "contextMenus", "downloads", "cookies",
   "webRequest", "webRequestBlocking", "webNavigation", "alarms", "management",
-  "browsingData", "declarativeNetRequest", "bookmarks",
+  "browsingData", "declarativeNetRequest", "declarativeNetRequestFeedback",
+  "bookmarks",
 ];
+
+/* #516 slice 5: the namespaces the argument contract covers. The
+   browserAction/pageAction aliases and chrome.extension mount on MV2
+   manifests only, so they stay out until a fixture mounts them;
+   webNavigation and webRequest mount events but no methods. */
+const COVERED_NAMESPACES = new Set([
+  "alarms", "action", "bookmarks", "browsingData", "contextMenus", "menus",
+  "cookies", "declarativeNetRequest", "downloads", "i18n", "management",
+  "notifications", "permissions", "runtime", "scripting", "storage", "tabs",
+  "windows",
+]);
 
 async function allPermsApi() {
   const m = new ExtensionManager();
@@ -55,13 +66,13 @@ async function allPermsApi() {
   );
 }
 
-/** The mounted member paths of the five covered namespaces (methods
+/** The mounted member paths of the covered namespaces (methods
     only; events and constants have no argument contract). Nested area
     members (storage.local.get, ...) count as methods of their own. */
 function coveredMethodPaths(browser: Record<string, unknown>): string[] {
   const out: string[] = [];
   for (const ns of buildInventory(browser)) {
-    if (ns.name !== "alarms" && ns.name !== "cookies" && ns.name !== "runtime" && ns.name !== "tabs" && ns.name !== "storage") continue;
+    if (!COVERED_NAMESPACES.has(ns.name)) continue;
     for (const mem of ns.members) {
       if (mem.kind === "method") {
         out.push(`${ns.name}.${mem.name}`);
@@ -124,14 +135,14 @@ describe("argument schemas (#516 slice 3)", () => {
     expect(stale, "ARG_SCHEMAS entries that do not resolve to a mounted method").toEqual([]);
   });
 
-  it("every mounted method of the five covered namespaces has a schema", async () => {
+  it("every mounted method of the covered namespaces has a schema", async () => {
     api = await allPermsApi();
     const mounted = coveredMethodPaths(api.browser);
     const tabled = Object.keys(ARG_SCHEMAS).sort();
     const missing = mounted.filter((p) => !tabled.includes(p));
     const extra = tabled.filter((p) => !mounted.includes(p));
     expect(missing, "mounted methods without an argument schema").toEqual([]);
-    expect(extra, "ARG_SCHEMAS entries beyond the five covered namespaces' mounted methods").toEqual([]);
+    expect(extra, "ARG_SCHEMAS entries beyond the covered namespaces' mounted methods").toEqual([]);
   });
 
   it("too few or too many arguments reject with a TypeError before the engine runs", async () => {
