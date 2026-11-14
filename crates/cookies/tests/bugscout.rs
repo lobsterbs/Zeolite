@@ -69,7 +69,10 @@ fn loopback_secure_gate_accepts_only_real_loopback_hosts() {
     ] {
         let mut jar = Jar::new();
         assert!(
-            matches!(store(&mut jar, host, "k=1; Secure"), StoreOutcome::Stored { .. }),
+            matches!(
+                store(&mut jar, host, "k=1; Secure"),
+                StoreOutcome::Stored { .. }
+            ),
             "{host} is loopback and must admit Secure cookies"
         );
     }
@@ -98,11 +101,15 @@ fn secure_and_host_prefixes_match_case_insensitively() {
         Reject::PrefixRequiresSecure
     );
     assert_eq!(
-        rejected(store(&mut jar, "https://a.example/", "__HOST-k=1; Secure; Domain=a.example")),
+        rejected(store(
+            &mut jar,
+            "https://a.example/",
+            "__HOST-k=1; Secure; Domain=a.example"
+        )),
         Reject::HostPrefixRequiresRoot
     );
     /* A case-variant spelling that satisfies every invariant
-       stores exactly like the canonical one. */
+    stores exactly like the canonical one. */
     assert!(matches!(
         store(&mut jar, "https://a.example/", "__HOST-k=1; Secure"),
         StoreOutcome::Stored { .. }
@@ -124,23 +131,28 @@ fn secure_and_host_prefixes_match_case_insensitively() {
 fn profile_sweep_domain_pass_precedes_total_pass() {
     let mut p = Profile::new();
     /* Bucket b1: 60 session cookies on one domain (10 over the
-       per-domain cap). */
+    per-domain cap). */
     let d: Vec<Cookie> = (0..60).map(|i| sc("k", "v", "d.example", i)).collect();
     p.set_bucket("b1", d);
     /* Bucket b2: 59 domains at exactly the per-domain cap:
-       2950 cookies, no per-domain excess. */
+    2950 cookies, no per-domain excess. */
     let mut e: Vec<Cookie> = Vec::new();
     for j in 0..59usize {
         for k in 0..COOKIE_MAX_PER_DOMAIN {
-            e.push(sc("k", "v", &format!("e{j}.example"), 1000 + (j * 50 + k) as i64));
+            e.push(sc(
+                "k",
+                "v",
+                &format!("e{j}.example"),
+                1000 + (j * 50 + k) as i64,
+            ));
         }
     }
     p.set_bucket("b2", e);
 
     let evicted = p.sweep(None, NOW);
     /* Total was 3010 (10 over); the domain pass evicts exactly 10
-       and the total pass then sees exactly the cap: 10 unique
-       evictions, 3000 cookies left, no over-eviction. */
+    and the total pass then sees exactly the cap: 10 unique
+    evictions, 3000 cookies left, no over-eviction. */
     assert_eq!(
         evicted.len(),
         10,
@@ -150,7 +162,11 @@ fn profile_sweep_domain_pass_precedes_total_pass() {
     let mut uniq = evicted.clone();
     uniq.sort_by_key(|c| c.created);
     uniq.dedup();
-    assert_eq!(uniq.len(), evicted.len(), "evicted list must not double-report");
+    assert_eq!(
+        uniq.len(),
+        evicted.len(),
+        "evicted list must not double-report"
+    );
     let total: usize = p.buckets().map(|(_, v)| v.len()).sum();
     assert_eq!(total, COOKIE_MAX_TOTAL);
     let d_left = p
@@ -160,7 +176,9 @@ fn profile_sweep_domain_pass_precedes_total_pass() {
         .count();
     assert_eq!(d_left, COOKIE_MAX_PER_DOMAIN);
     /* The evicted ones are d.example's earliest-created. */
-    assert!(evicted.iter().all(|c| c.domain == "d.example" && c.created < 10));
+    assert!(evicted
+        .iter()
+        .all(|c| c.domain == "d.example" && c.created < 10));
 }
 
 /* ---- 4. control characters in attribute values ---- */
@@ -168,7 +186,7 @@ fn profile_sweep_domain_pass_precedes_total_pass() {
 #[test]
 fn attribute_values_with_control_characters_are_ignored() {
     /* A CR/LF inside the Path value must not reach the jar; the
-       attribute is outside the 5.2 grammar and is ignored. */
+    attribute is outside the 5.2 grammar and is ignored. */
     let p = parse_set_cookie("a=1; Path=/x\r\ny").unwrap();
     assert_eq!(p.path, None);
     let d = parse_set_cookie("a=1; Domain=e\u{1d}vil.com").unwrap();
