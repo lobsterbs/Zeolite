@@ -11,10 +11,11 @@
    @types/firefox-webext-browser 143.0.1 (the community types
    generated from Firefox's own toolkit/browser components
    extensions/schemas JSON). Taxonomy matches buildInventory():
-   method | event | constant. Argument schemas and per-member
-   Firefox version annotations stay future slices (#516 open);
-   shortcut: this file must be regenerated when Firefox's schema
-   changes, the source package version is pinned in this header.
+   method | event | constant. Argument schemas live in
+   ./arg-schemas.ts (#516 slice 3) and per-member Firefox version
+   annotations in ./firefox-versions.ts (#516 slice 4); shortcut:
+   this file must be regenerated when Firefox's schema changes, the
+   source package version is pinned in this header.
 
    Three conformance facts live here:
    - FIREFOX_UNMOUNTED_REASONS: every Firefox namespace the engine
