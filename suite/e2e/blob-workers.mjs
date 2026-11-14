@@ -281,6 +281,10 @@ async function main() {
       hits.push(u.pathname);
       if (u.pathname === "/dir/page.html") { res.writeHead(200, { "content-type": "text/html" }); res.end(pageHtml("site-B")); }
       else if (u.pathname === "/api/data.txt") { res.writeHead(200, { "content-type": "text/plain", "access-control-allow-origin": "*" }); res.end("DIRECT-B"); }
+      /* #537 remainder: the net worker's cross-origin fetch targets
+         FX_B, so the second origin must serve the same CORS probe
+         FX_A serves — the check asserts the body round-trips. */
+      else if (u.pathname === "/api/cors.txt") { res.writeHead(200, { "content-type": "text/plain", "access-control-allow-origin": "*" }); res.end("CORS-OK"); }
       else { res.writeHead(404); res.end("no"); }
     });
     srv.listen(FX_B_PORT, "127.0.0.1", () => resolve_(srv));
@@ -288,23 +292,44 @@ async function main() {
   engineProc = spawn(bin, ["--port", String(ENGINE_PORT), "--static", resolve("app/dist")], { env: { ...process.env, ZL_TEST_ALLOW_PRIVATE_DESTS: "1", ZL_TEST_EGRESS: "1" }, stdio: ["ignore", "pipe", "pipe"] });
   engineProc.stdout.on("data", (c) => engineErr.push(String(c)));
   engineProc.stderr.on("data", (c) => engineErr.push(String(c)));
-  await sleep(2500);
+  /* Wait until the engine ANSWERS, not merely until a fixed sleep
+     elapses: a cold first boot (wasm glue init, upstream DNS pinning)
+     can outlast any constant, and the first proxied load would 502
+     into a virtual frame without the fixture's script globals. */
+  let ready = false;
+  for (let i = 0; i < 180; i++) {
+    try {
+      const r = await fetch(ENGINE + "/");
+      if (r.ok) { ready = true; break; }
+    } catch { /* not listening yet */ }
+    await sleep(500);
+  }
+  if (!ready) throw new Error("zeolite-server never answered on " + ENGINE);
   browser = await chromium.launch({ args: ["--no-sandbox"] });
   context = await browser.newContext();
   const page = await context.newPage();
   page.on("console", (m) => console.log("PAGE-CONSOLE " + m.type() + " " + m.text().slice(0, 200)));
   page.on("pageerror", (e) => console.log("PAGE-ERROR " + String(e).slice(0, 300)));
   const drive = async (virtualUrl) => {
-    await page.goto(ENGINE + "/?url=" + encodeURIComponent(virtualUrl));
-    await sleep(2500);
-    let frame = null;
-    for (let i = 0; i < 60; i++) {
-      frame = page.frames().find((fr) => fr.url().startsWith(ENGINE + "/j/"));
-      if (frame) break;
-      await sleep(500);
+    /* A cold engine's first proxied load can answer 502 while its
+       upstream path warms (degraded egress boxes); the fixture frame
+       then exists but carries an error document without __run. Retry
+       the whole load until the fixture script globals are live — on a
+       healthy engine the first attempt succeeds and this is a no-op. */
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await page.goto(ENGINE + "/?url=" + encodeURIComponent(virtualUrl));
+      await sleep(2500);
+      let frame = null;
+      for (let i = 0; i < 60; i++) {
+        frame = page.frames().find((fr) => fr.url().startsWith(ENGINE + "/j/"));
+        if (frame) break;
+        await sleep(500);
+      }
+      const live = frame !== null &&
+        await frame.evaluate(() => typeof window.__run === "function").catch(() => false);
+      if (live) return await frame.evaluate(() => window.__run());
     }
-    if (!frame) throw new Error("virtual frame never appeared for " + virtualUrl);
-    return await frame.evaluate(() => window.__run());
+    throw new Error("virtual frame never served the fixture for " + virtualUrl);
   };
 
   const res = await drive(VIRTUAL_PAGE);
@@ -428,7 +453,10 @@ async function main() {
   });
   await check("terminated worker's SOURCE blob stays usable (native blob semantics)", () => {
     if (res.probe.reboot !== "DONE") throw new Error("reboot=" + JSON.stringify(res.probe));
-    const sites = res.log.filter((l) => l.startsWith("classic:site="));
+    /* The first boot logs under the classic label, the rebooted
+       worker under its own reboot label — both must have posted
+       their site token for the source blob to be proven usable. */
+    const sites = res.log.filter((l) => l.startsWith("classic:site=") || l.startsWith("reboot:site="));
     if (sites.length < 2) throw new Error("the rebooted worker never re-posted its site token");
     return "rebooted from the same blob URL";
   });
