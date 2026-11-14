@@ -279,7 +279,10 @@ fn future_expires_stores() {
         "https://a.example/",
         "a=1; Expires=Wed, 01 Jan 2031 00:00:00 GMT",
     );
-    assert_eq!(stored(o).expires, 1_924_992_000_000);
+    /* bis Cookie Lifetime Limits: a lifetime longer than 400 days
+    (34560000 seconds) is reduced to the limit (the uncapped 2031
+    value was the pre-bis behavior, pinned before the cap). */
+    assert_eq!(stored(o).expires, NOW + 34_560_000_000);
 }
 
 /* ---------------- attach oracle ---------------- */

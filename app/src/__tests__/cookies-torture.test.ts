@@ -705,13 +705,15 @@ describe("admission/assembly fuzz (tough-cookie differential)", () => {
       cookiesResetForTests();
       const seq: Array<[string, string]> = [];
       const n = 1 + Math.floor(rnd() * 3);
+      const rejections: string[] = [];
       for (let k = 0; k < n; k++) {
         let h = pick(NAMES) + "=" + pick(VALUES);
         const na = Math.floor(rnd() * 3);
         for (let a = 0; a < na; a++) h += "; " + pick(ATTRS);
         const url = pick(URLS);
         seq.push([h, url]);
-        applySetCookie(url, resp([h]));
+        const res = applySetCookie(url, resp([h]));
+        rejections.push(res.length === 1 ? (res[0].rejected ?? "") : "");
       }
       const probe = pick(URLS);
       const o = ours(probe);
@@ -756,6 +758,17 @@ describe("admission/assembly fuzz (tough-cookie differential)", () => {
          involved names are all gated-header names is explained. */
       const gatedNames = new Set(seq.filter(([h, u]) => gateFires(h, u)).map(([h]) => headerName(h)));
       if (gatedNames.size > 0 && involved.size > 0 && [...involved].every((nm) => gatedNames.has(nm))) continue;
+
+      /* bis 5.6 step 16 (leave secure cookies alone): ours refuses a
+         non-secure write that would shadow an already-stored Secure
+         cookie of the same name (domain chain either way, path-match);
+         tough has no such rule and stores or overwrites. The refusal
+         is state-dependent, so the class is fed by the admission's own
+         rejected:"secure shadow" results rather than by header shape. */
+      const shadowNames = new Set(
+        seq.filter((_, i) => rejections[i] === "secure shadow").map(([h]) => headerName(h)),
+      );
+      if (shadowNames.size > 0 && involved.size > 0 && [...involved].every((nm) => shadowNames.has(nm))) continue;
 
       /* An empty Path attribute: RFC 6265 5.2.4 says ignore it, ours
          keeps the earlier/default path; tough lets the empty value
