@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DL, DownloadTracker, adoptResponse, downloadFilename, isAdArtefact, ZL_DL_RESUME_MAX } from "../downloads";
-import { openDb, idbClear, idbGetAllKeys, idbPut, idbDelete, STORE_DOWNLOADS, STORE_PARTIALS } from "../extensions/idb";
+import { openDb, idbClear, idbGet, idbGetAllKeys, idbPut, idbDelete, STORE_DOWNLOADS, STORE_PARTIALS } from "../extensions/idb";
 
 function headers(h: Record<string, string>): Headers {
   return new Headers(h);
@@ -247,6 +247,28 @@ describe("download registry persistence (2.2)", () => {
     expect(snap).toHaveLength(1);
     expect(snap[0].id).toBe("dl2");
     expect(Number.isFinite(snap[0].speed)).toBe(true);
+    t.reset();
+  });
+
+  it("purges persisted ad artefact rows on load (beta report 2026-11-14)", async () => {
+    const db = await openDb();
+    /* A stale row from before the filter (c3268850) reached the pin. */
+    await idbPut(db, STORE_DOWNLOADS, "site:https://googleads.g.doubleclick.net", [
+      { id: "dl1", filename: "f.txt", mime: "text/plain", size: 5, received: 5, startedAt: Date.now(), endedAt: Date.now(), status: "done", source: "https://googleads.g.doubleclick.net/pagead/x", speed: 0 },
+    ]);
+    /* The same filename from a non-ad host stays a tracked download. */
+    await idbPut(db, STORE_DOWNLOADS, "site:https://x.test", [
+      { id: "dl2", filename: "f.txt", mime: "text/plain", size: 5, received: 5, startedAt: Date.now(), endedAt: Date.now(), status: "done", source: "https://x.test/f.txt", speed: 0 },
+    ]);
+    const t = new DownloadTracker();
+    await t.load();
+    const snap = t.snapshot();
+    expect(snap).toHaveLength(1);
+    expect(snap[0].source).toBe("https://x.test/f.txt");
+    /* The follow-up persist rewrites the store without the artefact. */
+    await t.persist();
+    const rec = await idbGet(db, STORE_DOWNLOADS, "site:https://googleads.g.doubleclick.net");
+    expect(rec).toBeUndefined();
     t.reset();
   });
 });

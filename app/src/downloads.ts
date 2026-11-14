@@ -319,12 +319,23 @@ export class DownloadTracker {
     const keys = await idbGetAllKeys(db, STORE_DOWNLOADS);
     const restored: DownloadEntry[] = [];
     let skipped = 0;
+    /* Ad artefact purge (beta report 2026-11-14): the registry ring
+       persists site-scoped and terminal entries never age out, so
+       f.txt rows registered before the filter (c3268850) reached the
+       deployed pin surfaced forever. The filter only stops new
+       registrations; the load path is where the stale rows die. The
+       follow-up persist rewrites the store without them. */
+    let purged = 0;
     for (const k of keys) {
       const rec = (await idbGet(db, STORE_DOWNLOADS, k)) as DownloadEntry[] | undefined;
       if (!Array.isArray(rec)) continue;
       for (const e of rec) {
         if (!isValidEntry(e)) {
           skipped++;
+          continue;
+        }
+        if (isAdArtefact(e.source, e.filename)) {
+          purged++;
           continue;
         }
         restored.push(
@@ -336,6 +347,10 @@ export class DownloadTracker {
     }
     if (skipped > 0) {
       console.warn(`download registry: skipped ${skipped} corrupted stored entries`);
+    }
+    if (purged > 0) {
+      console.warn(`download registry: purged ${purged} ad artefact entries`);
+      this.schedulePersist();
     }
     restored.sort((a, b) => a.startedAt - b.startedAt);
     this.entries.length = 0;
