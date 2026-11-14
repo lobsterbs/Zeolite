@@ -85,6 +85,10 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   "runtime.getURL": { min: 1, max: 1, types: [["string"]] },
   "runtime.openOptionsPage": { min: 0, max: 0 },
   "runtime.reload": { min: 0, max: 0 },
+  /* #518: the engine answers no_update honestly (no update server);
+     setUninstallURL clears the stored URL when called without one. */
+  "runtime.requestUpdateCheck": { min: 0, max: 0 },
+  "runtime.setUninstallURL": { min: 0, max: 1, types: [["string"]] },
   /* Firefox adds sendMessage(extensionId, message, options?) - the
      engine has no options argument. Positions stay unchecked: both
      the (message) and (extensionId, message) overloads are live. */

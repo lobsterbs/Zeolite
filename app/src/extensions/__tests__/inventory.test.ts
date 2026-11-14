@@ -224,7 +224,11 @@ describe("Firefox API inventory conformance (#516 slice 2)", () => {
     const missingOf = (ns: string) => report.missingMembers.find((m) => m.namespace === ns)?.members ?? [];
     expect(missingOf("i18n")).toContain("detectLanguage");
     expect(missingOf("storage"), "managed mounted by the #520 slice").toEqual([]);
-    expect(missingOf("runtime")).toContain("setUninstallURL");
+    /* requestUpdateCheck/setUninstallURL left the runtime list in the
+       #518 slice; the native-messaging and page surfaces stay open. */
+    expect(missingOf("runtime")).toContain("connectNative");
+    expect(missingOf("runtime")).not.toContain("setUninstallURL");
+    expect(missingOf("runtime")).not.toContain("requestUpdateCheck");
     /* duplicate/highlight/TAB_ID_NONE left the tabs list in the #519
        slice; reload and friends stay open. */
     expect(missingOf("tabs")).toContain("reload");

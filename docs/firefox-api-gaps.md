@@ -12,7 +12,7 @@ ZL_UPDATE_GAPS_DOC=1 npx vitest run src/extensions/__tests__/gaps-doc.test.ts   
 
 ## Summary
 
-- Mounted namespaces: **23** (195 members), the union of the action-family fixtures
+- Mounted namespaces: **23** (197 members), the union of the action-family fixtures
 - Firefox namespaces not mounted: **40**, each with its honest reason
 - Mounted namespaces with member-level gaps: **18**
 - Engine extras (mounted members Firefox does not have): **4**, each justified in COMPAT
@@ -68,7 +68,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 
 | Namespace | Firefox members not mounted |
 | --- | --- |
-| `runtime` | connectNative, getBackgroundPage, getFrameId, getPackageDirectoryEntry, onBrowserUpdateAvailable, onPerformanceWarning, onRestartRequired, onSuspendCanceled, onUpdateAvailable, onUserScriptConnect, onUserScriptMessage, requestUpdateCheck, restart, sendNativeMessage, setUninstallURL |
+| `runtime` | connectNative, getBackgroundPage, getFrameId, getPackageDirectoryEntry, onBrowserUpdateAvailable, onPerformanceWarning, onRestartRequired, onSuspendCanceled, onUpdateAvailable, onUserScriptConnect, onUserScriptMessage, restart, sendNativeMessage |
 | `i18n` | detectLanguage, getPreferredSystemLanguages |
 | `tabs` | captureTab, captureVisibleTab, connect, detectLanguage, discard, executeScript, getZoom, getZoomSettings, goBack, goForward, group, hide, insertCSS, move, moveInSuccession, onAttached, onDetached, onHighlighted, onMoved, onReplaced, onZoomChange, print, printPreview, reload, removeCSS, saveAsPDF, setZoom, setZoomSettings, show, toggleReaderMode, ungroup, warmup |
 | `windows` | create, onCreated, onRemoved, remove, update |
@@ -116,7 +116,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `notifications` | `clear` (method), `create` (method), `getAll` (method), `onButtonClicked` (event), `onClicked` (event), `onClosed` (event), `update` (method) |
 | `pageAction` | `getPopup` (method), `getTitle` (method), `hide` (method), `isShown` (method), `onClicked` (event), `setIcon` (method), `setPopup` (method), `setTitle` (method), `show` (method) |
 | `permissions` | `contains` (method), `getAll` (method), `onAdded` (event), `onRemoved` (event), `remove` (method), `request` (method) |
-| `runtime` | `connect` (method), `getBrowserInfo` (method), `getContexts` (method), `getManifest` (method), `getPlatformInfo` (method), `getURL` (method), `id` (constant), `lastError` (constant), `onConnect` (event), `onConnectExternal` (event), `onInstalled` (event), `onMessage` (event), `onMessageExternal` (event), `onStartup` (event), `onSuspend` (event), `openOptionsPage` (method), `reload` (method), `sendMessage` (method) |
+| `runtime` | `connect` (method), `getBrowserInfo` (method), `getContexts` (method), `getManifest` (method), `getPlatformInfo` (method), `getURL` (method), `id` (constant), `lastError` (constant), `onConnect` (event), `onConnectExternal` (event), `onInstalled` (event), `onMessage` (event), `onMessageExternal` (event), `onStartup` (event), `onSuspend` (event), `openOptionsPage` (method), `reload` (method), `requestUpdateCheck` (method), `sendMessage` (method), `setUninstallURL` (method) |
 | `scripting` | `executeScript` (method), `insertCSS` (method) |
 | `storage` | `local` (constant), `managed` (constant), `onChanged` (event), `session` (constant), `sync` (constant) |
 | `tabs` | `TAB_ID_NONE` (constant), `create` (method), `duplicate` (method), `get` (method), `getCurrent` (method), `highlight` (method), `onActivated` (event), `onCreated` (event), `onRemoved` (event), `onUpdated` (event), `query` (method), `remove` (method), `sendMessage` (method), `update` (method) |

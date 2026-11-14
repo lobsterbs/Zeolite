@@ -37,6 +37,7 @@ import { installArgValidation } from "./arg-schemas";
 import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
 import { makeManagedArea, setSessionAccessLevel, SYNC_MAX_ITEMS, SYNC_MAX_WRITE_OPERATIONS_PER_HOUR, SYNC_MAX_WRITE_OPERATIONS_PER_MINUTE, SYNC_QUOTA_BYTES, SYNC_QUOTA_BYTES_PER_ITEM } from "./storage";
+import { setUninstallUrlOf } from "./uninstall-url";
 import type { ExtensionStorageArea, StorageValue } from "./storage";
 import type { ExtensionMessenger, MessageListener, ConnectListener, MessageSender, ExtensionPort } from "./messaging";
 import { ALARMS } from "./alarms";
@@ -401,6 +402,16 @@ export function buildApi(
       { contextType: "BACKGROUND" },
       ...pageClientsOf(ext.id).map(() => ({ contextType: "TAB" })),
     ],
+    /* #518: the engine has no update server, so the check answers
+       Firefox's no_update honestly - never a fabricated update. */
+    requestUpdateCheck: (): Promise<{ status: "no_update" }> => Promise.resolve({ status: "no_update" }),
+    /* #518: the URL persists per extension and opens through the real
+       tabs bridge when the extension uninstalls (manager.uninstall);
+       only http(s) URLs are accepted (uninstall-url.ts). */
+    setUninstallURL: (url?: unknown) => {
+      setUninstallUrlOf(ext.id, url);
+      return Promise.resolve();
+    },
     /* #518: Firefox-shaped overloads. runtime.sendMessage(message)
      sends internally; runtime.sendMessage(targetId, message) sends
      cross-extension (delivered to the target's onMessageExternal when
