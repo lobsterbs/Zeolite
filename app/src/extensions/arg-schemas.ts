@@ -113,6 +113,15 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
      object form is accepted too (storage.ts setSessionAccessLevel). */
   "storage.session.setAccessLevel": { min: 1, max: 1, types: [["string", "object"]] },
 
+  /* #520: the managed area answers honestly empty (no policy source)
+     and every write rejects read-only (storage.ts makeManagedArea) -
+     the shapes exist exactly as Firefox's do. */
+  "storage.managed.get": { min: 0, max: 1, types: [["null", "string", "array", "object"]] },
+  "storage.managed.set": { min: 1, max: 1, types: [["object"]] },
+  "storage.managed.remove": { min: 1, max: 1, types: [["string", "array"]] },
+  "storage.managed.clear": { min: 0, max: 0 },
+  "storage.managed.getBytesInUse": { min: 0, max: 1, types: [["null", "string", "array"]] },
+
   /* ---- tabs --------------------------------------------------------------- */
   "tabs.create": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (an empty active tab)" },
   "tabs.get": { min: 1, max: 1, types: [["number"]] },

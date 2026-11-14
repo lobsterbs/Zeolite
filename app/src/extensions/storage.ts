@@ -79,6 +79,33 @@ export function contentScriptMayUseSession(id: ExtensionId): boolean {
   return sessionAccessLevelOf(id) === "TRUSTED_AND_UNTRUSTED_CONTEXTS";
 }
 
+/* #520: Firefox's storage.managed - the enterprise-policy area. The
+   engine has no policy source, so the area answers honestly EMPTY,
+   which is exactly what Firefox answers when no policy is configured:
+   get resolves to only the defaults an object-form query carries, and
+   every write rejects as read-only (Firefox rejects them too). Not an
+   ExtensionStorageArea: nothing backs it, nothing persists, nothing
+   fires onChanged. A real policy source would arrive with a host
+   settings story (#521/#524) and grow this factory a backing store. */
+export function makeManagedArea(): Record<string, unknown> {
+  const readOnly = (): Promise<never> =>
+    Promise.reject(new Error("zeolite: storage.managed is read-only"));
+  return {
+    get: async (keys: unknown = null): Promise<Record<string, unknown>> => {
+      if (keys === null || keys === undefined) return {};
+      if (typeof keys === "string") return {};
+      if (Array.isArray(keys)) return {};
+      /* The object form carries defaults: an empty store answers them. */
+      if (typeof keys === "object") return { ...(keys as Record<string, unknown>) };
+      return {};
+    },
+    getBytesInUse: async (): Promise<number> => 0,
+    set: readOnly,
+    remove: readOnly,
+    clear: readOnly,
+  };
+}
+
 /* Write-operation rate limiting for the sync area (Firefox's
    MAX_WRITE_OPERATIONS_* constants): a rolling window of op
    timestamps, pruned per check. Counted per area instance; one

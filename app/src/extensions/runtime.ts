@@ -36,7 +36,7 @@ import { isApiDetached } from "./apis";
 import { installArgValidation } from "./arg-schemas";
 import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
-import { setSessionAccessLevel, SYNC_MAX_ITEMS, SYNC_MAX_WRITE_OPERATIONS_PER_HOUR, SYNC_MAX_WRITE_OPERATIONS_PER_MINUTE, SYNC_QUOTA_BYTES, SYNC_QUOTA_BYTES_PER_ITEM } from "./storage";
+import { makeManagedArea, setSessionAccessLevel, SYNC_MAX_ITEMS, SYNC_MAX_WRITE_OPERATIONS_PER_HOUR, SYNC_MAX_WRITE_OPERATIONS_PER_MINUTE, SYNC_QUOTA_BYTES, SYNC_QUOTA_BYTES_PER_ITEM } from "./storage";
 import type { ExtensionStorageArea, StorageValue } from "./storage";
 import type { ExtensionMessenger, MessageListener, ConnectListener, MessageSender, ExtensionPort } from "./messaging";
 import { ALARMS } from "./alarms";
@@ -578,6 +578,10 @@ export function buildApi(
                enforced at the SW content-script gate immediately. */
             setAccessLevel: (arg: unknown) => setSessionAccessLevel(ext.id, arg),
           },
+          /* #520: the enterprise-policy area. No policy source exists,
+             so it answers honestly empty and writes reject read-only
+             (storage.ts makeManagedArea). */
+          managed: makeManagedArea(),
           onChanged,
         };
       })()

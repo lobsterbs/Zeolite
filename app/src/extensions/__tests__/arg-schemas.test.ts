@@ -80,8 +80,9 @@ function coveredMethodPaths(browser: Record<string, unknown>): string[] {
       }
       /* storage areas mount as plain objects with function members;
          every other non-method member is an event or constant and has
-         no argument contract. */
-      if (ns.name === "storage" && ["local", "sync", "session"].includes(mem.name)) {
+         no argument contract. Managed is the read-only policy area
+         whose writes reject at the call itself. */
+      if (ns.name === "storage" && ["local", "sync", "session", "managed"].includes(mem.name)) {
         const area = (browser.storage as Record<string, unknown>)[mem.name] as Record<string, unknown>;
         for (const [k, inner] of Object.entries(area)) {
           if (typeof inner === "function") out.push(`storage.${mem.name}.${k}`);

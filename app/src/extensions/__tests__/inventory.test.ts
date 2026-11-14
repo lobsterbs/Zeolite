@@ -218,10 +218,12 @@ describe("Firefox API inventory conformance (#516 slice 2)", () => {
       expect(absent.get(ns)?.length, `${ns} absent without a reason`).toBeGreaterThan(0);
     }
     expect(absent.has("bookmarks"), "bookmarks mounted by the #520 slice").toBe(false);
-    /* member-level gaps the compat matrix documents */
+    /* member-level gaps the compat matrix documents; storage.managed
+       left the list when the #520 slice mounted the read-only
+       enterprise-policy area. */
     const missingOf = (ns: string) => report.missingMembers.find((m) => m.namespace === ns)?.members ?? [];
     expect(missingOf("i18n")).toContain("detectLanguage");
-    expect(missingOf("storage")).toContain("managed");
+    expect(missingOf("storage"), "managed mounted by the #520 slice").toEqual([]);
     expect(missingOf("runtime")).toContain("setUninstallURL");
     expect(missingOf("tabs")).toContain("duplicate");
     /* exactly the four justified extras */
