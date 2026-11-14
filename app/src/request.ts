@@ -3959,14 +3959,17 @@ export function handleFetch(e: FetchEvent): void {
         if (c) sriNote(SRI, c, abs, integrity);
       };
       /* #554 import maps: document rewrites feed this collector. The
-         registry is keyed by the page-space URL of the page
-         (e.request.url for a navigation - redirects resolve inside
-         the upstream fetch, so the committed key stays the request
-         URL); the module-worker serve seams recover that key from
-         the worker request referrer. */
+         registry is keyed by the page-space URL of the page - the
+         DECODED navigation target, not e.request.url (that is the
+         engine route the browser navigated; its origin is the proxy,
+         and scope keys normalized against it would live on the engine
+         origin while every importer URL the worker seams match is
+         page-space, so no scope could ever apply). The module-worker
+         serve seams recover that key by decoding the worker request
+         referrer route with the same codec. */
       const docMap = (body: string): void => {
         if (e.request.mode !== "navigate") return;
-        const pk = pageKeyOf(e.request.url, self.location.origin);
+        const pk = pageKeyOf(target, self.location.origin);
         if (pk) importmapNote(MAPS, pk, body);
       };
 
@@ -3995,8 +3998,10 @@ export function handleFetch(e: FetchEvent): void {
              previous document's merged state for this page key now;
              the response phase re-records this document's maps in
              order. Without the reset, a re-served page would merge
-             with its predecessor's leftovers, which no browser does. */
-          const navMapKey = pageKeyOf(e.request.url, self.location.origin);
+             with its predecessor's leftovers, which no browser does.
+             Same key space as docMap: the decoded target, not the
+             engine route. */
+          const navMapKey = pageKeyOf(target, self.location.origin);
           if (navMapKey) importmapReset(MAPS, navMapKey);
         }
       }
@@ -4600,8 +4605,14 @@ export function handleFetch(e: FetchEvent): void {
                  import map (referrer recovery; same key space as docMap).
                  The importing module for the worker body's top-level imports
                  is the worker script itself, so scopes match against the
-                 page-space worker URL the cache entry serves from. */
-              const wrPk = pageKeyOf(e.request.referrer, self.location.origin);
+                 page-space worker URL the cache entry serves from. The
+                 referrer names the creating document's ENGINE route; the
+                 registry lives in page space, so decode the route first
+                 (an empty tail resolves the page's own URL). */
+              const refPage = e.request.referrer
+                ? referrerDest(e.request.referrer, "")
+                : null;
+              const wrPk = refPage ? pageKeyOf(refPage, self.location.origin) : null;
               const wrImportBase = cacheRewriteBase(hit, target);
               const wrBare = wrPk
                 ? (spec: string) => resolveBareImportFor(MAPS, wrPk, wrImportBase, spec)
@@ -5728,7 +5739,10 @@ export function handleFetch(e: FetchEvent): void {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "worker prelude + specifier pass" });
             traceDecision({ subsystem: "rewriter", rule: "worker-imports", original: target, result: "rewritten", resource: rtype, traceId });
-            const wrPk = pageKeyOf(e.request.referrer, self.location.origin);
+            const refPage = e.request.referrer
+              ? referrerDest(e.request.referrer, "")
+              : null;
+            const wrPk = refPage ? pageKeyOf(refPage, self.location.origin) : null;
             /* The importer for the body's top-level imports is the worker
                script itself; scopes match against its page-space URL. */
             const wrBare = wrPk
