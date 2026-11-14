@@ -18,7 +18,7 @@ const enc = new TextEncoder();
 const ALL_NS_PERMISSIONS = [
   "storage", "tabs", "notifications", "contextMenus", "downloads", "cookies",
   "webRequest", "webRequestBlocking", "webNavigation", "alarms", "management",
-  "browsingData", "declarativeNetRequest",
+  "browsingData", "declarativeNetRequest", "bookmarks",
 ];
 
 function pkg(name: string, permissions: string[], extra: Record<string, unknown> = {}): Map<string, Uint8Array> {
@@ -210,11 +210,14 @@ describe("Firefox API inventory conformance (#516 slice 2)", () => {
   it("the gap report answers the documented honest gaps (#517-#524 diff baseline)", async () => {
     const { browser } = await mountSurface();
     const report = firefoxGapReport(browser);
-    /* unmounted namespaces come with reasons */
+    /* unmounted namespaces come with reasons. bookmarks no longer
+       belongs here: the #520 slice mounts it (drop it from this list
+       when a namespace gains its implementation). */
     const absent = new Map(report.absentNamespaces.map((a) => [a.name, a.reason]));
-    for (const ns of ["bookmarks", "history", "idle", "sessions", "sidebarAction", "userScripts"]) {
+    for (const ns of ["history", "idle", "sessions", "sidebarAction", "userScripts"]) {
       expect(absent.get(ns)?.length, `${ns} absent without a reason`).toBeGreaterThan(0);
     }
+    expect(absent.has("bookmarks"), "bookmarks mounted by the #520 slice").toBe(false);
     /* member-level gaps the compat matrix documents */
     const missingOf = (ns: string) => report.missingMembers.find((m) => m.namespace === ns)?.members ?? [];
     expect(missingOf("i18n")).toContain("detectLanguage");

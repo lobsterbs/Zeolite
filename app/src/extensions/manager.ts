@@ -23,6 +23,7 @@ import { normalizeExtensionPath } from "./origin";
 import { globToRegExp } from "./content-scripts";
 import { hostPatternsMatch } from "./permissions";
 import { ALARMS } from "./alarms";
+import { BOOKMARKS } from "./bookmarks";
 import { DNR } from "./dnr";
 import { ACTION } from "./action";
 import { dropSessionAccess } from "./storage";
@@ -214,6 +215,8 @@ export class ExtensionManager {
     this.changed(id);
     this.exts.delete(id);
     ALARMS.drop(id);
+    /* #520: the extension's bookmark tree is per-extension state. */
+    BOOKMARKS.drop(id);
     /* #519: the toolbar action registry is per-extension state. */
     ACTION.drop(id);
     /* #520: a fresh install of the same identity starts from the

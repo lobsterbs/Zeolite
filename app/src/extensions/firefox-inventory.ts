@@ -108,7 +108,6 @@ export const FIREFOX_API: Record<string, Record<string, MemberKind>> = {
     the conformance tests. */
 export const FIREFOX_UNMOUNTED_REASONS: Record<string, string> = {
   activityLog: "privileged namespace (System-privileged add-ons only); no engine surface",
-  bookmarks: "no bookmark store exists in the engine (#520)",
   browserSettings: "host settings (homepage, new-tab override, cache) have no engine surface (#521)",
   "browserSettings.colorManagement": "no host color-management surface (#521)",
   captivePortal: "no captive-portal detection exists in the engine (#522)",

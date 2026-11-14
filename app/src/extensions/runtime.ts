@@ -40,6 +40,17 @@ import type { ExtensionStorageArea, StorageValue } from "./storage";
 import type { ExtensionMessenger, MessageListener, ConnectListener, MessageSender, ExtensionPort } from "./messaging";
 import { ALARMS } from "./alarms";
 import type { Alarm, AlarmCreateInfo } from "./alarms";
+import { BOOKMARKS } from "./bookmarks";
+import type {
+  BookmarkChangedListener,
+  BookmarkCreateDetails,
+  BookmarkCreatedListener,
+  BookmarkMoveDestination,
+  BookmarkMovedListener,
+  BookmarkRemovedListener,
+  BookmarkSearchQuery,
+  BookmarkUpdateChanges,
+} from "./bookmarks";
 import {
   DNR,
   GUARANTEED_MINIMUM_STATIC_RULES,
@@ -1000,6 +1011,31 @@ export function buildApi(
       }
     : undefined;
 
+  /* #520: bookmarks over a real per-extension tree persisted to the
+     subsystem's IndexedDB (see ./bookmarks). Mounted only with the
+     "bookmarks" permission so feature detection answers honestly. */
+  const bookmarksNs = ext.permissions.includes("bookmarks")
+    ? (() => {
+        return {
+          create: (details: BookmarkCreateDetails) => BOOKMARKS.create(ext.id, details),
+          get: (idOrIdList: string | string[]) => BOOKMARKS.get(ext.id, idOrIdList),
+          getChildren: (id: string) => BOOKMARKS.getChildren(ext.id, id),
+          getRecent: (numberOfItems: number) => BOOKMARKS.getRecent(ext.id, numberOfItems),
+          getTree: () => BOOKMARKS.getTree(ext.id),
+          getSubTree: (id: string) => BOOKMARKS.getSubTree(ext.id, id),
+          search: (query: BookmarkSearchQuery) => BOOKMARKS.search(ext.id, query),
+          move: (id: string, destination: BookmarkMoveDestination) => BOOKMARKS.move(ext.id, id, destination),
+          update: (id: string, changes: BookmarkUpdateChanges) => BOOKMARKS.update(ext.id, id, changes),
+          remove: (id: string) => BOOKMARKS.remove(ext.id, id),
+          removeTree: (id: string) => BOOKMARKS.removeTree(ext.id, id),
+          onCreated: bridged<BookmarkCreatedListener>((l) => BOOKMARKS.onCreated(ext.id, l)),
+          onRemoved: bridged<BookmarkRemovedListener>((l) => BOOKMARKS.onRemoved(ext.id, l)),
+          onChanged: bridged<BookmarkChangedListener>((l) => BOOKMARKS.onChanged(ext.id, l)),
+          onMoved: bridged<BookmarkMovedListener>((l) => BOOKMARKS.onMoved(ext.id, l)),
+        };
+      })()
+    : undefined;
+
   const browser: Record<string, unknown> = {
     runtime,
     ...(extensionNs ? { extension: extensionNs } : {}),
@@ -1022,6 +1058,7 @@ export function buildApi(
     ...(notificationsNs && !isApiDetached("notifications") ? { notifications: notificationsNs } : {}),
     ...(cookiesNs && !isApiDetached("cookies") ? { cookies: cookiesNs } : {}),
     ...(browsingDataNs && !isApiDetached("browsingData") ? { browsingData: browsingDataNs } : {}),
+    ...(bookmarksNs && !isApiDetached("bookmarks") ? { bookmarks: bookmarksNs } : {}),
   };
   /* Share implementations while honoring Chrome callbacks. */
   return { browser, chrome: chromeApi(browser) };
