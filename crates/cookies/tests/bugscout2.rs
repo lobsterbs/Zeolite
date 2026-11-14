@@ -16,7 +16,9 @@
 //! 5. bis 5.6 step 9: a public-suffix Domain equal to the host
 //!    degrades to host-only instead of aborting.
 
-use zeolite_cookies::{parse_cookie_date, parse_http_url, Jar, Origin, Profile, Reject, StoreOutcome};
+use zeolite_cookies::{
+    parse_cookie_date, parse_http_url, Jar, Origin, Profile, Reject, StoreOutcome,
+};
 
 const NOW: i64 = 1_735_689_600_000; // 2025-01-01T00:00:00Z
 const AGE_LIMIT_MS: i64 = 34_560_000 * 1000;
@@ -61,7 +63,13 @@ fn years_outside_the_windows_still_fail_closed() {
 #[test]
 fn domain_dot_is_an_empty_domain_attribute_host_only() {
     let mut jar = Jar::new();
-    let out = jar.store(&org("https://accounts.example.com/"), "k=1; Domain=.", false, NOW, NO_PS);
+    let out = jar.store(
+        &org("https://accounts.example.com/"),
+        "k=1; Domain=.",
+        false,
+        NOW,
+        NO_PS,
+    );
     match &out {
         StoreOutcome::Stored { cookie, .. } => {
             assert!(cookie.host_only);
@@ -69,8 +77,12 @@ fn domain_dot_is_an_empty_domain_attribute_host_only() {
         }
         other => panic!("expected Stored, got {:?}", other),
     }
-    assert!(jar.header_for(&org("https://accounts.example.com/"), NOW).is_some());
-    assert!(jar.header_for(&org("https://x.accounts.example.com/"), NOW).is_none());
+    assert!(jar
+        .header_for(&org("https://accounts.example.com/"), NOW)
+        .is_some());
+    assert!(jar
+        .header_for(&org("https://x.accounts.example.com/"), NOW)
+        .is_none());
 }
 
 #[test]
@@ -88,13 +100,21 @@ fn domain_dot_profile_arm_matches() {
         StoreOutcome::Stored { cookie, .. } => assert!(cookie.host_only),
         other => panic!("expected Stored, got {:?}", other),
     }
-    assert!(p.match_document(&org("https://x.accounts.example.com/"), NOW).is_empty());
+    assert!(p
+        .match_document(&org("https://x.accounts.example.com/"), NOW)
+        .is_empty());
 }
 
 #[test]
 fn multi_dot_domain_still_fails_the_gate() {
     let mut jar = Jar::new();
-    let out = jar.store(&org("https://accounts.example.com/"), "k=1; Domain=..", false, NOW, NO_PS);
+    let out = jar.store(
+        &org("https://accounts.example.com/"),
+        "k=1; Domain=..",
+        false,
+        NOW,
+        NO_PS,
+    );
     assert_eq!(out, StoreOutcome::Rejected(Reject::Domain));
 }
 
@@ -103,7 +123,13 @@ fn multi_dot_domain_still_fails_the_gate() {
 #[test]
 fn age_limit_caps_max_age_and_expires() {
     let mut jar = Jar::new();
-    let out = jar.store(&org("https://a.example/"), "k=1; Max-Age=34600000", false, NOW, NO_PS);
+    let out = jar.store(
+        &org("https://a.example/"),
+        "k=1; Max-Age=34600000",
+        false,
+        NOW,
+        NO_PS,
+    );
     match &out {
         StoreOutcome::Stored { cookie, .. } => assert_eq!(cookie.expires, NOW + AGE_LIMIT_MS),
         other => panic!("expected Stored, got {:?}", other),
@@ -132,12 +158,24 @@ fn age_limit_caps_max_age_and_expires() {
 #[test]
 fn age_limit_leaves_under_cap_and_deletions_untouched() {
     let mut jar = Jar::new();
-    let out = jar.store(&org("https://a.example/"), "k=1; Max-Age=34559999", false, NOW, NO_PS);
+    let out = jar.store(
+        &org("https://a.example/"),
+        "k=1; Max-Age=34559999",
+        false,
+        NOW,
+        NO_PS,
+    );
     match &out {
         StoreOutcome::Stored { cookie, .. } => assert_eq!(cookie.expires, NOW + 34_559_999_000),
         other => panic!("expected Stored, got {:?}", other),
     }
-    let out = jar.store(&org("https://a.example/"), "k=1; Max-Age=0", false, NOW, NO_PS);
+    let out = jar.store(
+        &org("https://a.example/"),
+        "k=1; Max-Age=0",
+        false,
+        NOW,
+        NO_PS,
+    );
     assert!(matches!(out, StoreOutcome::Deleted { cookie: Some(_) }));
 }
 
@@ -146,13 +184,37 @@ fn age_limit_leaves_under_cap_and_deletions_untouched() {
 #[test]
 fn http_cannot_overwrite_or_delete_a_secure_cookie() {
     let mut jar = Jar::new();
-    jar.store(&org("https://example.com/"), "sid=1; Secure; Path=/", false, NOW, NO_PS);
-    let out = jar.store(&org("http://example.com/"), "sid=2; Path=/", false, NOW, NO_PS);
+    jar.store(
+        &org("https://example.com/"),
+        "sid=1; Secure; Path=/",
+        false,
+        NOW,
+        NO_PS,
+    );
+    let out = jar.store(
+        &org("http://example.com/"),
+        "sid=2; Path=/",
+        false,
+        NOW,
+        NO_PS,
+    );
     assert_eq!(out, StoreOutcome::Rejected(Reject::SecureShadow));
-    assert_eq!(jar.header_for(&org("https://example.com/"), NOW).as_deref(), Some("sid=1"));
-    let out = jar.store(&org("http://example.com/"), "sid=1; Path=/; Max-Age=0", false, NOW, NO_PS);
+    assert_eq!(
+        jar.header_for(&org("https://example.com/"), NOW).as_deref(),
+        Some("sid=1")
+    );
+    let out = jar.store(
+        &org("http://example.com/"),
+        "sid=1; Path=/; Max-Age=0",
+        false,
+        NOW,
+        NO_PS,
+    );
     assert_eq!(out, StoreOutcome::Rejected(Reject::SecureShadow));
-    assert_eq!(jar.header_for(&org("https://example.com/"), NOW).as_deref(), Some("sid=1"));
+    assert_eq!(
+        jar.header_for(&org("https://example.com/"), NOW).as_deref(),
+        Some("sid=1")
+    );
 }
 
 #[test]
@@ -180,28 +242,79 @@ fn shadow_domain_comparison_runs_both_directions() {
 #[test]
 fn shadow_path_comparison_is_bis_directional() {
     let mut jar = Jar::new();
-    jar.store(&org("https://example.com/"), "tok=1; Secure; Path=/", false, NOW, NO_PS);
+    jar.store(
+        &org("https://example.com/"),
+        "tok=1; Secure; Path=/",
+        false,
+        NOW,
+        NO_PS,
+    );
     /* the new path path-matches the secure cookie's path -> blocked */
-    let out = jar.store(&org("http://example.com/"), "tok=2; Path=/deep", false, NOW, NO_PS);
+    let out = jar.store(
+        &org("http://example.com/"),
+        "tok=2; Path=/deep",
+        false,
+        NOW,
+        NO_PS,
+    );
     assert_eq!(out, StoreOutcome::Rejected(Reject::SecureShadow));
     /* a non-overlapping narrower scope stays writable */
     let mut jar = Jar::new();
-    jar.store(&org("https://example.com/"), "tok=1; Secure; Path=/deep", false, NOW, NO_PS);
-    let out = jar.store(&org("http://example.com/"), "tok=2; Path=/", false, NOW, NO_PS);
+    jar.store(
+        &org("https://example.com/"),
+        "tok=1; Secure; Path=/deep",
+        false,
+        NOW,
+        NO_PS,
+    );
+    let out = jar.store(
+        &org("http://example.com/"),
+        "tok=2; Path=/",
+        false,
+        NOW,
+        NO_PS,
+    );
     assert!(matches!(out, StoreOutcome::Stored { .. }));
 }
 
 #[test]
 fn secure_writers_and_loopback_keep_full_power() {
     let mut jar = Jar::new();
-    jar.store(&org("https://example.com/"), "sid=1; Secure; Path=/", false, NOW, NO_PS);
-    let out = jar.store(&org("https://example.com/"), "sid=2; Path=/", false, NOW, NO_PS);
+    jar.store(
+        &org("https://example.com/"),
+        "sid=1; Secure; Path=/",
+        false,
+        NOW,
+        NO_PS,
+    );
+    let out = jar.store(
+        &org("https://example.com/"),
+        "sid=2; Path=/",
+        false,
+        NOW,
+        NO_PS,
+    );
     assert!(matches!(out, StoreOutcome::Stored { .. }));
-    assert_eq!(jar.header_for(&org("https://example.com/"), NOW).as_deref(), Some("sid=2"));
+    assert_eq!(
+        jar.header_for(&org("https://example.com/"), NOW).as_deref(),
+        Some("sid=2")
+    );
     /* the #191 loopback grant is a secure connection for step 16 */
     let mut jar = Jar::new();
-    jar.store(&org("http://localhost/"), "sid=1; Secure; Path=/", false, NOW, NO_PS);
-    let out = jar.store(&org("http://localhost/"), "sid=2; Path=/", false, NOW, NO_PS);
+    jar.store(
+        &org("http://localhost/"),
+        "sid=1; Secure; Path=/",
+        false,
+        NOW,
+        NO_PS,
+    );
+    let out = jar.store(
+        &org("http://localhost/"),
+        "sid=2; Path=/",
+        false,
+        NOW,
+        NO_PS,
+    );
     assert!(matches!(out, StoreOutcome::Stored { .. }));
 }
 
@@ -210,7 +323,13 @@ fn secure_writers_and_loopback_keep_full_power() {
 #[test]
 fn psl_domain_equal_to_host_degrades_to_host_only() {
     let mut jar = Jar::new();
-    let out = jar.store(&org("https://github.io/"), "k=1; Domain=github.io", false, NOW, GITHUB_IO_PS);
+    let out = jar.store(
+        &org("https://github.io/"),
+        "k=1; Domain=github.io",
+        false,
+        NOW,
+        GITHUB_IO_PS,
+    );
     match &out {
         StoreOutcome::Stored { cookie, .. } => {
             assert!(cookie.host_only);
@@ -218,8 +337,17 @@ fn psl_domain_equal_to_host_degrades_to_host_only() {
         }
         other => panic!("expected Stored, got {:?}", other),
     }
-    assert_eq!(jar.header_for(&org("https://github.io/"), NOW).as_deref(), Some("k=1"));
+    assert_eq!(
+        jar.header_for(&org("https://github.io/"), NOW).as_deref(),
+        Some("k=1")
+    );
     /* a public-suffix Domain from a subdomain still aborts */
-    let out = jar.store(&org("https://sub.github.io/"), "k=1; Domain=github.io", false, NOW, GITHUB_IO_PS);
+    let out = jar.store(
+        &org("https://sub.github.io/"),
+        "k=1; Domain=github.io",
+        false,
+        NOW,
+        GITHUB_IO_PS,
+    );
     assert_eq!(out, StoreOutcome::Rejected(Reject::Domain));
 }
