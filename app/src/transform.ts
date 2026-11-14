@@ -642,8 +642,14 @@ export async function rewriteJsBody(js: string, base: string, pageBase?: string)
 /* #456: total candidate buffering bound for the serve seams. A JS or
    worker body above the cap streams through byte-identical: the
    specifier, URL-literal and location passes skip it, fail-open with
-   the same contract as the wasm raw pass's element cap. */
-export const JS_BODY_CAP = 2 * 1024 * 1024;
+   the same contract as the wasm raw pass's element cap.
+   Raised 2 MiB -> 8 MiB (beta report 2026-11-14, icloud.com): modern
+   SPA entry bundles (icloud main.js, the duck.ai entry script #663)
+   sit between 2 and 8 MiB, so at 2 MiB their specifier/URL-literal
+   passes never ran and the apps booted against unrewritten literals.
+   8 MiB stays a small fraction of the worker's per-request budget
+   (256 MiB) and only buffers while the body streams in. */
+export const JS_BODY_CAP = 8 * 1024 * 1024;
 
 export type BoundedBody =
   | { over: false; bytes: Uint8Array }
