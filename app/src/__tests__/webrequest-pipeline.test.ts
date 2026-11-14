@@ -165,4 +165,30 @@ describe("webRequest observe lifecycle over the real pipeline (#521)", () => {
       ["https://site.example/page", 301],
     ]);
   });
+
+  it("a spec'd listener cannot block a real request without the 'blocking' opt-in", async () => {
+    /* A webRequestBlocking-capable extension whose spec omits
+       'blocking': the cancel verdict is ignored and the request
+       proceeds to the network (#521 slice 2, end to end). */
+    transportMock.queue = [new Response("ok", { headers: { "content-type": "text/plain" } })];
+    const off = WEBREQ.register("e-blk-nospec", "beforeRequest", () => ({ cancel: true }),
+      { perm: () => ({ hostPatterns: ["<all_urls>"], canBlock: true }), urls: [], spec: ["requestHeaders"] });
+    const { ev, armed } = mkGetEvent("https://site.example/page");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(transportMock.urls).toEqual(["https://site.example/page"]);
+    off();
+    /* With 'blocking' in the spec the same listener blocks the same
+       request before any transport byte: 403 BLOCKED_WEBREQUEST. */
+    transportMock.queue = [];
+    transportMock.urls = [];
+    WEBREQ.register("e-blk-spec", "beforeRequest", () => ({ cancel: true }),
+      { perm: () => ({ hostPatterns: ["<all_urls>"], canBlock: true }), urls: [], spec: ["blocking"] });
+    const { ev: ev2, armed: armed2 } = mkGetEvent("https://site.example/page");
+    handleFetch(ev2);
+    const served2 = await armed2[0]!;
+    expect(served2.status).toBe(403);
+    expect(transportMock.urls).toEqual([]);
+  });
 });

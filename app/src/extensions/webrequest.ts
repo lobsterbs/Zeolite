@@ -8,9 +8,14 @@
    onErrorOccurred are observation-only, and the #521 observe
    lifecycle (onSendHeaders, onBeforeRedirect, onResponseStarted)
    reports the wire events the engine's own hop chain produces.
-   addListener validates the Firefox extraInfoSpec array and records
-   it per listener; blocking remains permission-gated. Delivery
-   requires the
+   addListener validates the Firefox extraInfoSpec array and enforces
+   it per listener (#521 slice 2): "blocking" opts a listener into
+   cancel/header-replacement (still requiring webRequestBlocking),
+   "requestHeaders"/"responseHeaders" gate the header fields, and a
+   spec'd listener that asks for no blocking capability may register
+   on the header-modifying events observe-only without the
+   permission. Legacy no-spec registrations keep the MV2 blanket
+   model. Delivery requires the
    webRequest permission at the API layer plus a host permission (or
    <all_urls>) matching the request URL, and each listener's own url
    filter is applied. The registry only ever sees requests the engine
@@ -44,13 +49,17 @@ export interface WrDetails {
   timeStamp: number;
 }
 
+/* #521 slice 2: the requestHeaders/responseHeaders fields follow the
+   Firefox extraInfoSpec model — present only when the listener's spec
+   opts into them (or, legacy, when the listener predates the spec
+   model and the extension holds webRequestBlocking). */
 export interface WrSendDetails extends WrDetails {
-  requestHeaders: WrHeaderPair[];
+  requestHeaders?: WrHeaderPair[];
 }
 
 export interface WrReceiveDetails extends WrDetails {
   statusCode: number;
-  responseHeaders: WrHeaderPair[];
+  responseHeaders?: WrHeaderPair[];
 }
 
 export interface WrCompletedDetails extends WrDetails {
@@ -70,6 +79,7 @@ export interface WrErrorDetails extends WrDetails {
 export interface WrRedirectDetails extends WrDetails {
   redirectUrl: string;
   statusCode: number;
+  responseHeaders?: WrHeaderPair[];
 }
 
 export interface WrResponseStartedDetails extends WrDetails {
@@ -286,6 +296,48 @@ export class WebRequestRegistry {
     return !f || hostPatternsMatch(f, url);
   }
 
+  /** #521 slice 2: the listener's recorded extraInfoSpec, or null for
+      a legacy listener with no spec. Legacy keeps the MV2 model —
+      capability follows the webRequestBlocking permission alone, so
+      every pre-spec registration behaves exactly as before. A spec'd
+      listener gets Firefox's per-listener opt-in semantics instead. */
+  private specOf(r: ExtWrReg, listener: AnyWrListener): string[] | null {
+    const s = r.specs.get(listener);
+    return s && s.length > 0 ? s : null;
+  }
+
+  /** May this listener actually cancel or replace header sets? The
+      webRequestBlocking permission is still the gate the spec cannot
+      lift; a spec'd listener must additionally have opted in with
+      "blocking". */
+  private mayModify(r: ExtWrReg, listener: AnyWrListener): boolean {
+    if (!r.perm().canBlock) return false;
+    const s = this.specOf(r, listener);
+    return !s || s.includes("blocking");
+  }
+
+  /** Is a header field (requestHeaders/responseHeaders) present in
+      this listener's details? Legacy blocking listeners always saw
+      the field; spec'd listeners see it only when they asked. */
+  private wantsField(r: ExtWrReg, listener: AnyWrListener, field: "requestHeaders" | "responseHeaders"): boolean {
+    const s = this.specOf(r, listener);
+    if (!s) return r.perm().canBlock;
+    return s.includes(field);
+  }
+
+  /** Should this listener be invoked at all on a header event?
+      Legacy: only blocking extensions get the header-modifying
+      events (unchanged). Spec'd: whenever the spec asks for the
+      blocking capability or the respective field. */
+  private invited(r: ExtWrReg, listener: AnyWrListener, kind: "beforeSendHeaders" | "headersReceived"): boolean {
+    const s = this.specOf(r, listener);
+    if (!s) return r.perm().canBlock;
+    return (
+      s.includes("blocking") ||
+      s.includes(kind === "beforeSendHeaders" ? "requestHeaders" : "responseHeaders")
+    );
+  }
+
   /** Engine hook: true when a blocking listener cancelled the request.
       Non-blocking extensions observe onBeforeRequest but cannot
       cancel (Firefox semantics). Each listener gets its own defensive
@@ -302,28 +354,33 @@ export class WebRequestRegistry {
           /* a broken listener is the extension's own problem */
           continue;
         }
-        if (r.perm().canBlock && res && res.cancel === true) return true;
+        if (this.mayModify(r, l) && res && res.cancel === true) return true;
       }
     }
     return false;
   }
 
   /** Engine hook: replacement request headers, or null to keep the
-      originals. Header modification requires webRequestBlocking. */
+      originals. Header modification requires webRequestBlocking AND
+      (for a spec'd listener) the "blocking" opt-in (#521 slice 2);
+      a spec'd observe-only listener is delivered when it asked for
+      requestHeaders, but its replacement is ignored. */
   beforeSendHeaders(d: WrDetails, headers: Headers): Headers | null {
     let out: Headers | null = null;
     for (const r of this.exts.values()) {
-      if (!r.perm().canBlock) continue;
       for (const l of [...r.beforeSendHeaders]) {
         if (!this.visible(r, l, d.url)) continue;
+        if (!this.invited(r, l, "beforeSendHeaders")) continue;
+        const mayModify = this.mayModify(r, l);
+        const wantsHeaders = this.wantsField(r, l, "requestHeaders");
         const pairs = headersToPairs(out ?? headers);
         let res: void | { requestHeaders?: WrHeaderPair[] };
         try {
-          res = l({ ...d, requestHeaders: pairs });
+          res = l(wantsHeaders ? { ...d, requestHeaders: pairs } : { ...d });
         } catch {
           continue;
         }
-        if (res && Array.isArray(res.requestHeaders)) {
+        if (mayModify && res && Array.isArray(res.requestHeaders)) {
           const h = pairsToHeaders(res.requestHeaders);
           if (h) out = h;
         }
@@ -332,21 +389,24 @@ export class WebRequestRegistry {
     return out;
   }
 
-  /** Engine hook: replacement response headers, or null to keep. */
+  /** Engine hook: replacement response headers, or null to keep.
+      Same per-listener model as beforeSendHeaders (#521 slice 2). */
   headersReceived(d: WrDetails, statusCode: number, headers: Headers): Headers | null {
     let out: Headers | null = null;
     for (const r of this.exts.values()) {
-      if (!r.perm().canBlock) continue;
       for (const l of [...r.headersReceived]) {
         if (!this.visible(r, l, d.url)) continue;
+        if (!this.invited(r, l, "headersReceived")) continue;
+        const mayModify = this.mayModify(r, l);
+        const wantsHeaders = this.wantsField(r, l, "responseHeaders");
         const pairs = headersToPairs(out ?? headers);
         let res: void | { responseHeaders?: WrHeaderPair[] };
         try {
-          res = l({ ...d, statusCode, responseHeaders: pairs });
+          res = l(wantsHeaders ? { ...d, statusCode, responseHeaders: pairs } : { ...d, statusCode });
         } catch {
           continue;
         }
-        if (res && Array.isArray(res.responseHeaders)) {
+        if (mayModify && res && Array.isArray(res.responseHeaders)) {
           const h = pairsToHeaders(res.responseHeaders);
           if (h) out = h;
         }
@@ -387,13 +447,15 @@ export class WebRequestRegistry {
       blocking listeners, identity, jar) is about to hit the wire.
       Fired once per request, before the initial upstream fetch;
       redirect hops are reported by beforeRedirect instead. The pair
-      list is a fresh copy per listener. */
+      list is a fresh copy per listener; a spec'd listener sees it
+      only when it asked for requestHeaders (#521 slice 2). */
   sendHeaders(d: WrDetails, headers: Headers): void {
     for (const r of this.exts.values()) {
       for (const l of [...r.sendHeaders]) {
         if (!this.visible(r, l, d.url)) continue;
         try {
-          l({ ...d, requestHeaders: headersToPairs(headers) });
+          const wantsHeaders = this.specOf(r, l) === null || this.wantsField(r, l, "requestHeaders");
+          l(wantsHeaders ? { ...d, requestHeaders: headersToPairs(headers) } : { ...d });
         } catch {
           /* observation only; listener errors are ignored */
         }
@@ -405,13 +467,16 @@ export class WebRequestRegistry {
       about to be followed. url is the hop that returned the 3xx,
       redirectUrl the URL it redirects to. Breaks (one-shot stream
       bodies, missing or unresolvable Location) surface the 3xx
-      without a followed hop and never reach this event. */
-  beforeRedirect(d: WrDetails, redirectUrl: string, statusCode: number): void {
+      without a followed hop and never reach this event. The 3xx
+      response's headers are delivered only to listeners whose spec
+      opts into responseHeaders (#521 slice 2). */
+  beforeRedirect(d: WrDetails, redirectUrl: string, statusCode: number, headers?: Headers): void {
     for (const r of this.exts.values()) {
       for (const l of [...r.beforeRedirect]) {
         if (!this.visible(r, l, d.url)) continue;
         try {
-          l({ ...d, redirectUrl, statusCode });
+          const wantsHeaders = headers !== undefined && this.wantsField(r, l, "responseHeaders");
+          l(wantsHeaders ? { ...d, redirectUrl, statusCode, responseHeaders: headersToPairs(headers) } : { ...d, redirectUrl, statusCode });
         } catch {
           /* observation only; listener errors are ignored */
         }

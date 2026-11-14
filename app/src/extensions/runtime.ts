@@ -824,11 +824,14 @@ export function buildApi(
   const webRequestNs = ext.permissions.includes("webRequest")
     ? (() => {
         /* #521: Firefox extraInfoSpec — validated at addListener
-           (unknown strings fail), recorded per listener in the
-           registry. Per-listener spec enforcement ("blocking" opt-in
-           semantics) is the next #521 slice; blocking stays
-           permission-gated registry-wide. "asyncBlocking" is in the
-           accepted set for Chrome-shaped callers and currently
+           (unknown strings fail) and ENFORCED per listener in the
+           registry (#521 slice 2): "blocking" opts a listener into
+           cancel/header-replacement (still requiring
+           webRequestBlocking), "requestHeaders"/"responseHeaders"
+           gate the header fields, and a spec'd listener that asks for
+           no blocking capability may register on the header-modifying
+           events observe-only without the permission. "asyncBlocking"
+           is in the accepted set for Chrome-shaped callers and
            behaves as observation-only, which is documented. */
         const SPEC_KEYS = new Set([
           "blocking",
@@ -857,7 +860,16 @@ export function buildApi(
                 (kind === "beforeSendHeaders" || kind === "headersReceived") &&
                 !ext.permissions.includes("webRequestBlocking")
               ) {
-                throw new Error("zeolite: " + kind + " requires the 'webRequestBlocking' permission");
+                /* #521 slice 2: Firefox per-listener model — a spec'd
+                   listener that asks for NO blocking capability
+                   ("requestHeaders"/"responseHeaders" only) registers
+                   observe-only without webRequestBlocking. A "blocking"
+                   spec or a legacy no-spec registration on a
+                   header-modifying kind still requires the permission. */
+                const wantsBlocking = spec === undefined || spec.includes("blocking");
+                if (wantsBlocking) {
+                  throw new Error("zeolite: " + kind + " requires the 'webRequestBlocking' permission");
+                }
               }
               if (offs.has(l)) return;
               offs.set(
