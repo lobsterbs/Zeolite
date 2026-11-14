@@ -60,7 +60,13 @@ fn sc(name: &str, value: &str, domain: &str, created: i64) -> Cookie {
 #[test]
 fn loopback_secure_gate_accepts_only_real_loopback_hosts() {
     /* The real loopback set stays admitted. */
-    for host in ["https://127.0.0.1/", "http://127.0.0.2/", "http://localhost/", "http://sub.localhost/", "http://[::1]/"] {
+    for host in [
+        "https://127.0.0.1/",
+        "http://127.0.0.2/",
+        "http://localhost/",
+        "http://sub.localhost/",
+        "http://[::1]/",
+    ] {
         let mut jar = Jar::new();
         assert!(
             matches!(store(&mut jar, host, "k=1; Secure"), StoreOutcome::Stored { .. }),
@@ -68,7 +74,11 @@ fn loopback_secure_gate_accepts_only_real_loopback_hosts() {
         );
     }
     /* An attacker name must not inherit the loopback grant. */
-    for host in ["http://127.0.0.1.evil.com/", "http://127.example.com/", "http://127.0.0.1.localhost.evil.com/"] {
+    for host in [
+        "http://127.0.0.1.evil.com/",
+        "http://127.example.com/",
+        "http://127.0.0.1.localhost.evil.com/",
+    ] {
         let mut jar = Jar::new();
         assert_eq!(
             rejected(store(&mut jar, host, "k=1; Secure")),
@@ -131,7 +141,12 @@ fn profile_sweep_domain_pass_precedes_total_pass() {
     /* Total was 3010 (10 over); the domain pass evicts exactly 10
        and the total pass then sees exactly the cap: 10 unique
        evictions, 3000 cookies left, no over-eviction. */
-    assert_eq!(evicted.len(), 10, "evictions: {:?}", evicted.iter().map(|c| c.created).collect::<Vec<_>>());
+    assert_eq!(
+        evicted.len(),
+        10,
+        "evictions: {:?}",
+        evicted.iter().map(|c| c.created).collect::<Vec<_>>()
+    );
     let mut uniq = evicted.clone();
     uniq.sort_by_key(|c| c.created);
     uniq.dedup();
