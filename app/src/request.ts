@@ -4849,6 +4849,12 @@ export function handleFetch(e: FetchEvent): void {
             else reqSignal.addEventListener("abort", () => navAbort!.abort(reqSignal!.reason), { once: true });
           }
           const hopSignal = navAbort ? navAbort.signal : reqSignal;
+          /* #521: webRequest.onSendHeaders — observation-only delivery
+             of the FINAL outgoing header set (rules, DNR, blocking
+             listeners, identity profile and jar all applied), fired
+             once per request before the initial upstream fetch;
+             redirect hops are reported by onBeforeRedirect instead. */
+          WEBREQ.sendHeaders(wrDetails, sendHeaders);
           let resp: Response;
           try {
             resp = await withDeadline(
@@ -4915,6 +4921,7 @@ export function handleFetch(e: FetchEvent): void {
             if (hopCookie) sendHeaders.set("cookie", hopCookie);
             else sendHeaders.delete("cookie");
             DIAG.stage(traceId, "REDIRECT_HOP", { url: hopUrl, message: "hop -> " + next });
+            const redirectFrom = hopUrl;
             hopUrl = next;
             lastHopUrl = next;
             /* #201: the hop's body is never read; cancel it so the
@@ -5000,6 +5007,15 @@ export function handleFetch(e: FetchEvent): void {
                hop; the 10ms bound is invisible next to a redirect
                round trip. */
             await new Promise((r) => setTimeout(r, 10));
+            /* #521: webRequest.onBeforeRedirect — this hop passed every
+               gate (rules, webRequest, interception, disabled hosts)
+               and is about to be followed: url is the hop that
+               returned the 3xx, redirectUrl the URL it redirects to,
+               statusCode the 3xx itself. The loop's break paths
+               (one-shot stream bodies, missing or unresolvable
+               Location) surface the 3xx without a followed hop and
+               never reach this event. */
+            WEBREQ.beforeRedirect({ ...wrDetails, url: redirectFrom }, next, resp.status);
             /* #514: a re-issue hop that fails upstream becomes a
                bounded, attributable diagnostic - the CI torture probe's
                "zeolite: upstream fetch failed" class used to reach the
@@ -5326,6 +5342,13 @@ export function handleFetch(e: FetchEvent): void {
              the response header set the page will see. */
           const rHeaders = WEBREQ.headersReceived(wrDetailsFinal, resp.status, headers);
           const outHeaders = rHeaders ?? headers;
+          /* #521: webRequest.onResponseStarted — upstream responses
+             only (cache hits report onCompleted without network, so
+             firing here would claim activity that never happened),
+             after the final response header set is settled and before
+             any body byte streams; describes the final-hop URL
+             (#288). */
+          WEBREQ.responseStarted(wrDetailsFinal, resp.status);
           /* #452: opt-in, strictly deny-only CSP on HTML documents.
              The live response carries original headers; every
              unsupported policy is left stripped (not passed through). */
