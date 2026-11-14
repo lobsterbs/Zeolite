@@ -10,3 +10,4 @@ suite/scoreboard.*
 
 # Generated live measurement artifact (location-targeting-live.mjs)
 suite/location-targeting.json
+suite/e2e/node_modules/
