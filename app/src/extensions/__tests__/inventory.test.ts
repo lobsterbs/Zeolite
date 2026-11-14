@@ -225,7 +225,11 @@ describe("Firefox API inventory conformance (#516 slice 2)", () => {
     expect(missingOf("i18n")).toContain("detectLanguage");
     expect(missingOf("storage"), "managed mounted by the #520 slice").toEqual([]);
     expect(missingOf("runtime")).toContain("setUninstallURL");
-    expect(missingOf("tabs")).toContain("duplicate");
+    /* duplicate/highlight/TAB_ID_NONE left the tabs list in the #519
+       slice; reload and friends stay open. */
+    expect(missingOf("tabs")).toContain("reload");
+    expect(missingOf("tabs")).not.toContain("duplicate");
+    expect(missingOf("tabs")).not.toContain("highlight");
     /* exactly the four justified extras */
     expect(report.engineExtras.map((e) => `${e.namespace}.${e.member}`)).toEqual([
       "browsingData.removeServiceWorkers",

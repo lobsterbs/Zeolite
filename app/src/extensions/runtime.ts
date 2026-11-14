@@ -618,6 +618,37 @@ export function buildApi(
     remove: (ids: number | number[]) => TABS.remove(Array.isArray(ids) ? ids : [ids]),
     sendMessage: (tabId: number, msg: unknown, options?: { frameId?: number }) =>
       TABS.sendMessage(ext, tabId, msg, options),
+    /* #519: Firefox's TAB_ID_NONE (-1) for no-browser-window states. */
+    TAB_ID_NONE: -1,
+    /* #519: duplicate rides the real create seam - same url, a fresh
+       tab with its own id, onCreated through the registry. Firefox's
+       duplicate carries the pinned state; the create seam has no
+       pinned property, so the copy lands unpinned (compat.ts). */
+    duplicate: (tabId: number, props?: { index?: number; active?: boolean }) => {
+      const t = TABS.get(tabId);
+      if (!t) return Promise.reject(new Error("Invalid tab ID: " + tabId));
+      return TABS.create({
+        url: t.url,
+        ...(props?.active !== undefined ? { active: props.active } : {}),
+        ...(props?.index !== undefined ? { index: props.index } : {}),
+      });
+    },
+    /* #519: highlight without a highlighted-set concept - the
+       single-window model activates the LAST tab in the list, exactly
+       the one Firefox activates, and the others are a no-op here;
+       unknown ids reject. onHighlighted is not mounted (compat.ts). */
+    highlight: async (info: { tabs?: unknown }) => {
+      const ids = info && typeof info === "object" && Array.isArray(info.tabs) ? info.tabs : null;
+      if (!ids || ids.length === 0) {
+        throw new Error("zeolite: tabs.highlight requires a non-empty tabs array");
+      }
+      for (const id of ids) {
+        if (typeof id !== "number" || !TABS.get(id)) {
+          throw new Error("Invalid tab ID: " + String(id));
+        }
+      }
+      await TABS.update(ids[ids.length - 1] as number, { active: true });
+    },
     onCreated: makeTabsEvent(ext, "created"),
     onUpdated: makeTabsEvent(ext, "updated"),
     onActivated: makeTabsEvent(ext, "activated"),

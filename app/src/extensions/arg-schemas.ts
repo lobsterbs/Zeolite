@@ -132,6 +132,11 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   /* Firefox: update(updateProperties) | update(tabId, updateProperties);
      the engine mounts the no-tab form (the single-window model). */
   "tabs.update": { min: 0, max: 2, types: [["number", "object"], ["object"]], ff: [1, 2], note: "the engine also mounts the no-tab form" },
+  /* #519: duplicate(tabId, properties?) matches Firefox's shape
+     (duplicateProperties is a Firefox extension); highlight takes the
+     highlightInfo object. */
+  "tabs.duplicate": { min: 1, max: 2, types: [["number"], ["object"]] },
+  "tabs.highlight": { min: 1, max: 1, types: [["object"]] },
   /* ---- action family -----------------------------------------------------
      The toolbar action family mounts for MV3 `action`, MV2
      `browserAction` and MV2 `pageAction` (pageAction without badge /
