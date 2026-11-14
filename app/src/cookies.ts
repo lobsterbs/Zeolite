@@ -1025,15 +1025,17 @@ function admitCookieTs(
       case "domain": {
         /* RFC 6265 5.2.3: an empty Domain attribute is ignored - the
            cookie stays host-only instead of becoming a bare-host
-           domain cookie that subdomains would match. */
-        if (val !== "") {
+           domain cookie that subdomains would match. A value outside
+           the grammar (control characters) is ignored too, never
+           ingested into the jar. */
+        if (val !== "" && !/[\x00-\x1F\x7F]/.test(val)) {
           domain = (val.startsWith(".") ? val.slice(1) : val).toLowerCase();
           hostOnly = false;
         }
         break;
       }
       case "path": {
-        if (val.startsWith("/")) path = val;
+        if (val.startsWith("/") && !/[\x00-\x1F\x7F]/.test(val)) path = val;
         break;
       }
       case "secure":
@@ -1095,17 +1097,19 @@ function admitCookieTs(
     return { name, stored: false, deleted: false, rejected: "domain" };
   }
 
-  /* #191: RFC 6265bis 4.1.3 name prefixes (case-sensitive). Checked
-     before the deletion branch, so a deletion that breaks them is
-     refused too. __Secure- needs Secure; __Host- needs Secure, Path=/
-     and no Domain attribute (host-only). */
-  if (name.startsWith("__Secure-") || name.startsWith("__Host-")) {
-    if (!secure) {
-      DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: __Secure- or __Host- prefix without secure" });
-      return { name, stored: false, deleted: false, rejected: "prefix requires secure" };
-    }
+  /* #191: RFC 6265bis 4.1.3 name prefixes. The match is
+     CASE-INSENSITIVE per the bis text (what Firefox and Chrome
+     ship), so "__secure-k" and "__HOST-k" carry the same gates as
+     their canonical spellings. Checked before the deletion branch,
+     so a deletion that breaks them is refused too. __Secure- needs
+     Secure; __Host- needs Secure, Path=/ and no Domain attribute
+     (host-only). */
+  const lname = name.toLowerCase();
+  if ((lname.startsWith("__secure-") || lname.startsWith("__host-")) && !secure) {
+    DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: __Secure- or __Host- prefix without secure" });
+    return { name, stored: false, deleted: false, rejected: "prefix requires secure" };
   }
-  if (name.startsWith("__Host-") && (!hostOnly || path !== "/")) {
+  if (lname.startsWith("__host-") && (!hostOnly || path !== "/")) {
     DIAG.emit({ category: "COOKIE", cause: "blocked", severity: "warning", message: "set-cookie rejected: __Host- prefix needs host-only and path /" });
     return { name, stored: false, deleted: false, rejected: "__Host- requires host-only and path /" };
   }

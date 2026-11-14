@@ -79,11 +79,20 @@ pub(crate) fn domain_match(host: &str, domain: &str) -> bool {
     host == domain || (host.ends_with(&format!(".{}", domain)) && !looks_like_ip(host))
 }
 
+/// Real loopback only: "localhost", a "*.localhost" name, a
+/// 127/8 dotted quad, or the "[::1]" literal. A first-label
+/// check ("127" as the leftmost label) once admitted
+/// attacker-controlled names like 127.0.0.1.evil.com to the
+/// secure-origin grant.
 fn is_loopback_host(host: &str) -> bool {
     host == "localhost"
         || host.ends_with(".localhost")
-        || host.split('.').next().is_some_and(|first| first == "127")
         || host == "[::1]"
+        || (host.bytes().filter(|b| *b == b'.').count() == 3
+            && host
+                .split('.')
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            && host.split('.').next().is_some_and(|first| first == "127"))
 }
 
 fn is_secure_origin(origin: &Origin) -> bool {
@@ -158,10 +167,14 @@ where
     {
         return Err(Reject::Domain);
     }
-    if (sc.name.starts_with("__Secure-") || sc.name.starts_with("__Host-")) && !sc.secure {
+    /* 6265bis 4.1.3: the name prefixes match case-insensitively,
+    so "__secure-k" and "__HOST-k" carry the same gates as their
+    canonical spellings. */
+    let lname = sc.name.to_ascii_lowercase();
+    if (lname.starts_with("__secure-") || lname.starts_with("__host-")) && !sc.secure {
         return Err(Reject::PrefixRequiresSecure);
     }
-    if sc.name.starts_with("__Host-") && (!host_only || path != "/") {
+    if lname.starts_with("__host-") && (!host_only || path != "/") {
         return Err(Reject::HostPrefixRequiresRoot);
     }
     let is_deletion = match sc.max_age {
