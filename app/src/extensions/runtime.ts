@@ -33,6 +33,7 @@ import { cookiesGet, cookiesGetAll, cookiesSet, cookiesRemove, onCookieChanged }
 import type { CookieChangeListener } from "./cookies";
 import { hostPatternsMatch } from "./permissions";
 import { isApiDetached } from "./apis";
+import { installArgValidation } from "./arg-schemas";
 import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
 import { setSessionAccessLevel, SYNC_MAX_ITEMS, SYNC_MAX_WRITE_OPERATIONS_PER_HOUR, SYNC_MAX_WRITE_OPERATIONS_PER_MINUTE, SYNC_QUOTA_BYTES, SYNC_QUOTA_BYTES_PER_ITEM } from "./storage";
@@ -1060,6 +1061,12 @@ export function buildApi(
     ...(browsingDataNs && !isApiDetached("browsingData") ? { browsingData: browsingDataNs } : {}),
     ...(bookmarksNs && !isApiDetached("bookmarks") ? { bookmarks: bookmarksNs } : {}),
   };
+  /* #516 slice 3: the mounted surface validates its argument contract
+     (arg-schemas.ts) before any engine work runs. chromeApi wraps the
+     already-validated methods and pops its trailing callback first,
+     so chrome callers see the same rejections with callback-shaped
+     lastError delivery. */
+  installArgValidation(browser);
   /* Share implementations while honoring Chrome callbacks. */
   return { browser, chrome: chromeApi(browser) };
 }
