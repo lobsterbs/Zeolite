@@ -18,6 +18,7 @@ import {
   resolveBareImport,
   resolveBareImportFor,
 } from "../importmaps";
+import { encodeDest, referrerDest } from "../codec";
 
 describe("pageKeyOf", () => {
   it("strips fragments and resolves relative URLs against the origin", () => {
@@ -272,5 +273,58 @@ describe("resolveBareImportFor (scope-aware)", () => {
     }));
     expect(resolveBareImportFor(reg2, "https://page.host/app", "https://page.host/sub/w.mjs", "util/helper.js"))
       .toBe("https://x/u/helper.js");
+  });
+});
+
+/* The serve-seam key space: the registry lives in page space, so the
+   worker seams must decode the creating document's ENGINE-route
+   referrer before recovering the page key. Keying (or recovering)
+   in engine-route space normalized every scope prefix onto the
+   proxy origin, where no page-space importer URL could ever match -
+   the scoped-worker failure the e2e pins (suite/e2e/importmap.mjs
+   leg 2). */
+describe("importmap serve-seam key space (#554 scoped workers)", () => {
+  it("recovers the page-space page URL from an engine-route referrer", () => {
+    const pageUrl = "https://fx.example/dir/scoped.html";
+    const route = "https://sw.example" + encodeDest(pageUrl);
+    expect(referrerDest(route, "")).toBe(pageUrl);
+    /* A page-space referrer is not an engine route: no decode. */
+    expect(referrerDest(pageUrl, "")).toBeNull();
+  });
+
+  it("applies scoped maps when the registry is keyed in page space", () => {
+    const reg = newImportmapRegistry();
+    const pk = pageKeyOf("https://fx.example/dir/scoped.html", "https://sw.example")!;
+    importmapNote(reg, pk, JSON.stringify({
+      imports: { mylib: "https://fx.example/lib/lib.js" },
+      scopes: {
+        "/dir/sub/": {
+          mylib: "https://fx.example/lib/sublib.js",
+          scopedlib: "https://fx.example/lib/s.js",
+        },
+      },
+    }));
+    /* The worker script's page-space URL is the importer for its
+       own top-level imports (what the fixed serve seams pass). */
+    const inScope = "https://fx.example/dir/sub/worker.mjs";
+    expect(resolveBareImportFor(reg, pk, inScope, "scopedlib")).toBe("https://fx.example/lib/s.js");
+    expect(resolveBareImportFor(reg, pk, inScope, "mylib")).toBe("https://fx.example/lib/sublib.js");
+    /* Out-of-scope importer: the scope-only key never leaks. */
+    expect(resolveBareImportFor(reg, pk, "https://fx.example/dir/leakworker.mjs", "scopedlib")).toBeNull();
+    /* Importer-unknown: top-level imports only. */
+    expect(resolveBareImportFor(reg, pk, null, "mylib")).toBe("https://fx.example/lib/lib.js");
+  });
+
+  it("never matches a page-space importer through an engine-route key (the pre-fix drift)", () => {
+    const reg = newImportmapRegistry();
+    /* The old seams recorded under the engine route of the page;
+       scope keys then normalized onto the proxy origin. */
+    const engineKey = pageKeyOf("https://sw.example" + encodeDest("https://fx.example/dir/scoped.html"), "https://sw.example")!;
+    importmapNote(reg, engineKey, JSON.stringify({
+      scopes: { "/dir/sub/": { scopedlib: "https://fx.example/lib/s.js" } },
+    }));
+    expect(
+      resolveBareImportFor(reg, engineKey, "https://fx.example/dir/sub/worker.mjs", "scopedlib"),
+    ).toBeNull();
   });
 });
