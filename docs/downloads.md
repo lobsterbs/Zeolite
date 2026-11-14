@@ -121,6 +121,10 @@ data survive untouched):
   doubleclick.net ad host) are an upstream anti-clickjacking
   convention, not user downloads: the response is served untouched,
   but the registry does not claim it (`isAdArtefact`).
+- Attachment responses to background requests (fetch(), beacons,
+  images, iframes) are never registered: only a navigation (request
+  destination `document`) reaches the browser's download machinery,
+  so the registry only claims navigations (the destination gate).
 - Speed is a whole-lifetime average, not a rolling window.
 - The ring is bounded (200 entries): eviction picks the oldest idle
   entry, never a live stream, so an all-active ring honestly runs

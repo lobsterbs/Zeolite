@@ -404,6 +404,63 @@ describe("ad artefact filter (f.txt)", () => {
   });
 });
 
+/* The destination gate: only a navigation (request destination
+   "document") reaches the browser's download machinery, so an
+   attachment response to a background fetch is served untouched and
+   never registered. A caller that cannot know the destination keeps
+   the legacy behavior. */
+describe("adoptResponse destination gate", () => {
+  function attachmentPair(): { resp: Response; outHeaders: Headers } {
+    const resp = new Response(streamOf([new Uint8Array(3)]), {
+      status: 200,
+      headers: headers({ "content-disposition": 'attachment; filename="f.bin"' }),
+    });
+    const outHeaders = new Headers({
+      "content-disposition": 'attachment; filename="f.bin"',
+      "content-type": "application/octet-stream",
+    });
+    return { resp, outHeaders };
+  }
+
+  it("registers a navigation attachment (destination document)", async () => {
+    DL.reset();
+    const { resp, outHeaders } = attachmentPair();
+    const adopted = adoptResponse("https://x.test/f.bin", resp, outHeaders, 200, "document");
+    expect(adopted).not.toBeNull();
+    await drain(adopted!.body as ReadableStream<Uint8Array>);
+    const snap = DL.snapshot();
+    expect(snap).toHaveLength(1);
+    expect(snap[0].filename).toBe("f.bin");
+    DL.reset();
+  });
+
+  it("serves but does not register a background fetch (destination empty string)", () => {
+    DL.reset();
+    const { resp, outHeaders } = attachmentPair();
+    expect(adoptResponse("https://x.test/f.bin", resp, outHeaders, 200, "")).toBeNull();
+    expect(DL.snapshot()).toHaveLength(0);
+    DL.reset();
+  });
+
+  it("serves but does not register subresource destinations", () => {
+    DL.reset();
+    for (const dest of ["iframe", "image", "script", "video", "worker"]) {
+      const { resp, outHeaders } = attachmentPair();
+      expect(adoptResponse("https://x.test/f.bin", resp, outHeaders, 200, dest)).toBeNull();
+    }
+    expect(DL.snapshot()).toHaveLength(0);
+    DL.reset();
+  });
+
+  it("keeps the legacy behavior when the destination is unknown", () => {
+    DL.reset();
+    const { resp, outHeaders } = attachmentPair();
+    expect(adoptResponse("https://x.test/f.bin", resp, outHeaders, 200)).not.toBeNull();
+    expect(DL.snapshot()).toHaveLength(1);
+    DL.reset();
+  });
+});
+
 /* Issue #118: download resume via Range through the engine fetch
    seam. The seam test also pins that the Range header is sent;
    the wisp relay is an opaque byte tunnel end-to-end. */
