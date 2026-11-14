@@ -124,14 +124,18 @@ pub fn parse_set_cookie(header: &str) -> Result<SetCookie, ParseReject> {
         };
         match key.as_str() {
             "domain" => {
-                /* 5.2.3: an empty Domain is ignored (host-only). */
-                if !val.is_empty() {
+                /* 5.2.3: an empty Domain is ignored (host-only); a
+                value outside the grammar (control characters) is
+                ignored too, never ingested into the jar. */
+                if !val.is_empty() && !has_control_char(val) {
                     let d = val.strip_prefix('.').unwrap_or(val);
                     out.domain = Some(d.to_lowercase());
                 }
             }
             "path" => {
-                if val.starts_with('/') {
+                /* 5.2.4: only an attribute value that starts with
+                "/" and carries no control characters is a Path. */
+                if val.starts_with('/') && !has_control_char(val) {
                     out.path = Some(val.to_string());
                 }
             }
