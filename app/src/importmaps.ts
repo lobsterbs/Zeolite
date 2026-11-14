@@ -13,10 +13,21 @@
    it at the serve seam.
 
    Honest limits:
-   - Only top-level imports is honored. Scope resolution needs
-     the URL of the importing module, which the serve seam does
-     not know for a worker body; scoped bare specifiers stay
-     bare and fail natively, exactly as before #554.
+   - Scope maps apply through the importer URL the serve seams
+     pass: for a worker body's top-level imports the importing
+     module is the worker script itself, so the seams hand the
+     worker script's page-space URL to resolveBareImportFor.
+     Deeper scopes (a nested module importing from inside a
+     scope) stay unmodeled: the body pass only knows the worker
+     script's URL, so a scope whose prefix does not contain it
+     never applies - the same keys the browser would consult for
+     the worker script's own imports.
+   - The registry is keyed in PAGE space (the decoded navigation
+     target; the worker seams decode the creating document's
+     engine route referrer back to that space). Keying by the
+     engine route instead once normalized every scope prefix
+     onto the proxy origin, where no page-space importer URL
+     could ever match - the #554 scoped-worker failure.
    - The registry is memory-only per SW lifetime; a worker
      restart loses the maps and later workers fall back to the
      native failure.
