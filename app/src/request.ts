@@ -5916,9 +5916,11 @@ export function handleFetch(e: FetchEvent): void {
              downloads subsystem (adoptResponse); the body stays a
              stream - a counting passthrough forwards every chunk
              untouched, so the browser keeps writing the file to disk
-             and nothing is buffered whole. */
+             and nothing is buffered whole. The request destination
+             rides along: only navigations register (the destination
+             gate in ./downloads). */
 
-          const dl = adoptResponse(target, resp, outHeaders, resp.status);
+          const dl = adoptResponse(target, resp, outHeaders, resp.status, e.request.destination);
           if (dl) return dl;
           return new Response(resp.body, { status: resp.status, headers: outHeaders });
         } catch (err) {
