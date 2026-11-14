@@ -182,9 +182,7 @@ where
             }
             host_only = true;
             domain = host.to_string();
-        } else if !domain_match(host, &domain)
-            || (!domain.contains('.') && domain != host)
-        {
+        } else if !domain_match(host, &domain) || (!domain.contains('.') && domain != host) {
             return Err(Reject::Domain);
         }
     }

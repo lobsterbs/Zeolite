@@ -77,7 +77,11 @@ fn year_token(tok: &str) -> Option<i64> {
     token length: "0069" is the year 69 -> 2069, "0070" -> 1970
     (Firefox windows on the value the same way). */
     Some(if y <= 99 {
-        if y >= 70 { 1900 + y } else { 2000 + y }
+        if y >= 70 {
+            1900 + y
+        } else {
+            2000 + y
+        }
     } else {
         y
     })
