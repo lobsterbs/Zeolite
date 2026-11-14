@@ -18,9 +18,11 @@ crate-type = ["cdylib", "rlib"]
 adblock = "0.13.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# wasm-bindgen is only imported under #[cfg(target_arch = "wasm32")]
-# (the wasm-pack surface in lib.rs); on the host target the manifest
-# lint `cargo::unused_dependencies` (the #656 clippy gate, -D warnings)
-# flags the unconditional declaration — run 132458326112 on main.
+
+# Every wasm_bindgen use sits behind cfg(target_arch = "wasm32"),
+# so on the host target this crate-level dependency is unused and
+# the unused-dependency lint fails the clippy gate. Target table:
+# the wasm-pack cdylib build still resolves it, the host gates no
+# longer see it.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
