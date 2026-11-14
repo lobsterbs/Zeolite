@@ -100,16 +100,16 @@ jobs:
         run: |
           VER="$(grep -m1 '^version' Cargo.toml | tr -d ' " ' | cut -d= -f2 | tr -d ' ')"
           git fetch origin main --quiet
-          git tag "v${VER}" origin/main
-          git push origin "v${VER}" --quiet
+          git tag "v${VER}" origin/main 2>/dev/null || true
+          git push origin "v${VER}" --quiet || true
           echo "TAG=v${VER}" >> "$GITHUB_ENV"
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${TAG:-${GITHUB_REF#refs/tags/}}"
-          gh release create "${TAG}" --title "${TAG}" --generate-notes
-          gh release upload "${TAG}" artifacts/zeolite-server-linux/* artifacts/zeolite-engine-dist/*
+          gh release view "${TAG}" >/dev/null 2>&1 || gh release create "${TAG}" --title "${TAG}" --generate-notes
+          gh release upload --clobber "${TAG}" artifacts/zeolite-server-linux/* artifacts/zeolite-engine-dist/*
 
   npm:
     runs-on: ubuntu-latest
