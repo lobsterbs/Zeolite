@@ -38,6 +38,9 @@ export interface CookiesWasmCore {
   clearNs(ns: string): string;
   /** Clear one origin bucket; returns how many cookies died. */
   clearBucket(ns: string, bucket: string): number;
+  /** Clear every cookie whose scope applies to the host, across the
+      namespace's buckets (#337/#49); { jars, cookies } JSON. */
+  clearScoped(ns: string, host: string): string;
   /** Teardown: drop every namespace (the PSL stays injected). */
   clearAll(): void;
   /** wasm-pack --target web async init. */

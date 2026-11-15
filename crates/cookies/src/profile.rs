@@ -394,6 +394,34 @@ impl Profile {
         }
     }
 
+    /// Clear every cookie whose scope applies to the host, across
+    /// buckets (#337/#49): a Domain cookie set by a sibling origin
+    /// lives in the SIBLING's bucket while still attaching to the
+    /// cleared host. A Domain cookie is one record, so it leaves
+    /// every host it applied to. Returns (buckets touched, cookies
+    /// removed).
+    pub fn clear_scoped(&mut self, host: &str) -> (usize, usize) {
+        let mut jars = 0;
+        let mut cookies = 0;
+        for list in self.buckets.values_mut() {
+            let before = list.len();
+            list.retain(|c| {
+                if c.host_only {
+                    c.domain != host
+                } else {
+                    !domain_match(host, &c.domain)
+                }
+            });
+            let removed = before - list.len();
+            if removed > 0 {
+                jars += 1;
+                cookies += removed;
+            }
+        }
+        self.drop_empty();
+        (jars, cookies)
+    }
+
     /// Clear the whole profile; returns (jars, cookies) counts.
     pub fn clear(&mut self) -> (usize, usize) {
         let jars = self.buckets.len();
