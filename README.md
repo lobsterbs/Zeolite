@@ -105,3 +105,6 @@ Bug reports, compatibility findings, and pull requests are welcome. Include the 
 ## License
 
 AGPL-3.0-only. See [LICENSE](LICENSE).
+
+<!-- merge-wave 2026-11-15 -->
+Merge wave 2026-11-15: PRs #656, #658, #660-#662, #665, #666, #668, #671 merged to main; this comment retriggers the dist publish that raced four concurrent CI runs.
