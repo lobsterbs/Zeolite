@@ -238,6 +238,20 @@ impl Profile {
                 }
             }
         }
+        /* 6.1 runs the domain pass FIRST: apply its evictions before
+        the total pass so the total excess is computed over the
+        reduced set. Counting the per-domain-doomed cookies again
+        over-evicted on import/restore shapes that were over both
+        limits at once, and double-reported the same cookie in the
+        evicted list. */
+        for (k, d) in &doomed {
+            if let Some(list) = self.buckets.get_mut(k) {
+                if let Some(i) = list.iter().position(|c| c == d) {
+                    list.remove(i);
+                }
+            }
+        }
+        self.drop_empty();
         let all: Vec<(String, Cookie)> = collect(self).into_values().flatten().collect();
         if all.len() > COOKIE_MAX_TOTAL {
             let excess = all.len() - COOKIE_MAX_TOTAL;
@@ -251,7 +265,8 @@ impl Profile {
         }
         /* Remove exactly one copy per doomed entry: two
         field-identical copies are indistinguishable, but the
-        counts must still match the TS object-identity removal. */
+        counts must still match the TS object-identity removal.
+        Entries the domain pass already removed are no-ops here. */
         for (k, d) in &doomed {
             if let Some(list) = self.buckets.get_mut(k) {
                 if let Some(i) = list.iter().position(|c| c == d) {
