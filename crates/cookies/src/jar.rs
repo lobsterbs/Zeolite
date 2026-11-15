@@ -49,6 +49,10 @@ pub enum Reject {
     Size,
     /// A script write targeting an HttpOnly identity.
     HttpOnlyScriptWrite,
+    /// bis 5.6 step 16: a non-Secure cookie received over a
+    /// non-secure connection would shadow an existing Secure
+    /// cookie (leave secure cookies alone).
+    SecureShadow,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -97,6 +101,13 @@ fn is_loopback_host(host: &str) -> bool {
 
 fn is_secure_origin(origin: &Origin) -> bool {
     origin.secure || is_loopback_host(&origin.host)
+}
+
+/// bis 5.6 step 16: the "secure connection" test for the
+/// leave-secure-cookies-alone gate (the engine's UA definition
+/// includes the #191 loopback grant).
+pub(crate) fn secure_connection(origin: &Origin) -> bool {
+    is_secure_origin(origin)
 }
 
 /// 5.1.4: default the path to the directory of the request URI.
@@ -152,7 +163,7 @@ where
     if sc.secure && !is_secure_origin(origin) {
         return Err(Reject::SecureFromInsecureOrigin);
     }
-    let (domain, host_only) = match &sc.domain {
+    let (mut domain, mut host_only) = match &sc.domain {
         Some(d) => (d.clone(), false),
         None => (host.to_string(), true),
     };
@@ -160,12 +171,20 @@ where
         .path
         .clone()
         .unwrap_or_else(|| default_path(&origin.path));
-    if !host_only
-        && (is_public_suffix(&domain)
-            || !domain_match(host, &domain)
-            || (!domain.contains('.') && domain != host))
-    {
-        return Err(Reject::Domain);
+    if !host_only {
+        /* bis 5.6 step 9: a public-suffix domain-attribute EQUAL to
+        the canonicalized request-host degrades to an empty
+        domain-attribute (the cookie lands host-only); only the
+        non-equal case aborts. */
+        if is_public_suffix(&domain) {
+            if domain != host {
+                return Err(Reject::Domain);
+            }
+            host_only = true;
+            domain = host.to_string();
+        } else if !domain_match(host, &domain) || (!domain.contains('.') && domain != host) {
+            return Err(Reject::Domain);
+        }
     }
     /* 6265bis 4.1.3: the name prefixes match case-insensitively,
     so "__secure-k" and "__HOST-k" carry the same gates as their
@@ -181,10 +200,20 @@ where
         Some(m) => m <= 0,
         None => sc.expires.is_some_and(|t| t <= now),
     };
+    /* bis Cookie Lifetime Limits / Expires step 4 / Max-Age step 6:
+    a lifetime longer than 400 days (34560000 seconds) is reduced to
+    the limit; the TS arm caps the same way. Deletions are
+    unaffected (a non-positive Max-Age and a past Expires both stay
+    on the deletion path). */
+    const COOKIE_AGE_LIMIT_S: i64 = 34_560_000;
     let expiry = sc
         .max_age
-        .map(|m| now + m * 1000)
-        .unwrap_or(sc.expires.unwrap_or(0));
+        .map(|m| now + m.clamp(-COOKIE_AGE_LIMIT_S, COOKIE_AGE_LIMIT_S) * 1000)
+        .unwrap_or_else(|| {
+            sc.expires
+                .map(|t| t.min(now + COOKIE_AGE_LIMIT_S * 1000))
+                .unwrap_or(0)
+        });
     /* 6.1 size gate: UTF-8 bytes of name+value. Deletions
     are never size-gated, so an oversized cookie can still
     be cleaned up. */
@@ -264,6 +293,24 @@ impl Jar {
             Ok(x) => x,
             Err(r) => return StoreOutcome::Rejected(r),
         };
+        /* bis 5.6 step 16 (leave secure cookies alone): a non-Secure
+        cookie received over a non-secure connection aborts when the
+        jar holds a Secure cookie of the same name whose domain
+        matches either way and whose path the new cookie's path
+        path-matches. Deletions abort under the same rule (the
+        received deletion cookie is what the step gates). */
+        if !fresh.secure
+            && !secure_connection(origin)
+            && self.cookies.iter().any(|c| {
+                c.secure
+                    && c.name == fresh.name
+                    && (domain_match(&c.domain, &fresh.domain)
+                        || domain_match(&fresh.domain, &c.domain))
+                    && path_match(&fresh.path, &c.path)
+            })
+        {
+            return StoreOutcome::Rejected(Reject::SecureShadow);
+        }
         if is_deletion {
             let mut removed: Option<Cookie> = None;
             let before = self.cookies.len();

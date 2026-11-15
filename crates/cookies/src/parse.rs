@@ -69,9 +69,11 @@ fn parse_max_age(val: &str) -> Option<i64> {
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let v: i128 = digits
-        .bytes()
-        .fold(0i128, |acc, b| acc * 10 + i128::from(b - b'0'));
+    let v: i128 = digits.bytes().fold(0i128, |acc, b| {
+        /* saturating: a hostile Max-Age with hundreds of digits must
+        clamp, not overflow (debug builds panic on i128 wrap). */
+        acc.saturating_mul(10).saturating_add(i128::from(b - b'0'))
+    });
     let bound = i128::from((i64::MAX - 1) / 1000);
     Some((v.clamp(-bound, bound) * sign) as i64)
 }
@@ -124,12 +126,18 @@ pub fn parse_set_cookie(header: &str) -> Result<SetCookie, ParseReject> {
         };
         match key.as_str() {
             "domain" => {
-                /* 5.2.3: an empty Domain is ignored (host-only); a
-                value outside the grammar (control characters) is
+                /* 5.2.3 + bis 5.6 steps 7+10: an empty Domain is
+                ignored (host-only); so is a value that is empty
+                AFTER the one leading-dot strip ("Domain=." is an
+                empty domain-attribute -> the cookie lands
+                host-only, never parent-scoped), and a value
+                outside the grammar (control characters) is
                 ignored too, never ingested into the jar. */
                 if !val.is_empty() && !has_control_char(val) {
                     let d = val.strip_prefix('.').unwrap_or(val);
-                    out.domain = Some(d.to_lowercase());
+                    if !d.is_empty() {
+                        out.domain = Some(d.to_lowercase());
+                    }
                 }
             }
             "path" => {

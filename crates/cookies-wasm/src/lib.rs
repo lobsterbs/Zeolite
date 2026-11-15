@@ -157,6 +157,7 @@ fn reject_str(r: &Reject) -> &'static str {
         Reject::HostPrefixRequiresRoot => "__Host- requires host-only and path /",
         Reject::Size => "size",
         Reject::HttpOnlyScriptWrite => "httponly",
+        Reject::SecureShadow => "secure shadow",
     }
 }
 

@@ -73,10 +73,18 @@ fn year_token(tok: &str) -> Option<i64> {
     if !(2..=4).contains(&n) || digit_at(tok, n) {
         return None;
     }
-    if n == 2 {
-        return Some(if y >= 70 { 1900 + y } else { 2000 + y });
-    }
-    Some(y)
+    /* RFC 6265 5.1.1 steps 3-4 window the year-VALUE, not the
+    token length: "0069" is the year 69 -> 2069, "0070" -> 1970
+    (Firefox windows on the value the same way). */
+    Some(if y <= 99 {
+        if y >= 70 {
+            1900 + y
+        } else {
+            2000 + y
+        }
+    } else {
+        y
+    })
 }
 
 /// A three-letter month prefix, case-insensitive (0-based like
