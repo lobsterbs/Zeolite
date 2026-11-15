@@ -1737,8 +1737,24 @@ export function jarClearScope(
       jarsCleared = cleared.jars;
       cookiesCleared = cleared.cookies;
     } else {
-      cookiesCleared = wasmCore.clearBucket(namespace, id);
-      jarsCleared = cookiesCleared > 0 ? 1 : 0;
+      /* #337/#49 cross-bucket semantics: a Domain cookie set by a
+         sibling origin lives in the SIBLING's bucket while still
+         attaching to the cleared origin, so a URL-scoped clear
+         removes every cookie in the namespace whose scope applies to
+         the host. A bare-id scope (no URL to parse) keeps the plain
+         bucket clear. */
+      const host = parseUrl(String(origin))?.host ?? null;
+      if (host !== null) {
+        const cleared = JSON.parse(wasmCore.clearScoped(namespace, host)) as {
+          jars: number;
+          cookies: number;
+        };
+        jarsCleared = cleared.jars;
+        cookiesCleared = cleared.cookies;
+      } else {
+        cookiesCleared = wasmCore.clearBucket(namespace, id);
+        jarsCleared = cookiesCleared > 0 ? 1 : 0;
+      }
     }
     if (jarsCleared > 0 && pid === PROFILE_DEFAULT) schedulePersist();
     return { ok: true, jars: jarsCleared, cookies: cookiesCleared };
@@ -1756,12 +1772,27 @@ export function jarClearScope(
       jarsCleared++;
     }
   } else {
-    const k = jarKey(id, namespace);
-    const list = jars.get(k);
-    if (list) {
-      cookiesCleared = list.length;
-      jars.delete(k);
-      jarsCleared = 1;
+    const host = parseUrl(String(origin))?.host ?? null;
+    if (host !== null) {
+      /* #337/#49 cross-bucket semantics: span the buckets and remove
+         every cookie whose scope applies to the cleared host. */
+      for (const [k, list] of [...jars]) {
+        if (!inProfile(k, namespace)) continue;
+        const keep = list.filter((c) => !(c.hostOnly ? c.domain === host : domainMatch(host, c.domain)));
+        if (keep.length === list.length) continue;
+        cookiesCleared += list.length - keep.length;
+        jarsCleared++;
+        if (keep.length) jars.set(k, keep);
+        else jars.delete(k);
+      }
+    } else {
+      const k = jarKey(id, namespace);
+      const list = jars.get(k);
+      if (list) {
+        cookiesCleared = list.length;
+        jars.delete(k);
+        jarsCleared = 1;
+      }
     }
   }
   if (jarsCleared > 0 && pid === PROFILE_DEFAULT) schedulePersist();
@@ -1846,9 +1877,24 @@ export async function jarPersist(): Promise<void> {
   await idbPut(db, STORE_COOKIES, "origins", ids);
 }
 
+/** Control characters are the #349 poisoning class: a CR/LF inside a
+    stored name/value/domain/path would ride into every later Cookie
+    header built from the jar. */
+function recordHasControlChar(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const cc = s.charCodeAt(i);
+    if (cc < 0x20 || cc === 0x7f) return true;
+  }
+  return false;
+}
+
 /** Shape check for a persisted or imported cookie record: storage
     and host imports are untrusted input, and a malformed cookie
-    reaching the matching code would throw mid-request. */
+    reaching the matching code would throw mid-request. These records
+    bypass admission entirely, so the #349 control-character gate is
+    re-applied here: a corrupted or hand-edited row must never reach
+    the matching code (a CR/LF in a value poisons every later Cookie
+    header built from it). */
 function isStoredCookie(c: unknown): c is Cookie {
   const o = c as Partial<Cookie>;
   return (
@@ -1860,7 +1906,11 @@ function isStoredCookie(c: unknown): c is Cookie {
     typeof o?.secure === "boolean" &&
     typeof o?.httpOnly === "boolean" &&
     typeof o?.expires === "number" &&
-    typeof o?.created === "number"
+    typeof o?.created === "number" &&
+    !recordHasControlChar(o.name) &&
+    !recordHasControlChar(o.value) &&
+    !recordHasControlChar(o.domain) &&
+    !recordHasControlChar(o.path)
   );
 }
 

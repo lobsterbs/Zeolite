@@ -21,6 +21,7 @@ const cap = vi.hoisted(() => ({
   mergeJson: JSON.stringify({ jars: 0, cookies: 0, conflicts: 0 }),
   clearNsJson: JSON.stringify({ jars: 0, cookies: 0 }),
   clearBucketCount: 0,
+  clearScopedJson: JSON.stringify({ jars: 0, cookies: 0 }),
   calls: [] as Array<{ op: string; args: unknown[] }>,
 }));
 
@@ -43,6 +44,7 @@ vi.mock("../cookieswasm", () => ({
       mergeNs: (ns: string, entriesJson: string, rule: string) => { cap.calls.push({ op: "mergeNs", args: [ns, JSON.parse(entriesJson), rule] }); return cap.mergeJson; },
       clearNs: (ns: string) => { cap.calls.push({ op: "clearNs", args: [ns] }); return cap.clearNsJson; },
       clearBucket: (ns: string, bucket: string) => { cap.calls.push({ op: "clearBucket", args: [ns, bucket] }); return cap.clearBucketCount; },
+      clearScoped: (ns: string, host: string) => { cap.calls.push({ op: "clearScoped", args: [ns, host] }); return cap.clearScopedJson; },
       clearAll: () => { cap.calls.push({ op: "clearAll", args: [] }); },
       default: async () => undefined,
     };
@@ -96,6 +98,7 @@ beforeEach(async () => {
   cap.mergeJson = JSON.stringify({ jars: 0, cookies: 0, conflicts: 0 });
   cap.clearNsJson = JSON.stringify({ jars: 0, cookies: 0 });
   cap.clearBucketCount = 0;
+  cap.clearScopedJson = JSON.stringify({ jars: 0, cookies: 0 });
   await fresh();
   cap.calls.length = 0;
 });
@@ -237,15 +240,20 @@ describe("cookies wasm arm cutover and dispatch (#614)", () => {
     expect(v[0].cookies).toBe(1);
   });
 
-  it("clears a whole namespace or one bucket through the wasm arm", async () => {
+  it("clears a whole namespace, a bare-id bucket, or a host scope through the wasm arm", async () => {
     await cm.initCookiesWasm();
     cap.clearNsJson = JSON.stringify({ jars: 2, cookies: 5 });
     expect(cm.jarClearScope("default", undefined)).toEqual({ ok: true, jars: 2, cookies: 5 });
     expect(ops("clearNs")[0].args[0]).toBe("default");
+    /* a bare id has no URL to scope: the plain bucket clear */
     const id = cm.registerOrigin("https://a.example").id;
     cap.clearBucketCount = 3;
-    expect(cm.jarClearScope("default", "https://a.example")).toEqual({ ok: true, jars: 1, cookies: 3 });
+    expect(cm.jarClearScope("default", id)).toEqual({ ok: true, jars: 1, cookies: 3 });
     expect(ops("clearBucket")[0].args[1]).toBe(id);
+    /* a URL scope spans buckets by host (#337/#49) */
+    cap.clearScopedJson = JSON.stringify({ jars: 2, cookies: 4 });
+    expect(cm.jarClearScope("default", "https://a.example")).toEqual({ ok: true, jars: 2, cookies: 4 });
+    expect(ops("clearScoped")[0].args).toEqual(["default", "a.example"]);
   });
 
   it("filters jarReplace records before the wasm import", async () => {
