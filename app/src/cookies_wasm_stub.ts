@@ -49,6 +49,9 @@ export function clearNs(): string {
 export function clearBucket(): number {
   return missing();
 }
+export function clearScoped(): string {
+  return missing();
+}
 export function clearAll(): void {
   missing();
 }

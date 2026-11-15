@@ -116,6 +116,14 @@ fn cookie_from_json(v: &Value) -> Option<Cookie> {
         },
         _ => return None,
     };
+    /* The #349 class behind admission: these records bypass
+    parse_set_cookie, so a control character in any stored string
+    would poison every later Cookie header built from the jar. The
+    same content gate the TS isStoredCookie applies. */
+    let ctl = |s: &str| s.bytes().any(|b| b < 0x20 || b == 0x7f);
+    if ctl(name) || ctl(value) || ctl(domain) || ctl(path) {
+        return None;
+    }
     Some(Cookie {
         name: name.to_string(),
         value: value.to_string(),
@@ -439,6 +447,17 @@ pub fn clear_ns_js(ns: &str) -> String {
 #[wasm_bindgen(js_name = "clearBucket")]
 pub fn clear_bucket_js(ns: &str, bucket: &str) -> usize {
     with_ns(ns, false, |p| p.clear_bucket(bucket)).unwrap_or(0)
+}
+
+/// Clear every cookie whose scope applies to the host, across the
+/// namespace's buckets (#337/#49); { jars, cookies } JSON.
+#[wasm_bindgen(js_name = "clearScoped")]
+pub fn clear_scoped_js(ns: &str, host: &str) -> String {
+    with_ns(ns, false, |p| {
+        let (jars, cookies) = p.clear_scoped(host);
+        json!({"jars": jars, "cookies": cookies}).to_string()
+    })
+    .unwrap_or_else(|| json!({"jars": 0, "cookies": 0}).to_string())
 }
 
 /// Teardown: cookies do not survive an engine switch. The PSL
@@ -819,5 +838,71 @@ mod tests {
         let removed = arr(&sweep_js("default", LATER));
         assert_eq!(removed.as_array().map(Vec::len), Some(1));
         assert_eq!(removed[0]["name"], "dead");
+    }
+
+    #[test]
+    fn import_gates_drop_control_characters() {
+        /* the #349 class behind admission: jarReplace/jarMerge/jarLoad
+        records bypass parse_set_cookie, so the import gate carries the
+        control-character rejection itself */
+        let bad = json!({
+            "name": "sid", "value": "1\r\nX-Evil: 1", "domain": "a.example.com",
+            "hostOnly": true, "path": "/", "secure": false, "httpOnly": false,
+            "sameSite": Value::Null, "expires": 0, "created": 1500000,
+        });
+        let good = json!({
+            "name": "good", "value": "1", "domain": "a.example.com",
+            "hostOnly": true, "path": "/", "secure": false, "httpOnly": false,
+            "sameSite": Value::Null, "expires": 0, "created": 1500000,
+        });
+        let entries = json!([["A", [bad, good]]]).to_string();
+        assert_eq!(replace_ns_js("nsgate", &entries), 1);
+        let d = arr(&match_document_js(
+            "nsgate",
+            "https://a.example.com/",
+            LATER,
+        ));
+        assert_eq!(d.as_array().map(Vec::len), Some(1));
+        assert_eq!(d[0]["name"], "good");
+    }
+
+    #[test]
+    fn clear_scoped_counts_and_isolates_honestly() {
+        /* the test registry's PSL is unset and the predicate fails
+        CLOSED (an unset PSL treats every domain as a public suffix),
+        so Domain attributes are refused here: this seam probe uses
+        host-only scopes and pins the honest counts; the cross-bucket
+        Domain-cookie span is pinned at the Profile layer
+        (bugscout3.rs, injectable PSL) and on the TS arm (real tldts). */
+        store_batch(
+            "nsclr",
+            "A",
+            "https://example.com/",
+            &headers(&["own=2"]),
+            false,
+            NOW,
+        );
+        store_batch(
+            "nsclr",
+            "B",
+            "https://sub.example.com/",
+            &headers(&["sub=3"]),
+            false,
+            NOW,
+        );
+        let out = arr(&clear_scoped_js("nsclr", "example.com"));
+        assert_eq!(out["jars"], 1);
+        assert_eq!(out["cookies"], 1);
+        assert_eq!(
+            match_document_js("nsclr", "https://example.com/", LATER),
+            "[]"
+        );
+        let d = arr(&match_document_js(
+            "nsclr",
+            "https://sub.example.com/",
+            LATER,
+        ));
+        assert_eq!(d.as_array().map(Vec::len), Some(1));
+        assert_eq!(d[0]["name"], "sub");
     }
 }
