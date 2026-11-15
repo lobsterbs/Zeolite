@@ -823,10 +823,36 @@ export function buildApi(
      time by the registry. */
   const webRequestNs = ext.permissions.includes("webRequest")
     ? (() => {
+        /* #521: Firefox extraInfoSpec — validated at addListener
+           (unknown strings fail), recorded per listener in the
+           registry. Per-listener spec enforcement ("blocking" opt-in
+           semantics) is the next #521 slice; blocking stays
+           permission-gated registry-wide. "asyncBlocking" is in the
+           accepted set for Chrome-shaped callers and currently
+           behaves as observation-only, which is documented. */
+        const SPEC_KEYS = new Set([
+          "blocking",
+          "requestHeaders",
+          "responseHeaders",
+          "requestBody",
+          "asyncBlocking",
+        ]);
         const reg = (kind: WrKind) => {
           const offs = new Map<unknown, () => void>();
           return {
-            addListener: (l: unknown, filter?: { urls?: unknown }) => {
+            addListener: (l: unknown, filter?: { urls?: unknown }, extraInfoSpec?: unknown) => {
+              let spec: string[] | undefined;
+              if (extraInfoSpec !== undefined) {
+                if (!Array.isArray(extraInfoSpec)) {
+                  throw new Error("zeolite: extraInfoSpec must be an array of strings");
+                }
+                spec = extraInfoSpec.map(String);
+                for (const s of spec) {
+                  if (!SPEC_KEYS.has(s)) {
+                    throw new Error("zeolite: unknown extraInfoSpec '" + s + "'");
+                  }
+                }
+              }
               if (
                 (kind === "beforeSendHeaders" || kind === "headersReceived") &&
                 !ext.permissions.includes("webRequestBlocking")
@@ -847,6 +873,7 @@ export function buildApi(
                     canBlock: ext.permissions.includes("webRequestBlocking"),
                   }),
                   urls: (Array.isArray(filter?.urls) ? filter!.urls : []).map(String),
+                  spec,
                 }),
               );
             },
@@ -857,12 +884,35 @@ export function buildApi(
             hasListener: (l: unknown) => offs.has(l),
           };
         };
+        /* #521: no webRequest evaluation result is cached between
+           requests in this engine, so the flush handlerBehaviorChanged
+           asks for is a no-op by construction; the call still counts
+           against the Firefox 10-minute cap and rejects once it is
+           exhausted. */
+        const behaviorCalls: number[] = [];
         return {
           onBeforeRequest: reg("beforeRequest"),
           onBeforeSendHeaders: reg("beforeSendHeaders"),
+          onSendHeaders: reg("sendHeaders"),
           onHeadersReceived: reg("headersReceived"),
+          onBeforeRedirect: reg("beforeRedirect"),
+          onResponseStarted: reg("responseStarted"),
           onCompleted: reg("completed"),
           onErrorOccurred: reg("errorOccurred"),
+          MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES: 20,
+          handlerBehaviorChanged: (): Promise<void> => {
+            const now = Date.now();
+            while (behaviorCalls.length > 0 && now - behaviorCalls[0]! >= 600_000) {
+              behaviorCalls.shift();
+            }
+            if (behaviorCalls.length >= 20) {
+              return Promise.reject(
+                new Error("zeolite: MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES exceeded"),
+              );
+            }
+            behaviorCalls.push(now);
+            return Promise.resolve();
+          },
         };
       })()
     : undefined;

@@ -5,7 +5,12 @@
    cancel a request (MV2-style blocking, honored only for extensions
    holding webRequestBlocking), onBeforeSendHeaders / onHeadersReceived
    can replace the header set with validated pairs, onCompleted /
-   onErrorOccurred are observation-only. Delivery requires the
+   onErrorOccurred are observation-only, and the #521 observe
+   lifecycle (onSendHeaders, onBeforeRedirect, onResponseStarted)
+   reports the wire events the engine's own hop chain produces.
+   addListener validates the Firefox extraInfoSpec array and records
+   it per listener; blocking remains permission-gated. Delivery
+   requires the
    webRequest permission at the API layer plus a host permission (or
    <all_urls>) matching the request URL, and each listener's own url
    filter is applied. The registry only ever sees requests the engine
@@ -20,7 +25,10 @@ export type WrKind =
   | "beforeSendHeaders"
   | "headersReceived"
   | "completed"
-  | "errorOccurred";
+  | "errorOccurred"
+  | "sendHeaders"
+  | "beforeRedirect"
+  | "responseStarted";
 
 export interface WrHeaderPair {
   name: string;
@@ -53,11 +61,29 @@ export interface WrErrorDetails extends WrDetails {
   error: string;
 }
 
+/* #521 observe lifecycle: the wire events Firefox reports between the
+   header stages and completion. onBeforeRedirect describes one
+   followed hop (url = the hop that returned the 3xx, redirectUrl =
+   the URL it redirects to); onResponseStarted fires on upstream
+   responses after the final header set is settled and before any
+   body byte streams (cache hits report onCompleted only). */
+export interface WrRedirectDetails extends WrDetails {
+  redirectUrl: string;
+  statusCode: number;
+}
+
+export interface WrResponseStartedDetails extends WrDetails {
+  statusCode: number;
+}
+
 export type BeforeRequestListener = (d: WrDetails) => void | { cancel?: boolean };
 export type BeforeSendHeadersListener = (d: WrSendDetails) => void | { requestHeaders?: WrHeaderPair[] };
 export type HeadersReceivedListener = (d: WrReceiveDetails) => void | { responseHeaders?: WrHeaderPair[] };
 export type CompletedListener = (d: WrCompletedDetails) => void;
 export type ErrorOccurredListener = (d: WrErrorDetails) => void;
+export type SendHeadersListener = (d: WrSendDetails) => void;
+export type BeforeRedirectListener = (d: WrRedirectDetails) => void;
+export type ResponseStartedListener = (d: WrResponseStartedDetails) => void;
 
 /** sec-fetch-dest -> webRequest resource type. Honest mapping:
     sec-fetch-dest "empty" is what browsers send for fetch()/XHR (and
@@ -124,7 +150,10 @@ type AnyWrListener =
   | BeforeSendHeadersListener
   | HeadersReceivedListener
   | CompletedListener
-  | ErrorOccurredListener;
+  | ErrorOccurredListener
+  | SendHeadersListener
+  | BeforeRedirectListener
+  | ResponseStartedListener;
 
 interface ExtWrReg {
   /* #282: live permission view, not a registration-time snapshot.
@@ -138,6 +167,14 @@ interface ExtWrReg {
   headersReceived: Set<HeadersReceivedListener>;
   completed: Set<CompletedListener>;
   errorOccurred: Set<ErrorOccurredListener>;
+  sendHeaders: Set<SendHeadersListener>;
+  beforeRedirect: Set<BeforeRedirectListener>;
+  responseStarted: Set<ResponseStartedListener>;
+  /** Per-listener extraInfoSpec, when the listener declared any.
+      Recorded at addListener time; per-listener spec enforcement
+      ("blocking" opt-in semantics) is the next #521 slice — blocking
+      remains permission-gated registry-wide for now. */
+  specs: Map<AnyWrListener, string[]>;
   /** Per-listener url filters, when the listener declared any. */
   filters: Map<AnyWrListener, string[]>;
 }
@@ -155,6 +192,10 @@ export class WebRequestRegistry {
         headersReceived: new Set(),
         completed: new Set(),
         errorOccurred: new Set(),
+        sendHeaders: new Set(),
+        beforeRedirect: new Set(),
+        responseStarted: new Set(),
+        specs: new Map(),
         filters: new Map(),
       };
       this.exts.set(id, r);
@@ -172,7 +213,7 @@ export class WebRequestRegistry {
     id: ExtensionId,
     kind: WrKind,
     listener: AnyWrListener,
-    opts: { perm: () => { hostPatterns: string[]; canBlock: boolean }; urls: string[] },
+    opts: { perm: () => { hostPatterns: string[]; canBlock: boolean }; urls: string[]; spec?: string[] },
   ): () => void {
     const r = this.reg(id, opts.perm);
     switch (kind) {
@@ -191,7 +232,17 @@ export class WebRequestRegistry {
       case "errorOccurred":
         r.errorOccurred.add(listener as ErrorOccurredListener);
         break;
+      case "sendHeaders":
+        r.sendHeaders.add(listener as SendHeadersListener);
+        break;
+      case "beforeRedirect":
+        r.beforeRedirect.add(listener as BeforeRedirectListener);
+        break;
+      case "responseStarted":
+        r.responseStarted.add(listener as ResponseStartedListener);
+        break;
     }
+    if (opts.spec && opts.spec.length > 0) r.specs.set(listener, [...opts.spec]);
     if (opts.urls.length > 0) r.filters.set(listener, opts.urls);
     return () => {
       switch (kind) {
@@ -210,7 +261,17 @@ export class WebRequestRegistry {
         case "errorOccurred":
           r.errorOccurred.delete(listener as ErrorOccurredListener);
           break;
+        case "sendHeaders":
+          r.sendHeaders.delete(listener as SendHeadersListener);
+          break;
+        case "beforeRedirect":
+          r.beforeRedirect.delete(listener as BeforeRedirectListener);
+          break;
+        case "responseStarted":
+          r.responseStarted.delete(listener as ResponseStartedListener);
+          break;
       }
+      r.specs.delete(listener);
       r.filters.delete(listener);
     };
   }
@@ -315,6 +376,59 @@ export class WebRequestRegistry {
         if (!this.visible(r, l, d.url)) continue;
         try {
           l({ ...d });
+        } catch {
+          /* observation only; listener errors are ignored */
+        }
+      }
+    }
+  }
+
+  /** Engine hook (#521): the FINAL outgoing header set (rules, DNR,
+      blocking listeners, identity, jar) is about to hit the wire.
+      Fired once per request, before the initial upstream fetch;
+      redirect hops are reported by beforeRedirect instead. The pair
+      list is a fresh copy per listener. */
+  sendHeaders(d: WrDetails, headers: Headers): void {
+    for (const r of this.exts.values()) {
+      for (const l of [...r.sendHeaders]) {
+        if (!this.visible(r, l, d.url)) continue;
+        try {
+          l({ ...d, requestHeaders: headersToPairs(headers) });
+        } catch {
+          /* observation only; listener errors are ignored */
+        }
+      }
+    }
+  }
+
+  /** Engine hook (#521): a redirect hop passed every gate and is
+      about to be followed. url is the hop that returned the 3xx,
+      redirectUrl the URL it redirects to. Breaks (one-shot stream
+      bodies, missing or unresolvable Location) surface the 3xx
+      without a followed hop and never reach this event. */
+  beforeRedirect(d: WrDetails, redirectUrl: string, statusCode: number): void {
+    for (const r of this.exts.values()) {
+      for (const l of [...r.beforeRedirect]) {
+        if (!this.visible(r, l, d.url)) continue;
+        try {
+          l({ ...d, redirectUrl, statusCode });
+        } catch {
+          /* observation only; listener errors are ignored */
+        }
+      }
+    }
+  }
+
+  /** Engine hook (#521): an upstream response's header set is settled
+      and no body byte has streamed yet. Upstream path only — cache
+      hits report onCompleted without network, so firing here would
+      claim activity that never happened. */
+  responseStarted(d: WrDetails, statusCode: number): void {
+    for (const r of this.exts.values()) {
+      for (const l of [...r.responseStarted]) {
+        if (!this.visible(r, l, d.url)) continue;
+        try {
+          l({ ...d, statusCode });
         } catch {
           /* observation only; listener errors are ignored */
         }
