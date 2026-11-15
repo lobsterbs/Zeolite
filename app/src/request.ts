@@ -5043,11 +5043,13 @@ export function handleFetch(e: FetchEvent): void {
                gate (rules, webRequest, interception, disabled hosts)
                and is about to be followed: url is the hop that
                returned the 3xx, redirectUrl the URL it redirects to,
-               statusCode the 3xx itself. The loop's break paths
-               (one-shot stream bodies, missing or unresolvable
-               Location) surface the 3xx without a followed hop and
-               never reach this event. */
-            WEBREQ.beforeRedirect({ ...wrDetails, url: redirectFrom }, next, resp.status);
+               statusCode the 3xx itself, and the 3xx response's
+               headers ride along for listeners whose extraInfoSpec
+               opts into responseHeaders (#521 slice 2). The loop's
+               break paths (one-shot stream bodies, missing or
+               unresolvable Location) surface the 3xx without a
+               followed hop and never reach this event. */
+            WEBREQ.beforeRedirect({ ...wrDetails, url: redirectFrom }, next, resp.status, resp.headers);
             /* #514: a re-issue hop that fails upstream becomes a
                bounded, attributable diagnostic - the CI torture probe's
                "zeolite: upstream fetch failed" class used to reach the

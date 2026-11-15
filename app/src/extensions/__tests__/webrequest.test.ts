@@ -85,7 +85,7 @@ describe("WebRequestRegistry", () => {
   it("beforeSendHeaders replaces headers with validated pairs", () => {
     WEBREQ.resetForTests();
     const off = WEBREQ.register("ext-h", "beforeSendHeaders", (d: WrSendDetails) => {
-      expect(d.requestHeaders.length).toBeGreaterThan(0);
+      expect(d.requestHeaders!.length).toBeGreaterThan(0);
       return { requestHeaders: [{ name: "x-zl-test", value: "1" } as WrHeaderPair] };
     }, opts(["<all_urls>"], true));
     const h = new Headers();
@@ -102,7 +102,7 @@ describe("WebRequestRegistry", () => {
     WEBREQ.resetForTests();
     const off = WEBREQ.register("ext-r", "headersReceived", (d: WrReceiveDetails) => {
       expect(d.statusCode).toBe(200);
-      const pairs = d.responseHeaders.filter((p) => p.name !== "x-drop-me");
+      const pairs = d.responseHeaders!.filter((p) => p.name !== "x-drop-me");
       return { responseHeaders: pairs };
     }, opts(["<all_urls>"], true));
     const h = new Headers();

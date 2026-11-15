@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
 import { WEBREQ } from "../webrequest";
-import type { WrDetails, WrRedirectDetails, WrResponseStartedDetails, WrSendDetails } from "../webrequest";
+import type { WrDetails, WrHeaderPair, WrReceiveDetails, WrRedirectDetails, WrResponseStartedDetails, WrSendDetails } from "../webrequest";
 import { ExtensionManager } from "../manager";
 import { buildApi } from "../runtime";
 import { ExtensionMessenger } from "../messaging";
@@ -58,15 +58,15 @@ describe("WebRequestRegistry observe lifecycle (#521)", () => {
     const off1 = WEBREQ.register("e1", "sendHeaders", (d: WrSendDetails) => {
       /* Snapshot BEFORE the mutation: the registry must hand each
          listener its own fresh pair list (#272 contract). */
-      seen.push({ ...d, requestHeaders: [...d.requestHeaders] });
-      d.requestHeaders.length = 0;
+      seen.push({ ...d, requestHeaders: [...(d.requestHeaders ?? [])] });
+      d.requestHeaders!.length = 0;
     }, opts(["<all_urls>"]));
     const off2 = WEBREQ.register("e2", "sendHeaders", (d: WrSendDetails) => seen.push(d), opts(["<all_urls>"]));
     const h = new Headers({ accept: "text/html", "x-a": "1" });
     WEBREQ.sendHeaders(details(), h);
     expect(seen).toHaveLength(2);
     for (const s of seen) {
-      expect(s.requestHeaders.map((p) => p.name).sort()).toEqual(["accept", "x-a"]);
+      expect(s.requestHeaders!.map((p) => p.name).sort()).toEqual(["accept", "x-a"]);
     }
     off1();
     off2();
@@ -137,6 +137,7 @@ type WrSurface = {
   onSendHeaders: WrEvent;
   onBeforeRedirect: WrEvent;
   onResponseStarted: WrEvent;
+  onHeadersReceived: WrEvent;
   MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES: number;
   handlerBehaviorChanged: () => Promise<void>;
 };
@@ -178,5 +179,152 @@ describe("webRequest surface: observe events, extraInfoSpec, handlerBehaviorChan
     await expect(wr.handlerBehaviorChanged()).rejects.toThrow(
       /MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES/,
     );
+  });
+});
+
+/* #521 slice 2: per-listener extraInfoSpec enforcement. Legacy no-spec
+   registrations keep the MV2 blanket model (capability follows the
+   webRequestBlocking permission); a spec'd listener gets Firefox's
+   per-listener opt-in semantics instead. */
+describe("#521 slice 2: per-listener extraInfoSpec enforcement", () => {
+  const optsSpec = (hostPatterns: string[], canBlock: boolean, spec?: string[], urls: string[] = []) =>
+    ({ perm: () => ({ hostPatterns, canBlock }), urls, spec });
+
+  it("a spec'd onBeforeRequest listener cannot cancel without the 'blocking' opt-in", () => {
+    WEBREQ.resetForTests();
+    /* ['requestHeaders'] only, even with webRequestBlocking: observe-only. */
+    const offR = WEBREQ.register("e-rh", "beforeRequest", () => ({ cancel: true }), optsSpec(["<all_urls>"], true, ["requestHeaders"]));
+    expect(WEBREQ.beforeRequest(details())).toBe(false);
+    offR();
+    /* With 'blocking' the same shape cancels. */
+    const offB = WEBREQ.register("e-blk", "beforeRequest", () => ({ cancel: true }), optsSpec(["<all_urls>"], true, ["blocking", "requestHeaders"]));
+    expect(WEBREQ.beforeRequest(details())).toBe(true);
+    offB();
+    /* Legacy no-spec listener: MV2 blanket model unchanged. */
+    const offL = WEBREQ.register("e-leg", "beforeRequest", () => ({ cancel: true }), optsSpec(["<all_urls>"], true));
+    expect(WEBREQ.beforeRequest(details())).toBe(true);
+    offL();
+    WEBREQ.resetForTests();
+  });
+
+  it("spec'd beforeSendHeaders: 'requestHeaders' delivers observe-only, 'blocking' may replace", () => {
+    WEBREQ.resetForTests();
+    const h = new Headers({ accept: "text/html" });
+    const seen: string[] = [];
+    /* ['requestHeaders'] only, canBlock: delivered WITH the field,
+       its replacement ignored — the originals go out untouched. */
+    const offO = WEBREQ.register("e-obs", "beforeSendHeaders", (d: WrSendDetails) => {
+      seen.push((d.requestHeaders ?? []).map((p) => p.name).join(","));
+      return { requestHeaders: [{ name: "x-zl-hack", value: "1" } as WrHeaderPair] };
+    }, optsSpec(["<all_urls>"], true, ["requestHeaders"]));
+    expect(WEBREQ.beforeSendHeaders(details(), h)).toBeNull();
+    expect(seen).toEqual(["accept"]);
+    expect(h.get("x-zl-hack")).toBeNull();
+    offO();
+    seen.length = 0;
+    /* ['blocking'] only: may replace, but sees NO requestHeaders
+       field (Firefox omits it without the "requestHeaders" opt-in). */
+    const offB = WEBREQ.register("e-blk", "beforeSendHeaders", (d: WrSendDetails) => {
+      seen.push("requestHeaders" in d ? "field" : "nofield");
+      return { requestHeaders: [{ name: "x-zl-test", value: "1" } as WrHeaderPair] };
+    }, optsSpec(["<all_urls>"], true, ["blocking"]));
+    const out = WEBREQ.beforeSendHeaders(details(), h);
+    expect(seen).toEqual(["nofield"]);
+    expect(out!.get("x-zl-test")).toBe("1");
+    offB();
+    seen.length = 0;
+    /* Legacy no-spec on a NON-blocking extension: not delivered at
+       all (unchanged from the pre-spec model). */
+    const offL = WEBREQ.register("e-leg", "beforeSendHeaders", () => { seen.push("delivered"); }, optsSpec(["<all_urls>"], false));
+    expect(WEBREQ.beforeSendHeaders(details(), h)).toBeNull();
+    expect(seen).toEqual([]);
+    offL();
+    /* Spec'd observe-only on a NON-blocking extension: delivered,
+       mutation still ignored (the permission is the gate the spec
+       cannot lift). */
+    const offN = WEBREQ.register("e-nb", "beforeSendHeaders", (d: WrSendDetails) => {
+      seen.push("delivered:" + ((d.requestHeaders ?? []).length > 0));
+      return { requestHeaders: [{ name: "x-zl-hack", value: "1" } as WrHeaderPair] };
+    }, optsSpec(["<all_urls>"], false, ["requestHeaders"]));
+    expect(WEBREQ.beforeSendHeaders(details(), h)).toBeNull();
+    expect(seen).toEqual(["delivered:true"]);
+    expect(h.get("x-zl-hack")).toBeNull();
+    offN();
+    WEBREQ.resetForTests();
+  });
+
+  it("headersReceived mirrors the model: spec'd observe-only delivery, legacy silence", () => {
+    WEBREQ.resetForTests();
+    const h = new Headers({ "content-type": "text/html" });
+    const seen: string[] = [];
+    /* Legacy non-blocking: silent (the pipeline test pins this
+       end-to-end too). */
+    const offL = WEBREQ.register("e-leg", "headersReceived", () => { seen.push("legacy"); }, optsSpec(["<all_urls>"], false));
+    /* Spec'd ['responseHeaders'] non-blocking: delivered observe-only. */
+    const offO = WEBREQ.register("e-obs", "headersReceived", (d: WrReceiveDetails) => {
+      seen.push("obs:" + (d.responseHeaders ?? []).map((p) => p.name).join(","));
+      return { responseHeaders: [{ name: "x-zl-hack", value: "1" } as WrHeaderPair] };
+    }, optsSpec(["<all_urls>"], false, ["responseHeaders"]));
+    expect(WEBREQ.headersReceived(details(), 200, h)).toBeNull();
+    expect(seen).toEqual(["obs:content-type"]);
+    expect(h.get("x-zl-hack")).toBeNull();
+    offL();
+    offO();
+    /* Blocking spec + permission: replacement honored. */
+    const offB = WEBREQ.register("e-blk", "headersReceived", () => (
+      { responseHeaders: [{ name: "x-zl-test", value: "1" } as WrHeaderPair] }
+    ), optsSpec(["<all_urls>"], true, ["blocking", "responseHeaders"]));
+    const out = WEBREQ.headersReceived(details(), 200, h);
+    expect(out!.get("x-zl-test")).toBe("1");
+    offB();
+    WEBREQ.resetForTests();
+  });
+
+  it("beforeRedirect carries the 3xx response headers only with the 'responseHeaders' spec", () => {
+    WEBREQ.resetForTests();
+    const seen: Array<Record<string, unknown>> = [];
+    const offY = WEBREQ.register("e-y", "beforeRedirect", (d: WrRedirectDetails) => {
+      seen.push({ has: "responseHeaders" in d, first: d.responseHeaders?.[0]?.name });
+    }, optsSpec(["<all_urls>"], false, ["responseHeaders"]));
+    const offN = WEBREQ.register("e-n", "beforeRedirect", (d: WrRedirectDetails) => {
+      seen.push({ has: "responseHeaders" in d });
+    }, optsSpec(["<all_urls>"], false, ["blocking"]));
+    const h = new Headers({ location: "https://b.example/y" });
+    WEBREQ.beforeRedirect(details(), "https://b.example/y", 301, h);
+    expect(seen).toEqual([
+      { has: true, first: "location" },
+      { has: false },
+    ]);
+    offY();
+    offN();
+    WEBREQ.resetForTests();
+  });
+
+  it("sendHeaders omits requestHeaders for a spec'd listener without 'requestHeaders'", () => {
+    WEBREQ.resetForTests();
+    const seen: boolean[] = [];
+    const offB = WEBREQ.register("e-b", "sendHeaders", (d: WrSendDetails) => seen.push("requestHeaders" in d), optsSpec(["<all_urls>"], false, ["blocking"]));
+    const offL = WEBREQ.register("e-l", "sendHeaders", (d: WrSendDetails) => seen.push("requestHeaders" in d), optsSpec(["<all_urls>"], false));
+    WEBREQ.sendHeaders(details(), new Headers({ accept: "text/html" }));
+    expect(seen).toEqual([false, true]);
+    offB();
+    offL();
+    WEBREQ.resetForTests();
+  });
+
+  it("surface: observe-only registration on header events without webRequestBlocking", async () => {
+    const { api } = await apiFor("obsonly", ["webRequest"], ["<all_urls>"]);
+    const wr = api.browser.webRequest as unknown as WrSurface;
+    const l = () => {};
+    /* Legacy no-spec registration still throws. */
+    expect(() => wr.onHeadersReceived.addListener(l)).toThrow(/webRequestBlocking/);
+    /* A blocking spec still throws without the permission: the spec
+       cannot grant a capability the manifest does not carry. */
+    expect(() => wr.onHeadersReceived.addListener(l, undefined, ["blocking"])).toThrow(/webRequestBlocking/);
+    /* An observe-only spec registers without the permission. */
+    wr.onHeadersReceived.addListener(l, undefined, ["responseHeaders"]);
+    expect(wr.onHeadersReceived.hasListener(l)).toBe(true);
+    wr.onHeadersReceived.removeListener(l);
+    expect(wr.onHeadersReceived.hasListener(l)).toBe(false);
   });
 });
