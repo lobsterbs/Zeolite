@@ -3672,6 +3672,27 @@ export function handleFetch(e: FetchEvent): void {
         target = gsiFixed;
       }
 
+      /* #653/#654: the Google Pay payframe and the legacy OAuth
+         iframerpc carry origin= built from LegacyUnforgeable
+         window.location.origin the same way; both validate it
+         against the client's registered JavaScript origins. Repair
+         only values naming this engine and only on these two frame
+         endpoints. */
+      const gframeFixed = virtualGoogleFrameOrigin(target, e.request.referrer, self.location.origin, initiator);
+      if (gframeFixed !== target) {
+        const gftid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: gftid,
+          requestId: gftid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "google frame origin parameter virtualized to the page origin",
+          url: target,
+        });
+        target = gframeFixed;
+      }
+
       /* The hCaptcha widget (#433) builds its host= from
          window.location.hostname (LegacyUnforgeable, the #112 co=
          class): hCaptcha validates it against the sitekey's
@@ -6395,6 +6416,52 @@ export function virtualGsiOrigin(target: string, referrer: string, engineOrigin:
   if (!u.pathname.startsWith("/gsi/") || !u.search) return target;
   let parent: string | null | undefined;
   const fixed = u.search.replace(/([?&])(origin|ss_domain)=([^&]*)/g, (full, sep: string, key: string, raw: string) => {
+    let value: string;
+    try {
+      value = decodeURIComponent(raw);
+    } catch {
+      return full;
+    }
+    if (value !== engineOrigin && value !== engineOrigin + ":443" && value !== engineOrigin + ":80")
+      return full;
+    if (parent === undefined) parent = referrerOrigin(referrer, initiator);
+    if (!parent) return full;
+    return sep + key + "=" + encodeURIComponent(parent);
+  });
+  return fixed === u.search ? target : u.href.replace(u.search, fixed);
+}
+
+/** #653/#654: the Google Pay payframe and the legacy OAuth iframerpc
+    both carry the embedding page's origin in origin= — pay.js builds
+    https://pay.google.com/gp/p/ui/payframe?origin=<page origin>&mid=…
+    ("Pass in origin because document.referrer inside iframe is empty
+    in certain cases", src/pay_frame_helper.js of the google/payjs
+    mirror), and platform.js / gapi auth2 builds
+    https://accounts.google.com/o/oauth2/iframerpc?action=…&origin=<page
+    origin>&client_id=… the same way (f.origin =
+    window.location.origin — LegacyUnforgeable, the #112 co= class).
+    Both endpoints validate origin= against the OAuth client's
+    registered JavaScript origins and fail closed on mismatch, so on
+    a virtualized page the parameter names the ENGINE origin and the
+    widget dies. Repair only values naming this engine and only on
+    these two frame endpoints; an unknown embedding origin stays
+    unmodified (#436 no-invention rule), and this repairs the request
+    identity the allowlist validates — it does not modify Google's
+    server-side registration. mid= / client_id= / action= are not
+    engine-derived and ride along untouched. */
+export function virtualGoogleFrameOrigin(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  const payframe = u.host === "pay.google.com" && u.pathname.startsWith("/gp/p/ui/payframe");
+  const iframerpc = u.host === "accounts.google.com" && u.pathname === "/o/oauth2/iframerpc";
+  if ((!payframe && !iframerpc) || !u.search) return target;
+  let parent: string | null | undefined;
+  const fixed = u.search.replace(/([?&])(origin|parent)=([^&]*)/g, (full, sep: string, key: string, raw: string) => {
     let value: string;
     try {
       value = decodeURIComponent(raw);
