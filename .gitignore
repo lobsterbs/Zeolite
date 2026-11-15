@@ -10,3 +10,9 @@ suite/scoreboard.*
 
 # Generated live measurement artifact (location-targeting-live.mjs)
 suite/location-targeting.json
+suite/e2e/node_modules/
+
+# Stray tooling caches must never be committed (a root-level vitest
+# run created node_modules/.vite and an unscoped git add -A swept it
+# into this branch).
+/node_modules/
