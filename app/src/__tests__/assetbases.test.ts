@@ -1,9 +1,12 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { assetBaseCount, isFlagSurgeryPath, isFlatPath, isRecoverableAssetPath, recordAssetBase, recoverFlatAsset, recordScriptUrl, recoverFlagSurgeryScript, resetAssetBases } from "../assetbases";
 import { DIAG } from "../diag";
 
 const mkResp = (status: number, ct: string) =>
   new Response("body", { status, headers: { "content-type": ct } });
+
+/* one tick past the module's 8s per-candidate bound (BUG-13) */
+const RECOVERY_TEST_ADVANCE = 8_100;
 
 describe("asset base registry (#134)", () => {
   beforeEach(() => resetAssetBases());
@@ -252,6 +255,36 @@ describe("asset base registry (#134)", () => {
       async () => mkResp(200, "text/html"),
     );
     expect(rec).toBeNull();
+  });
+
+  it("bounds each recovery candidate and continues to the next base (BUG-13)", async () => {
+    vi.useFakeTimers();
+    try {
+      /* slow base is first in the LRU (recorded last), fast second */
+      recordAssetBase("https://p.example/", "https://fast.example/assets/x.js");
+      recordAssetBase("https://p.example/", "https://slow.example/assets/x.js");
+      const seen: string[] = [];
+      const pending = recoverFlatAsset(
+        "https://p.example/",
+        "https://p.example/flat.module.css",
+        "style",
+        new Headers(),
+        (u: string) => {
+          seen.push(u);
+          if (u.includes("slow.example")) return new Promise<Response>(() => {}) as Promise<Response>;
+          return Promise.resolve(mkResp(200, "text/css"));
+        },
+      );
+      await vi.advanceTimersByTimeAsync(RECOVERY_TEST_ADVANCE);
+      const rec = await pending;
+      expect(rec?.url).toBe("https://fast.example/assets/flat.module.css");
+      expect(seen).toEqual([
+        "https://slow.example/assets/flat.module.css",
+        "https://fast.example/assets/flat.module.css",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("recovers an image destination flat miss", async () => {
