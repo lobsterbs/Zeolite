@@ -352,7 +352,7 @@ export function cspGate(
      style-src admits). A first-party request is an engine-topology
      artifact the direct browser never makes, never a policy
      evasion: always allow. */
-  if (u.origin === plan.selfOrigin) return { blocked: false };
+  if (u.origin === plan.selfOrigin) return { blocked: false, directive };
   /* Wave-55 parity (#414): Cloudflare's /cdn-cgi/ edge namespace
      (challenge-platform orchestrate, assets) serves verbatim by
      transport invariant (transit.ts CDN_CGI_NATIVE /
