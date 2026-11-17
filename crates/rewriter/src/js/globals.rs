@@ -3,8 +3,8 @@
 //! SvelteKit-class client routers match their route tables against
 //! location.pathname, which the engine has replaced with the opaque
 //! route, so every pathname-routed SPA falls back to a full document
-//! load and loses its client-minted state (Brave Ask, the wave-25
-//! README Working-sites entry). window.location is
+//! load and loses its client-minted state (Brave Ask, the README
+//! Working-sites entry). window.location is
 //! [LegacyUnforgeable]: no bootstrap hook can make the page see the
 //! real path, the fix has to change the code that reads location
 //! (#39's documented limit). This pass parses script bodies with oxc

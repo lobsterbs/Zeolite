@@ -8,7 +8,7 @@
 //! rows (TS notify), the persistence/IndexedDB rows (TS), the
 //! zl:importSession seam rows (TS), and the tough-cookie fuzz
 //! differential (needs tough-cookie in the runner). The wasm
-//! wiring lands in the follow-up wave per the issue phasing.
+//! wiring lands in a follow-up.
 
 use zeolite_cookies::{
     parse_cookie_date, parse_http_url, parse_set_cookie, Jar, Origin, Reject, SetCookie,
