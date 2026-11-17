@@ -8,6 +8,7 @@ import {
   setSiteOverrides,
   siteUaFor,
 } from "../rules";
+import shippedRules from "../../public/rules.kdl?raw";
 
 const RULES = compileRules({
   block: [
@@ -109,6 +110,20 @@ describe("loadRules", () => {
       })) as typeof fetch;
     const r = await loadRules();
     expect(applyRules(r, "https://sub.block.example/x", "fetch").action).toBe("block");
+    globalThis.fetch = orig;
+  });
+});
+
+describe("shipped rules.kdl", () => {
+  it("allows YouTube's video CDN so watch streams are not caught by generic ad filters (#647)", async () => {
+    const orig = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(shippedRules, { status: 200 })) as typeof fetch;
+    const r = await loadRules();
+    expect(
+      applyRules(r, "https://rr2---sn-q4fl6ndz.googlevideo.com/videoplayback?itag=18", "media"),
+    ).toMatchObject({ action: "allow", matched: "googlevideo.com" });
+    /* the static ad/tracker block list still works on the shipped file */
+    expect(applyRules(r, "https://ad.doubleclick.net/x.js", "script").action).toBe("block");
     globalThis.fetch = orig;
   });
 });
