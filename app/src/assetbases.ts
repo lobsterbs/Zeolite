@@ -15,6 +15,41 @@ const ASSET_BASES_PER_ORIGIN = 4;
 const ASSET_BASES_TOTAL = 128;
 const assetBases = new Map<string, string[]>();
 
+/* BUG-13: a missing flat asset must fail fast instead of pending for
+   the duration of every candidate base's transport deadline (observed
+   ~30s per base, over a minute before the final 404). Each candidate
+   gets a short bound; a late answer after the bound is dropped and
+   its body cancelled. */
+const RECOVERY_CANDIDATE_TIMEOUT_MS = 8_000;
+
+async function fetchCandidateWithTimeout(
+  fetchUpstream: FlatFetch,
+  url: string,
+  headers: Headers,
+): Promise<Response> {
+  let timedOut = false;
+  const attempt = fetchUpstream(url, { method: "GET", headers });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    attempt.then(
+      (late) => {
+        late.body?.cancel().catch(() => undefined);
+      },
+      () => undefined,
+    );
+  }, RECOVERY_CANDIDATE_TIMEOUT_MS);
+  try {
+    const r = await attempt;
+    if (timedOut) {
+      await r.body?.cancel().catch(() => undefined);
+      throw new Error("recovery candidate timed out");
+    }
+    return r;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /* #134 residual: the registry is not script/style-only. Runtime-built
    binary names (a glb or fragment minted at runtime, a hashed image)
    404 at the page origin exactly like module css; recover them too.
@@ -198,7 +233,7 @@ export async function recoverFlatAsset(
       continue;
     }
     try {
-      const r = await fetchUpstream(cand.href, { method: "GET", headers: safe });
+      const r = await fetchCandidateWithTimeout(fetchUpstream, cand.href, safe);
       if (r.ok && mimeOkFor(dest, r.headers.get("content-type") ?? "")) return { url: cand.href, resp: r };
       await r.body?.cancel().catch(() => undefined);
     } catch {
