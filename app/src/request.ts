@@ -3812,6 +3812,42 @@ export function handleFetch(e: FetchEvent): void {
         }
       }
 
+      /* #672 follow-up: the challenge POST names the page host in
+         its body (host: window.location.hostname, the same page-side
+         reads as the config site=). The body seam mirrors the #634
+         token rewrite: only a value naming this deployment is
+         repaired, and an unreadable or undecodable body passes
+         through unchanged. */
+      let cfxBodyOverride: string | undefined;
+      if (
+        e.request.method === "POST" &&
+        isCaptchafoxChallengeUrl(target) &&
+        ((e.request.headers.get("content-type") ?? "").includes("application/json") ||
+          (e.request.headers.get("content-type") ?? "").includes("application/x-www-form-urlencoded"))
+      ) {
+        try {
+          const raw = await e.request.clone().text();
+          const fixed = virtualCaptchafoxChallengeBody(raw, e.request.referrer, self.location.origin, initiator);
+          if (fixed !== raw) {
+            cfxBodyOverride = fixed;
+            const cbid = DIAG.trace(e.resultingClientId || e.clientId);
+            DIAG.emit({
+              traceId: cbid,
+              requestId: cbid,
+              category: "CHALLENGE",
+              cause: "challenge",
+              severity: "info",
+              stage: "REQUEST_INTERCEPTED",
+              message: "captchafox challenge host virtualized to the page host",
+              url: target,
+            });
+          }
+        } catch {
+          /* An unreadable body passes through unchanged (no-cors and
+             opaque shapes); the honest-fallback rule holds. */
+        }
+      }
+
       /* #565: the Disqus Universal Embed Code loader names the
          page in t_u= (t_i=) from the document URL (LegacyUnforgeable,
          the #112 co= class): on a virtualized page the parameter
@@ -3921,6 +3957,54 @@ export function handleFetch(e: FetchEvent): void {
           url: target,
         });
         target = poFixed;
+      }
+
+      /* #672: the CaptchaFox widget loader names the page in
+         site= (window.location.origin plus location.pathname,
+         LegacyUnforgeable reads, the #112 co= class): the config
+         endpoint validates site= against the sitekey's registered
+         site and answers 402 site-not-allowed for the engine
+         origin, so the widget never renders. Virtualize a site=
+         whose origin names this deployment at the seam the engine
+         owns. */
+      const cfxFixed = virtualCaptchafoxSite(target, e.request.referrer, self.location.origin, initiator);
+      if (cfxFixed !== target) {
+        const cfxid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: cfxid,
+          requestId: cfxid,
+          category: "CHALLENGE",
+          cause: "challenge",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "captchafox site= virtualized to the page url",
+          url: target,
+        });
+        target = cfxFixed;
+      }
+
+      /* #669: the VK Open API loader names the embedding page in
+         url= on the widget endpoints (location.href and
+         location.protocol + "//" + location.host shapes) and in
+         location= on the auth transport (window.location.hostname)
+         - LegacyUnforgeable reads, the #112 co= class. VK validates
+         the named domain against the app's registered base domain
+         and the widget renders the base-domain error instead of the
+         widget. Virtualize values that name this deployment at the
+         seam the engine owns. */
+      const vkFixed = virtualVkWidgetUrl(target, e.request.referrer, self.location.origin, initiator);
+      if (vkFixed !== target) {
+        const vkid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: vkid,
+          requestId: vkid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "vk widget url=/location= virtualized to the page url",
+          url: target,
+        });
+        target = vkFixed;
       }
 
       /* #129: challenge-widget frames stay engine-routed. The #120
@@ -4840,8 +4924,11 @@ export function handleFetch(e: FetchEvent): void {
             ? undefined
             : tokenBodyOverride !== undefined
               ? tokenBodyOverride
-              : e.request.body;
-          if (tokenBodyOverride !== undefined) sendHeaders.delete("content-length");
+              : cfxBodyOverride !== undefined
+                ? cfxBodyOverride
+                : e.request.body;
+          if (tokenBodyOverride !== undefined || cfxBodyOverride !== undefined)
+            sendHeaders.delete("content-length");
           /* #556 relay follow-up: when the body spooled, the File IS
              the chain body and the spool file must outlive the loop
              (307/308 replay it on every hop). Every chain exit below
@@ -6927,6 +7014,212 @@ export function virtualGiscusOrigin(target: string, referrer: string, engineOrig
     out = out.replace(m[0], m[1] + key + "=" + encodeURIComponent(page + (du.hash || "")));
   }
   return out;
+}
+
+/** #672: the CaptchaFox widget loader (cdn.captchafox.com/api.js)
+    builds the config request site= from window.location.origin +
+    window.location.pathname (LegacyUnforgeable, the #112 co= class):
+    the endpoint validates site= against the sitekey's registered site
+    and answers 402 site-not-allowed for the engine origin, so the
+    widget never renders. Virtualize a site= whose origin names this
+    deployment at the seam the engine owns; the page's real URL
+    (origin plus true path) is the honest value. */
+export function virtualCaptchafoxSite(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host !== "api.captchafox.com") return target;
+  if (!/^\/captcha\/[^/]+\/config$/.test(u.pathname)) return target;
+  const m = /([?&])site=([^&]*)/.exec(u.search);
+  if (!m || !m[2]) return target;
+  let dec: string;
+  try {
+    dec = decodeURIComponent(m[2]);
+  } catch {
+    return target;
+  }
+  let du: URL;
+  try {
+    du = new URL(dec);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(du.protocol)) return target;
+  /* Only a site= whose origin names THIS deployment is ours to fix;
+     any other value is a site the page genuinely chose. */
+  if (du.origin !== engineOrigin && du.origin !== engineOrigin + ":443" && du.origin !== engineOrigin + ":80")
+    return target;
+  /* No honest widget-side fallback exists: without the real page URL
+     the registered-site check has nothing real to validate. */
+  const page = referrerPageUrl(referrer, initiator);
+  if (!page) return target;
+  return u.href.replace(m[0], m[1] + "site=" + encodeURIComponent(page));
+}
+
+/** The challenge-endpoint shape the #672 body seam serves: the same
+    api.captchafox.com host and /captcha/<sitekey>/challenge path
+    family the config request uses. */
+export function isCaptchafoxChallengeUrl(target: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return false;
+  }
+  if (!/^https?:$/.test(u.protocol)) return false;
+  if (u.host !== "api.captchafox.com") return false;
+  return /^\/captcha\/[^/]+\/challenge$/.test(u.pathname);
+}
+
+/** #672 follow-up: the challenge POST body names the page host
+    (host: window.location.hostname from the same page-side reads as
+    the config site=). Repair only a value naming this deployment,
+    mirroring the #634 token-body seam; any other shape or value
+    passes through unchanged. */
+export function virtualCaptchafoxChallengeBody(body: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let engineHost = "";
+  let engineHostname = "";
+  try {
+    const eo = new URL(engineOrigin);
+    engineHost = eo.host;
+    engineHostname = eo.hostname;
+  } catch {
+    return body;
+  }
+  /* No honest widget-side fallback exists: without the real page
+     host there is nothing true to name. */
+  const parent = referrerPageUrl(referrer, initiator);
+  if (!parent) return body;
+  let vu: URL;
+  try {
+    vu = new URL(parent);
+  } catch {
+    return body;
+  }
+  const isEngine = (v: string): boolean =>
+    v === engineHostname || v === engineHost || v === engineOrigin ||
+    v === engineOrigin + ":443" || v === engineOrigin + ":80";
+  if (body.replace(/^\s+/, "").startsWith("{")) {
+    let obj: unknown;
+    try {
+      obj = JSON.parse(body);
+    } catch {
+      return body;
+    }
+    if (typeof obj !== "object" || obj === null) return body;
+    const rec = obj as Record<string, unknown>;
+    let touched = false;
+    for (const key of ["host", "hostname"]) {
+      if (typeof rec[key] === "string" && isEngine(rec[key] as string)) {
+        rec[key] = vu.hostname;
+        touched = true;
+      }
+    }
+    return touched ? JSON.stringify(obj) : body;
+  }
+  const m = /(^|&)host=([^&]*)/.exec(body);
+  if (!m || !m[2]) return body;
+  let dec: string;
+  try {
+    dec = decodeURIComponent(m[2].replace(/\+/g, "%20"));
+  } catch {
+    return body;
+  }
+  if (!isEngine(dec)) return body;
+  const fixed = encodeURIComponent(vu.hostname);
+  return body.slice(0, m.index) + m[1] + "host=" + fixed + body.slice(m.index + m[0].length);
+}
+
+/** #669: the VK Open API loader (vk.com/js/api/openapi.js) names the
+    embedding page in url= on the widget endpoints (built from
+    location.href or location.protocol + "//" + location.host plus a
+    page-relative path) and in location= on the auth transport
+    (window.location.hostname) - LegacyUnforgeable reads, the #112
+    co= class. VK validates the named domain against the app's
+    registered base domain and the widget renders the base-domain
+    error instead of the widget; the comments/like/poll threads are
+    keyed by the url= value, so an engine-origin url= also
+    fragments thread identity. Virtualize values that name this
+    deployment at the seam the engine owns; everything else is
+    intentionally left untouched. */
+export function virtualVkWidgetUrl(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host === "vk.com") {
+    if (!/^\/(al_)?widget_[a-z]+\.php$/.test(u.pathname)) return target;
+    const m = /([?&])url=([^&]*)/.exec(u.search);
+    if (!m || !m[2]) return target;
+    let dec: string;
+    try {
+      dec = decodeURIComponent(m[2]);
+    } catch {
+      return target;
+    }
+    let du: URL;
+    try {
+      du = new URL(dec);
+    } catch {
+      return target;
+    }
+    if (!/^https?:$/.test(du.protocol)) return target;
+    /* Only a url= whose origin names THIS deployment is ours to fix;
+       any other value is a page URL the page genuinely chose. */
+    if (du.origin !== engineOrigin && du.origin !== engineOrigin + ":443" && du.origin !== engineOrigin + ":80")
+      return target;
+    /* No honest widget-side fallback exists: without the real page
+       URL the base-domain check has nothing real to validate. */
+    const page = referrerPageUrl(referrer, initiator);
+    if (!page) return target;
+    return u.href.replace(m[0], m[1] + "url=" + encodeURIComponent(page));
+  }
+  if (u.host === "login.vk.com") {
+    if (u.searchParams.get("act") !== "openapi") return target;
+    const m = /([?&])location=([^&]*)/.exec(u.search);
+    if (!m || !m[2]) return target;
+    let dec: string;
+    try {
+      dec = decodeURIComponent(m[2]);
+    } catch {
+      return target;
+    }
+    /* The auth transport sends window.location.hostname; host and
+       origin forms are accepted so a page that built the value
+       differently still gets its real host back (the hcaptcha
+       rule). */
+    let engineHost = "";
+    let engineHostname = "";
+    try {
+      const eo = new URL(engineOrigin);
+      engineHost = eo.host;
+      engineHostname = eo.hostname;
+    } catch {
+      return target;
+    }
+    if (
+      dec !== engineHostname && dec !== engineHost && dec !== engineOrigin &&
+      dec !== engineOrigin + ":443" && dec !== engineOrigin + ":80"
+    )
+      return target;
+    const parent = referrerPageUrl(referrer, initiator);
+    if (!parent) return target;
+    let vu: URL;
+    try {
+      vu = new URL(parent);
+    } catch {
+      return target;
+    }
+    return u.href.replace(m[0], m[1] + "location=" + encodeURIComponent(vu.hostname));
+  }
+  return target;
 }
 
 /** A frame fragment is browser-only and never reaches handleFetch.
