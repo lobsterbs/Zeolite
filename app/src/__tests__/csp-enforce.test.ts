@@ -216,6 +216,35 @@ describe("cspGate: destination mapping and default-src fallback (#527)", () => {
     expect(cspGate(reg, "c1", "script", "https://evil.example/cdn-cgi-mimic/x.js").blocked).toBe(true);
   });
 
+  /* Live repro (2026-11-16): github.com's style-src admits only
+     github.githubassets.com, but through the engine its react app
+     resolves chunk URLs against the document host, so every
+     /assets/*.module.css decoded to github.com and the gate
+     blocked the whole stylesheet set (the page never hydrated).
+     A first-party request is an engine-topology artifact: allow.
+     */
+  it("never gates first-party subresources even when the policy excludes the document host (BUG-02)", () => {
+    const reg = newCspRegistry();
+    cspSetClient(
+      reg,
+      "c1",
+      planned(
+        "default-src 'none'; style-src 'unsafe-inline' github.githubassets.com",
+        "https://github.com/lobsterbs/Zeolite",
+      ),
+    );
+    expect(
+      cspGate(reg, "c1", "style", "https://github.com/assets/react-core.e507.module.css").blocked,
+    ).toBe(false);
+    /* Third-party and lookalike hosts still gate. */
+    expect(cspGate(reg, "c1", "style", "https://evil.example/a.css").blocked).toBe(true);
+    expect(cspGate(reg, "c1", "style", "https://github.evil.example/a.css").blocked).toBe(true);
+    /* The admitted CDN host still allows. */
+    expect(
+      cspGate(reg, "c1", "style", "https://github.githubassets.com/assets/light.css").blocked,
+    ).toBe(false);
+  });
+
   /* CSP3: an explicit directive replaces default-src for its request
      class. script-src 'nonce-...' is present but unverifiable at the
      fetch seam, so the degrade is a false allow; the old fallback to
