@@ -66,7 +66,7 @@ describe("virtualCaptchafoxSite (#672 captchafox class)", () => {
     setRouteKey(KEY);
     const token = encodeNavHandle(PAGE)!;
     /* #144: the handle carries the real path as a visible suffix */
-    const ref = ENGINE + "/__zl_navh__/" + token + "/account";
+    const ref = ENGINE + "/__zl_navh__/" + token + "/account?next=%2Fmail&x=1";
     expect(virtualCaptchafoxSite(config(ENGINE + encodeDest(PAGE)), ref, ENGINE)).toBe(config(PAGE));
   });
 
