@@ -29,22 +29,26 @@ async function fetchCandidateWithTimeout(
 ): Promise<Response> {
   let timedOut = false;
   const attempt = fetchUpstream(url, { method: "GET", headers });
-  const timer = setTimeout(() => {
-    timedOut = true;
-    attempt.then(
-      (late) => {
-        late.body?.cancel().catch(() => undefined);
-      },
-      () => undefined,
-    );
-  }, RECOVERY_CANDIDATE_TIMEOUT_MS);
+  /* A late answer after the bound is dropped and its body cancelled. */
+  attempt.then(
+    (late) => {
+      if (timedOut) late.body?.cancel().catch(() => undefined);
+    },
+    () => undefined,
+  );
+  /* The bound must reject the await itself: a candidate that never
+     answers headers would otherwise pin recovery until its transport
+     deadline (the observed ~30s per base), which is exactly what the
+     bound exists to prevent. */
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error("recovery candidate timed out"));
+    }, RECOVERY_CANDIDATE_TIMEOUT_MS);
+  });
   try {
-    const r = await attempt;
-    if (timedOut) {
-      await r.body?.cancel().catch(() => undefined);
-      throw new Error("recovery candidate timed out");
-    }
-    return r;
+    return await Promise.race([attempt, bound]);
   } finally {
     clearTimeout(timer);
   }
