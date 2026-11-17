@@ -10,10 +10,19 @@ function stalledBody(): ReadableStream<Uint8Array> {
   });
 }
 
+function silentBody(): ReadableStream<Uint8Array> {
+  /* never enqueues, never closes: a dead upstream */
+  return new ReadableStream<Uint8Array>({
+    start() {
+      /* nothing */
+    },
+  });
+}
+
 describe("withBodyStallDeadline (#140)", () => {
   it("errors an idle-stalled body within the deadline", async () => {
     const resp = new Response(stalledBody(), { status: 200, headers: { "content-type": "image/png" } });
-    const wrapped = withBodyStallDeadline(resp, 60, "t1", "https://x.example/img.png");
+    const wrapped = withBodyStallDeadline(resp, 60, "t1", "https://x.example/img.png", 60);
     const reader = wrapped.body!.getReader();
     const first = await reader.read();
     expect(first.done).toBe(false);
@@ -54,6 +63,29 @@ describe("withBodyStallDeadline (#140)", () => {
     };
     expect(wrapped.rawHeaders).toEqual([["set-cookie", "a=b; Path=/"]]);
   });
+
+  /* #647/BUG-07: a long-poll that answered 200 headers and sent its
+     first byte is proven alive; it may legitimately hold silence for
+     minutes between reads (gemini batchexecute processSession). The
+     tight 20s bound applies only until the first byte lands. */
+  it("gives a silent long-poll the longer post-first-byte bound (#647)", async () => {
+    const resp = new Response(stalledBody(), { status: 200, headers: { "content-type": "application/json" } });
+    const wrapped = withBodyStallDeadline(resp, 40, "t9", "https://x.example/poll", 120);
+    const reader = wrapped.body!.getReader();
+    expect((await reader.read()).done).toBe(false);
+    const second = reader.read();
+    /* the pre-first-byte deadline (40ms) must NOT abort this read */
+    await new Promise((r) => setTimeout(r, 70));
+    const settledEarly = await Promise.race([second.then(() => true, () => true), new Promise<boolean>((r) => setTimeout(() => r(false), 0))]);
+    expect(settledEarly).toBe(false);
+    await expect(second).rejects.toThrow(/body stall/);
+  });
+
+  it("still errors a body silent before its first byte within ms (dead upstream)", async () => {
+    const resp = new Response(silentBody(), { status: 200, headers: { "content-type": "application/json" } });
+    const wrapped = withBodyStallDeadline(resp, 40, "t10", "https://x.example/poll");
+    await expect(wrapped.body!.getReader().read()).rejects.toThrow(/body stall/);
+  });
 });
 
 /* #200/#201: document bodies get the same idle bound as
@@ -62,7 +94,7 @@ describe("withBodyStallDeadline (#140)", () => {
 describe("document stall bound and consumer cancel (#200/#201)", () => {
   it("applies the idle bound to document bodies too (#200)", async () => {
     const resp = new Response(stalledBody(), { status: 200, headers: { "content-type": "text/html" } });
-    const wrapped = withBodyStallDeadline(resp, 60, "t6", "https://x.example/doc.html");
+    const wrapped = withBodyStallDeadline(resp, 60, "t6", "https://x.example/doc.html", 60);
     const reader = wrapped.body!.getReader();
     expect((await reader.read()).done).toBe(false);
     await expect(reader.read()).rejects.toThrow(/body stall/);
