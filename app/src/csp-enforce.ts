@@ -343,6 +343,16 @@ export function cspGate(
     return { blocked: false };
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return { blocked: false };
+  /* First-party exemption (BUG-02): the engine re-serves every
+     subresource same-origin, and a page's runtime URL computation
+     can lose the upstream asset host (github's react app resolves
+     its /assets/*.module.css chunks against the document host, so
+     the requests decode to github.com while the direct browser
+     loads them from github.githubassets.com, the only host its
+     style-src admits). A first-party request is an engine-topology
+     artifact the direct browser never makes, never a policy
+     evasion: always allow. */
+  if (u.origin === plan.selfOrigin) return { blocked: false };
   /* Wave-55 parity (#414): Cloudflare's /cdn-cgi/ edge namespace
      (challenge-platform orchestrate, assets) serves verbatim by
      transport invariant (transit.ts CDN_CGI_NATIVE /
