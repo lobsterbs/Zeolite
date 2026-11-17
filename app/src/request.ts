@@ -156,18 +156,33 @@ const PRE_DEADLINE_BOUND_MS = 1_500;
    are long-lived by design, so only IDLE stalls are killed, never
    total duration: a stream that keeps sending bytes stays alive. */
 const BODY_STALL_DEADLINE_MS = 20_000;
+/* #647/BUG-07: the tight bound applies only until the first body
+   byte lands. Long-poll endpoints (gemini batchexecute processSession)
+   answer 200 headers, then legitimately hold silence for minutes
+   before the first payload byte; the flat 20s idle bound aborted
+   them in a loop the client itself re-opened. After the first byte
+   the stream is proven alive, so a much longer idle bound applies. */
+const BODY_STALL_POST_FIRST_MS = 120_000;
 
-export function withBodyStallDeadline(resp: Response, ms: number, traceId: string, url: string): Response {
+export function withBodyStallDeadline(
+  resp: Response,
+  ms: number,
+  traceId: string,
+  url: string,
+  postFirstMs = BODY_STALL_POST_FIRST_MS,
+): Response {
   if (!(ms > 0) || !resp.body) return resp;
   const ct = (resp.headers.get("content-type") ?? "").toLowerCase();
   if (ct.includes("text/event-stream")) return resp;
   const reader = resp.body.getReader();
+  let seenByte = false;
   const stream = new ReadableStream({
     async pull(controller) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const chunk = await new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("body stall: no bytes for " + ms + "ms")), ms);
+          const deadline = seenByte ? postFirstMs : ms;
+          timer = setTimeout(() => reject(new Error("body stall: no bytes for " + deadline + "ms")), deadline);
           reader.read().then(resolve, reject);
         });
         clearTimeout(timer);
@@ -175,6 +190,7 @@ export function withBodyStallDeadline(resp: Response, ms: number, traceId: strin
           controller.close();
           return;
         }
+        seenByte = true;
         controller.enqueue(chunk.value);
       } catch (err) {
         clearTimeout(timer);
