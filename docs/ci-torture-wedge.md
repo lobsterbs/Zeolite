@@ -1195,3 +1195,34 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes. The pin gate stands: all five jobs green or no
   LobsterBrowse pin.
+
+## App-job intermittent single-test wedge (2026-11-18, run 44304252459)
+
+- The app job has the same position-random intermittent class the
+  browser job documents above, at vitest grain: one test file fails
+  one timing-sensitive test per strike, a different victim each time,
+  rust/wasm/compat green in every affected run.
+- Runs 44170784588 and 44172114305 (heads b21ed0f2, 79e4d763, the
+  2026-11-17 waves): app red on assetbases.test.ts "bounds each
+  recovery candidate and continues to the next base" exactly.
+- Run 44193315143 (head 1629e5e7, the #672 captchafox wave): app red
+  on captchafox-site.test.ts "rewrites through a nav-handle referrer"
+  (an expected-URL assertion), the same single-victim shape.
+- Run 44304252459 (head 50c4a9b1, the #416 slice 1 shell escape
+  recapture plus its two CI repairs): app red on ws-shim.test.ts
+  "rejects SAB-backed views without posting or counting; unshared
+  payloads flow": InvalidStateError raised at src/bootstrap/ws.ts:226
+  while es.send ran in the OPEN phase, i.e. the port-delivered open
+  event had not landed within the test's single setTimeout(0) yield
+  (3235 passed, 1 failed). Every shell-escape.test.ts test is green
+  in this run, so the #416 recapture is exonerated: no positive or
+  negative recapture test failed, and the widened FetchEvent read and
+  the stubbed passthrough fetch are both green.
+- Every red app run in this class prints the same six
+  "TypeError: WebAssembly response has unsupported MIME type
+  'text/javascript'" lines from the vendored wasm glue under vitest,
+  including the runs without the #416 code: the noise is constant,
+  the victim rotates.
+- This docs-only commit is the recorded bounded retrigger per the
+  operational notes. The pin gate stands: all five jobs green or no
+  LobsterBrowse pin.
