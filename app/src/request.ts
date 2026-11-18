@@ -4007,6 +4007,29 @@ export function handleFetch(e: FetchEvent): void {
         target = vkFixed;
       }
 
+      /* #673: the Yandex SmartCaptcha widget pages name the
+         embedding page in host= and href= (LegacyUnforgeable
+         location reads, the #112 co= class): the widget validates
+         host= against the captcha's allowed-domain list and
+         renders the wrong-domain error for the engine origin,
+         which no registration can ever list. Virtualize values
+         that name this deployment at the seam the engine owns. */
+      const ynxFixed = virtualYandexCaptchaUrl(target, e.request.referrer, self.location.origin, initiator);
+      if (ynxFixed !== target) {
+        const ynxid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: ynxid,
+          requestId: ynxid,
+          category: "CHALLENGE",
+          cause: "challenge",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "yandex smartcaptcha host=/href= virtualized to the page",
+          url: target,
+        });
+        target = ynxFixed;
+      }
+
       /* #129: challenge-widget frames stay engine-routed. The #120
          policy redirected these navigations provider-direct, which
          was an IP leak (the #32 class) AND left the widget
@@ -7220,6 +7243,103 @@ export function virtualVkWidgetUrl(target: string, referrer: string, engineOrigi
     return u.href.replace(m[0], m[1] + "location=" + encodeURIComponent(vu.hostname));
   }
   return target;
+}
+
+/* #673: the Yandex SmartCaptcha widget pages name the embedding
+   page in host= (window.location.host) and href= (location.href),
+   both LegacyUnforgeable reads, the #112 co= class: the widget
+   validates host= against the captcha's allowed-domain list and
+   renders the wrong-domain error for the engine origin. Virtualize
+   values that name this deployment at the seam the engine owns. */
+export function virtualYandexCaptchaUrl(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (u.host !== "captcha-api.yandex.ru" && u.host !== "smartcaptcha.yandexcloud.net")
+    return target;
+  /* Widget pages only (checkbox/advanced/backend/challenge), never
+     /captcha.js or the /check handshake endpoint. */
+  if (
+    !/^\/(checkbox|advanced|backend)\.[^/]+\.html$/.test(u.pathname) &&
+    !u.pathname.startsWith("/challenge-")
+  )
+    return target;
+  let engineHost = "";
+  let engineHostname = "";
+  try {
+    const eo = new URL(engineOrigin);
+    engineHost = eo.host;
+    engineHostname = eo.hostname;
+  } catch {
+    return target;
+  }
+  let fixed = u.href;
+  let changed = false;
+  /* host= carries a host value; the loader sends location.host. */
+  const hm = /([?&])host=([^&]*)/.exec(u.search);
+  if (hm && hm[2]) {
+    let hdec = "";
+    try {
+      hdec = decodeURIComponent(hm[2]);
+    } catch {
+      hdec = "";
+    }
+    if (
+      hdec &&
+      (hdec === engineHostname ||
+        hdec === engineHost ||
+        hdec === engineOrigin ||
+        hdec === engineOrigin + ":443" ||
+        hdec === engineOrigin + ":80" ||
+        hdec === engineHost + ":443" ||
+        hdec === engineHost + ":80")
+    ) {
+      const parent = referrerOrigin(referrer, initiator);
+      if (parent) {
+        try {
+          fixed = fixed.replace(hm[0], hm[1] + "host=" + encodeURIComponent(new URL(parent).host));
+          changed = true;
+        } catch {
+          /* malformed parent origin passes through */
+        }
+      }
+    }
+  }
+  /* href= carries the full page URL; virtualize it alongside
+     host= so the widget sees one consistent page identity. */
+  const am = /([?&])href=([^&]*)/.exec(u.search);
+  if (am && am[2]) {
+    let adec = "";
+    try {
+      adec = decodeURIComponent(am[2]);
+    } catch {
+      adec = "";
+    }
+    let au: URL | null = null;
+    if (adec) {
+      try {
+        au = new URL(adec);
+      } catch {
+        au = null;
+      }
+    }
+    if (
+      au &&
+      /^https?:$/.test(au.protocol) &&
+      (au.origin === engineOrigin || au.origin === engineOrigin + ":443" || au.origin === engineOrigin + ":80")
+    ) {
+      const page = referrerPageUrl(referrer, initiator);
+      if (page) {
+        fixed = fixed.replace(am[0], am[1] + "href=" + encodeURIComponent(page));
+        changed = true;
+      }
+    }
+  }
+  return changed ? fixed : target;
 }
 
 /** A frame fragment is browser-only and never reaches handleFetch.
