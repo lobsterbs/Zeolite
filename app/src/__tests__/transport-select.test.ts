@@ -95,6 +95,18 @@ describe("transport reset (#74)", () => {
     expect(isConnectClassError("Websocket implementation error: websocket closed")).toBe(true);
     expect(isConnectClassError("Hyper: error reading a body from connection")).toBe(false);
     expect(isConnectClassError("Request failed with error code 3: URL using bad format")).toBe(false);
+    // #514: a wasm trap in the vendored singleton poisons every later
+    // request on the client - it is connect-class (reset), not a
+    // per-request failure.
+    const trap = (msg: string) => Object.assign(new Error(msg), { name: "RuntimeError" });
+    expect(isConnectClassError(trap("memory access out of bounds"))).toBe(true);
+    expect(isConnectClassError(trap("unreachable executed"))).toBe(true);
+    expect(isConnectClassError(trap("some page-side RuntimeError"))).toBe(true);
+    expect(isConnectClassError("RuntimeError: memory access out of bounds")).toBe(true);
+    expect(isConnectClassError(new TypeError("memory access out of bounds"))).toBe(true);
+    // unrelated RuntimeErrors still classify by message only when they
+    // are trap-shaped; plain transport errors stay non-class:
+    expect(isConnectClassError("Request failed with error code 75: unassigned")).toBe(false);
   });
 
   it("leaves ordinary failures alone", () => {

@@ -844,7 +844,22 @@ const CONNECT_CLASS_RE =
   /websocket did not open|failed sending data|failure when receiving data|server returned nothing|error code (?:7|35|52|55|56)\b|muxtaskended|multiplexor task ended|wisp transport already closed|failed to (?:send|receive) multiplexor message|websocket implementation error: websocket closed/i;
 
 export function isConnectClassError(err: unknown): boolean {
-  return CONNECT_CLASS_RE.test(String(err));
+  /* #514: a wasm trap inside the vendored singleton surfaces as a
+     RuntimeError ("memory access out of bounds" and the emscripten
+     trap family) and poisons the client's linear memory, so every
+     later request on the same client traps too - dead transport
+     state exactly like a dropped socket. It joins the connect class:
+     the request-time path resets the singleton (one retry when the
+     request is replayable, deferred reset otherwise) instead of
+     serving the trap to every later fetch and navigation. The message
+     arm covers a trap that crossed a boundary stringified. */
+  /* instanceof is not enough cross-realm (and RuntimeError is not a
+     guaranteed global): match the name too. */
+  if (err instanceof Error && err.name === "RuntimeError") return true;
+  return (
+    CONNECT_CLASS_RE.test(String(err)) ||
+    /memory access out of bounds|out of bounds memory access|unreachable executed/i.test(String(err))
+  );
 }
 
 /** Drop the libcurl/epoxy singletons so the next init() brings up a

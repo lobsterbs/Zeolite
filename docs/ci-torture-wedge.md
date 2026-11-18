@@ -1226,3 +1226,31 @@ deterministic; only its firing is intermittent. Tracked in #514.
 - This docs-only commit is the recorded bounded retrigger per the
   operational notes. The pin gate stands: all five jobs green or no
   LobsterBrowse pin.
+
+## 2026-11-18 #514 local root-cause pass (agent/site-repros)
+
+The redirect-semantics torture probe was looped locally against a real
+engine (zeolite-server msvc build + Chromium 131 + the app dist with the
+real wasm): iteration 0 passed, iteration 1 trapped the vendored singleton
+with `TransportDeliveryError: memory access out of bounds` on the first
+redirect POST and every later request (all five codes plus a plain GET
+health check) failed with the same trap - the exact CI cascade shape.
+
+Root cause of the CASCADE (engine-side, fixed): a wasm trap surfaces as
+a RuntimeError, which matched no connect-class pattern, so wispFetch
+rethrew without scheduling any reset and the poisoned singleton served
+the trap to every later request for the worker's life.
+libcurl-transport-vendored.ts `isConnectClassError` now classifies
+RuntimeError traps (name or trap message) as connect-class: idempotent
+requests get the one shared reset+retry, non-idempotent requests fail
+once honestly and schedule the deferred reset. Post-fix rerun of the
+same loop: the single trapped POST fails, the transport resets, and all
+remaining codes plus every later iteration succeed (40 iterations, one
+single-code failure, self-healed). Regression: transport-wasm-trap.test.ts
+(3 of 4 tests fail without the fix) plus classification cases in
+transport-select.test.ts.
+
+The trap itself is artifact-side (the vendored libcurl.js deferred
+handle-removal race, #477 class); rebuilding that artifact is the
+remaining upstream work. The engine now converts the permanent wedge
+into one honestly failed request.
