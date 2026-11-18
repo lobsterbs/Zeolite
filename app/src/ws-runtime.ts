@@ -4,7 +4,8 @@
    ./wsbridge (unit-gated); this module is the production wiring:
    openWebSocket as the wisp factory (TLS terminates there), netlog
    rows for the open (status 101) and the final close (code + byte
-   totals), DIAG events for abnormal closes, and the tracing hook.
+   totals), DIAG events for the open attempt (#664) and abnormal
+   closes, and the tracing hook.
 
    Pages route ws(s):// through the zl:wsOpen control message; ws://
    passes through as plaintext over the same wisp tunnel (#511).
@@ -25,13 +26,32 @@ import { WsBridge, type WsHooks } from "./wsbridge";
 
 function bridgeHooks(transport: "NativeTransit" | "Relay", internalUrl: string): WsHooks {
   return {
-    attempt: (url, upgraded) => ({
-      url,
-      upgraded,
-      entry: null as NetEntry | null,
-      bytes: 0,
-      traceId: DIAG.trace(),
-    }),
+    attempt: (url, upgraded) => {
+      /* #664/#511 triage: the attempt itself must be visible the
+         moment a page socket reaches the bridge. Before this row, the
+         first observable sign of a failed open was the abnormal close,
+         up to the open deadline later, or nothing at all when the
+         page-side path never got here (the speedtest capture: all
+         four /hello requests relayed, zero ws rows of any kind, so
+         those sockets never entered the bridge). */
+      const traceId = DIAG.trace();
+      DIAG.emit({
+        category: "WEBSOCKET",
+        cause: "proxy",
+        severity: "info",
+        message: "page websocket open attempt",
+        url,
+        traceId,
+        requestId: traceId,
+      });
+      return {
+        url,
+        upgraded,
+        entry: null as NetEntry | null,
+        bytes: 0,
+        traceId,
+      };
+    },
     onReady: (token, protocol, ms) => {
       const t = token as { url: string; entry: NetEntry | null; traceId: string };
       netLogPush({

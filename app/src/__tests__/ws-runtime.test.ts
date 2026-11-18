@@ -58,6 +58,14 @@ describe("ws-runtime wiring (#88)", () => {
     const before = DIAG.snapshot(0).events.length;
     const p = fakePort();
     wsBridge.open(p, "wss://example.com/chat", ["chat"]);
+    /* #664: the attempt row is the one new DIAG event, emitted before
+       the transport settles anything. */
+    const afterOpen = DIAG.snapshot(0).events;
+    expect(afterOpen.length).toBe(before + 1);
+    const attempt = afterOpen[afterOpen.length - 1]!;
+    expect(attempt.category).toBe("WEBSOCKET");
+    expect(attempt.severity).toBe("info");
+    expect(attempt.url).toBe("wss://example.com/chat");
     expect(mock.opens.length).toBeGreaterThan(0);
     expect(mock.opens[mock.opens.length - 1]!.url).toBe("wss://example.com/chat");
     expect(mock.opens[mock.opens.length - 1]!.protocols).toEqual(["chat"]);
@@ -69,9 +77,28 @@ describe("ws-runtime wiring (#88)", () => {
     const beforeClose = DIAG.snapshot(0).events.length;
     mock.handlers[mock.handlers.length - 1]!.onclose(1000, "done");
     expect(DIAG.snapshot(0).events.length).toBe(beforeClose);
-    expect(DIAG.snapshot(0).events.length).toBe(before); /* no DIAG rows at all */
+    /* Still exactly the attempt row: a clean open and close add no
+       further DIAG events. */
+    expect(DIAG.snapshot(0).events.length).toBe(before + 1);
     const closeRows = wsRows().filter((r) => r.status === 1000);
     expect(closeRows.some((r) => r.verdict === "ws:closed")).toBe(true);
+  });
+
+  it("the open attempt is visible before the transport settles anything (#664)", () => {
+    const before = DIAG.snapshot(0).events.length;
+    const p = fakePort();
+    wsBridge.open(p, "wss://hang.example/socket", []);
+    /* No transport callback fires: a never-settling handshake must
+       still be triagable immediately, not only after the open deadline
+       turns it into an abnormal close. */
+    const events = DIAG.snapshot(0).events;
+    expect(events.length).toBe(before + 1);
+    const ev = events[events.length - 1]!;
+    expect(ev.category).toBe("WEBSOCKET");
+    expect(ev.severity).toBe("info");
+    expect(ev.message).toBe("page websocket open attempt");
+    expect(ev.url).toBe("wss://hang.example/socket");
+    expect(ev.traceId).toBeTruthy();
   });
 
   it("passes ws:// through unchanged before the transport sees it (#525)", () => {
