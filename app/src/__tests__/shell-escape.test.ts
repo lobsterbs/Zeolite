@@ -38,6 +38,7 @@ vi.mock("../transport", () => ({
 }));
 
 import { handleFetch, routeReady } from "../request";
+import { netLog } from "../netlog";
 import { b64uEncode, buildQueryHandleUrl, setRouteKey, setScheme } from "../codec";
 
 describe("shell escape recapture (#416 slice 1)", () => {
@@ -221,5 +222,50 @@ describe("shell escape recapture (#416 slice 1)", () => {
     expect(served.status).toBe(200);
     expect(postMessage).not.toHaveBeenCalled();
     expect(transportMock.urls).toEqual([PAGE]);
+  });
+
+  /* #416 follow-up: the retest capture escaped with no evidence row,
+     so the gate consultation now records one row per navigate
+     document GET, the two client ids and the decision embedded in the
+     verdict. These tests pin the row for each decisive outcome: the
+     ids must surface even when the gate fails closed, because the
+     ids are the only field-level record a KDL export will carry. */
+  const gateRows = () =>
+    netLog.filter((r) => typeof r.verdict === "string" && r.verdict.startsWith("escape-gate "));
+  const lastGate = () => gateRows()[gateRows().length - 1]?.verdict;
+
+  it("logs gate evidence for a pane navigation of its own window", async () => {
+    const h = buildQueryHandleUrl(PAGE);
+    const { ev, armed } = mkEvent(ORIGIN + h, "pane-1", "pane-1");
+    handleFetch(ev);
+    await armed[0]!;
+    expect(lastGate()).toBe("escape-gate cid=pane-1 rid=eq-cid dec=precondition");
+    expect(transportMock.urls).toEqual([PAGE]);
+  });
+
+  it("logs gate evidence when no client is replaced (a minted popup)", async () => {
+    const h = buildQueryHandleUrl(PAGE);
+    const { ev, armed } = mkEvent(ORIGIN + h, "pane-1", "");
+    handleFetch(ev);
+    await armed[0]!;
+    expect(lastGate()).toBe("escape-gate cid=pane-1 rid=empty dec=precondition");
+  });
+
+  it("logs gate evidence when the replaced client cannot be resolved", async () => {
+    const h = buildQueryHandleUrl(PAGE);
+    const { ev, armed } = mkEvent(ORIGIN + h, "pane-1", "shell-9");
+    handleFetch(ev);
+    await armed[0]!;
+    expect(lastGate()).toBe("escape-gate cid=pane-1 rid=shell-9 dec=replaced-unresolved");
+  });
+
+  it("logs gate evidence when the recapture fires", async () => {
+    clients["shell-1"] = shellClient("top-level", ORIGIN + "/");
+    const h = buildQueryHandleUrl(PAGE);
+    const { ev, armed } = mkEvent(ORIGIN + h, "pane-1", "shell-1");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.type).toBe("error");
+    expect(lastGate()).toBe("escape-gate cid=pane-1 rid=shell-1 dec=fired");
   });
 });

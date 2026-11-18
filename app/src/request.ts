@@ -2850,19 +2850,63 @@ export function handleFetch(e: FetchEvent): void {
         through a widened FetchEvent: same field, typecheck clean. */
         const replacesRaw = (e as FetchEvent & { replacesClientId?: string })
           .replacesClientId;
+        /* #416 follow-up: a retest capture escaped with no gate row at
+           all, so the discriminating inputs (which client initiated,
+           which client the geometry claims gets replaced) never reach
+           a KDL export. Every navigate-document consultation now
+           records one evidence row: the two opaque client ids and
+           the decision, embedded in the verdict (exporters print
+           verdicts verbatim). Subresource consultations stay
+           unlogged: the first check below rejects them without any
+           client lookup. */
+        const gateLog = (dec: string): void => {
+          const rid =
+            typeof replacesRaw !== "string"
+              ? "undef"
+              : replacesRaw === ""
+                ? "empty"
+                : replacesRaw === e.clientId
+                  ? "eq-cid"
+                  : replacesRaw;
+          netLogPush({
+            method: e.request.method,
+            traceId: DIAG.trace(e.resultingClientId || e.clientId),
+            path: url.pathname + url.search,
+            dest: destUrl,
+            status: 0,
+            rtype: classifyRtype(reqDest(e.request), ""),
+            ms: -1,
+            bytes: -1,
+            verdict:
+              "escape-gate cid=" +
+              (e.clientId || "none") +
+              " rid=" +
+              rid +
+              " dec=" +
+              dec,
+            transport: "engine",
+            detail: { internalUrl: url.href, ttfb: -1 },
+          });
+        };
         if (
           e.request.mode !== "navigate" ||
           e.request.destination !== "document" ||
-          e.request.method !== "GET" ||
+          e.request.method !== "GET"
+        ) {
+          return null;
+        }
+        if (
           !e.clientId ||
           typeof replacesRaw !== "string" ||
           replacesRaw === "" ||
           replacesRaw === e.clientId ||
           !/^https?:/i.test(destUrl)
         ) {
+          gateLog("precondition");
           return null;
         }
         let shellWin = null as WindowClient | null | undefined;
+        let lookupFailed = false;
         try {
           shellWin = (await raceBoot(
             self.clients.get(replacesRaw),
@@ -2871,6 +2915,7 @@ export function handleFetch(e: FetchEvent): void {
           )) as WindowClient | null | undefined;
         } catch {
           /* lookup unavailable: the navigation serves as today */
+          lookupFailed = true;
           shellWin = null;
         }
         if (
@@ -2878,15 +2923,32 @@ export function handleFetch(e: FetchEvent): void {
           shellWin.type !== "window" ||
           shellWin.frameType !== "top-level"
         ) {
+          gateLog(
+            lookupFailed
+              ? "lookup-error"
+              : !shellWin
+                ? "replaced-unresolved"
+                : shellWin.type !== "window"
+                  ? "replaced-type-" + String(shellWin.type)
+                  : "replaced-frame-" + String(shellWin.frameType),
+          );
           return null;
         }
         try {
           const su = new URL(shellWin.url, self.location.origin);
-          if (su.origin !== self.location.origin) return null;
-          if (su.pathname !== "/" && su.pathname !== "/index.html") return null;
+          if (su.origin !== self.location.origin) {
+            gateLog("shell-origin-" + su.origin);
+            return null;
+          }
+          if (su.pathname !== "/" && su.pathname !== "/index.html") {
+            gateLog("shell-path-" + su.pathname);
+            return null;
+          }
         } catch {
+          gateLog("shell-url-unparsable");
           return null;
         }
+        gateLog("fired");
         const etid = DIAG.trace(replacesRaw);
         netLogPush({
           method: e.request.method,
