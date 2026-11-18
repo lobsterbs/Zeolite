@@ -50,7 +50,13 @@ fn header_for(p: &mut Profile, url: &str, now: i64) -> Option<String> {
     if matched.is_empty() {
         None
     } else {
-        Some(matched.iter().map(|c| format!("{}={}", c.name, c.value)).collect::<Vec<_>>().join("; "))
+        Some(
+            matched
+                .iter()
+                .map(|c| format!("{}={}", c.name, c.value))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
     }
 }
 
@@ -66,20 +72,34 @@ fn msal_chain_domain_scoping_across_hops() {
     for h in HOP1_SETCOOKIE {
         outcomes.push(p.store("b-mso", &o1, h, false, now, psl));
     }
-    let by_name = |n: &str| outcomes.iter().position(|o| match o {
-        StoreOutcome::Stored { cookie, .. } | StoreOutcome::Deleted { cookie: Some(cookie) } => cookie.name == n,
-        StoreOutcome::Rejected(_) => false,
-        _ => false,
-    });
+    let by_name = |n: &str| {
+        outcomes.iter().position(|o| match o {
+            StoreOutcome::Stored { cookie, .. }
+            | StoreOutcome::Deleted {
+                cookie: Some(cookie),
+            } => cookie.name == n,
+            StoreOutcome::Rejected(_) => false,
+            _ => false,
+        })
+    };
     for n in ["ESTSSC", "ESTSAUTH", "CCState", "LoginAttempts"] {
-        assert!(matches!(outcomes[by_name(n).unwrap()], StoreOutcome::Stored { .. }), "{n} must store");
+        assert!(
+            matches!(outcomes[by_name(n).unwrap()], StoreOutcome::Stored { .. }),
+            "{n} must store"
+        );
     }
     assert!(matches!(
-        outcomes[HOP1_SETCOOKIE.iter().position(|h| h.starts_with("SSOLive")).unwrap()],
+        outcomes[HOP1_SETCOOKIE
+            .iter()
+            .position(|h| h.starts_with("SSOLive"))
+            .unwrap()],
         StoreOutcome::Rejected(Reject::Domain)
     ));
     assert!(matches!(
-        outcomes[HOP1_SETCOOKIE.iter().position(|h| h.starts_with("SSOMs")).unwrap()],
+        outcomes[HOP1_SETCOOKIE
+            .iter()
+            .position(|h| h.starts_with("SSOMs"))
+            .unwrap()],
         StoreOutcome::Rejected(Reject::Domain)
     ));
 
@@ -90,7 +110,10 @@ fn msal_chain_domain_scoping_across_hops() {
     for h in HOP2_SETCOOKIE {
         let out = p.store("b-live", &o2, h, false, now, psl);
         if h.starts_with("BackToMso") {
-            assert!(matches!(out, StoreOutcome::Rejected(Reject::Domain)), "cross-domain from live.com must reject");
+            assert!(
+                matches!(out, StoreOutcome::Rejected(Reject::Domain)),
+                "cross-domain from live.com must reject"
+            );
         } else {
             assert!(matches!(out, StoreOutcome::Stored { .. }), "{h} must store");
         }
@@ -99,7 +122,10 @@ fn msal_chain_domain_scoping_across_hops() {
     // return hop: the full microsoftonline.com session rides along,
     // in 5.4 order (all paths "/", so creation order), nothing live.com
     let back = header_for(&mut p, AUTHORIZE_2, now).unwrap();
-    assert_eq!(back, "ESTSSC=abc123; ESTSAUTH=xyz; CCState=state1; LoginAttempts=1");
+    assert_eq!(
+        back,
+        "ESTSSC=abc123; ESTSAUTH=xyz; CCState=state1; LoginAttempts=1"
+    );
     assert!(!back.contains("MSPRequ"));
     assert!(!back.contains("MSPAuth"));
 

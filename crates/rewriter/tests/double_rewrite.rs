@@ -13,7 +13,9 @@ use zeolite_rewriter::rewrite_html;
 fn cfg() -> RewriteConfig {
     RewriteConfig {
         origin: "https://engine.example".to_string(),
-        codec: Codec::Base64Url { prefix: "/zl/".into() },
+        codec: Codec::Base64Url {
+            prefix: "/zl/".into(),
+        },
         inject_bootstrap: true,
         bootstrap_path: "/bootstrap.js".to_string(),
         ..Default::default()
@@ -21,8 +23,8 @@ fn cfg() -> RewriteConfig {
 }
 
 /* A ConvergedLogin/Me.htm-shaped document: absolute links to the login
-   hosts, a form POSTing to the ESTS endpoint, a loader script, an
-   inline script with a URL literal, and an image. */
+hosts, a form POSTing to the ESTS endpoint, a loader script, an
+inline script with a URL literal, and an image. */
 const ME_HTM: &str = r##"<!DOCTYPE html>
 <html><head>
 <title>Sign in to your account</title>
@@ -43,7 +45,9 @@ fn routes(doc: &str) -> Vec<String> {
     let mut rest = doc;
     while let Some(i) = rest.find("/zl/") {
         let tail = &rest[i + 4..];
-        let end = tail.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')).unwrap_or(tail.len());
+        let end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(tail.len());
         out.push(format!("/zl/{}", &tail[..end]));
         rest = &tail[end..];
     }
@@ -55,7 +59,10 @@ fn second_pass_is_a_fixpoint() {
     let c = cfg();
     let once = rewrite_html(ME_HTM, &c);
     let twice = rewrite_html(&once, &c);
-    assert_eq!(once, twice, "rewriting a rewritten document must be idempotent");
+    assert_eq!(
+        once, twice,
+        "rewriting a rewritten document must be idempotent"
+    );
 }
 
 #[test]
@@ -63,13 +70,21 @@ fn bootstrap_injected_exactly_once_across_two_passes() {
     let c = cfg();
     let once = rewrite_html(ME_HTM, &c);
     let twice = rewrite_html(&once, &c);
-    assert_eq!(once.matches("bootstrap.js").count(), 1, "first pass: one bootstrap");
-    assert_eq!(twice.matches("bootstrap.js").count(), 1, "second pass must not inject another bootstrap: {twice}");
+    assert_eq!(
+        once.matches("bootstrap.js").count(),
+        1,
+        "first pass: one bootstrap"
+    );
+    assert_eq!(
+        twice.matches("bootstrap.js").count(),
+        1,
+        "second pass must not inject another bootstrap: {twice}"
+    );
 }
 
 /* Production runs the keyed codec when the SW holds a route key: the
-   same fixpoint must hold there (split script routes carry the visible
-   path, so the second pass exercises the split-form unwrap too). */
+same fixpoint must hold there (split script routes carry the visible
+path, so the second pass exercises the split-form unwrap too). */
 fn keyed_cfg() -> RewriteConfig {
     let key: [u8; 16] = core::array::from_fn(|i| i as u8 ^ 0x5a);
     RewriteConfig {
@@ -89,8 +104,15 @@ fn second_pass_is_a_fixpoint_keyed_codec() {
     let c = keyed_cfg();
     let once = rewrite_html(ME_HTM, &c);
     let twice = rewrite_html(&once, &c);
-    assert_eq!(once, twice, "keyed: rewriting a rewritten document must be idempotent");
-    assert_eq!(twice.matches("bootstrap.js").count(), 1, "keyed: one bootstrap, no re-wrap: {twice}");
+    assert_eq!(
+        once, twice,
+        "keyed: rewriting a rewritten document must be idempotent"
+    );
+    assert_eq!(
+        twice.matches("bootstrap.js").count(),
+        1,
+        "keyed: one bootstrap, no re-wrap: {twice}"
+    );
 }
 
 #[test]
@@ -98,7 +120,11 @@ fn engine_routes_not_double_wrapped_across_two_passes() {
     let c = cfg();
     let once = rewrite_html(ME_HTM, &c);
     let twice = rewrite_html(&once, &c);
-    assert_eq!(routes(&once).len(), routes(&twice).len(), "second pass must not add route layers");
+    assert_eq!(
+        routes(&once).len(),
+        routes(&twice).len(),
+        "second pass must not add route layers"
+    );
     for route in routes(&twice) {
         let inner = c.unwrap_engine_route(&route).unwrap();
         assert!(

@@ -1305,18 +1305,18 @@ impl Rewriter {
                             // provider-direct above and anchor href
                             // fragments carry real semantics.
                             /* #431: the fragment exists to keep the
-                               filename visible on an opaque ROUTE. An
-                               engine-local src (the rewriter's own
-                               bootstrap/injections, engine assets) is
-                               emitted verbatim - filename already
-                               visible - so a second pass over composed
-                               output must not append it again. */
+                            filename visible on an opaque ROUTE. An
+                            engine-local src (the rewriter's own
+                            bootstrap/injections, engine assets) is
+                            emitted verbatim - filename already
+                            visible - so a second pass over composed
+                            output must not append it again. */
                             if name == "script" && lower == "src" && !e.contains('#') {
                                 let abs = resolve(&v, &self.base);
                                 /* Same boundary rule as the engine-local
-                                   pass above: the byte after the origin
-                                   must be end, '/', '?' or '#', so a
-                                   same-prefix attacker host never counts. */
+                                pass above: the byte after the origin
+                                must be end, '/', '?' or '#', so a
+                                same-prefix attacker host never counts. */
                                 let engine_local = !self.cfg.origin.is_empty()
                                     && abs.starts_with(&self.cfg.origin)
                                     && matches!(
