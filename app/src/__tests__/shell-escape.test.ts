@@ -196,12 +196,20 @@ describe("shell escape recapture (#416 slice 1)", () => {
   });
 
   it("serves when the replaced top document is on another origin", async () => {
+    /* the cross-origin class falls through to the #101 passthrough,
+    which hands the request to the browser's own fetch; that fetch is
+    stubbed the same way request.test.ts stubs its passthrough class:
+    vitest's real network fetch must never answer a test. */
+    const fetchStub = vi.fn(async () => new Response("origin", { status: 200 }));
+    vi.stubGlobal("fetch", fetchStub);
     clients["shell-1"] = shellClient("top-level", "https://other.example/");
     const { ev, armed } = mkEvent("https://evil.example/x", "pane-1", "shell-1");
     handleFetch(ev);
     const served = await armed[0]!;
     expect(served.status).toBe(200);
     expect(postMessage).not.toHaveBeenCalled();
+    expect(transportMock.calls).toBe(0);
+    expect(fetchStub).toHaveBeenCalledTimes(1);
   });
 
   it("serves a POST hijack (an abort would lose the body)", async () => {
