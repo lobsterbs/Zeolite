@@ -434,7 +434,7 @@ function renderDoctor(report: DoctorReply): void {
   doctorStatus.textContent = report.healthy === false
     ? "Confirmed failing checks. Review the evidence below."
     : report.healthy === true ? "All observed checks passed."
-      : "Partial inspection — unknown and skipped checks are not passes.";
+      : "Partial inspection - unknown and skipped checks are not passes.";
   for (const check of report.checks.slice(0, 32)) {
     const row = document.createElement("tr");
     const code = document.createElement("td");
@@ -443,7 +443,7 @@ function renderDoctor(report: DoctorReply): void {
     code.textContent = check.code;
     status.textContent = check.status;
     status.className = "doctor-" + check.status;
-    evidence.textContent = check.summary + (check.remedy ? " — " + check.remedy : "");
+    evidence.textContent = check.summary + (check.remedy ? " - " + check.remedy : "");
     row.append(code, status, evidence);
     doctorRows.append(row);
   }
@@ -508,6 +508,109 @@ doctorExport.addEventListener("click", () => {
   };
   if (lastDoctor) exportReport(lastDoctor);
   else doctorRequest(false, exportReport);
+});
+
+/* Export-all: one KDL artifact for every panel this page holds -
+   netlog, tracing, diagnostics and the last Doctor report. Assembled
+   on the page on purpose: the SW-side per-request export (#494)
+   stays the verified-trace artifact; this is the honest page view,
+   redacted upstream of it (the worker already redacts what it serves
+   here). The Doctor section carries the last completed report only;
+   running it is the Inspect button's job. */
+const allKdlExport = document.getElementById("allKdlExport") as HTMLButtonElement;
+const allKdlStatus = document.getElementById("allKdlStatus")!;
+
+function kdlStr(s: string): string {
+  return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+}
+
+function kdlNum(n: number | undefined): string {
+  return typeof n === "number" && Number.isFinite(n) ? String(n) : '""';
+}
+
+function buildExportAllKdl(): string {
+  const lines: string[] = [];
+  lines.push('zeolite-devtools "export-all" {');
+  lines.push("  generated " + kdlStr(new Date().toISOString()));
+  if (lastGeneration > 0)
+    lines.push("  worker generation " + kdlStr(new Date(lastGeneration).toISOString()));
+  lines.push("  netlog {");
+  for (const e of entries) {
+    lines.push(
+      "    request seq=" + e.seq +
+      " time=" + kdlStr(new Date(e.ts).toISOString()) +
+      " method=" + kdlStr(e.method) +
+      " destination=" + kdlStr(e.dest) +
+      " status=" + kdlNum(e.status) +
+      " ms=" + kdlNum(e.ms) +
+      " bytes=" + kdlNum(e.bytes) +
+      " verdict=" + kdlStr(e.verdict ?? "") +
+      " transport=" + kdlStr(e.transport ?? ""),
+    );
+    if (e.err) lines.push("      error " + kdlStr(e.err));
+    if (e.finalDest) lines.push("      final_destination " + kdlStr(e.finalDest));
+    if (e.detail?.initiator) lines.push("      initiator " + kdlStr(e.detail.initiator));
+    if (e.detail?.reqHeaders)
+      for (const [k, v] of Object.entries(e.detail.reqHeaders))
+        lines.push("      request_header " + kdlStr(k) + " " + kdlStr(v));
+    if (e.detail?.respHeaders)
+      for (const [k, v] of Object.entries(e.detail.respHeaders))
+        lines.push("      response_header " + kdlStr(k) + " " + kdlStr(v));
+    if (e.detail?.cookies?.length)
+      lines.push("      set_cookie " + kdlStr(e.detail.cookies.join(", ")));
+  }
+  lines.push("  }");
+  lines.push("  tracing {");
+  for (const t of traceEntries) {
+    lines.push(
+      "    trace time=" + kdlStr(new Date(t.ts).toISOString()) +
+      " subsystem=" + kdlStr(t.subsystem) +
+      " rule=" + kdlStr(t.rule ?? "") +
+      " original=" + kdlStr(t.original) +
+      " result=" + kdlStr(t.result) +
+      (t.resource !== undefined ? " resource=" + kdlStr(t.resource) : ""),
+    );
+  }
+  lines.push("  }");
+  lines.push("  diagnostics {");
+  for (const d of diagEvents) {
+    lines.push(
+      "    event time=" + kdlStr(new Date(d.ts).toISOString()) +
+      " severity=" + kdlStr(d.severity) +
+      " category=" + kdlStr(d.category) +
+      " stage=" + kdlStr(d.stage ?? "") +
+      " message=" + kdlStr(d.message) +
+      (d.url !== undefined ? " url=" + kdlStr(d.url) : ""),
+    );
+  }
+  lines.push("  }");
+  lines.push("  doctor {");
+  if (lastDoctor) {
+    lines.push("    healthy " + (lastDoctor.healthy === null ? '"unknown"' : String(lastDoctor.healthy)));
+    for (const c of lastDoctor.checks)
+      lines.push(
+        "    check code=" + kdlStr(c.code) +
+        " status=" + kdlStr(c.status) +
+        " summary=" + kdlStr(c.summary),
+      );
+  }
+  lines.push("  }");
+  lines.push("}");
+  return lines.join("\n");
+}
+
+allKdlExport.addEventListener("click", () => {
+  const url = URL.createObjectURL(new Blob([buildExportAllKdl()], { type: "text/plain;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "zeolite-devtools-all.kdl";
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  allKdlStatus.textContent = lastDoctor
+    ? "Exported netlog, tracing, diagnostics and doctor (" + entries.length + " requests)."
+    : "Exported netlog, tracing, diagnostics (" + entries.length + " requests; doctor not run yet).";
 });
 
 /* #550 Tier 2 DOM inspection, first slice. The devtools page never

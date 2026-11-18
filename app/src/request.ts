@@ -5007,7 +5007,7 @@ export function handleFetch(e: FetchEvent): void {
             else reqSignal.addEventListener("abort", () => navAbort!.abort(reqSignal!.reason), { once: true });
           }
           const hopSignal = navAbort ? navAbort.signal : reqSignal;
-          /* #521: webRequest.onSendHeaders — observation-only delivery
+          /* #521: webRequest.onSendHeaders - observation-only delivery
              of the FINAL outgoing header set (rules, DNR, blocking
              listeners, identity profile and jar all applied), fired
              once per request before the initial upstream fetch;
@@ -5165,7 +5165,7 @@ export function handleFetch(e: FetchEvent): void {
                hop; the 10ms bound is invisible next to a redirect
                round trip. */
             await new Promise((r) => setTimeout(r, 10));
-            /* #521: webRequest.onBeforeRedirect — this hop passed every
+            /* #521: webRequest.onBeforeRedirect - this hop passed every
                gate (rules, webRequest, interception, disabled hosts)
                and is about to be followed: url is the hop that
                returned the 3xx, redirectUrl the URL it redirects to,
@@ -5502,7 +5502,7 @@ export function handleFetch(e: FetchEvent): void {
              the response header set the page will see. */
           const rHeaders = WEBREQ.headersReceived(wrDetailsFinal, resp.status, headers);
           const outHeaders = rHeaders ?? headers;
-          /* #521: webRequest.onResponseStarted — upstream responses
+          /* #521: webRequest.onResponseStarted - upstream responses
              only (cache hits report onCompleted without network, so
              firing here would claim activity that never happened),
              after the final response header set is settled and before
@@ -6583,21 +6583,21 @@ export function virtualGsiOrigin(target: string, referrer: string, engineOrigin:
 }
 
 /** #653/#654: the Google Pay payframe and the legacy OAuth iframerpc
-    both carry the embedding page's origin in origin= — pay.js builds
+    both carry the embedding page's origin in origin= - pay.js builds
     https://pay.google.com/gp/p/ui/payframe?origin=<page origin>&mid=…
     ("Pass in origin because document.referrer inside iframe is empty
     in certain cases", src/pay_frame_helper.js of the google/payjs
     mirror), and platform.js / gapi auth2 builds
     https://accounts.google.com/o/oauth2/iframerpc?action=…&origin=<page
     origin>&client_id=… the same way (f.origin =
-    window.location.origin — LegacyUnforgeable, the #112 co= class).
+    window.location.origin - LegacyUnforgeable, the #112 co= class).
     Both endpoints validate origin= against the OAuth client's
     registered JavaScript origins and fail closed on mismatch, so on
     a virtualized page the parameter names the ENGINE origin and the
     widget dies. Repair only values naming this engine and only on
     these two frame endpoints; an unknown embedding origin stays
     unmodified (#436 no-invention rule), and this repairs the request
-    identity the allowlist validates — it does not modify Google's
+    identity the allowlist validates - it does not modify Google's
     server-side registration. mid= / client_id= / action= are not
     engine-derived and ride along untouched. */
 export function virtualGoogleFrameOrigin(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
@@ -6770,6 +6770,17 @@ export function virtualTwitchParent(target: string, referrer: string, engineOrig
     and query stay (MSAL appends its own routes to the origin it
     was given) and the state param round-trips untouched. Auth
     fidelity only. */
+/** #431/#634: the Microsoft login hosts both authorize seams gate
+    on; the #634 replay guard reads the same set, so one helper keeps
+    the three uses from drifting apart. */
+function isMicrosoftLoginHost(host: string): boolean {
+  return (
+    host === "login.microsoftonline.com" ||
+    host === "login.microsoft.com" ||
+    host === "login.live.com"
+  );
+}
+
 export function virtualAuthorizeRedirect(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
   let u: URL;
   try {
@@ -6778,12 +6789,7 @@ export function virtualAuthorizeRedirect(target: string, referrer: string, engin
     return target;
   }
   if (!/^https?:$/.test(u.protocol)) return target;
-  if (
-    u.host !== "login.microsoftonline.com" &&
-    u.host !== "login.microsoft.com" &&
-    u.host !== "login.live.com"
-  )
-    return target;
+  if (!isMicrosoftLoginHost(u.host)) return target;
   if (!u.pathname.includes("/oauth2/") || !u.pathname.endsWith("/authorize"))
     return target;
   const m = /([?&])redirect_uri=([^&]*)/.exec(u.search);
@@ -6812,6 +6818,20 @@ export function virtualAuthorizeRedirect(target: string, referrer: string, engin
      passes through unchanged. */
   const parent = referrerOrigin(referrer, initiator);
   if (!parent) return target;
+  /* #634: a parent that is itself one of the gate's login hosts
+     means the initiating document was a stored authorize page (the
+     sso_reload flow the browser re-drives from app state on every
+     open): a login host never registered this redirect_uri, so a
+     rewrite here mints a value the ESTS hop rejects with
+     invalid_request. A mid-chain replay has no recoverable app
+     origin - fail closed, pass through unchanged. */
+  let pu: URL;
+  try {
+    pu = new URL(parent);
+  } catch {
+    return target;
+  }
+  if (isMicrosoftLoginHost(pu.host)) return target;
   return u.href.replace(
     m[0],
     m[1] + "redirect_uri=" + encodeURIComponent(parent + du.pathname + (du.search || "")),
@@ -6849,6 +6869,17 @@ export function virtualAuthorizeTokenBody(body: string, referrer: string, engine
   if (du.origin !== eo.origin) return body;
   const parent = referrerOrigin(referrer, initiator);
   if (!parent) return body;
+  /* #634: the login-host parent rule mirrors the authorize seam: the
+     token exchange must present the redirect_uri the authorize step
+     used (RFC 6749 4.1.3), so the two seams rewrite together or pass
+     through together. */
+  let pu: URL;
+  try {
+    pu = new URL(parent);
+  } catch {
+    return body;
+  }
+  if (isMicrosoftLoginHost(pu.host)) return body;
   const fixed = encodeURIComponent(parent + du.pathname + (du.search || ""));
   return body.slice(0, m.index) + m[1] + "redirect_uri=" + fixed + body.slice(m.index + m[0].length);
 }
@@ -6864,12 +6895,7 @@ export function isAuthorizeTokenEndpoint(target: string): boolean {
     return false;
   }
   if (!/^https?:$/.test(u.protocol)) return false;
-  if (
-    u.host !== "login.microsoftonline.com" &&
-    u.host !== "login.microsoft.com" &&
-    u.host !== "login.live.com"
-  )
-    return false;
+  if (!isMicrosoftLoginHost(u.host)) return false;
   return (
     (u.pathname.includes("/oauth2/") && u.pathname.endsWith("/token")) ||
     u.pathname.endsWith("/oauth20_token.srf")
@@ -7450,12 +7476,29 @@ function referrerOrigin(referrer: string, initiator?: string): string | null {
   try {
     const refU = new URL(referrer, "https://zl.invalid/");
     let ref = decodePath(refU.pathname);
-    if (!ref && refU.pathname.startsWith(NAVH + "/"))
-      ref = decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1));
+    if (!ref && refU.pathname.startsWith(NAVH + "/")) {
+      /* #634: the same expired-handle context recovery the Referer
+         seam got in #633: a page parked past NAVH_TTL_MS (or orphaned
+         by a worker re-evaluation) keeps its MAC-verified handle, and
+         every #112-class widget/auth seam reading the parent origin
+         here lost it the moment the handle expired - the captured
+         Outlook authorize fell through unwritten exactly here. The
+         expired token still MAC-verifies (#385 trust), so the
+         recovered origin stays token-bound. */
+      ref =
+        decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1)) ??
+        decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1), {expired: true});
+    }
     /* Injector phase 2: a query-shape referrer carries its token in
        the search; the path is the real destination path. */
-    if (!ref && queryHandleToken(refU.search) !== null)
-      ref = decodeQueryHandle(refU)?.destination ?? null;
+    if (!ref && queryHandleToken(refU.search) !== null) {
+      /* #634: the query-shape mirror of the arm above (the deployed
+         sign-in commits on this shape). */
+      ref =
+        decodeQueryHandle(refU)?.destination ??
+        decodeQueryHandle(refU, {expired: true})?.destination ??
+        null;
+    }
     /* #113: legacy /zl/ routes from cold starts or pre-#113 dists
        also fail decodePath when the prefix is not configured yet.
        decodeLegacyRoute recovers them at the escape seam. */
@@ -7498,8 +7541,14 @@ function referrerPageUrl(referrer: string, initiator?: string): string | null {
         decodeNavHandlePath(refU.pathname.slice(NAVH.length + 1), {expired: true});
       if (nd) ref = nd + (refU.search || "");
     }
-    if (!ref && queryHandleToken(refU.search) !== null)
-      ref = decodeQueryHandle(refU)?.destination ?? null;
+    if (!ref && queryHandleToken(refU.search) !== null) {
+      /* #634: the query-shape mirror of the #633 expired recovery
+         above (same class, same one-line arm, the Disqus seam). */
+      ref =
+        decodeQueryHandle(refU)?.destination ??
+        decodeQueryHandle(refU, {expired: true})?.destination ??
+        null;
+    }
     if (!ref) {
       ref = decodeLegacyRoute(refU.pathname);
     }

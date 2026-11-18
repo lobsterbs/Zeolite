@@ -92,6 +92,43 @@ describe("virtualAuthorizeRedirect (#431 MSAL class)", () => {
     expect(virtualAuthorizeRedirect(inUrl, ENGINE + "/zl/garbage!!", ENGINE)).toBe(inUrl);
     expect(virtualAuthorizeRedirect(inUrl, "", ENGINE)).toBe(inUrl);
   });
+
+  it("rewrites through an expired nav-handle path referrer (#634 arm A)", () => {
+    setRouteKey(KEY);
+    /* the page parked past NAVH_TTL_MS (or was orphaned by a worker
+       re-evaluation): the MAC-verified handle still names the app
+       origin, the live decode alone loses it and the authorize
+       request went upstream unvirtualized (the captured Outlook
+       run). ReferrerOrigin must recover the expired handle. */
+    const token = encodeNavHandle(PAGE, -1)!;
+    const ref = ENGINE + "/__zl_navh__/" + token + "/mail/";
+    expect(virtualAuthorizeRedirect(auth(ENGINE + "/mail/"), ref, ENGINE))
+      .toBe(auth("https://outlook.office.com/mail/"));
+  });
+
+  it("rewrites through an expired query-shape referrer (#634 arm A)", () => {
+    setRouteKey(KEY);
+    const h = buildQueryHandleUrl(PAGE, -1);
+    expect(h).not.toBeNull();
+    const ref = ENGINE + h;
+    expect(virtualAuthorizeRedirect(auth(ENGINE + "/mail/"), ref, ENGINE))
+      .toBe(auth("https://outlook.office.com/mail/"));
+  });
+
+  it("passes through when the parent is a Microsoft login host (#634 arm B replay)", () => {
+    setRouteKey(KEY);
+    /* the auto-replayed sso_reload flow: the stored authorize page
+       itself is the initiating client, so the recovered parent
+       origin is a login host that never registered the
+       redirect_uri. A rewrite would mint an invalid value the ESTS
+       hop rejects; the seam fails closed instead. */
+    const h = buildQueryHandleUrl(
+      "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=abc",
+    );
+    expect(h).not.toBeNull();
+    const inUrl = auth(ENGINE + "/mail/");
+    expect(virtualAuthorizeRedirect(inUrl, ENGINE + h, ENGINE)).toBe(inUrl);
+  });
 });
 
 /* #634: the token exchange presents the SAME redirect_uri the
@@ -157,6 +194,28 @@ describe("virtualAuthorizeTokenBody (#634 token half of #431)", () => {
     expect(outFields[1]).toBe(inFields[1]);
     expect(outFields[2]).toBe(inFields[2]);
     expect(outFields[4]).toBe(inFields[4]);
+  });
+
+  it("rewrites through an expired query-shape referrer (#634 arm A)", () => {
+    setRouteKey(KEY);
+    const h = buildQueryHandleUrl(PAGE, -1);
+    expect(h).not.toBeNull();
+    expect(virtualAuthorizeTokenBody(body(ENGINE + "/mail/"), ENGINE + h, ENGINE))
+      .toBe(body("https://outlook.office.com/mail/"));
+  });
+
+  it("passes through when the parent is a Microsoft login host (#634 arm B replay)", () => {
+    setRouteKey(KEY);
+    /* the RFC 6749 4.1.3 consistency contract: when the authorize
+       seam passes through on a login-host parent, the token seam
+       must pass through on the same parent, never present a
+       redirect_uri the authorize step did not use. */
+    const h = buildQueryHandleUrl(
+      "https://login.live.com/oauth20_authorize.srf?client_id=abc",
+    );
+    expect(h).not.toBeNull();
+    const inBody = body(ENGINE + "/mail/");
+    expect(virtualAuthorizeTokenBody(inBody, ENGINE + h, ENGINE)).toBe(inBody);
   });
 });
 
