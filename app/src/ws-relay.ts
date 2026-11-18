@@ -27,6 +27,7 @@
    page counter drains when the bridge's send() returns, exactly like
    the wisp arm without the optional drainAt() seam. */
 
+import { DIAG } from "./diag";
 import { relayOnReRegister, relaySendWs, relaySubscribe } from "./relayfetch";
 import type { WsFactory } from "./wsbridge";
 
@@ -38,6 +39,22 @@ interface Conn {
   opened: boolean;
   closing: boolean;
   closeTimer: ReturnType<typeof setTimeout> | null;
+  /* #664: target url for the bounded relay failure DIAG events. */
+  url: string;
+}
+
+/* #664: relay-channel failures are DIAG-visible even when no WsBridge
+   sits on top (each surface below drops the conn, so each fires once). */
+function relayFailure(c: Conn, stage: "WS_CLOSE" | "WS_ERROR", message: string, technicalReason: string): void {
+  DIAG.failure({
+    category: "WEBSOCKET",
+    cause: "failure",
+    severity: "error",
+    stage,
+    message,
+    technicalReason,
+    url: c.url,
+  });
 }
 
 const conns = new Map<number, Conn>();
@@ -53,6 +70,7 @@ const CLOSE_FALLBACK_MS = 5000;
 relayOnReRegister(() => {
   for (const [rid, c] of [...conns]) {
     drop(rid, c);
+    relayFailure(c, "WS_CLOSE", "relay re-registered; websocket torn down", "relay re-registered");
     c.onerror("relay re-registered");
     if (c.opened) c.onclose(1006, "", false); /* #626: abnormal */
   }
@@ -98,6 +116,7 @@ relaySubscribe((m) => {
        sockets itself (1006), so a close is only reported here when
        the socket had already opened. */
     drop(msg.rid, c);
+    relayFailure(c, "WS_ERROR", "relay websocket error", msg.error ?? "relay ws failed");
     c.onerror(msg.error ?? "relay ws failed");
     if (c.opened) c.onclose(1006, "", false); /* #626: abnormal */
   }
@@ -123,10 +142,12 @@ export const relayWsFactory: WsFactory = {
       opened: false,
       closing: false,
       closeTimer: null,
+      url,
     };
     conns.set(rid, conn);
     if (!relaySendWs({ type: "zl:wsRelay", rid, url, protocols, headers: headers ?? [] })) {
       conns.delete(rid);
+      relayFailure(conn, "WS_ERROR", "relay channel unavailable", "zl:wsRelay could not be sent");
       throw new Error("relay channel unavailable");
     }
     return {
@@ -164,6 +185,7 @@ export const relayWsFactory: WsFactory = {
         c.closing = true;
         if (!relaySendWs({ type: "zl:wsClose", rid, code, reason: reason ?? "" })) {
           conns.delete(rid);
+          relayFailure(c, "WS_CLOSE", "relay channel died during close", "zl:wsClose could not be sent");
           c.onclose(1006, "relay channel died");
           return;
         }

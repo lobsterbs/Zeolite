@@ -73,7 +73,14 @@ export type DiagStage =
   | "ADAPTIVE_RECOVERY"
   /* #456: an over-cap script/worker body serves verbatim (the
      buffering bound); informational, never a failure point. */
-  | "RAW_BODY_CAP";
+  | "RAW_BODY_CAP"
+  /* #664: websocket bridge lifecycle stages, emitted by the bridge and
+     the relay factory themselves. Bounded to at most one event per
+     stage per connection on top of the ring bound; a normal close is
+     WS_CLOSE at info severity, never a failure. */
+  | "WS_OPEN"
+  | "WS_CLOSE"
+  | "WS_ERROR";
 
 export type DiagDeliveryState =
   | "definitely-not-delivered"

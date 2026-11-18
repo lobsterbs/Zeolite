@@ -12,6 +12,8 @@
    cleartext http already rides the same wisp tunnel; the trace
    marks plaintext passthrough. */
 
+import { DIAG } from "./diag";
+
 export interface WsHandle {
   send(data: unknown): void;
   close(code: number, reason?: string): void;
@@ -108,6 +110,10 @@ interface Conn {
   /* #546: the transport-accepted watermark already acknowledged to
      the page, for drains computed from the drainAt() seam. */
   drainAcked: number;
+  /* #664: DIAG trace for this connection's bounded stage events
+     (WS_OPEN/WS_CLOSE/WS_ERROR, at most one per stage per connection). */
+  traceId: string;
+  errored: boolean;
 }
 
 export interface WsBridgeOptions {
@@ -166,6 +172,8 @@ export class WsBridge {
       missed: 0,
       lastPong: 0,
       drainAcked: 0,
+      traceId: DIAG.trace(),
+      errored: false,
     };
     this.conns.set(port, conn);
     port.onmessage = (ev) => {
@@ -196,6 +204,12 @@ export class WsBridge {
           }
           conn.ready = true;
           this.hooks.onReady(conn.token, protocol, Date.now() - conn.t0);
+          /* #664: the open itself is a bounded DIAG stage event. */
+          DIAG.stage(conn.traceId, "WS_OPEN", {
+            url: target,
+            category: "WEBSOCKET",
+            message: "websocket open",
+          });
           this.hooks.trace({ subsystem: "websocket", original: target, result: "open", resource: "websocket" });
           port.postMessage({ ev: "open", protocol });
           /* #61 keepalive watchdog: only when the transport can both
@@ -238,6 +252,21 @@ export class WsBridge {
         onclose: (code, reason, clean) => this.end(port, code, clean !== false, reason),
         onerror: (err) => {
           if (this.conns.get(port) !== conn) return;
+          /* #664: one bounded WS_ERROR per connection, even if the
+             transport reports several errors before closing. */
+          if (!conn.errored) {
+            conn.errored = true;
+            DIAG.failure({
+              traceId: conn.traceId,
+              category: "WEBSOCKET",
+              cause: "failure",
+              severity: "error",
+              stage: "WS_ERROR",
+              message: "websocket error",
+              technicalReason: String(err),
+              url: target,
+            });
+          }
           port.postMessage({ ev: "error", error: String(err) });
           this.hooks.trace({ subsystem: "websocket", original: target, result: "error", resource: "websocket" });
           /* An error before the handshake completed means the
@@ -250,6 +279,17 @@ export class WsBridge {
       this.conns.delete(port);
       port.onmessage = null;
       this.hooks.onClose(token, 1006, false, 0);
+      /* #664: the failed open is visible as an abnormal WS_CLOSE. */
+      DIAG.failure({
+        traceId: conn.traceId,
+        category: "WEBSOCKET",
+        cause: "failure",
+        severity: "error",
+        stage: "WS_CLOSE",
+        message: "websocket open failed",
+        technicalReason: String(err),
+        url: target,
+      });
       port.postMessage({ ev: "error", error: String(err) });
       port.postMessage({ ev: "close", code: 1006, clean: false });
       port.close();
@@ -326,6 +366,27 @@ export class WsBridge {
       try { conn.handle.close(1000, "bridge terminated"); } catch { /* already gone */ }
     }
     this.hooks.onClose(conn.token, code, clean, Date.now() - conn.t0);
+    /* #664: the close is a bounded DIAG stage event - info when clean
+       (a normal close is not a failure), error when abnormal. end()
+       drops the conn first, so this fires exactly once per connection. */
+    if (clean) {
+      DIAG.stage(conn.traceId, "WS_CLOSE", {
+        url: conn.url,
+        category: "WEBSOCKET",
+        message: "websocket closed",
+      });
+    } else {
+      DIAG.failure({
+        traceId: conn.traceId,
+        category: "WEBSOCKET",
+        cause: "failure",
+        severity: "error",
+        stage: "WS_CLOSE",
+        message: "websocket closed abnormally",
+        technicalReason: "close code " + code + (reason ? ": " + reason : ""),
+        url: conn.url,
+      });
+    }
     if (!clean) {
       this.hooks.trace({
         subsystem: "websocket",
