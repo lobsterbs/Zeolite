@@ -2846,14 +2846,18 @@ export function handleFetch(e: FetchEvent): void {
          stays 404), and the early 302 cleanup hops (they redirect
          and re-enter, recaptured on the follow-up navigation). */
       const shellHijack = async (destUrl: string): Promise<Response | null> => {
+        /* the pinned lib types predate replacesClientId, so it is read
+        through a widened FetchEvent: same field, typecheck clean. */
+        const replacesRaw = (e as FetchEvent & { replacesClientId?: string })
+          .replacesClientId;
         if (
           e.request.mode !== "navigate" ||
           e.request.destination !== "document" ||
           e.request.method !== "GET" ||
           !e.clientId ||
-          typeof e.replacesClientId !== "string" ||
-          e.replacesClientId === "" ||
-          e.replacesClientId === e.clientId ||
+          typeof replacesRaw !== "string" ||
+          replacesRaw === "" ||
+          replacesRaw === e.clientId ||
           !/^https?:/i.test(destUrl)
         ) {
           return null;
@@ -2861,7 +2865,7 @@ export function handleFetch(e: FetchEvent): void {
         let shellWin = null as WindowClient | null | undefined;
         try {
           shellWin = (await raceBoot(
-            self.clients.get(e.replacesClientId),
+            self.clients.get(replacesRaw),
             "shell client lookup",
             PRE_DEADLINE_BOUND_MS,
           )) as WindowClient | null | undefined;
@@ -2883,7 +2887,7 @@ export function handleFetch(e: FetchEvent): void {
         } catch {
           return null;
         }
-        const etid = DIAG.trace(e.replacesClientId);
+        const etid = DIAG.trace(replacesRaw);
         netLogPush({
           method: e.request.method,
           traceId: etid,
