@@ -15,6 +15,7 @@
 
 export const OPTIONAL_API_MODULES = [
   "alarms",
+  "bookmarks",
   "browsingData",
   "cookies",
   "declarativeNetRequest",
