@@ -23,6 +23,13 @@
      named by the manifest's declarative_net_request.rule_resources,
      loaded lazily; invalid static rules are silently ignored, exactly as
      Firefox documents).
+   - Typed surface (slice 4): the reserved ruleset ids and the
+     remaining quota constants, isRegexSupported (answers for the
+     engine's own JavaScript-RegExp matcher, not Firefox's RE2),
+     per-ruleset static rule enable/disable persisted with the
+     dynamic rules (a disabled id never loads and frees its quota
+     share), and the read-only testMatchOutcome dry run of the real
+     matcher.
    - Resource types: the engine reports webRequest types via wrType();
      fetch and XHR surface as "xmlhttprequest" there (sec-fetch-dest
      "empty"), so rules typed "xmlhttprequest" match a tunnel fetch as
@@ -67,6 +74,20 @@ export const MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES = 5000;
 export const GUARANTEED_MINIMUM_STATIC_RULES = 5000;
 export const MAX_NUMBER_OF_STATIC_RULESETS = 100;
 export const MAX_NUMBER_OF_ENABLED_STATIC_RULESETS = 50;
+
+/* #521 slice 4: the reserved ruleset ids Firefox/Chrome use for the
+   dynamic and session areas - getDynamicRules/updateDynamicRules
+   already report these ids for their rules, now they are first-class
+   constants. The remaining quota constants are engine-defined
+   approximations consistent with the enforced combined cap above
+   (each area alone can fill the 5000-rule budget; MDN fixes no
+   cross-browser numbers). */
+export const DYNAMIC_RULESET_ID = "_dynamic";
+export const SESSION_RULESET_ID = "_session";
+export const MAX_NUMBER_OF_DYNAMIC_RULES = 5000;
+export const MAX_NUMBER_OF_SESSION_RULES = 5000;
+export const MAX_NUMBER_OF_REGEX_RULES = 1000;
+export const MAX_NUMBER_OF_DISABLED_STATIC_RULES = 5000;
 
 /* ---- vocabulary ---- */
 
@@ -417,6 +438,29 @@ function matchRule(r: NormRule, f: DnrRequestFacts): boolean {
   return true;
 }
 
+/** #521 slice 4: validate a testMatchOutcome request into engine
+    request facts. The engine facts carry no tab id, so Chrome's
+    request.tabId is not accepted here (compat.ts documents it). */
+function parseTestRequest(request: unknown): DnrRequestFacts {
+  if (!isObj(request)) throw new Error("zeolite: request must be an object");
+  if (typeof request.url !== "string") throw new Error("zeolite: request.url must be a string");
+  if (typeof request.type !== "string" || !RESOURCE_TYPES.has(request.type)) {
+    throw new Error("zeolite: request.type must be a known resource type");
+  }
+  const method = request.method === undefined ? "get" : request.method;
+  if (typeof method !== "string" || method.length === 0) {
+    throw new Error("zeolite: request.method must be a non-empty string");
+  }
+  if (request.initiator !== undefined && typeof request.initiator !== "string") {
+    throw new Error("zeolite: request.initiator must be a string");
+  }
+  return { url: request.url, method, type: request.type, initiator: request.initiator as string | undefined };
+}
+
+function throwBadOptions(): never {
+  throw new Error("zeolite: options must be an object");
+}
+
 /* ---- #521 slice 3: allowAllRequests frame bypass ---- */
 
 /* Chrome scopes allowAllRequests to the matched frame's subtree. The
@@ -460,6 +504,10 @@ export class DnrRegistry {
      manifest defaults apply until then. Persisted with the dynamic
      rules. */
   private readonly enabledStatic = new Map<ExtensionId, Set<string>>();
+  /* #521 slice 4: disabled static rule ids per declared ruleset,
+     persisted with the dynamic rules; a disabled id never loads from
+     its ruleset (which also frees its share of the static quota). */
+  private readonly disabledStaticRules = new Map<ExtensionId, Map<string, Set<number>>>();
   private readonly staticCache = new Map<ExtensionId, StaticCacheEntry>();
   private provider: DnrPermProvider | null = null;
   /* #594 pattern: hydration state and the in-flight persistence writes
@@ -550,9 +598,13 @@ export class DnrRegistry {
               ? (parsed.rules as unknown[])
               : null;
           if (arr === null) continue;
+          const disabled = this.disabledStaticRules.get(v.id)?.get(rs.id);
           for (const item of arr) {
             try {
               const nr = validateRule(item);
+              /* #521 slice 4: a disabled id never loads, and its share
+                 of the guaranteed static quota frees up with it. */
+              if (disabled !== undefined && disabled.has(nr.id)) continue;
               nr.rulesetId = rs.id;
               rules.push(nr);
             } catch {
@@ -897,6 +949,138 @@ export class DnrRegistry {
     return Math.max(0, GUARANTEED_MINIMUM_STATIC_RULES - entry.rules.length);
   }
 
+  /* ---- #521 slice 4: the typed surface remainder ---- */
+
+  /** Whether the engine's own matcher accepts the regexFilter. The
+      matcher compiles a JavaScript RegExp (dnr.ts validateRule), so
+      this answers exactly that: supported iff it compiles and is
+      non-empty. Chrome's isCaseSensitive argument is accepted and
+      ignored - matching stays case-sensitive here either way
+      (compat.ts documents the RE2 deviation). */
+  isRegexSupported(regexValue: unknown, _caseSensitive?: unknown): { isSupported: boolean; reason?: string } {
+    if (typeof regexValue !== "string") {
+      return { isSupported: false, reason: "regexValue must be a string" };
+    }
+    if (regexValue.length === 0) {
+      return { isSupported: false, reason: "regexFilter must be a non-empty string" };
+    }
+    try {
+      void new RegExp(regexValue);
+      return { isSupported: true };
+    } catch (e) {
+      return { isSupported: false, reason: String((e as Error).message ?? e) };
+    }
+  }
+
+  /** The declared static rulesets of one extension, for validation. */
+  private knownRulesets(id: ExtensionId): Set<string> {
+    const view = (this.provider?.() ?? []).find((v) => v.id === id) ?? null;
+    return new Set(view ? view.staticRulesets.map((rs) => rs.id) : []);
+  }
+
+  /** Enable/disable static rule ids per declared ruleset. Unknown
+      ruleset ids and ids listed in both directions are refused, and
+      the disabled set is quota-bounded. The change persists with the
+      dynamic rules and invalidates the static cache so the next load
+      applies it. */
+  async updateStaticRules(id: ExtensionId, update: unknown): Promise<void> {
+    if (!isObj(update)) throw new Error("zeolite: update must be an object");
+    const rulesetId = update.rulesetId;
+    if (typeof rulesetId !== "string" || rulesetId.length === 0) {
+      throw new Error("zeolite: update.rulesetId must be a non-empty string");
+    }
+    const known = this.knownRulesets(id);
+    if (!known.has(rulesetId)) {
+      throw new Error("zeolite: unknown static ruleset id " + JSON.stringify(rulesetId));
+    }
+    const idsOf = (v: unknown, field: string): number[] => {
+      if (v === undefined) return [];
+      if (!Array.isArray(v)) throw new Error("zeolite: " + field + " must be an array of integers");
+      for (const n of v) {
+        if (typeof n !== "number" || !Number.isInteger(n)) {
+          throw new Error("zeolite: " + field + " entries must be integers");
+        }
+      }
+      return v as number[];
+    };
+    const disable = idsOf(update.disableRuleIds, "disableRuleIds");
+    const enable = idsOf(update.enableRuleIds, "enableRuleIds");
+    const overlap = disable.filter((n) => enable.includes(n));
+    if (overlap.length > 0) {
+      throw new Error("zeolite: rule id " + overlap[0] + " cannot be disabled and enabled in one update");
+    }
+    const perExt = this.disabledStaticRules.get(id) ?? new Map<string, Set<number>>();
+    const set = new Set(perExt.get(rulesetId) ?? []);
+    for (const n of enable) set.delete(n);
+    for (const n of disable) set.add(n);
+    if (set.size > MAX_NUMBER_OF_DISABLED_STATIC_RULES) {
+      throw new Error("zeolite: disabled static rules exceed the " + MAX_NUMBER_OF_DISABLED_STATIC_RULES + " rule quota");
+    }
+    perExt.set(rulesetId, set);
+    this.disabledStaticRules.set(id, perExt);
+    this.staticCache.delete(id);
+    this.persist(id);
+  }
+
+  /** Chrome's shape: the disabled rule ids of one declared ruleset. */
+  getDisabledRuleIds(id: ExtensionId, options: unknown): { rulesetIds: number[] } {
+    if (!isObj(options) || typeof options.rulesetId !== "string" || options.rulesetId.length === 0) {
+      throw new Error("zeolite: options.rulesetId must be a non-empty string");
+    }
+    const known = this.knownRulesets(id);
+    if (!known.has(options.rulesetId)) {
+      throw new Error("zeolite: unknown static ruleset id " + JSON.stringify(options.rulesetId));
+    }
+    const set = this.disabledStaticRules.get(id)?.get(options.rulesetId);
+    return { rulesetIds: set ? [...set].sort((a, b) => a - b) : [] };
+  }
+
+  /** Read-only dry run of the matcher for one request, never recorded
+      to the match log. Without includeOtherExtensions only this
+      extension's rules evaluate (Chrome's documented default);
+      with it, every enabled extension evaluates in provider order
+      and cross-extension block-beats-allow applies, as in the real
+      pipeline. The effect vocabulary mirrors Chrome's: the strongest
+      action any matched rule would take, "none" when nothing matches. */
+  async testMatchOutcome(
+    id: ExtensionId,
+    request: unknown,
+    options?: unknown,
+  ): Promise<{ effect: string; matchedRules: Array<{ ruleId: number; rulesetId: string }> }> {
+    const f = parseTestRequest(request);
+    const includeOthers = options === undefined
+      ? false
+      : isObj(options)
+        ? options.includeOtherExtensions === true
+        : throwBadOptions();
+    const views = (this.provider?.() ?? []).filter((v) => v.enabled && (includeOthers || v.id === id));
+    const matched: Array<{ ruleId: number; rulesetId: string }> = [];
+    let effect = "none";
+    const rank: Record<string, number> = {
+      block: 5, upgradeScheme: 4, redirect: 3, modifyHeaders: 2, allow: 1, none: 0,
+    };
+    for (const v of views) {
+      let st: NormRule[] | null = null;
+      if (v.staticRulesets.length > 0) {
+        const entry = this.ensureStatic(v);
+        await entry.load;
+        st = entry.rules;
+      }
+      if (!this.dynamic.get(v.id) && !this.session.get(v.id) && !(st && st.length > 0)) continue;
+      const best = this.bestMatch(f, v, st, null);
+      if (best === null) continue;
+      const act = best.rule.actionType;
+      const eff = act === "allow" || act === "allowAllRequests" ? "allow" : act;
+      matched.push({
+        ruleId: best.rule.id,
+        rulesetId:
+          best.source === "session" ? SESSION_RULESET_ID : best.source === "dynamic" ? DYNAMIC_RULESET_ID : (best.rule.rulesetId ?? ""),
+      });
+      if (rank[eff] > rank[effect]) effect = eff;
+    }
+    return { effect, matchedRules: matched };
+  }
+
   /* ---- persistence (#594's alarms pattern) ---- */
 
   private persist(id: ExtensionId): void {
@@ -908,7 +1092,14 @@ export class DnrRegistry {
       .then((db) =>
         idbPut(db, STORE_DNR, id, {
           dynamic: this.getDynamicRules(id),
-          enabledStatic: [...(this.enabledStatic.get(id) ?? [])],
+          /* null = updateEnabledRulesets never ran for this
+             extension, so the manifest defaults still rule (an empty
+             snapshot would mean "every ruleset disabled"); the
+             snapshot only exists after the first call. */
+          enabledStatic: this.enabledStatic.has(id) ? [...this.enabledStatic.get(id)!] : null,
+          disabledStatic: [...(this.disabledStaticRules.get(id)?.entries() ?? [])].map(
+            ([rs, ids]) => [rs, [...ids]] as const,
+          ),
         }),
       )
       .catch(() => undefined);
@@ -942,8 +1133,22 @@ export class DnrRegistry {
         }
         if (map.size > 0) this.dynamic.set(extId, map);
         const enabled = Array.isArray(rec.enabledStatic) ? rec.enabledStatic : [];
-        if (enabled.every((e) => typeof e === "string")) {
+        /* Only a real snapshot (updateEnabledRulesets ran) overrides
+           the manifest defaults; a record without one keeps them. */
+        if (rec.enabledStatic !== null && enabled.every((e) => typeof e === "string")) {
           this.enabledStatic.set(extId, new Set(enabled as string[]));
+        }
+        /* #521 slice 4: disabled static rule ids survive the boot. */
+        if (Array.isArray(rec.disabledStatic)) {
+          const perExt = new Map<string, Set<number>>();
+          for (const pair of rec.disabledStatic) {
+            if (!Array.isArray(pair) || pair.length !== 2) continue;
+            const [rs, ids] = pair as [unknown, unknown];
+            if (typeof rs !== "string" || !Array.isArray(ids)) continue;
+            if (!ids.every((n) => typeof n === "number" && Number.isInteger(n))) continue;
+            perExt.set(rs, new Set(ids as number[]));
+          }
+          if (perExt.size > 0) this.disabledStaticRules.set(extId, perExt);
         }
       }
     } catch {
@@ -956,6 +1161,7 @@ export class DnrRegistry {
     this.dynamic.delete(id);
     this.session.delete(id);
     this.enabledStatic.delete(id);
+    this.disabledStaticRules.delete(id);
     this.staticCache.delete(id);
     this.frameBypass.delete(id);
     try {
@@ -976,6 +1182,7 @@ export class DnrRegistry {
     this.dynamic.clear();
     this.session.clear();
     this.enabledStatic.clear();
+    this.disabledStaticRules.clear();
     this.staticCache.clear();
     this.provider = null;
     this.hydrated = false;

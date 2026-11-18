@@ -4,25 +4,31 @@ import { ExtensionManager } from "../manager";
 import { buildApi } from "../runtime";
 import { ExtensionMessenger } from "../messaging";
 import { ExtensionStorageArea } from "../storage";
-import { buildInventory, isEventObject, NAMESPACE_COMPAT } from "../inventory";
+import { buildInventory, isEventObject, NAMESPACE_COMPAT, type InventoryMember } from "../inventory";
 import { COMPAT } from "../compat";
+import {
+  ENGINE_EXTRA_MEMBERS,
+  FIREFOX_API,
+  FIREFOX_UNMOUNTED_REASONS,
+  firefoxGapReport,
+} from "../firefox-inventory";
 
 const enc = new TextEncoder();
 
 const ALL_NS_PERMISSIONS = [
   "storage", "tabs", "notifications", "contextMenus", "downloads", "cookies",
   "webRequest", "webRequestBlocking", "webNavigation", "alarms", "management",
-  "browsingData", "declarativeNetRequest",
+  "browsingData", "declarativeNetRequest", "bookmarks",
 ];
 
-function pkg(name: string, permissions: string[]): Map<string, Uint8Array> {
+function pkg(name: string, permissions: string[], extra: Record<string, unknown> = {}): Map<string, Uint8Array> {
   return new Map<string, Uint8Array>([
-    ["manifest.json", enc.encode(JSON.stringify({ manifest_version: 2, name, version: "1.0", permissions }))],
+    ["manifest.json", enc.encode(JSON.stringify({ manifest_version: 2, name, version: "1.0", permissions, ...extra }))],
   ]);
 }
 
-async function apiFor(m: ExtensionManager, permissions: string[]) {
-  const { id } = await m.installFiles(pkg("Inv" + Math.random().toString(36).slice(2, 7), permissions));
+async function apiFor(m: ExtensionManager, permissions: string[], extra: Record<string, unknown> = {}) {
+  const { id } = await m.installFiles(pkg("Inv" + Math.random().toString(36).slice(2, 7), permissions, extra));
   const rec = m.get(id)!;
   const storage = {
     local: new ExtensionStorageArea(id, "local", "local"),
@@ -116,5 +122,124 @@ describe("mounted-surface conformance (#516 seed)", () => {
     const wr = (api.browser as Record<string, any>).webRequest;
     expect(wr).toBeTruthy();
     expect(wr.onBeforeRequest).toBeTruthy();
+  });
+});
+
+/* #516 slice 2: the mounted surface diffed against the exhaustive
+   Firefox inventory (firefox-inventory.ts). The action family mounts
+   one namespace per manifest kind, so the union of three fixtures is
+   the full mountable surface. */
+describe("Firefox API inventory conformance (#516 slice 2)", () => {
+  const FB_PERMISSIONS = [...ALL_NS_PERMISSIONS, "declarativeNetRequestFeedback"];
+
+  type Surface = Map<string, Map<string, InventoryMember["kind"]>>;
+
+  async function mountSurface(): Promise<{ surface: Surface; browser: Record<string, unknown> }> {
+    const fixtures: Array<Record<string, unknown>> = [
+      { manifest_version: 3, action: {} },
+      { manifest_version: 2, browser_action: {} },
+      { manifest_version: 2, page_action: {} },
+    ];
+    const m = new ExtensionManager();
+    await m.startup();
+    const surface: Surface = new Map();
+    const browser: Record<string, unknown> = {};
+    for (const extra of fixtures) {
+      const { api } = await apiFor(m, FB_PERMISSIONS, extra);
+      const b = api.browser as Record<string, unknown>;
+      Object.assign(browser, b);
+      for (const ns of buildInventory(b)) {
+        const members = surface.get(ns.name) ?? new Map();
+        for (const mem of ns.members) members.set(mem.name, mem.kind);
+        surface.set(ns.name, members);
+      }
+    }
+    return { surface, browser };
+  }
+
+  it("every mounted namespace is a real Firefox API namespace", async () => {
+    const { surface } = await mountSurface();
+    const invented = [...surface.keys()].filter((ns) => !FIREFOX_API[ns]);
+    expect(invented, `namespaces Firefox does not have: ${invented.join(", ")}`).toEqual([]);
+  });
+
+  it("every mounted member is a real Firefox member or a justified engine extra", async () => {
+    const { surface } = await mountSurface();
+    const offenders: string[] = [];
+    for (const [ns, members] of surface) {
+      for (const [member, kind] of members) {
+        const ffKind = FIREFOX_API[ns]?.[member];
+        if (ffKind) {
+          if (ffKind !== kind) offenders.push(`${ns}.${member}: mounted ${kind}, Firefox ${ffKind}`);
+          continue;
+        }
+        if (!ENGINE_EXTRA_MEMBERS[ns]?.[member]) offenders.push(`${ns}.${member} (${kind})`);
+      }
+    }
+    expect(offenders, "members Firefox does not have and ENGINE_EXTRA_MEMBERS does not justify").toEqual([]);
+  });
+
+  it("every engine extra is mounted, absent from Firefox, and documented in COMPAT", async () => {
+    const { surface } = await mountSurface();
+    const entries: string[] = [];
+    for (const [ns, members] of Object.entries(ENGINE_EXTRA_MEMBERS)) {
+      for (const [member, why] of Object.entries(members)) {
+        entries.push(`${ns}.${member}`);
+        expect(surface.get(ns)?.has(member), `${ns}.${member} listed as extra but not mounted`).toBe(true);
+        expect(FIREFOX_API[ns]?.[member], `${ns}.${member} exists in Firefox after all`).toBeUndefined();
+        expect(COMPAT[why.compatKey], `${ns}.${member} names missing COMPAT key ${why.compatKey}`).toBeTruthy();
+      }
+    }
+    expect(entries).toEqual([
+      "browsingData.removeServiceWorkers",
+      "declarativeNetRequest.getMatchedRules",
+      "declarativeNetRequest.onRuleMatchedDebug",
+      "management.uninstall",
+    ]);
+  });
+
+  it("every unmounted Firefox namespace carries a reason and every reason names an unmounted namespace", async () => {
+    const { surface } = await mountSurface();
+    const unmounted = Object.keys(FIREFOX_API).filter((ns) => !surface.has(ns)).sort();
+    expect(unmounted).toEqual(Object.keys(FIREFOX_UNMOUNTED_REASONS).sort());
+    for (const ns of unmounted) {
+      expect(FIREFOX_UNMOUNTED_REASONS[ns].length, `${ns} reason is empty`).toBeGreaterThan(0);
+    }
+  });
+
+  it("the gap report answers the documented honest gaps (#517-#524 diff baseline)", async () => {
+    const { browser } = await mountSurface();
+    const report = firefoxGapReport(browser);
+    /* unmounted namespaces come with reasons. bookmarks no longer
+       belongs here: the #520 slice mounts it (drop it from this list
+       when a namespace gains its implementation). */
+    const absent = new Map(report.absentNamespaces.map((a) => [a.name, a.reason]));
+    for (const ns of ["history", "idle", "sessions", "sidebarAction", "userScripts"]) {
+      expect(absent.get(ns)?.length, `${ns} absent without a reason`).toBeGreaterThan(0);
+    }
+    expect(absent.has("bookmarks"), "bookmarks mounted by the #520 slice").toBe(false);
+    /* member-level gaps the compat matrix documents; storage.managed
+       left the list when the #520 slice mounted the read-only
+       enterprise-policy area. */
+    const missingOf = (ns: string) => report.missingMembers.find((m) => m.namespace === ns)?.members ?? [];
+    expect(missingOf("i18n")).toContain("detectLanguage");
+    expect(missingOf("storage"), "managed mounted by the #520 slice").toEqual([]);
+    /* requestUpdateCheck/setUninstallURL left the runtime list in the
+       #518 slice; the native-messaging and page surfaces stay open. */
+    expect(missingOf("runtime")).toContain("connectNative");
+    expect(missingOf("runtime")).not.toContain("setUninstallURL");
+    expect(missingOf("runtime")).not.toContain("requestUpdateCheck");
+    /* duplicate/highlight/TAB_ID_NONE left the tabs list in the #519
+       slice; reload and friends stay open. */
+    expect(missingOf("tabs")).toContain("reload");
+    expect(missingOf("tabs")).not.toContain("duplicate");
+    expect(missingOf("tabs")).not.toContain("highlight");
+    /* exactly the four justified extras */
+    expect(report.engineExtras.map((e) => `${e.namespace}.${e.member}`)).toEqual([
+      "browsingData.removeServiceWorkers",
+      "declarativeNetRequest.getMatchedRules",
+      "declarativeNetRequest.onRuleMatchedDebug",
+      "management.uninstall",
+    ]);
   });
 });

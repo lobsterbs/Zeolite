@@ -33,19 +33,38 @@ import { cookiesGet, cookiesGetAll, cookiesSet, cookiesRemove, onCookieChanged }
 import type { CookieChangeListener } from "./cookies";
 import { hostPatternsMatch } from "./permissions";
 import { isApiDetached } from "./apis";
+import { installArgValidation } from "./arg-schemas";
 import { PERMS } from "./advanced-permissions";
 import type { ApiPermissions, PermListener } from "./advanced-permissions";
-import { setSessionAccessLevel, SYNC_MAX_ITEMS, SYNC_MAX_WRITE_OPERATIONS_PER_HOUR, SYNC_MAX_WRITE_OPERATIONS_PER_MINUTE, SYNC_QUOTA_BYTES, SYNC_QUOTA_BYTES_PER_ITEM } from "./storage";
+import { makeManagedArea, setSessionAccessLevel, SYNC_MAX_ITEMS, SYNC_MAX_WRITE_OPERATIONS_PER_HOUR, SYNC_MAX_WRITE_OPERATIONS_PER_MINUTE, SYNC_QUOTA_BYTES, SYNC_QUOTA_BYTES_PER_ITEM } from "./storage";
+import { setUninstallUrlOf } from "./uninstall-url";
 import type { ExtensionStorageArea, StorageValue } from "./storage";
 import type { ExtensionMessenger, MessageListener, ConnectListener, MessageSender, ExtensionPort } from "./messaging";
 import { ALARMS } from "./alarms";
 import type { Alarm, AlarmCreateInfo } from "./alarms";
+import { BOOKMARKS } from "./bookmarks";
+import type {
+  BookmarkChangedListener,
+  BookmarkCreateDetails,
+  BookmarkCreatedListener,
+  BookmarkMoveDestination,
+  BookmarkMovedListener,
+  BookmarkRemovedListener,
+  BookmarkSearchQuery,
+  BookmarkUpdateChanges,
+} from "./bookmarks";
 import {
   DNR,
+  DYNAMIC_RULESET_ID,
   GUARANTEED_MINIMUM_STATIC_RULES,
+  MAX_NUMBER_OF_DISABLED_STATIC_RULES,
   MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES,
+  MAX_NUMBER_OF_DYNAMIC_RULES,
   MAX_NUMBER_OF_ENABLED_STATIC_RULESETS,
+  MAX_NUMBER_OF_REGEX_RULES,
+  MAX_NUMBER_OF_SESSION_RULES,
   MAX_NUMBER_OF_STATIC_RULESETS,
+  SESSION_RULESET_ID,
   type DnrMatchedRule,
 } from "./dnr";
 import { MGMT, infoOf } from "./management";
@@ -383,6 +402,16 @@ export function buildApi(
       { contextType: "BACKGROUND" },
       ...pageClientsOf(ext.id).map(() => ({ contextType: "TAB" })),
     ],
+    /* #518: the engine has no update server, so the check answers
+       Firefox's no_update honestly - never a fabricated update. */
+    requestUpdateCheck: (): Promise<{ status: "no_update" }> => Promise.resolve({ status: "no_update" }),
+    /* #518: the URL persists per extension and opens through the real
+       tabs bridge when the extension uninstalls (manager.uninstall);
+       only http(s) URLs are accepted (uninstall-url.ts). */
+    setUninstallURL: (url?: unknown) => {
+      setUninstallUrlOf(ext.id, url);
+      return Promise.resolve();
+    },
     /* #518: Firefox-shaped overloads. runtime.sendMessage(message)
      sends internally; runtime.sendMessage(targetId, message) sends
      cross-extension (delivered to the target's onMessageExternal when
@@ -560,6 +589,10 @@ export function buildApi(
                enforced at the SW content-script gate immediately. */
             setAccessLevel: (arg: unknown) => setSessionAccessLevel(ext.id, arg),
           },
+          /* #520: the enterprise-policy area. No policy source exists,
+             so it answers honestly empty and writes reject read-only
+             (storage.ts makeManagedArea). */
+          managed: makeManagedArea(),
           onChanged,
         };
       })()
@@ -596,6 +629,37 @@ export function buildApi(
     remove: (ids: number | number[]) => TABS.remove(Array.isArray(ids) ? ids : [ids]),
     sendMessage: (tabId: number, msg: unknown, options?: { frameId?: number }) =>
       TABS.sendMessage(ext, tabId, msg, options),
+    /* #519: Firefox's TAB_ID_NONE (-1) for no-browser-window states. */
+    TAB_ID_NONE: -1,
+    /* #519: duplicate rides the real create seam - same url, a fresh
+       tab with its own id, onCreated through the registry. Firefox's
+       duplicate carries the pinned state; the create seam has no
+       pinned property, so the copy lands unpinned (compat.ts). */
+    duplicate: (tabId: number, props?: { index?: number; active?: boolean }) => {
+      const t = TABS.get(tabId);
+      if (!t) return Promise.reject(new Error("Invalid tab ID: " + tabId));
+      return TABS.create({
+        url: t.url,
+        ...(props?.active !== undefined ? { active: props.active } : {}),
+        ...(props?.index !== undefined ? { index: props.index } : {}),
+      });
+    },
+    /* #519: highlight without a highlighted-set concept - the
+       single-window model activates the LAST tab in the list, exactly
+       the one Firefox activates, and the others are a no-op here;
+       unknown ids reject. onHighlighted is not mounted (compat.ts). */
+    highlight: async (info: { tabs?: unknown }) => {
+      const ids = info && typeof info === "object" && Array.isArray(info.tabs) ? info.tabs : null;
+      if (!ids || ids.length === 0) {
+        throw new Error("zeolite: tabs.highlight requires a non-empty tabs array");
+      }
+      for (const id of ids) {
+        if (typeof id !== "number" || !TABS.get(id)) {
+          throw new Error("Invalid tab ID: " + String(id));
+        }
+      }
+      await TABS.update(ids[ids.length - 1] as number, { active: true });
+    },
     onCreated: makeTabsEvent(ext, "created"),
     onUpdated: makeTabsEvent(ext, "updated"),
     onActivated: makeTabsEvent(ext, "activated"),
@@ -953,6 +1017,20 @@ export function buildApi(
           updateEnabledRulesets: (u: unknown) => DNR.updateEnabledRulesets(ext.id, u),
           getEnabledRulesets: () => Promise.resolve(DNR.getEnabledRulesets(ext.id)),
           getAvailableStaticRuleCount: () => DNR.getAvailableStaticRuleCount(ext.id),
+          /* #521 slice 4: the typed surface remainder - the reserved
+             ruleset ids, the remaining quota constants, the regex
+             support probe, per-ruleset static rule enable/disable and
+             the read-only match dry run. */
+          DYNAMIC_RULESET_ID,
+          SESSION_RULESET_ID,
+          MAX_NUMBER_OF_DYNAMIC_RULES,
+          MAX_NUMBER_OF_SESSION_RULES,
+          MAX_NUMBER_OF_REGEX_RULES,
+          MAX_NUMBER_OF_DISABLED_STATIC_RULES,
+          isRegexSupported: (re: unknown, caseSensitive?: unknown) => DNR.isRegexSupported(re, caseSensitive),
+          updateStaticRules: (u: unknown) => DNR.updateStaticRules(ext.id, u),
+          getDisabledRuleIds: (o: unknown) => DNR.getDisabledRuleIds(ext.id, o),
+          testMatchOutcome: (req: unknown, opts?: unknown) => DNR.testMatchOutcome(ext.id, req, opts),
           /* #521 slice 3: the debugging surface requires the
              declarativeNetRequestFeedback permission (Chrome's
              documented gate); absent otherwise so feature detection
@@ -1062,6 +1140,31 @@ export function buildApi(
       }
     : undefined;
 
+  /* #520: bookmarks over a real per-extension tree persisted to the
+     subsystem's IndexedDB (see ./bookmarks). Mounted only with the
+     "bookmarks" permission so feature detection answers honestly. */
+  const bookmarksNs = ext.permissions.includes("bookmarks")
+    ? (() => {
+        return {
+          create: (details: BookmarkCreateDetails) => BOOKMARKS.create(ext.id, details),
+          get: (idOrIdList: string | string[]) => BOOKMARKS.get(ext.id, idOrIdList),
+          getChildren: (id: string) => BOOKMARKS.getChildren(ext.id, id),
+          getRecent: (numberOfItems: number) => BOOKMARKS.getRecent(ext.id, numberOfItems),
+          getTree: () => BOOKMARKS.getTree(ext.id),
+          getSubTree: (id: string) => BOOKMARKS.getSubTree(ext.id, id),
+          search: (query: BookmarkSearchQuery) => BOOKMARKS.search(ext.id, query),
+          move: (id: string, destination: BookmarkMoveDestination) => BOOKMARKS.move(ext.id, id, destination),
+          update: (id: string, changes: BookmarkUpdateChanges) => BOOKMARKS.update(ext.id, id, changes),
+          remove: (id: string) => BOOKMARKS.remove(ext.id, id),
+          removeTree: (id: string) => BOOKMARKS.removeTree(ext.id, id),
+          onCreated: bridged<BookmarkCreatedListener>((l) => BOOKMARKS.onCreated(ext.id, l)),
+          onRemoved: bridged<BookmarkRemovedListener>((l) => BOOKMARKS.onRemoved(ext.id, l)),
+          onChanged: bridged<BookmarkChangedListener>((l) => BOOKMARKS.onChanged(ext.id, l)),
+          onMoved: bridged<BookmarkMovedListener>((l) => BOOKMARKS.onMoved(ext.id, l)),
+        };
+      })()
+    : undefined;
+
   const browser: Record<string, unknown> = {
     runtime,
     ...(extensionNs ? { extension: extensionNs } : {}),
@@ -1084,7 +1187,14 @@ export function buildApi(
     ...(notificationsNs && !isApiDetached("notifications") ? { notifications: notificationsNs } : {}),
     ...(cookiesNs && !isApiDetached("cookies") ? { cookies: cookiesNs } : {}),
     ...(browsingDataNs && !isApiDetached("browsingData") ? { browsingData: browsingDataNs } : {}),
+    ...(bookmarksNs && !isApiDetached("bookmarks") ? { bookmarks: bookmarksNs } : {}),
   };
+  /* #516 slice 3: the mounted surface validates its argument contract
+     (arg-schemas.ts) before any engine work runs. chromeApi wraps the
+     already-validated methods and pops its trailing callback first,
+     so chrome callers see the same rejections with callback-shaped
+     lastError delivery. */
+  installArgValidation(browser);
   /* Share implementations while honoring Chrome callbacks. */
   return { browser, chrome: chromeApi(browser) };
 }

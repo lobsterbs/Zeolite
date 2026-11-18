@@ -104,7 +104,11 @@ describe("storage.session.setAccessLevel (#520)", () => {
       setAccessLevel: (arg: unknown) => void;
     };
     expect(() => session.setAccessLevel("SOMETING_ELSE")).toThrow(/access level must be/);
-    expect(() => session.setAccessLevel(7)).toThrow(/access level must be/);
+    /* #516 slice 3: a non-string/object argument now meets the
+       argument-schema layer first (setAccessLevel only admits string
+       | object), so the TypeError names the position instead of the
+       level vocabulary - the call still throws, as Firefox throws. */
+    expect(() => session.setAccessLevel(7)).toThrow(/must be string \| object/);
   });
 
   it("uninstall resets the level to the default", async () => {

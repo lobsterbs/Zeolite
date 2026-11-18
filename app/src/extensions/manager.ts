@@ -23,7 +23,10 @@ import { normalizeExtensionPath } from "./origin";
 import { globToRegExp } from "./content-scripts";
 import { hostPatternsMatch } from "./permissions";
 import { ALARMS } from "./alarms";
+import { BOOKMARKS } from "./bookmarks";
 import { DNR } from "./dnr";
+import { TABS } from "./tabs";
+import { dropUninstallUrl, uninstallUrlOf } from "./uninstall-url";
 import { ACTION } from "./action";
 import { dropSessionAccess } from "./storage";
 import type { ExtensionId, ExtensionRecord } from "./types";
@@ -201,6 +204,13 @@ export class ExtensionManager {
   async uninstall(id: ExtensionId): Promise<void> {
     const rec = this.exts.get(id);
     if (!rec) throw new Error("zeolite: no such extension: " + id);
+    /* #518: Firefox/Chrome open the stored uninstall URL when the
+       browser uninstalls the extension; this engine delivers it
+       through the real tabs bridge as the uninstall runs. Best
+       effort: a dead tab host never blocks the uninstall. */
+    const bye = uninstallUrlOf(id);
+    if (bye) void TABS.create({ url: bye }).catch(() => undefined);
+    dropUninstallUrl(id);
     const db = await openDb();
     await idbDelete(db, STORE_META, id);
     const keys = await idbGetAllKeys(db, STORE_FILES);
@@ -214,6 +224,8 @@ export class ExtensionManager {
     this.changed(id);
     this.exts.delete(id);
     ALARMS.drop(id);
+    /* #520: the extension's bookmark tree is per-extension state. */
+    BOOKMARKS.drop(id);
     /* #519: the toolbar action registry is per-extension state. */
     ACTION.drop(id);
     /* #520: a fresh install of the same identity starts from the

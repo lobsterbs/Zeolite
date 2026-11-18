@@ -68,6 +68,7 @@ export function buildInventory(api: Record<string, unknown>): InventoryNamespace
 export const NAMESPACE_COMPAT: Record<string, string[]> = {
   action: ["action.* / browserAction.* / pageAction.*"],
   alarms: ["alarms.*"],
+  bookmarks: ["bookmarks.*"],
   browserAction: ["action.* / browserAction.* / pageAction.*"],
   browsingData: ["browsingData.*"],
   cookies: ["cookies.*"],
