@@ -31,6 +31,7 @@ import { buildCompatibilityReport, compatibilityKdl } from "./compat-debugger";
 import { DL } from "./downloads";
 import { EXT_CONTROL_TYPES, dispatchExtControl } from "./extensions/control";
 import { ALARMS } from "./extensions/alarms";
+import { BOOKMARKS } from "./extensions/bookmarks";
 import { DNR } from "./extensions/dnr";
 import { extensions } from "./extensions/manager";
 import { setBrowsingDataCacheDropper, setBrowsingDataDownloadClear, setBrowsingDataGuestTerminator } from "./extensions/browsingdata";
@@ -47,6 +48,10 @@ setBrowsingDataGuestTerminator(() => guestTerminateAll());
    store degrades honestly to in-memory alarms (hydrate never
    throws). */
 void ALARMS.hydrate();
+/* #520: hydrate the persisted per-extension bookmark trees at worker
+   boot; a broken store degrades honestly to in-memory trees (hydrate
+   never throws). */
+void BOOKMARKS.hydrate();
 /* #521: hydrate persisted declarativeNetRequest dynamic rules and
    enabled static-ruleset snapshots at worker boot, and expose the
    live extension view (enabled state, host permissions, declared

@@ -120,15 +120,18 @@ describe("browser.tabs (buildApi)", () => {
     const tabsOf = (a: { api: { browser: Record<string, unknown> } }) =>
       a.api.browser.tabs as Record<string, unknown>;
 
-    const qAll = (await (tabsOf(withPerm).query as (q?: unknown) => Promise<Record<string, unknown>[]>)([])) as Record<string, unknown>[];
+    /* #516 slice 3: tabs.query takes the Firefox queryInfo object -
+       an empty object queries everything (the array form was a
+       degenerate accident, now rejected by the argument schema). */
+    const qAll = (await (tabsOf(withPerm).query as (q?: unknown) => Promise<Record<string, unknown>[]>)({})) as Record<string, unknown>[];
     expect(qAll[0]).toMatchObject({ id: 10, url: "https://example.com/" });
 
-    const qBare = (await (tabsOf(bare).query as (q?: unknown) => Promise<Record<string, unknown>[]>)([])) as Record<string, unknown>[];
+    const qBare = (await (tabsOf(bare).query as (q?: unknown) => Promise<Record<string, unknown>[]>)({})) as Record<string, unknown>[];
     expect(qBare[0]).not.toHaveProperty("url");
     expect(qBare[0]).not.toHaveProperty("title");
     expect(qBare[0]).toMatchObject({ id: 10, active: true });
 
-    const qHost = (await (tabsOf(withHost).query as (q?: unknown) => Promise<Record<string, unknown>[]>)([])) as Record<string, unknown>[];
+    const qHost = (await (tabsOf(withHost).query as (q?: unknown) => Promise<Record<string, unknown>[]>)({})) as Record<string, unknown>[];
     expect(qHost.find((t) => t.id === 10)).toHaveProperty("url");
     expect(qHost.find((t) => t.id === 11)).not.toHaveProperty("url");
 

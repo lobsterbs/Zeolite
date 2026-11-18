@@ -176,6 +176,12 @@ describe("browser.pageAction (#519, MV2)", () => {
   it("requires a tabId for show", async () => {
     const { api } = await install("PABad", { manifest_version: 2, page_action: {} });
     const pa = api.browser.pageAction as Record<string, unknown>;
-    await expect((pa.show as (t?: number) => Promise<void>)(undefined as unknown as number)).rejects.toThrow(/tabId/);
+    /* Since #516's arg schemas tabled pageAction, the rejection comes
+       from the argument validator BEFORE the engine runs, and on the
+       browser surface that throw is synchronous (the wrapper is not
+       async): the message names the position kind. The implementation's
+       own "requires a tabId" stays as the backstop for callers that
+       reach it. */
+    expect(() => (pa.show as (t?: number) => Promise<void>)(undefined as unknown as number)).toThrow(/tabId|must be number/);
   });
 });
