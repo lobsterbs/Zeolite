@@ -1262,8 +1262,23 @@ export function referrerDest(referrer: string, path: string): string | null {
   } catch {
     return null;
   }
-  if (!isEnginePath(ref.pathname)) return null;
-  const pageDest = decodePath(ref.pathname);
+  let pageDest = isEnginePath(ref.pathname) ? decodePath(ref.pathname) : null;
+  /* #425: the navguard popup marker (/__zl_nav__/<b64u of the full
+     destination>) is an engine route too - decodeClientUrl resolves it,
+     so a referrer from a page parked on the marker must resolve here
+     as well instead of stranding. Fail closed on a garbage or
+     non-http(s) payload, never a guess. */
+  if (!pageDest && ref.pathname.startsWith(NAVQ_NAV + "/")) {
+    const bytes = b64uDecode(ref.pathname.slice(NAVQ_NAV.length + 1).split(/[?#]/)[0]);
+    if (bytes) {
+      try {
+        const d = DEC_STRICT.decode(bytes);
+        if (/^https?:\/\//.test(d)) pageDest = d;
+      } catch {
+        /* not UTF-8: not a marker payload */
+      }
+    }
+  }
   if (!pageDest) return null;
   let home: URL;
   try {
