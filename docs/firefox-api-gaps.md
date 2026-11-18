@@ -12,7 +12,7 @@ ZL_UPDATE_GAPS_DOC=1 npx vitest run src/extensions/__tests__/gaps-doc.test.ts   
 
 ## Summary
 
-- Mounted namespaces: **23** (197 members), the union of the action-family fixtures
+- Mounted namespaces: **23** (202 members), the union of the action-family fixtures
 - Firefox namespaces not mounted: **40**, each with its honest reason
 - Mounted namespaces with member-level gaps: **18**
 - Engine extras (mounted members Firefox does not have): **4**, each justified in COMPAT
@@ -78,7 +78,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `menus` | ACTION_MENU_TOP_LEVEL_LIMIT, getTargetElement, onHidden, onShown, overrideContext, refresh |
 | `downloads` | acceptDanger, cancel, drag, erase, getFileIcon, onCreated, onErased, open, pause, removeFile, resume, setShelfEnabled, show, showDefaultFolder |
 | `management` | install |
-| `webRequest` | MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES, filterResponseData, getSecurityInfo, handlerBehaviorChanged, onAuthRequired, onBeforeRedirect, onResponseStarted, onSendHeaders |
+| `webRequest` | filterResponseData, getSecurityInfo, onAuthRequired |
 | `action` | getUserSettings, openPopup |
 | `notifications` | getPermissionLevel, onPermissionLevelChanged, onShowSettings, onShown |
 | `cookies` | getAllCookieStores |
@@ -121,5 +121,5 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `storage` | `local` (constant), `managed` (constant), `onChanged` (event), `session` (constant), `sync` (constant) |
 | `tabs` | `TAB_ID_NONE` (constant), `create` (method), `duplicate` (method), `get` (method), `getCurrent` (method), `highlight` (method), `onActivated` (event), `onCreated` (event), `onRemoved` (event), `onUpdated` (event), `query` (method), `remove` (method), `sendMessage` (method), `update` (method) |
 | `webNavigation` | `onBeforeNavigate` (event), `onCommitted` (event), `onCompleted` (event), `onDOMContentLoaded` (event) |
-| `webRequest` | `onBeforeRequest` (event), `onBeforeSendHeaders` (event), `onCompleted` (event), `onErrorOccurred` (event), `onHeadersReceived` (event) |
+| `webRequest` | `MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES` (constant), `handlerBehaviorChanged` (method), `onBeforeRedirect` (event), `onBeforeRequest` (event), `onBeforeSendHeaders` (event), `onCompleted` (event), `onErrorOccurred` (event), `onHeadersReceived` (event), `onResponseStarted` (event), `onSendHeaders` (event) |
 | `windows` | `WINDOW_ID_CURRENT` (constant), `WINDOW_ID_NONE` (constant), `get` (method), `getAll` (method), `getCurrent` (method), `getLastFocused` (method), `onFocusChanged` (event) |
