@@ -2822,7 +2822,100 @@ export function handleFetch(e: FetchEvent): void {
            strands like the NAVH class - never a guess */
         return navOutcome(e, url, 404, "route", "zeolite: bad or expired query handle");
       }
+      /* #416 slice 1: the shell navigation lockdown. A proxied page
+         hijacking the top window navigates the host UI document
+         itself, and the fetch spec makes that visible here: the
+         initiator (clientId) is the nested pane, while the client
+         being REPLACED (replacesClientId) is the shell window. Only
+         the host app itself can change the shell URL: its own
+         navigations have replaced == initiator (or no initiator at
+         all, address bar and reloads), and both fail the gate
+         below. A GET document navigation whose initiator is a
+         nested pane and whose replaced client provably IS a
+         same-origin top-level shell document ("/" or "/index.html")
+         never serves: it aborts with Response.error() (the shell
+         document and its URL stay intact) and the decoded
+         destination is posted to the shell, which reopens it as a
+         new in-app tab. Fails closed: a pane's own navigation and a
+         popup serve as today, a nested or auxiliary replaced client
+         is not the shell, and a client the clients API cannot
+         resolve fails open. Honest residual classes keep their
+         ladder behavior and are never guessed into a tab: POST
+         hijacks (an abort loses the body), engine assets (the
+         asset branch returns earlier), undecodable routes (404
+         stays 404), and the early 302 cleanup hops (they redirect
+         and re-enter, recaptured on the follow-up navigation). */
+      const shellHijack = async (destUrl: string): Promise<Response | null> => {
+        if (
+          e.request.mode !== "navigate" ||
+          e.request.destination !== "document" ||
+          e.request.method !== "GET" ||
+          !e.clientId ||
+          typeof e.replacesClientId !== "string" ||
+          e.replacesClientId === "" ||
+          e.replacesClientId === e.clientId ||
+          !/^https?:/i.test(destUrl)
+        ) {
+          return null;
+        }
+        let shellWin = null as WindowClient | null | undefined;
+        try {
+          shellWin = (await raceBoot(
+            self.clients.get(e.replacesClientId),
+            "shell client lookup",
+            PRE_DEADLINE_BOUND_MS,
+          )) as WindowClient | null | undefined;
+        } catch {
+          /* lookup unavailable: the navigation serves as today */
+          shellWin = null;
+        }
+        if (
+          !shellWin ||
+          shellWin.type !== "window" ||
+          shellWin.frameType !== "top-level"
+        ) {
+          return null;
+        }
+        try {
+          const su = new URL(shellWin.url, self.location.origin);
+          if (su.origin !== self.location.origin) return null;
+          if (su.pathname !== "/" && su.pathname !== "/index.html") return null;
+        } catch {
+          return null;
+        }
+        const etid = DIAG.trace(e.replacesClientId);
+        netLogPush({
+          method: e.request.method,
+          traceId: etid,
+          path: url.pathname + url.search,
+          dest: destUrl,
+          status: 0,
+          rtype: classifyRtype(reqDest(e.request), ""),
+          ms: -1,
+          bytes: -1,
+          verdict: "escape: shell navigation recaptured as a tab",
+          transport: "engine",
+          detail: { internalUrl: url.href, ttfb: -1 },
+        });
+        DIAG.emit({
+          traceId: etid,
+          requestId: etid,
+          category: "SERVICE_WORKER",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "top-level shell hijack recaptured as a new tab",
+          url: destUrl,
+        });
+        shellWin.postMessage({ lb: "zlescape", data: { dest: destUrl } });
+        return Response.error();
+      };
       if (foreign) {
+        /* #416 slice 1: a cross-origin target hijacking the shell is
+           recaptured here, ahead of the foreign policy (the browser
+           allows the navigation because engine panes are same-origin
+           windows; the shell must not move off-origin either). */
+        const foreignEsc = await shellHijack(url.href);
+        if (foreignEsc) return foreignEsc;
         /* Issue #34. The client lookup is the only async part; the
            policy itself is pure and unit-tested. */
         let clientUrl: string | undefined;
@@ -4082,6 +4175,12 @@ export function handleFetch(e: FetchEvent): void {
           });
         }
       }
+
+      /* #416 slice 1: the decoded destination of an engine-route
+         hijack, recaptured before any gate could strand or serve
+         the shell document itself. */
+      const shellEsc = await shellHijack(target);
+      if (shellEsc) return shellEsc;
 
       if (siteDisabled(target)) {
         /* #31: a disabled-site navigation lands on the error page
