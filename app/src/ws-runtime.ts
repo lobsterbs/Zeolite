@@ -4,8 +4,10 @@
    ./wsbridge (unit-gated); this module is the production wiring:
    openWebSocket as the wisp factory (TLS terminates there), netlog
    rows for the open (status 101) and the final close (code + byte
-   totals), DIAG events for the open attempt (#664) and abnormal
-   closes, and the tracing hook.
+   totals), the DIAG event for the open attempt (#664), and the tracing
+   hook. The WS_OPEN/WS_CLOSE/WS_ERROR stage events are emitted by the
+   bridge itself (wsbridge.ts, #664), so this hook only adds the
+   attempt row.
 
    Pages route ws(s):// through the zl:wsOpen control message; ws://
    passes through as plaintext over the same wisp tunnel (#511).
@@ -76,18 +78,9 @@ function bridgeHooks(transport: "NativeTransit" | "Relay", internalUrl: string):
     },
     onClose: (token, code, clean, ms) => {
       const t = token as { url: string; bytes: number; traceId: string };
-      if (!clean) {
-        DIAG.emit({
-          category: "WEBSOCKET",
-          cause: "failure",
-          severity: "error",
-          message: "websocket closed abnormally",
-          technicalReason: "close code " + code,
-          url: t.url,
-          traceId: t.traceId,
-          requestId: t.traceId,
-        });
-      }
+      /* #664: no DIAG row here - the bridge emits the bounded
+         WS_CLOSE stage event (info when clean, error when abnormal),
+         so this hook would only duplicate it. */
       netLogPush({
         method: "WS",
         traceId: t.traceId,

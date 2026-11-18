@@ -40,7 +40,7 @@ const stages = new Set([
   "REQUEST_CREATED","REQUEST_INTERCEPTED","UPSTREAM_REQUEST","UPSTREAM_RESPONSE",
   "RESPONSE_RECEIVED","REWRITE_STARTED","REWRITE_COMPLETED","REWRITE_FAILED",
   "RUNTIME_INJECTION","SCRIPT_EXECUTION","DOWNSTREAM_REQUEST","TRANSPORT_FALLBACK",
-  "REDIRECT_HOP","REDIRECTED","PINNED_SCRIPT",
+  "REDIRECT_HOP","REDIRECTED","PINNED_SCRIPT","WS_OPEN","WS_CLOSE","WS_ERROR",
 ]);
 const severities = new Set(["info","warning","error","critical"]);
 const causes = new Set(["failure","unsupported","blocked","upstream","proxy","rewrite","browser_limit","extension","challenge","unknown"]);
