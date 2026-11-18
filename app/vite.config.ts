@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import wasm from "vite-plugin-wasm";
 
@@ -22,7 +23,7 @@ function wasmGlueTestFallback(): Plugin {
     { suffix: "seam_wasm/seam_wasm.js", real: "src/seam_wasm/seam_wasm.js", stub: "./src/seam_wasm_stub.ts" },
     { suffix: "adblock_wasm/adblock_wasm.js", real: "src/adblock_wasm/adblock_wasm.js", stub: "./src/adblock_wasm_stub.ts" },
     { suffix: "cookies_wasm/cookies_wasm.js", real: "src/cookies_wasm/cookies_wasm.js", stub: "./src/cookies_wasm_stub.ts" },
-  ].map((g) => ({ ...g, stubPath: new URL(g.stub, import.meta.url).pathname }));
+  ].map((g) => ({ ...g, stubPath: fileURLToPath(new URL(g.stub, import.meta.url)) }));
   return {
     name: "zl-wasm-glue-test-fallback",
     enforce: "pre",
