@@ -99,6 +99,17 @@ describe("virtualDisqusPageUrl (#565 disqus class)", () => {
     expect(virtualDisqusPageUrl(inUrl, ref, ENGINE)).toBe(embed(PAGE));
   });
 
+  it("rewrites through an expired query-shape referrer (#634 arm A mirror)", () => {
+    setRouteKey(KEY);
+    /* referrerPageUrl already recovers an expired nav-handle path
+       referrer (#633); the query shape had no expired arm, so the
+       same parked page lost the Disqus rewrite too. */
+    const h = buildQueryHandleUrl(PAGE, -1);
+    expect(h).not.toBeNull();
+    const inUrl = embed(ENGINE + encodeDest(PAGE));
+    expect(virtualDisqusPageUrl(inUrl, ENGINE + h, ENGINE)).toBe(embed(PAGE));
+  });
+
   it("rewrites through a legacy /zl/ referrer (cold-start seam)", () => {
     const ref = ENGINE + "/zl/" + b64uEncode(ENC.encode(PAGE));
     const inUrl = embed(ENGINE + encodeDest(PAGE));
