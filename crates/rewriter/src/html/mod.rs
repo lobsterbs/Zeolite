@@ -774,20 +774,39 @@ impl Rewriter {
 
     /// Emit bootstrap + injections. Called once, right after <head>
     /// (fallback <html>, final fallback at finish()).
+    ///
+    /// #431 double-rewrite guard: the tags are emitted with the
+    /// engine-origin-ABSOLUTE src, which the engine-local pass keeps
+    /// verbatim, so a second pass over already-composed output never
+    /// re-wraps the bootstrap as a site route (the page would then load
+    /// the SITE's /bootstrap.js and the SPA never boots - the
+    /// rewritten-twice blank page). And when the unprocessed remainder
+    /// (self.buf at the injection point) already starts with one of our
+    /// own tags, that tag is skipped instead of duplicated, so a
+    /// re-rewritten document never double-boots.
     fn emit_injections(&mut self) -> String {
         if self.injected {
             return String::new();
         }
         self.injected = true;
-        let mut out = String::new();
+        let mut paths: Vec<String> = Vec::new();
         if self.cfg.inject_bootstrap {
-            out.push_str(&format!(
-                "<script src=\"{}\"></script>",
-                self.cfg.bootstrap_path
-            ));
+            paths.push(self.cfg.bootstrap_path.clone());
         }
-        for path in &self.cfg.injections {
-            out.push_str(&format!("<script src=\"{}\"></script>", path));
+        paths.extend(self.cfg.injections.iter().cloned());
+        let origin = self.cfg.origin.clone();
+        let mut rest = self.buf.trim_start();
+        let mut out = String::new();
+        for path in &paths {
+            let tag_abs = format!("<script src=\"{}{}\"></script>", origin, path);
+            let tag_rel = format!("<script src=\"{}\"></script>", path);
+            if rest.starts_with(&tag_abs) {
+                rest = rest[tag_abs.len()..].trim_start();
+            } else if rest.starts_with(&tag_rel) {
+                rest = rest[tag_rel.len()..].trim_start();
+            } else {
+                out.push_str(&tag_abs);
+            }
         }
         out
     }
@@ -1285,12 +1304,31 @@ impl Rewriter {
                             // script src only: challenge srcs stay
                             // provider-direct above and anchor href
                             // fragments carry real semantics.
+                            /* #431: the fragment exists to keep the
+                            filename visible on an opaque ROUTE. An
+                            engine-local src (the rewriter's own
+                            bootstrap/injections, engine assets) is
+                            emitted verbatim - filename already
+                            visible - so a second pass over composed
+                            output must not append it again. */
                             if name == "script" && lower == "src" && !e.contains('#') {
                                 let abs = resolve(&v, &self.base);
-                                let dest = self.cfg.unwrap_engine_route(&abs).unwrap_or(abs);
-                                if let Some(seg) = last_path_segment(&dest) {
-                                    e.push('#');
-                                    e.push_str(seg);
+                                /* Same boundary rule as the engine-local
+                                pass above: the byte after the origin
+                                must be end, '/', '?' or '#', so a
+                                same-prefix attacker host never counts. */
+                                let engine_local = !self.cfg.origin.is_empty()
+                                    && abs.starts_with(&self.cfg.origin)
+                                    && matches!(
+                                        abs[self.cfg.origin.len()..].chars().next(),
+                                        None | Some('/') | Some('?') | Some('#')
+                                    );
+                                if !engine_local {
+                                    let dest = self.cfg.unwrap_engine_route(&abs).unwrap_or(abs);
+                                    if let Some(seg) = last_path_segment(&dest) {
+                                        e.push('#');
+                                        e.push_str(seg);
+                                    }
                                 }
                             }
                             // <base href> switches the folding base for
