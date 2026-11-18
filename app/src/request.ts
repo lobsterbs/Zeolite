@@ -3174,18 +3174,26 @@ export function handleFetch(e: FetchEvent): void {
            query it can read. Pane navigations keep the in-place serve
            (their surface stamp fails closed as iframe, #612); fetches
            and non-GET keep it too (a redirect strips a POST body). */
+        /* #633: the marker URL's own search is page decoration and
+           unions onto the payload (mergeRouteSearch, outer params
+           winning) - the contract markerPathDest and decodeClientUrl
+           already apply. Without the union the decoration was silently
+           dropped from both the upstream target and the minted handle
+           form below, the dropped-query-params class on the sign-in
+           flows. */
+        const navFull = url.search ? mergeRouteSearch(nav, url.search) : nav;
         if (e.request.method === "GET" && e.request.mode === "navigate" && e.request.destination === "document") {
           const navClean = queryRoutesEnabled()
-            ? buildQueryHandleUrl(nav, NAVH_TTL_MS)
+            ? buildQueryHandleUrl(navFull, NAVH_TTL_MS)
             : null;
-          const navLoc = navClean ?? buildNavHandleUrl(nav, NAVH_TTL_MS);
+          const navLoc = navClean ?? buildNavHandleUrl(navFull, NAVH_TTL_MS);
           if (navLoc) {
             const ntid = DIAG.trace(e.resultingClientId || e.clientId);
             netLogPush({
               method: e.request.method,
               traceId: ntid,
               path: url.pathname + url.search,
-              dest: nav,
+              dest: navFull,
               status: 302,
               rtype: classifyRtype(reqDest(e.request), ""),
               ms: 0,
@@ -3198,6 +3206,10 @@ export function handleFetch(e: FetchEvent): void {
           }
         }
         dest0 = nav;
+        /* #633: the real query rides in the marker route's search, like
+           every sibling branch (NAVH #144, /j/ routes) - the merge seam
+           below unions it onto the payload instead of dropping it. */
+        routeCarriesQuery = true;
       } else if (url.pathname.startsWith(NAVH + "/")) {
         /* #63 (#54 design D): the opaque initial-navigation handle.
            The host asked for it over the host-gated zl:navHandle
@@ -7849,6 +7861,28 @@ export function forwardedHeaders(req: Request, target: string, initiator?: strin
        direct browsing sends (issue #20). */
     let ref = decodePath(refU.pathname);
     let queryReferrer = false;
+    /* #425: the navguard popup marker (/__zl_nav__/<b64u of the full
+       destination>) is an engine route decodeClientUrl resolves, but a
+       page parked on the marker (pane navigations keep the in-place
+       marker serve) sends it as the referrer - decode it here too, or
+       every subresource goes upstream Referer-less and the sign-in RPC
+       class answers with the generic rejection. The marker URL's own
+       search unions below via mergeRouteSearch, the same contract
+       markerPathDest applies. Fail closed on garbage or non-http(s). */
+    if (!ref && refU.pathname.startsWith(NAV + "/")) {
+      const mbytes = b64uDecode(refU.pathname.slice(NAV.length + 1).split(/[?#]/)[0]);
+      if (mbytes) {
+        try {
+          /* fatal: a tampered tail that lossy-decodes to a
+             replacement-char string must fail closed here - a
+             non-ByteString value would throw at Headers.set below. */
+          const d = new TextDecoder("utf-8", { fatal: true }).decode(mbytes);
+          if (/^https?:\/\//.test(d)) ref = d;
+        } catch {
+          /* not strict UTF-8: not a marker payload */
+        }
+      }
+    }
     /* #112: a nav-handle document keeps the real destination inside
        its keyed token, so decodePath fails on the navh route and
        every subresource from that page lost the Referer upstream.
