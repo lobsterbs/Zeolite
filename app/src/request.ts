@@ -67,8 +67,8 @@ import {
   contextOf,
   establishContext,
   establishFromClientUrl,
-  latestWindowContext,
   resolveRelative,
+  unambiguousWindowContext,
   VCTX_CAP,
   type VirtualContext,
 } from "./vctx";
@@ -2193,7 +2193,9 @@ async function rehydrateClientContext(
     is explicitly NOT a fallback target: its same-origin requests are the
     embedder's own assets and must keep the #101 passthrough to dist.
     Returns null on unknown client, shell client, no open proxied window,
-    or any error - every failure keeps the honest passthrough. */
+    an AMBIGUOUS set of window contexts (more than one upstream origin,
+    #687 - never route a context-less realm to another tab's site), or
+    any error - every failure keeps the honest passthrough. */
 async function fallbackRealmDest(
   clientId: string | undefined,
   url: URL,
@@ -2217,7 +2219,12 @@ async function fallbackRealmDest(
       if (frameType === "top-level" && cu.origin === self.location.origin && !isEnginePath(cu.pathname))
         return null; /* the host shell: passthrough stays */
     }
-    const last = latestWindowContext(VCTX);
+    /* #687: only an UNAMBIGUOUS window home may serve as the fallback -
+       with live window contexts on more than one origin (two proxied
+       tabs on different sites) the realm cannot be attributed to any of
+       them, so null keeps the #101 passthrough instead of routing the
+       realm to the other tab's site (and its jar cookies) upstream. */
+    const last = unambiguousWindowContext(VCTX);
     if (!last) return null;
     const dest = new URL(url.pathname + url.search, last.currentUrl).href;
     if (!/^https?:$/.test(new URL(dest).protocol)) return null;
@@ -3632,12 +3639,17 @@ export function handleFetch(e: FetchEvent): void {
                  scripts are the live case. Passing through makes the
                  origin server answer 404 with no content-type plus
                  nosniff, which MIME-blocks the script and kills the
-                 challenge before it boots. Resolve against the most
-                 recent live window context instead; the host shell
+                 challenge before it boots. Resolve against a live window
+                 context ONLY when that home is unambiguous - all live
+                 window contexts on one upstream origin (#687: with tabs
+                 on different sites the realm cannot be attributed, so
+                 fail closed to the passthrough below and never route it
+                 to the other tab's site and its cookies). The host shell
                  (top-level window on a non-engine path) keeps the
                  passthrough below so its own assets (/main.js, ...) still
                  serve from dist. Fail closed: unknown client, no open
-                 proxied window, or any error keeps the old passthrough. */
+                 proxied window, ambiguous windows, or any error keeps the
+                 old passthrough. */
               const realmDest = await fallbackRealmDest(e.clientId, url);
               if (realmDest) {
                 dest0 = realmDest;
