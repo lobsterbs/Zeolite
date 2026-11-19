@@ -43,6 +43,44 @@ export function initTransform(d: TransformDeps): void {
   deps = d;
 }
 
+/* ---- #682: event-loop yields in the rewrite pumps --------------------
+   A pump loops on `await reader.read()`; when the upstream body is
+   already buffered (transport spool, page cache, a whole-body Response)
+   every read resolves in a MICROtask, so the entire document rewrite
+   runs inside ONE macrotask. Queued fetch events - same-origin
+   passthrough /build, /zlrelay renewals - cannot dispatch until the
+   storm drains (netlog rows pinned at status 0, ms -1 for tens of
+   seconds). Yielding to the macrotask queue between chunks lets those
+   events answer mid-storm. Count-based backstop so even instant chunks
+   cannot starve the loop; time-based arm so a few huge slow chunks
+   yield too. */
+export const PUMP_YIELD_CHUNKS = 256;
+export const PUMP_YIELD_MS = 8;
+
+/** One macrotask turn: prefer scheduler.yield() where exposed, else a
+    zero-delay timer. FIFO enough that fetch events already queued run
+    before the pump continuation. */
+export function yieldToEventLoop(): Promise<void> {
+  const sched = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
+  if (sched && typeof sched.yield === "function") return sched.yield();
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Per-pump yield tracker: call once per pumped chunk. */
+export function makePumpYield(): () => Promise<void> {
+  let chunks = 0;
+  let last = performance.now();
+  return async () => {
+    chunks++;
+    const now = performance.now();
+    if (chunks >= PUMP_YIELD_CHUNKS || now - last >= PUMP_YIELD_MS) {
+      chunks = 0;
+      await yieldToEventLoop();
+      last = performance.now();
+    }
+  };
+}
+
 /* ---- Streaming rewriter wiring ------------------------------------- */
 
 interface JsRewriter {
@@ -329,6 +367,9 @@ export function rewriteStream(
         let heldLen = 0;
         let head = "";
         let injected = false;
+        /* #682: hand the event loop back between chunks so passthrough
+           fetch events dispatch mid-storm. */
+        const pumpYield = makePumpYield();
         const splice = (at: number) => {
           emit(rw.process(head.slice(0, at)));
           controller.enqueue(encoder.encode(init));
@@ -383,6 +424,9 @@ export function rewriteStream(
             onDone?.();
             return;
           }
+          /* #682: yield before the per-chunk wasm pass when the budget
+             trips; a buffered body otherwise rewrites whole in one task. */
+          await pumpYield();
           if (injected) {
             const t = decoder!.decode(value, { stream: true });
             sriScan?.feed(t); mapScan?.feed(t);
@@ -475,6 +519,8 @@ export function cssRewriteStream(
         let decoder: TextDecoder | null = headerLabel ? makeDecoder(headerLabel) : null;
         let held: Uint8Array[] = [];
         let heldLen = 0;
+        /* #682: event-loop yield tracker for the pump below. */
+        const pumpYield = makePumpYield();
         for (;;) {
           const { done, value } = await reader.read();
           if (done) {
@@ -495,6 +541,8 @@ export function cssRewriteStream(
             onDone?.();
             return;
           }
+          /* #682: yield between chunks (see rewriteStream). */
+          await pumpYield();
           if (decoder !== null) {
             emit(rw.process(decoder.decode(value, { stream: true })));
             continue;
@@ -687,6 +735,9 @@ export async function boundedBody(body: ReadableStream<Uint8Array> | null): Prom
   const reader = body.getReader();
   const parts: Uint8Array[] = [];
   let total = 0;
+  /* #682: a buffered body drains in microtasks only; yield so passthrough
+     fetch events dispatch while a large JS/worker body buffers. */
+  const pumpYield = makePumpYield();
   for (;;) {
     const { done, value } = await reader.read();
     if (done) {
@@ -702,6 +753,7 @@ export async function boundedBody(body: ReadableStream<Uint8Array> | null): Prom
       parts.push(value);
       total += value.byteLength;
     }
+    await pumpYield();
     if (total > JS_BODY_CAP) {
       const rest = new ReadableStream<Uint8Array>({
         async pull(c) {
