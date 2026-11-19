@@ -4,8 +4,8 @@ import {
   establishFromClientUrl,
   contextOf,
   establishContext,
-  latestWindowContext,
   resolveRelative,
+  unambiguousWindowContext,
   VCTX_CAP,
   type VirtualContext,
 } from "../vctx";
@@ -157,26 +157,47 @@ describe("Virtual context rehydration (issue #535)", () => {
   });
 });
 
-describe("latestWindowContext (CF challenge realm fallback)", () => {
+describe("unambiguousWindowContext (CF challenge realm fallback, #687)", () => {
   it("returns undefined with no contexts at all", () => {
     const m = new Map<string, VirtualContext>();
-    expect(latestWindowContext(m)).toBeUndefined();
+    expect(unambiguousWindowContext(m)).toBeUndefined();
   });
 
-  it("skips worker contexts and returns the most recent window context", () => {
+  it("skips worker contexts and returns the single window context", () => {
     const m = new Map<string, VirtualContext>();
     establishContext(m, "w-old", "https://old.example/", "worker");
     establishContext(m, "doc-1", "https://site.example/page");
     establishContext(m, "w-2", "https://w.example/w.js", "sharedworker");
-    const last = latestWindowContext(m);
+    const last = unambiguousWindowContext(m);
     expect(last?.clientId).toBe("doc-1");
     expect(last?.currentUrl).toBe("https://site.example/page");
   });
 
-  it("tracks the most recently established window context", () => {
+  it("returns the most recent window context when all window contexts share one origin (same-site tabs are unambiguous)", () => {
     const m = new Map<string, VirtualContext>();
-    establishContext(m, "a", "https://a.example/");
-    establishContext(m, "b", "https://b.example/");
-    expect(latestWindowContext(m)?.targetOrigin).toBe("https://b.example");
+    establishContext(m, "a", "https://site.example/one");
+    establishContext(m, "b", "https://site.example/two");
+    expect(unambiguousWindowContext(m)?.targetOrigin).toBe("https://site.example");
+    expect(unambiguousWindowContext(m)?.currentUrl).toBe("https://site.example/two");
+  });
+
+  it("#687: returns undefined when window contexts sit on different origins (two tabs on different sites - the realm cannot be attributed)", () => {
+    const m = new Map<string, VirtualContext>();
+    establishContext(m, "tab-b", "https://example.com/");
+    establishContext(m, "tab-a", "https://en.wikipedia.org/");
+    expect(unambiguousWindowContext(m)).toBeUndefined();
+    /* same after the other tab navigates elsewhere: still two origins */
+    establishContext(m, "tab-b", "https://example.com/other");
+    expect(unambiguousWindowContext(m)).toBeUndefined();
+    /* and even if a third same-origin-as-A tab appears */
+    establishContext(m, "tab-a2", "https://en.wikipedia.org/wiki/X");
+    expect(unambiguousWindowContext(m)).toBeUndefined();
+  });
+
+  it("worker-only contexts never serve as the fallback home", () => {
+    const m = new Map<string, VirtualContext>();
+    establishContext(m, "w-1", "https://w.example/w.js", "worker");
+    establishContext(m, "w-2", "https://w2.example/w.js", "sharedworker");
+    expect(unambiguousWindowContext(m)).toBeUndefined();
   });
 });

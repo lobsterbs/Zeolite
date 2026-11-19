@@ -122,16 +122,29 @@ export function resolveRelative(
     its root-relative site paths (Cloudflare's /cdn-cgi/ challenge scripts
     are the live case) would otherwise strand at the #101 passthrough and
     the origin server's content-typeless 404 MIME-blocks the script.
-    Returns the most recently established window context (Map insertion
-    order), skipping worker contexts; undefined when no proxied window is
-    open, so the caller keeps the honest passthrough. Pure, total. */
-export function latestWindowContext(
+
+    #687 fail-closed: the home is only returned when it is UNAMBIGUOUS.
+    Every live window context must sit on the SAME upstream origin, so
+    whichever one is picked the resolved dest is identical (the usual
+    single-proxied-tab Turnstile boot). With window contexts on two or
+    more DIFFERENT origins (two proxied tabs on different sites) the
+    realm cannot be tied to any one of them - a blob: client's URL is
+    opaque and its referrer does not decode, and any decodable client
+    URL or referrer was already consumed by the context/referrer
+    recovery upstream - so this returns undefined and the caller keeps
+    the honest passthrough: a context-less realm must never be routed to
+    a different virtual site (that leaked the other site's jar cookies
+    upstream, #687). Worker contexts are skipped as before. Pure, total. */
+export function unambiguousWindowContext(
   map: Map<string, VirtualContext>,
 ): VirtualContext | undefined {
   let last: VirtualContext | undefined;
+  let origin: string | undefined;
   for (const c of map.values()) {
     if (c.clientKind === "worker" || c.clientKind === "sharedworker") continue;
+    if (last !== undefined && c.targetOrigin !== origin) return undefined;
     last = c;
+    origin = c.targetOrigin;
   }
   return last;
 }
