@@ -62,7 +62,7 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
 
 import { handleFetch } from "../request";
 import { encodeDestLegacy } from "../codec";
-import { decideTransport, planResponseTransit } from "../transit";
+import { decideTransport, planResponseTransit, relabelChallengeZone, CHALLENGE_ZONE_PATCH_CAP } from "../transit";
 import { initTransform, type TransformDeps } from "../transform";
 import { VCTX } from "../swstate";
 
@@ -262,5 +262,145 @@ describe("D1/D2: handleFetch serving (integration)", () => {
     const served = await sub.armed[0]!;
     expect(await served.text()).toBe("shell-asset");
     expect(transportMock.urls.some((u) => u.includes("/cdn-cgi/"))).toBe(false);
+  });
+});
+
+/* D3 (CF_CHALLENGE_ZONE_RELABEL, #685 follow-up): the managed-challenge
+   orchestrator (chl_page/v1) gates the Turnstile mount on
+   `location.hostname === _cf_chl_opt.cZone`; served on the opaque /j/
+   realm the frame hostname is the engine host, so a site-host cZone never
+   matches and the widget dies on "Unable to connect to the website"
+   before any challenges.cloudflare.com request (live: rumble.com,
+   dash.cloudflare.com @2c1799b). The engine relabels ONLY the inline
+   `cZone: '<host>'` literal to `cZone: location.hostname` in
+   cf-mitigated challenge documents - everything else stays byte-verbatim,
+   and nothing about the challenge is solved or bypassed. */
+
+describe("D3: relabelChallengeZone (unit)", () => {
+  it("relabels a single-quoted inline cZone and leaves every other byte alone", () => {
+    const html = '<script nonce="n">window._cf_chl_opt={cH:"x",cZone: \'rumble.com\',cRay:"r1"};</script>';
+    const out = relabelChallengeZone(html);
+    expect(out).toBe('<script nonce="n">window._cf_chl_opt={cH:"x",cZone: location.hostname,cRay:"r1"};</script>');
+  });
+
+  it("relabels a double-quoted cZone", () => {
+    expect(relabelChallengeZone('cZone: "dash.cloudflare.com"')).toBe("cZone: location.hostname");
+  });
+
+  it("is a no-op when no cZone literal is present", () => {
+    const html = "<html><body>no opt here</body></html>";
+    expect(relabelChallengeZone(html)).toBe(html);
+  });
+
+  it("never touches cZone-like substrings inside longer identifiers", () => {
+    const html = "var mycZone: 'x'; cZone: 'a.example';";
+    expect(relabelChallengeZone(html)).toBe("var mycZone: 'x'; cZone: location.hostname;");
+  });
+
+  it("exposes a sane patch cap", () => {
+    expect(CHALLENGE_ZONE_PATCH_CAP).toBeGreaterThan(64 * 1024);
+  });
+});
+
+describe("D3: handleFetch relabels the cZone literal in cf-mitigated docs only", () => {
+  const mkEvent = (
+    url: string,
+    mode: string,
+    destination: string,
+    referrer: string,
+    clientId: string,
+    resultingClientId?: string,
+  ) => {
+    const armed: Promise<Response>[] = [];
+    const ev = {
+      request: {
+        url,
+        method: "GET",
+        mode,
+        destination,
+        credentials: "same-origin",
+        referrer,
+        body: null,
+        headers: new Headers(),
+      },
+      clientId,
+      resultingClientId: resultingClientId ?? clientId,
+      respondWith: (p: Promise<Response>) => void armed.push(p),
+      waitUntil: () => {},
+    } as unknown as FetchEvent;
+    return { ev, armed };
+  };
+
+  let clientsMap: Record<string, { type: string; url: string; frameType?: string }>;
+
+  beforeEach(() => {
+    transportMock.calls = 0;
+    transportMock.urls = [];
+    transportMock.queue = [];
+    VCTX.clear();
+    clientsMap = {};
+    siteScript.mockClear();
+    initTransform(transformDeps());
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("shell-asset", { status: 200 })));
+    vi.stubGlobal("self", {
+      location: { origin: ORIGIN, href: ORIGIN + "/sw.js" },
+      registration: { scope: ORIGIN + "/" },
+      clients: { get: async (id: string) => clientsMap[id] ?? null },
+    });
+    vi.stubGlobal("caches", { open: async () => { throw new Error("no cache storage"); } });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    VCTX.clear();
+  });
+
+  const CHALLENGE_HTML_ZONE =
+    '<!DOCTYPE html><html><head><title>Just a moment...</title><script nonce="abc">window._cf_chl_opt={cH:"x",cZone: \'site.example\',cRay:"r1",cType:\'managed\'};</script></head><body>challenge</body></html>';
+
+  it("serves a cf-mitigated challenge doc with the cZone literal relabeled, status and all other bytes intact", async () => {
+    transportMock.queue.push(
+      new Response(CHALLENGE_HTML_ZONE, {
+        status: 403,
+        headers: { "content-type": "text/html; charset=utf-8", "cf-mitigated": "challenge", "content-length": String(CHALLENGE_HTML_ZONE.length) },
+      }),
+    );
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "navigate", "document", "", "doc-z1");
+    handleFetch(ev);
+    expect(armed.length).toBe(1);
+    const served = await armed[0]!;
+    expect(served.status).toBe(403);
+    const body = await served.text();
+    expect(body).toContain("cZone: location.hostname");
+    expect(body).not.toContain("cZone: 'site.example'");
+    /* every other byte is untouched */
+    expect(body).toBe(CHALLENGE_HTML_ZONE.replace("cZone: 'site.example'", "cZone: location.hostname"));
+    expect(body).not.toContain("__ZL");
+    /* the stale upstream content-length must not survive a changed body */
+    expect(served.headers.get("content-length")).toBeNull();
+  });
+
+  it("serves a cf-mitigated doc without a cZone literal byte-verbatim", async () => {
+    const NOZONE = '<!DOCTYPE html><html><head><title>Just a moment...</title></head><body><script nonce="abc">window._cf_chl_opt={cH:"x"};</script></body></html>';
+    transportMock.queue.push(
+      new Response(NOZONE, { status: 403, headers: { "content-type": "text/html; charset=utf-8", "cf-mitigated": "challenge" } }),
+    );
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "navigate", "document", "", "doc-z2");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(403);
+    expect(await served.text()).toBe(NOZONE);
+  });
+
+  it("does not relabel ordinary (non-challenge-flagged) HTML documents", async () => {
+    const DOC = '<!DOCTYPE html><html><head><title>t</title></head><body><script>var cZone: \'site.example\';</script></body></html>';
+    transportMock.queue.push(new Response(DOC, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }));
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "navigate", "document", "", "doc-z3");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    const body = await served.text();
+    /* ordinary docs go through the rewrite stream; the cZone literal must
+       not be relabeled by the challenge path */
+    expect(body).not.toContain("cZone: location.hostname");
   });
 });

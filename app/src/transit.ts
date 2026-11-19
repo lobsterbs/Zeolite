@@ -180,6 +180,34 @@ export function isChallengeMitigated(h: { get(name: string): string | null }): b
   return (h.get("cf-mitigated") ?? "").trim().toLowerCase() === "challenge";
 }
 
+/* #685 follow-up (CF_CHALLENGE_ZONE_RELABEL). Live evidence 2026-11-19,
+   zeolite-server 3.4.2 @2c1799b: on rumble.com, 4chan.org, fandom.com and
+   dash.cloudflare.com/login the cf-mitigated interstitial served verbatim
+   on the opaque /j/ realm and chl_page/v1 loaded 200 in full, but the
+   Turnstile widget never mounted - zero challenges.cloudflare.com
+   requests, empty captchaTrace, page ends on "Unable to connect to the
+   website". Deobfuscating the orchestrate (chl_page/v1) shows the single
+   gate: lc() compares location.hostname with _cf_chl_opt.cZone (copied
+   from the inline `cZone: '<site host>'` bootstrap) and on mismatch
+   renders "Unable to connect to the website" and returns before rkb()
+   ever loads https://challenges.cloudflare.com/turnstile/v0/.../api.js.
+   On the /j/ realm location.hostname is the engine host, so the site-host
+   cZone can never match. Control: direct https://rumble.com/ in the same
+   HeadlessChrome/159 UA mounts the widget (api.js + turnstile iframe),
+   so the UA is not the cause. Relabeling ONLY the inline cZone literal to
+   `location.hostname` lets the gate pass (verified live via an init-script
+   shim: with cZone = location.hostname the widget mounted through the
+   engine and a cf_clearance landed in the jar). Every other byte stays
+   verbatim; the challenge is never solved or bypassed - the widget still
+   runs and must still be satisfied. */
+export const CHALLENGE_ZONE_PATCH_CAP = 1024 * 1024;
+
+export function relabelChallengeZone(html: string): string {
+  return html
+    .replace(/\b(cZone\s*:\s*)'[^']*'/g, "$1location.hostname")
+    .replace(/\b(cZone\s*:\s*)"[^"]*"/g, "$1location.hostname");
+}
+
 /** Pre-fetch decision from the destination URL and the request
     destination. */
 export function decideTransport(target: string, dest: string): TransitDecision {
