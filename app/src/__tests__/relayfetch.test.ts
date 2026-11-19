@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { relayFetch, relayRegister, RELAY_HEADER_DEADLINE_MS } from "../relayfetch";
+import { relayFetch, relayRegister, RELAY_BODY_IDLE_MS, RELAY_HEADER_DEADLINE_MS } from "../relayfetch";
 
 /* #137: the embedder relay over a fake port. The port contract:
    zl:fetchRelay out, head/chunk/end/error frames back per rid. */
@@ -166,3 +166,84 @@ describe("relayFetch header deadline (#382)", () => {
   });
 });
 
+
+/* #681 follow-up (white ESTS authorize tabs on LB beta): the body
+   phase had no liveness bound. A head delivered, then the relay
+   channel died mid-body (embedder page frozen or closed, port
+   dropped by the 15 s keep-alive re-registration, pump loop killed)
+   and the pull parked forever: the tab sat white with zero events
+   past the head, and the favicon (a document subresource) never even
+   issued. The watchdog races each body pull against
+   RELAY_BODY_IDLE_MS and converts every silent-death subclass into
+   an honest stream error plus a zl:relayCancel to the embedder.
+   Port pinning keeps a replaced registration's channel alive while
+   its fetches still drain. */
+
+describe("relayFetch body-idle watchdog (#681 follow-up)", () => {
+  const errOf = (p: Promise<unknown>) =>
+    p.then(
+      () => {
+        throw new Error("expected rejection");
+      },
+      (e: Error) => e,
+    );
+
+  it("errors the body after the idle bound, cancels upstream instead of parking", async () => {
+    const p = reg();
+    vi.useFakeTimers();
+    try {
+      const respP = relayFetch("https://login.example/authorize", { method: "GET", headers: new Headers() }, "w1");
+      const rid = (p.posted[0] as { rid: number }).rid;
+      p.deliver(head(rid, { setCookies: [] }));
+      const resp = await respP;
+      /* head landed, channel goes silent: no chunk, no end, no error */
+      const readP = resp!.body!.getReader().read();
+      await vi.advanceTimersByTimeAsync(RELAY_BODY_IDLE_MS + 1);
+      const err = await errOf(readP);
+      expect(err.message).toContain("relay body idle");
+      expect(p.posted.some((m) => (m as { type?: string }).type === "zl:relayCancel")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps serving when frames arrive before the idle bound", async () => {
+    const p = reg();
+    vi.useFakeTimers();
+    try {
+      const respP = relayFetch("https://ddg.example/", { method: "GET", headers: new Headers() }, "w2");
+      const rid = (p.posted[0] as { rid: number }).rid;
+      p.deliver(head(rid));
+      const resp = await respP;
+      const enc = new TextEncoder();
+      const readP = resp!.body!.getReader().read();
+      await vi.advanceTimersByTimeAsync(RELAY_BODY_IDLE_MS - 1);
+      p.deliver({ type: "zl:relayChunk", rid, bytes: enc.encode("ok") });
+      const first = await readP;
+      expect(new TextDecoder().decode(first!.value as Uint8Array)).toBe("ok");
+      p.deliver({ type: "zl:relayEnd", rid });
+      const done = await resp!.body!.getReader().read();
+      expect(done!.done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("relay port pinning across re-registration (#681 follow-up)", () => {
+  it("still serves in-flight fetches on the replaced port after a newer registration", async () => {
+    const portA = reg();
+    const respP = relayFetch("https://outlook.example/mail/", { method: "GET", headers: new Headers() }, "w3");
+    const rid = (portA.posted[0] as { rid: number }).rid;
+    portA.deliver(head(rid));
+    const resp = await respP;
+    /* the 15 s keep-alive re-registration replaces hostPort mid-body */
+    const portB = reg();
+    expect(portB).not.toBe(portA);
+    const enc = new TextEncoder();
+    portA.deliver({ type: "zl:relayChunk", rid, bytes: enc.encode("hel") });
+    portA.deliver({ type: "zl:relayChunk", rid, bytes: enc.encode("lo") });
+    portA.deliver({ type: "zl:relayEnd", rid });
+    expect(await resp!.text()).toBe("hello");
+  });
+});

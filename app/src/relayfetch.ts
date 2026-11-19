@@ -50,6 +50,17 @@ type RelayMsg =
 
 let hostPort: MessagePort | null = null;
 let ridSeq = 0;
+/* #681 follow-up: the LB embedder re-registers its relay every 15 s
+   (keep-alive) plus on relayLost/controllerchange heals. An in-flight
+   fetch can still be pumping chunks through the PREVIOUS port when
+   the replacement lands in hostPort; without a strong reference the
+   worker may collect the old port (and its entangled embedder twin)
+   mid-body, killing the channel silently and parking the page as a
+   white tab. Pin the most recent registered ports so replaced ports
+   stay alive while their fetches drain; a genuinely dead channel is
+   still converted to an honest error by the body-idle watchdog. */
+const pinnedPorts: MessagePort[] = [];
+const PINNED_PORT_LIMIT = 8;
 const waiters = new Map<number, (m: RelayMsg) => void>();
 /* #511: WebSocket-over-relay subscribers. The zl:ws* frames are
    typed and disjoint from fetch replies (the dispatch keys on the
@@ -188,6 +199,10 @@ export function relayOnReRegister(fn: () => void): void {
 
 export function relayRegister(port: MessagePort, credits?: unknown): void {
   hostPort = port;
+  /* #681 follow-up: keep a reference to the port beyond hostPort so a
+     re-registration cannot orphan an in-flight fetch's channel. */
+  pinnedPorts.push(port);
+  if (pinnedPorts.length > PINNED_PORT_LIMIT) pinnedPorts.shift();
   /* #470: only an embedder that understands byte credits receives
      them; legacy registrations use the bounded non-cooperative queue. */
   hostCredits = credits === 1;
@@ -218,6 +233,17 @@ export function relayAvailable(): boolean {
     channel, untransportable body) so the caller falls back to wisp. */
 /** Longest wait for the embedder's first answer on a relayed fetch. */
 export const RELAY_HEADER_DEADLINE_MS = 60_000;
+/* #681 follow-up (white ESTS authorize tabs): the header deadline
+   bounds only the FIRST frame. Once a head is delivered, a channel
+   that dies mid-body (embedder page frozen/closed, port collected at
+   re-registration, pump loop killed) parks the body pull forever:
+   the response has partial head bytes, so only the outer body-stall
+   bound would fire much later, and the tab sits white with no DIAG
+   evidence. Each body pull races a liveness deadline; a breach is an
+   honest stream error plus a DIAG row, so every silent subclass dies
+   visibly. Legit slow origins lose nothing: the outer body-stall
+   bound already kills a body this idle. */
+export const RELAY_BODY_IDLE_MS = 20_000;
 export const RELAY_UPLOAD_HEADER_DEADLINE_MS = 600_000;
 /** #470: bytes the SW grants a crediting embedder up front and back
     per drained chunk, so the producer can pace its reads. */
@@ -544,12 +570,40 @@ async function relayFetchRaw(
     }
     const stream = nullBody ? null : new ReadableStream<Uint8Array>({
       async pull(controller) {
-        let m: RelayMsg;
+        /* #681 follow-up: race the frame wait against the body-idle
+           deadline, re-armed per pull: any gap longer than the bound
+           means the channel died mid-body (port collected, page
+           frozen, pump gone), so error the stream honestly instead of
+           parking the page on a white tab. */
+        let idleTimer: ReturnType<typeof setTimeout> | undefined;
+        const idle = new Promise<"relay-body-idle">((resolve) => {
+          idleTimer = setTimeout(() => resolve("relay-body-idle"), RELAY_BODY_IDLE_MS);
+        });
+        let m: RelayMsg | "relay-body-idle";
         try {
-          m = await take();
+          m = await Promise.race([take(), idle]);
         } catch (err) {
+          clearTimeout(idleTimer);
           cleanup();
           controller.error(err);
+          return;
+        }
+        clearTimeout(idleTimer);
+        if (m === "relay-body-idle") {
+          const message = "relay body idle: no frames for " + RELAY_BODY_IDLE_MS + "ms; channel died mid-body";
+          DIAG.emit({
+            traceId,
+            requestId: traceId,
+            category: "TRANSPORT",
+            cause: "proxy",
+            severity: "warning",
+            stage: "UPSTREAM_RESPONSE",
+            message,
+            url: dest,
+          });
+          cleanup();
+          cancelUpstream();
+          controller.error(new Error(message));
           return;
         }
         if (m.type === "zl:relayChunk") {
