@@ -67,6 +67,7 @@ import {
   contextOf,
   establishContext,
   establishFromClientUrl,
+  latestWindowContext,
   resolveRelative,
   VCTX_CAP,
   type VirtualContext,
@@ -2184,6 +2185,47 @@ async function rehydrateClientContext(
   });
   return ctx;
 }
+
+/** Last-resort virtual home for a same-origin path issued by a child realm
+    of a proxied page that has no context of its own (blob: challenge
+    iframes/workers - the CF challenge platform's runtime shape). The host
+    shell (a top-level window parked on a non-engine path like "/?url=...")
+    is explicitly NOT a fallback target: its same-origin requests are the
+    embedder's own assets and must keep the #101 passthrough to dist.
+    Returns null on unknown client, shell client, no open proxied window,
+    or any error - every failure keeps the honest passthrough. */
+async function fallbackRealmDest(
+  clientId: string | undefined,
+  url: URL,
+): Promise<string | null> {
+  if (!clientId) return null;
+  let client = null as null | Awaited<ReturnType<typeof self.clients.get>>;
+  try {
+    client = await raceBoot(
+      self.clients.get(clientId),
+      "realm fallback client lookup",
+      PRE_DEADLINE_BOUND_MS,
+    );
+  } catch {
+    return null;
+  }
+  if (!client || !client.url) return null;
+  try {
+    if (client.type === "window") {
+      const cu = new URL(client.url, self.location.origin);
+      const frameType = (client as unknown as { frameType?: string }).frameType;
+      if (frameType === "top-level" && cu.origin === self.location.origin && !isEnginePath(cu.pathname))
+        return null; /* the host shell: passthrough stays */
+    }
+    const last = latestWindowContext(VCTX);
+    if (!last) return null;
+    const dest = new URL(url.pathname + url.search, last.currentUrl).href;
+    if (!/^https?:$/.test(new URL(dest).protocol)) return null;
+    return dest;
+  } catch {
+    return null;
+  }
+}
 function navOutcome(
   e: FetchEvent,
   url: URL,
@@ -3583,27 +3625,45 @@ export function handleFetch(e: FetchEvent): void {
                 "zeolite: undecodable legacy route",
               );
             } else {
-              /* #101: the silent passthrough. Neither the client's
-                 virtual context nor the referrer names a home for this
-                 same-origin path (an unrewritten embed page, a client
-                 the context cap dropped, or a child realm the guard
-                 never reached), so the browser serves it - on the
-                 proxy origin that is a 404. Escape row, not a guess:
-                 dest records what the browser will actually request. */
-              netLogPush({
-                method: e.request.method,
-                traceId: DIAG.trace(e.resultingClientId || e.clientId),
-                path: url.pathname + url.search,
-                dest: e.request.url,
-                status: 0,
-                rtype: classifyRtype(reqDest(e.request), ""),
-                ms: -1,
-                bytes: -1,
-                verdict: "escape: same-origin unknown home",
-                transport: "browser",
-                detail: { internalUrl: url.pathname + url.search, ttfb: -1 },
-              });
-              return fetch(e.request);
+              /* #101 fallback: a context-less CHILD realm of a proxied page
+                 (a blob: challenge iframe/worker has no decodable client
+                 URL, and its referrer is opaque) lands here with a
+                 root-relative site path - Cloudflare's /cdn-cgi/ challenge
+                 scripts are the live case. Passing through makes the
+                 origin server answer 404 with no content-type plus
+                 nosniff, which MIME-blocks the script and kills the
+                 challenge before it boots. Resolve against the most
+                 recent live window context instead; the host shell
+                 (top-level window on a non-engine path) keeps the
+                 passthrough below so its own assets (/main.js, ...) still
+                 serve from dist. Fail closed: unknown client, no open
+                 proxied window, or any error keeps the old passthrough. */
+              const realmDest = await fallbackRealmDest(e.clientId, url);
+              if (realmDest) {
+                dest0 = realmDest;
+              } else {
+                /* #101: the silent passthrough. Neither the client's
+                   virtual context nor the referrer names a home for this
+                   same-origin path (an unrewritten embed page, a client
+                   the context cap dropped, or a child realm the guard
+                   never reached), so the browser serves it - on the
+                   proxy origin that is a 404. Escape row, not a guess:
+                   dest records what the browser will actually request. */
+                netLogPush({
+                  method: e.request.method,
+                  traceId: DIAG.trace(e.resultingClientId || e.clientId),
+                  path: url.pathname + url.search,
+                  dest: e.request.url,
+                  status: 0,
+                  rtype: classifyRtype(reqDest(e.request), ""),
+                  ms: -1,
+                  bytes: -1,
+                  verdict: "escape: same-origin unknown home",
+                  transport: "browser",
+                  detail: { internalUrl: url.pathname + url.search, ttfb: -1 },
+                });
+                return fetch(e.request);
+              }
             }
           } else {
             dest0 = refDest;
@@ -4732,7 +4792,7 @@ export function handleFetch(e: FetchEvent): void {
             /* #487: one conservative planner for cache and live responses.
                MIME, KDL behavior, and CDN-CGI gates must not diverge
                between first load and reload. */
-            const plan = planResponseTransit(decision, hit.headers.get("content-type") ?? "", dest, target, policyRule);
+            const plan = planResponseTransit(decision, hit.headers.get("content-type") ?? "", dest, target, policyRule, hit.headers);
             const dec = plan.decision;
             if (experimentalEnabled("adaptiveTransit"))
               traceDecision({ subsystem: "transport", rule: "adaptive-shadow",
@@ -4817,7 +4877,10 @@ export function handleFetch(e: FetchEvent): void {
                bootstrap, no cookie/storage virtualization). */
             /* #414: HTML MIME alone does not make a document; the
                live-path twin below gates the same way. */
-            if (DOC_DESTS.has(dest) && isHtml(hit) && hit.body && !chNative) {
+            /* dec.mode === "RewriteFallback" keeps the gate in lockstep with the
+               planner: a challenge-flagged (cf-mitigated) or /cdn-cgi/ document
+               decided native above serves verbatim here too. */
+            if (DOC_DESTS.has(dest) && isHtml(hit) && hit.body && !chNative && dec.mode === "RewriteFallback") {
               const chRules = await siteRules();
               const chRule = ruleFor(chRules, target);
               const csInject = csInjectUrls(target, e.request, e.request.referrer);
@@ -5748,7 +5811,7 @@ export function handleFetch(e: FetchEvent): void {
           /* #487: same response selector as the page-cache hit path.
              It keeps rewrite behavior independent from Wisp/relay
              transport rules, and never auto-demotes required passes. */
-          const plan = planResponseTransit(decision, resp.headers.get("content-type") ?? "", dest, target, policyRule);
+          const plan = planResponseTransit(decision, resp.headers.get("content-type") ?? "", dest, target, policyRule, resp.headers);
           const dec = plan.decision;
           if (experimentalEnabled("adaptiveTransit"))
             traceDecision({ subsystem: "transport", rule: "adaptive-shadow",
@@ -5953,7 +6016,10 @@ export function handleFetch(e: FetchEvent): void {
             CAPTCHA_TRACE.observe({ attemptId: ratid, stage: "VERIFY_OUTCOME", outcome: outcomeOf(resp.status), url: target, note: "pass-challenge re-anchored" });
             return new Response(null, { status: 302, headers: { location: challengeReanchor } });
           }
-          if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body && !cdnCgiNative) {
+          /* dec.mode === "RewriteFallback" keeps the gate in lockstep with the
+             planner: a cf-mitigated challenge document (CF_CHALLENGE_VERBATIM)
+             or /cdn-cgi/ document serves verbatim, never rewrite-streamed. */
+          if (DOC_DESTS.has(dest) && (isHtml(resp) || respCt === "") && resp.body && !cdnCgiNative && dec.mode === "RewriteFallback") {
             curStage = "REWRITE_STARTED";
             DIAG.stage(traceId, "REWRITE_STARTED", { url: target, message: "html rewrite stream wired" });
             traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });
