@@ -614,16 +614,40 @@ export function originPinningRelaxed(pageBase: string | undefined | null): boole
   }
 }
 
-export async function rewriteJsBody(js: string, base: string, pageBase?: string): Promise<string> {
+/* #451: reCAPTCHA widget release scripts are exempt from the #449
+   literal skip even when their body pins origins (the gstatic release
+   self-check regex). Their single RPC-base literal
+   ("https://www.google.com/recaptcha/api2/") must stay engine-mediated:
+   skipped, the widget mints real google.com iframe URLs, the anchor
+   loads as a genuine cross-origin document, the #112 co= seam never
+   fires, and every press carries the deployment origin into the
+   site-key domain check ("Invalid API parameter(s). Try reloading the
+   page."). The gapi-class protection stays for every other pinned
+   body; the anchored regex literal itself is never rewritten (#122),
+   so the release self-check is untouched. */
+const RECAPTCHA_RELEASE_SCRIPT_RE =
+  /^https:\/\/www\.(?:gstatic\.com|google\.com|recaptcha\.net)\/recaptcha\/releases\/[\w-]+\/recaptcha__[\w-]+\.js$/;
+export function recaptchaReleaseScript(url: string | undefined | null): boolean {
+  if (!url) return false;
+  try {
+    return RECAPTCHA_RELEASE_SCRIPT_RE.test(new URL(url).href);
+  } catch {
+    return false;
+  }
+}
+
+export async function rewriteJsBody(js: string, base: string, pageBase?: string, relaxPinnedLiteral = false): Promise<string> {
   const mod = await rewriter();
   // The owner page chooses policy; a third-party CDN's hostname must not.
   // #456 gate 4: the learned mark rides the same owner-page rule.
   const policy = resolveLocationPolicy(pageBase, pageBase ? ruleFor(await siteRules(), pageBase) : {});
   const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined);
   /* #618: the owner page's host relaxes the #449 literal skip for
-     this one-shot pass (older WASM without the setter keeps the
-     skip: fail-safe to the current behavior). */
-  if (originPinningRelaxed(pageBase)) rw.set_origin_pinning_skip?.(false);
+     this one-shot pass. #451: the caller may pass the same relaxation
+     out-of-band for a reCAPTCHA release script (the arms key it on the
+     script URL, not the resolution base). Older WASM without the
+     setter keeps the skip: fail-safe to the current behavior. */
+  if (originPinningRelaxed(pageBase) || relaxPinnedLiteral) rw.set_origin_pinning_skip?.(false);
   try {
     if (configureLocation(rw, policy) && rw.rewrite_script) {
       const out = rw.rewrite_script(js);

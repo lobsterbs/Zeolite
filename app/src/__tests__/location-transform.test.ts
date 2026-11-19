@@ -70,3 +70,16 @@ describe("#618 origin-pinning relaxation wiring", () => {
     expect(state.pinSkip).toEqual([["https://accounts.google.com/signup", false]]);
   });
 });
+
+describe("#451 reCAPTCHA release-script literal-pass relief wiring", () => {
+  const RELEASE = "https://www.gstatic.com/recaptcha/releases/4i3aN5wAweL7i3ADI7BSX4B-/recaptcha__en.js";
+  it("runs the literal pass for a pinned release script when the caller passes the carve-out", async () => {
+    await rewriteJsBody("var va=/^https?:/;", RELEASE, "https://www.google.com/sorry/index", true);
+    expect(state.pinSkip).toEqual([[RELEASE, false]]);
+    expect(state.freed).toBe(1);
+  });
+  it("keeps the #449 skip without the flag (the gapi class)", async () => {
+    await rewriteJsBody("var va=/^https?:/;", "https://apis.google.com/js/client.js", "https://www.google.com/");
+    expect(state.pinSkip).toEqual([]);
+  });
+});
