@@ -277,6 +277,7 @@ export function planResponseTransit(
   dest: string,
   target: string,
   override: BehaviorOverride | null = null,
+  respHeaders?: { get(name: string): string | null },
 ): AdaptiveTransitPlan {
   let decision = refineWithContent(initial, contentType, dest);
   let evidence: AdaptiveEvidence = initial.mode === "RewriteFallback" && initial.reason === "POLICY_REWRITE"
@@ -304,6 +305,19 @@ export function planResponseTransit(
      into a transportable one. */
   if (decision.mode === "RewriteFallback" && isCdnCgiUrl(target)) {
     decision = { mode: "NativeTransit", reason: "CDN_CGI_NATIVE" };
+    evidence = "challenge-namespace";
+  }
+
+  /* cf-mitigated: challenge response header flags Cloudflare's managed
+     interstitial document. Same byte-hostile class as the /cdn-cgi/
+     namespace above (the nonce CSP and inline _cf_chl_opt data corrupt
+     under any rewrite, and the widget then dies on its own "unable to
+     connect"), so a challenge-flagged response serves verbatim. This
+     emits the CF_CHALLENGE_VERBATIM reason the NativeReason taxonomy
+     reserved for exactly this class. Detection only - the challenge is
+     never solved or bypassed. Never turns a Blocked request transportable. */
+  if (decision.mode === "RewriteFallback" && respHeaders && isChallengeMitigated(respHeaders)) {
+    decision = { mode: "NativeTransit", reason: "CF_CHALLENGE_VERBATIM" };
     evidence = "challenge-namespace";
   }
 
