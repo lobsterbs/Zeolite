@@ -1073,9 +1073,27 @@ export function decodePath(path: string): string | null {
     scan without the SW-realm key is the attacker's problem, and a
     key that passes the gate is by definition the minting key. */
 export function recoverPath(path: string): string | null {
-  const i = path.indexOf(prefix);
+  const out = recoverPathFrom(path, path.indexOf(prefix), prefix);
+  if (out) return out;
+  /* #684: a path-preserving split route minted under the reserved
+     legacy "zl" segment (the same rule decodeLegacyRoute applies to
+     two-segment routes, #428/#113) must decode under ANY configured
+     prefix. Without this retry a script-src split route minted while
+     the prefix was "/zl/" strands when the boot configures "/j/":
+     the request falls to the relative-recovery seam, resolves against
+     the page's virtual origin and leaves for the WRONG host
+     (https://<page-host>/zl/<token>/...) - the subresource-serve
+     stall class, never a decodable route. MAC-gated like every decode:
+     a foreign key or garbage tail still fails closed to null. */
+  if (prefix !== "/zl/") return recoverPathFrom(path, path.indexOf("/zl/"), "/zl/");
+  return null;
+}
+
+/** recoverPath's decode attempt at one prefix position. i < 0 (the
+    prefix is absent) is a plain miss. */
+function recoverPathFrom(path: string, i: number, seg: string): string | null {
   if (i < 0) return null;
-  const tail = path.slice(i + prefix.length).split(/[?#]/)[0];
+  const tail = path.slice(i + seg.length).split(/[?#]/)[0];
   if (tail.length < 23 || tail.length > 2048) return null;
   // The appended plaintext can carry non-b64u chars ("/", ".", ":");
   // decode only up to the first one - every candidate L sits before
