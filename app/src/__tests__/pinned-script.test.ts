@@ -41,7 +41,7 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
   };
 });
 
-import { originPinningRelaxed, scriptPinsOrigins } from "../transform";
+import { originPinningRelaxed, recaptchaReleaseScript, scriptPinsOrigins } from "../transform";
 import { netLog, netLogAnnotateRewrite, netLogPush } from "../netlog";
 
 const PINNED = "var va=/^https?:\\/x/;";
@@ -101,5 +101,23 @@ describe("#618 origin-pinning relaxation", () => {
     expect(originPinningRelaxed(null)).toBe(false);
     expect(originPinningRelaxed("")).toBe(false);
     expect(originPinningRelaxed("not a url")).toBe(false);
+  });
+});
+
+describe("#451 reCAPTCHA release-script carve-out", () => {
+  it("recaptchaReleaseScript matches only widget release scripts, failing closed", () => {
+    expect(recaptchaReleaseScript("https://www.gstatic.com/recaptcha/releases/4i3aN5wAweL7i3ADI7BSX4B-/recaptcha__en.js")).toBe(true);
+    expect(recaptchaReleaseScript("https://www.recaptcha.net/recaptcha/releases/abc123/recaptcha__de.js")).toBe(true);
+    expect(recaptchaReleaseScript("https://www.google.com/recaptcha/releases/abc123/recaptcha__fr.js")).toBe(true);
+    expect(recaptchaReleaseScript("https://www.gstatic.com/recaptcha/releases/abc123/recaptcha__en-GB.js")).toBe(true);
+    expect(recaptchaReleaseScript("https://www.google.com/recaptcha/enterprise.js")).toBe(false);
+    expect(recaptchaReleaseScript("https://apis.google.com/js/client.js")).toBe(false);
+    expect(recaptchaReleaseScript("https://evil.example/recaptcha/releases/abc123/recaptcha__en.js")).toBe(false);
+    expect(recaptchaReleaseScript("https://www.gstatic.com/recaptcha/releases/abc123/other.js")).toBe(false);
+    expect(recaptchaReleaseScript("https://www.gstatic.com/recaptcha/releases/abc123/recaptcha__en.js?x=1")).toBe(false);
+    expect(recaptchaReleaseScript(undefined)).toBe(false);
+    expect(recaptchaReleaseScript(null)).toBe(false);
+    expect(recaptchaReleaseScript("")).toBe(false);
+    expect(recaptchaReleaseScript("not a url")).toBe(false);
   });
 });

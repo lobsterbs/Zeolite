@@ -32,7 +32,7 @@ import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, isChallengeMitigated, type TransitDecision } from "./transit";
 import { loadPolicy, behaviorMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
-import { boundedBody, cssRewriteStream, isCss, isHtml, isJs, originPinningRelaxed, passthroughStream, rawFrom, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
+import { boundedBody, cssRewriteStream, isCss, isHtml, isJs, originPinningRelaxed, passthroughStream, rawFrom, recaptchaReleaseScript, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
 import { applyOnRequest, applyOnResponse } from "./plugins";
 import { applyRules, loadRules, siteUaFor, type GhosteryRedirect, type ResourceType } from "./rules";
@@ -4949,7 +4949,9 @@ export function handleFetch(e: FetchEvent): void {
               /* #449: origin-pinning skip telemetry for the cached
                  copy (the fresh path's twin). */
               /* #618: the fresh path's twin relaxation. */
-              const pinRelaxed = originPinningRelaxed(initiator);
+              /* #451: a reCAPTCHA widget release script relaxes the
+                 skip by its own URL (the sorry-wall press class). */
+              const pinRelaxed = originPinningRelaxed(initiator) || recaptchaReleaseScript(target);
               let pinnedScript = false;
               if (!pinRelaxed) {
                 try {
@@ -4974,7 +4976,7 @@ export function handleFetch(e: FetchEvent): void {
                 literalOut = null;
               } else {
                 try {
-                  src = await rewriteJsBody(src, cacheRewriteBase(hit, target), initiator);
+                  src = await rewriteJsBody(src, cacheRewriteBase(hit, target), initiator, recaptchaReleaseScript(target));
                   literalOut = src;
                 } catch (err) {
                   /* A wasm load failure must not break the hit: the
@@ -6176,7 +6178,11 @@ export function handleFetch(e: FetchEvent): void {
             /* #618: a relaxed owner page (accounts.google.com) runs
                the literal pass on pinned bodies too, so the probe and
                its skip telemetry stay off for it. */
-            const pinRelaxed = originPinningRelaxed(initiator);
+            /* #451: a reCAPTCHA widget release script relaxes the
+               skip by its own URL: unmediated, its RPC base literal
+               escapes to a real cross-origin anchor iframe and the
+               #112 co= seam never fires (the sorry-wall press class). */
+            const pinRelaxed = originPinningRelaxed(initiator) || recaptchaReleaseScript(target);
             let pinnedScript = false;
             if (!pinRelaxed) {
               try {
@@ -6212,7 +6218,7 @@ export function handleFetch(e: FetchEvent): void {
               literalOut = null;
             } else {
               try {
-                src = await rewriteJsBody(src, target, initiator);
+                src = await rewriteJsBody(src, target, initiator, recaptchaReleaseScript(target));
                 literalOut = src;
               } catch (err) {
                 literalOut = null;
