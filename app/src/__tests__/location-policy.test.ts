@@ -14,7 +14,7 @@ describe("location rewrite policy (#456)", () => {
     expect(locationPolicy(ruleFor(rules, "https://cdn.other/script.js")).mode).toBe("legacy");
   });
   it("rejects invalid modes and caps instead of silently enabling a policy", () => {
-    for (const spec of ['"auto"', '"hybrid" max-bytes=0', '"hybrid" max-bytes=2097153', '"hybrid" max-bytes=1.5']) {
+    for (const spec of ['"auto"', '"hybrid" max-bytes=0', '"hybrid" max-bytes=8388609', '"hybrid" max-bytes=1.5']) {
       const rules = rulesFromNodes(parseKdl('site "example.com" { location-rewrite ' + spec + ' }'));
       expect(locationPolicy(ruleFor(rules, "https://example.com")).mode).toBe("legacy");
     }
@@ -23,8 +23,8 @@ describe("location rewrite policy (#456)", () => {
     const kdl = readFileSync(new URL("../../public/siteconfig.kdl", import.meta.url), "utf8");
     const rules = rulesFromNodes(parseKdl(kdl));
     expect(Object.keys(rules)).toEqual(["play2048.co"]);
-    expect(locationPolicy(ruleFor(rules, "https://play2048.co/"))).toEqual({ mode: "hybrid", maxBytes: 512 * 1024 });
-    expect(locationPolicy(ruleFor(rules, "https://www.play2048.co/game"))).toEqual({ mode: "hybrid", maxBytes: 512 * 1024 });
+    expect(locationPolicy(ruleFor(rules, "https://play2048.co/"))).toEqual({ mode: "hybrid", maxBytes: 8 * 1024 * 1024 });
+    expect(locationPolicy(ruleFor(rules, "https://www.play2048.co/game"))).toEqual({ mode: "hybrid", maxBytes: 8 * 1024 * 1024 });
     /* Every other origin keeps the legacy default. */
     expect(locationPolicy(ruleFor(rules, "https://example.com/")).mode).toBe("legacy");
   });
