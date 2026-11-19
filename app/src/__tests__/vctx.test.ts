@@ -4,6 +4,7 @@ import {
   establishFromClientUrl,
   contextOf,
   establishContext,
+  latestWindowContext,
   resolveRelative,
   VCTX_CAP,
   type VirtualContext,
@@ -153,5 +154,29 @@ describe("Virtual context rehydration (issue #535)", () => {
     expect(resolveRelative(m, "b", "img/1.png")).toBe(
       "https://other.example/img/1.png",
     );
+  });
+});
+
+describe("latestWindowContext (CF challenge realm fallback)", () => {
+  it("returns undefined with no contexts at all", () => {
+    const m = new Map<string, VirtualContext>();
+    expect(latestWindowContext(m)).toBeUndefined();
+  });
+
+  it("skips worker contexts and returns the most recent window context", () => {
+    const m = new Map<string, VirtualContext>();
+    establishContext(m, "w-old", "https://old.example/", "worker");
+    establishContext(m, "doc-1", "https://site.example/page");
+    establishContext(m, "w-2", "https://w.example/w.js", "sharedworker");
+    const last = latestWindowContext(m);
+    expect(last?.clientId).toBe("doc-1");
+    expect(last?.currentUrl).toBe("https://site.example/page");
+  });
+
+  it("tracks the most recently established window context", () => {
+    const m = new Map<string, VirtualContext>();
+    establishContext(m, "a", "https://a.example/");
+    establishContext(m, "b", "https://b.example/");
+    expect(latestWindowContext(m)?.targetOrigin).toBe("https://b.example");
   });
 });

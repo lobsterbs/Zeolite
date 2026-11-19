@@ -115,6 +115,27 @@ export function resolveRelative(
   }
 }
 
+/** Last-resort home for a same-origin path issued by a realm the worker
+    cannot key to a context: a blob: challenge iframe/worker spawned by a
+    proxied page has no decodable client URL (establishFromClientUrl
+    installs nothing for opaque URLs) and its referrer is opaque too, so
+    its root-relative site paths (Cloudflare's /cdn-cgi/ challenge scripts
+    are the live case) would otherwise strand at the #101 passthrough and
+    the origin server's content-typeless 404 MIME-blocks the script.
+    Returns the most recently established window context (Map insertion
+    order), skipping worker contexts; undefined when no proxied window is
+    open, so the caller keeps the honest passthrough. Pure, total. */
+export function latestWindowContext(
+  map: Map<string, VirtualContext>,
+): VirtualContext | undefined {
+  let last: VirtualContext | undefined;
+  for (const c of map.values()) {
+    if (c.clientKind === "worker" || c.clientKind === "sharedworker") continue;
+    last = c;
+  }
+  return last;
+}
+
 /** Keep the context map bounded: past max entries the oldest
     (insertion-order) contexts drop. Pure, total, never throws. */
 export function capContexts(map: Map<string, VirtualContext>, max: number): void {
