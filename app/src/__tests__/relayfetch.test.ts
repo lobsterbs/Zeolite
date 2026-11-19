@@ -196,10 +196,13 @@ describe("relayFetch body-idle watchdog (#681 follow-up)", () => {
       const rid = (p.posted[0] as { rid: number }).rid;
       p.deliver(head(rid, { setCookies: [] }));
       const resp = await respP;
-      /* head landed, channel goes silent: no chunk, no end, no error */
-      const readP = resp!.body!.getReader().read();
+      /* head landed, channel goes silent: no chunk, no end, no error.
+         Attach the rejection handler SYNCHRONOUSLY: the read rejects
+         mid-advance and an unattached macrotask crossing triggers
+         Node's unhandledRejection report. */
+      const errP = errOf(resp!.body!.getReader().read());
       await vi.advanceTimersByTimeAsync(RELAY_BODY_IDLE_MS + 1);
-      const err = await errOf(readP);
+      const err = await errP;
       expect(err.message).toContain("relay body idle");
       expect(p.posted.some((m) => (m as { type?: string }).type === "zl:relayCancel")).toBe(true);
     } finally {
@@ -215,14 +218,17 @@ describe("relayFetch body-idle watchdog (#681 follow-up)", () => {
       const rid = (p.posted[0] as { rid: number }).rid;
       p.deliver(head(rid));
       const resp = await respP;
+      /* one reader for the whole body: a second getReader() would
+         lock-error on the held stream */
+      const reader = resp!.body!.getReader();
       const enc = new TextEncoder();
-      const readP = resp!.body!.getReader().read();
+      const readP = reader.read();
       await vi.advanceTimersByTimeAsync(RELAY_BODY_IDLE_MS - 1);
       p.deliver({ type: "zl:relayChunk", rid, bytes: enc.encode("ok") });
       const first = await readP;
       expect(new TextDecoder().decode(first!.value as Uint8Array)).toBe("ok");
       p.deliver({ type: "zl:relayEnd", rid });
-      const done = await resp!.body!.getReader().read();
+      const done = await reader.read();
       expect(done!.done).toBe(true);
     } finally {
       vi.useRealTimers();
