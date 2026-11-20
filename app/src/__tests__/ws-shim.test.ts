@@ -30,6 +30,15 @@ afterEach(() => {
   ctlState.ctl = null;
 });
 
+/* Port messages and timer ticks come from separate task sources, so a
+   fixed number of ticks can observe the shim before a posted message
+   lands; poll the observable instead. Bound is generous, not load-
+   sensitive, and a miss still fails the pending assertion. */
+const tick = () => new Promise((r) => setTimeout(r, 0));
+async function settle(cond: () => boolean) {
+  for (let i = 0; !cond() && i < 200; i++) await tick();
+}
+
 describe("page WebSocket shim (#54 parity)", () => {
   it("adopts the real prototype and keeps on-handlers plain own props", async () => {
     const Real = globalThis.WebSocket;
@@ -75,8 +84,8 @@ describe("page WebSocket shim abnormal close (#61)", () => {
     const port = port2 as MessagePort | null;
     port?.postMessage({ ev: "open", protocol: "chat" });
     port?.postMessage({ ev: "close", code: 1006, clean: false });
-    await new Promise((r) => setTimeout(r, 0)); /* let port delivery flush */
-    await new Promise((r) => setTimeout(r, 0)); /* let queued events flush */
+    await settle(() => es.readyState === 3); /* let port delivery flush */
+    await tick(); /* let queued events flush */
     expect(order).toEqual(["open", "close"]);
     expect(es.readyState).toBe(3);
     expect(seen).toEqual({ code: 1006, wasClean: false });
@@ -103,8 +112,7 @@ describe("page WebSocket shim send and close states (#460/#461)", () => {
     expect(() => es.send("a")).toThrowError(expect.objectContaining({ name: "InvalidStateError" }));
     const port = port2 as MessagePort | null;
     port?.postMessage({ ev: "open", protocol: "chat" });
-    await new Promise((r) => setTimeout(r, 0)); /* port delivery */
-    await new Promise((r) => setTimeout(r, 0)); /* queued events */
+    await settle(() => es.readyState === 1); /* port delivery */
     expect(es.readyState).toBe(1);
     es.send("open");
     es.close();
@@ -113,7 +121,7 @@ describe("page WebSocket shim send and close states (#460/#461)", () => {
     expect(() => es.send("é")).not.toThrow();
     expect(es.bufferedAmount).toBe(beforeCloseSend + 2);
     port?.postMessage({ ev: "close", code: 1000, clean: true });
-    await new Promise((r) => setTimeout(r, 0));
+    await settle(() => es.readyState === 3);
     expect(es.readyState).toBe(3);
     const beforeClosedSend = es.bufferedAmount;
     expect(() => es.send("é")).not.toThrow();
@@ -131,7 +139,7 @@ describe("page WebSocket shim send and close states (#460/#461)", () => {
     const WS = w.WebSocket as new (u: string) => WebSocket;
     const ws = new WS("wss://relay.example/ws");
     port.postMessage({ ev: "open", protocol: "chat" });
-    await new Promise((r) => setTimeout(r, 0));
+    await settle(() => ws.readyState === 1);
     ws.send("é");
     expect(ws.bufferedAmount).toBe(2);
     ws.send(new Uint8Array([1, 2, 3]));
@@ -139,14 +147,14 @@ describe("page WebSocket shim send and close states (#460/#461)", () => {
     ws.send(new Blob(["ab"]));
     expect(ws.bufferedAmount).toBe(7);
     port.postMessage({ ev: "drain", bytes: 2 });
-    await new Promise((r) => setTimeout(r, 0));
+    await settle(() => ws.bufferedAmount === 5);
     expect(ws.bufferedAmount).toBe(5);
     port.postMessage({ ev: "drain", bytes: 5 });
-    await new Promise((r) => setTimeout(r, 0));
+    await settle(() => ws.bufferedAmount === 0);
     expect(ws.bufferedAmount).toBe(0);
     port.postMessage({ ev: "drain", bytes: 500 });
     await new Promise((r) => setTimeout(r, 0));
-    expect(ws.bufferedAmount).toBe(0); /* never underflows */
+    expect(ws.bufferedAmount).toBe(0); /* never underflows: late ack keeps 0 either way */
   });
 
   it("posts converted close arguments to the bridge", async () => {
@@ -388,14 +396,14 @@ describe("page WebSocket shim shared-backed views (#493)", () => {
     expect(() => es.send("queued")).toThrow(DOMException);
     expect(es.bufferedAmount).toBe(0);
     port?.postMessage({ ev: "open", protocol: "chat" });
-    await new Promise((r) => setTimeout(r, 0));
+    await settle(() => (es as WebSocket).readyState === 1);
     /* OPEN: shared views still throw, unshared payloads still post */
     expect(() => es.send(new Uint8Array(new SharedArrayBuffer(4)))).toThrow(TypeError);
     expect(() => es.send(new DataView(new SharedArrayBuffer(8)))).toThrow(TypeError);
     es.send("text");
     es.send(new ArrayBuffer(4));
     es.send(new Uint8Array(new ArrayBuffer(4)));
-    await new Promise((r) => setTimeout(r, 0));
+    await settle(() => posted.filter((m) => (m as { op?: string })?.op === "send").length === 3);
     const sends = posted.filter((m) => (m as { op?: string })?.op === "send");
     expect(sends).toHaveLength(3);
   });
@@ -416,7 +424,7 @@ describe("page WebSocket shim shared-backed views (#493)", () => {
     const es = new WS("wss://relay.example/ws");
     const port = port2 as MessagePort | null;
     port?.postMessage({ ev: "open", protocol: "chat" });
-    await new Promise((r) => setTimeout(r, 0));
+    await settle(() => (es as WebSocket).readyState === 1);
     (es as WebSocket).close();
     let err: unknown = null;
     try {
