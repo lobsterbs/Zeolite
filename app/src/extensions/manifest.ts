@@ -557,6 +557,11 @@ export function resolveManifestI18n(
   };
   apply("name", parsed.name, (t) => {
     parsed.name = t;
+    /* #523: the raw copy IS the manifest the detail surfaces expose
+       (rec.manifest, runtime.getManifest, the pagejs bridge); leaving
+       the token there rendered Tampermonkey 5.5.0's own options
+       header as "__MSG_extName__ by Jan Biniok". */
+    raw.name = t;
   });
   if (typeof raw.description === "string") {
     apply("description", raw.description, (t) => {

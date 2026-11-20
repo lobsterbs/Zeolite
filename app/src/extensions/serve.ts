@@ -27,7 +27,7 @@ import { PAGE_BRIDGE_SOURCE } from "./pagebridge";
 import { ACTION } from "./action";
 import { pageCallList, pageNamespaceList } from "./pageapi";
 import { devtoolsBindingOf, registerDevtoolsClient } from "./devtools";
-import { recordI18n, resolvePackageI18n, substituteCss } from "./i18n";
+import { recordI18n, resolvePackageI18n, substituteCss, substituteManifestStrings } from "./i18n";
 import type { ExtensionRecord } from "./types";
 
 export const EXT_ROUTE = "/zl-ext/";
@@ -498,8 +498,11 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
         base: EXT_ROUTE + sr.id,
         /* #560: the manifest is embedded so the page bridge can
            answer runtime.getManifest synchronously (Chrome parity;
-           extension pages read it during boot). */
-        manifest: rec.manifest,
+           extension pages read it during boot). #523: embedded
+           localized - records installed before the name fix still
+           carry raw __MSG_*__ tokens on this copy, and Chrome serves
+           getManifest localized to the active UI locale. */
+        manifest: substituteManifestStrings(rec.manifest, i18n),
         calls: pageCallList(rec, devtoolsBindingOf(ctx?.clientId) !== null),
         ns: pageNamespaceList(rec),
         i18n: { locale: i18n.locale, messages: i18n.messages },

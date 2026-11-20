@@ -62,6 +62,19 @@ describe("manifest __MSG_*__ i18n placeholders (#504)", () => {
     expect(warnings).toEqual([]);
   });
 
+  it("carries the resolved name on the manifest copy getManifest exposes (#523)", async () => {
+    const { rec } = await installWith(i18nManifest(), {
+      "_locales/en/messages.json": JSON.stringify({
+        extName: { message: "Raw Copy Name" },
+        extDesc: { message: "A resolved description." },
+      }),
+    });
+    /* rec.manifest IS the copy runtime.getManifest and the pagejs
+       bridge embed; a token left there renders literally in
+       extension UIs (Tampermonkey 5.5.0's options header). */
+    expect((rec.manifest as Record<string, unknown>).name).toBe("Raw Copy Name");
+  });
+
   it("keeps the literal placeholder and warns when the messages file is missing", async () => {
     const { rec, warnings } = await installWith(i18nManifest(), {});
     expect(rec.name).toBe("__MSG_extName__");
