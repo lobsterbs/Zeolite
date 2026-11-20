@@ -336,7 +336,7 @@ describe("argument schemas (#516 slice 3)", () => {
     });
     expect(fromCb).toEqual({ cbk: 7 });
     /* a synchronous implementation wires its callback asynchronously too */
-    let fromSync = "unset";
+    let fromSync: unknown = "unset";
     await new Promise<void>((done) => {
       expect(call("runtime.getURL", "x", (u: unknown) => {
         fromSync = u;
