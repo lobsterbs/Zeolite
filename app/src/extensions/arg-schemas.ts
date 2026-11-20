@@ -354,7 +354,7 @@ export function resolveCallArgs(schema: ArgSchema, raw: unknown[]): ResolvedCall
   while (end > schema.min && raw[end - 1] === undefined) end--;
   let callback: ((value?: unknown) => void) | undefined;
   if (end === schema.max + 1 && typeof raw[end - 1] === "function") {
-    callback = raw[end - 1];
+    callback = raw[end - 1] as (value?: unknown) => void;
     end--;
   }
   if (end === raw.length) return { args: raw };
