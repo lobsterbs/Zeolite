@@ -126,3 +126,116 @@ describe("rooted extension pages (#560)", () => {
     expect(PAGE_BRIDGE_SOURCE).toContain('"zlExt=" + cfg.ext');
   });
 });
+
+/* Fragment-link guard: the #560 base tag must not turn fragment-only
+   hrefs into tab-leaving navigations to the package root. Rooted
+   extension pages reproduce the reported defect exactly (the served
+   page's own UI is full of href="#" anchors), so the guard's
+   real-origin replay semantics get a behavior-level test here, driven
+   through the real PAGE_BRIDGE_SOURCE in a DOM-free sandbox. */
+describe("fragment-link guard (rooted extension pages)", () => {
+  type ClickH = (ev: {
+    defaultPrevented: boolean;
+    preventDefault(): void;
+    target: { closest(sel: string): { getAttribute(n: string): string } | null };
+  }) => void;
+
+  function install(
+    docUrl: string,
+  ): {
+    handler: ClickH | null;
+    hashReplays: string[];
+    scrolls: number[];
+  } {
+    const id = "a".repeat(31) + "b";
+    let handler: ClickH | null = null;
+    const hashReplays: string[] = [];
+    const scrolls: number[] = [];
+    const document = {
+      baseURI: "https://sw.example" + EXT_ROUTE + id + "/",
+      addEventListener(type: string, fn: ClickH, capture: boolean) {
+        if (type === "click" && capture === true) handler = fn;
+      },
+    };
+    const location = {
+      href: docUrl,
+      set hash(v: string) {
+        hashReplays.push(v);
+      },
+    };
+    const window = { scrollTo(x: number, y: number) { scrolls.push(x, y); } };
+    const installBridge = new Function(
+      "ZL_PAGE_CFG", "window", "navigator", "MessageChannel", "document", "location",
+      PAGE_BRIDGE_SOURCE,
+    ) as (cfg: unknown, win: unknown, nav: unknown, ch: typeof MessageChannel, doc: unknown, loc: unknown) => void;
+    installBridge(
+      { ext: id, calls: [] },
+      window,
+      { serviceWorker: { controller: null } },
+      MessageChannel,
+      document,
+      location,
+    );
+    return { handler, hashReplays, scrolls };
+  }
+
+  function click(
+    h: ClickH,
+    href: string,
+  ): { prevented: boolean } {
+    let prevented = false;
+    h({
+      defaultPrevented: false,
+      preventDefault() { prevented = true; },
+      target: {
+        closest() {
+          return { getAttribute() { return href; } };
+        },
+      },
+    });
+    return { prevented };
+  }
+
+  const ROOTED = "https://sw.example/options.html?zlExt=" + "a".repeat(31) + "b" + "&zlPageTok=t";
+
+  it("replays a fragment-only href as a same-document navigation on rooted pages", () => {
+    const sandbox = install(ROOTED);
+    expect(sandbox.handler).not.toBeNull();
+    const r = click(sandbox.handler!, "#");
+    /* The default must be suppressed: the resolved package-root
+       navigation never leaves through the browser. */
+    expect(r.prevented).toBe(true);
+    expect(sandbox.hashReplays).toEqual([""]);
+    expect(sandbox.scrolls).toEqual([0, 0]);
+    const r2 = click(sandbox.handler!, "#nav=scripts");
+    expect(r2.prevented).toBe(true);
+    expect(sandbox.hashReplays).toEqual(["", "nav=scripts"]);
+  });
+
+  it("leaves same-document and non-fragment hrefs to the browser", () => {
+    const sandbox = install(ROOTED);
+    /* A package-served page (base equals the document URL): the
+       browser's own same-document navigation is correct. */
+    const r1 = click(sandbox.handler!, "options.html?q=1#x");
+    expect(r1.prevented).toBe(false);
+    expect(sandbox.hashReplays).toEqual([]);
+    const r2 = click(sandbox.handler!, "");
+    expect(r2.prevented).toBe(false);
+    const r3 = click(sandbox.handler!, "#locked");
+    /* Rewritten onto the document hash, like a real origin. */
+    expect(r3.prevented).toBe(true);
+    expect(sandbox.hashReplays).toEqual(["locked"]);
+  });
+
+  it("skips clicks whose default was already prevented", () => {
+    const sandbox = install(ROOTED);
+    let prevented = false;
+    (sandbox.handler as unknown as (ev: unknown) => void)({
+      defaultPrevented: true,
+      preventDefault() { prevented = true; },
+      target: null,
+    });
+    expect(prevented).toBe(false);
+    expect(sandbox.hashReplays).toEqual([]);
+  });
+});

@@ -222,6 +222,56 @@ export const PAGE_BRIDGE_SOURCE = `(function () {
       onDisconnect: evt(dl),
     };
   };
+  /* Fragment-link guard. The #560 injected <base> re-roots every
+     relative URL onto the package route /zl-ext/<id>/, so a
+     fragment-only href ("#"), a same-document no-op on a real
+     extension origin, instead resolves to the package root and pulls
+     the tab onto an origin response the engine never sees. Restore
+     the real-origin semantics: when the resolved target is not this
+     document, replay the fragment against the document itself. The
+     sandbox-driven suites run this source without a DOM, so the
+     guard installs only when a document is present. */
+  if (
+    typeof document === "object" &&
+    document &&
+    typeof document.addEventListener === "function"
+  ) {
+    document.addEventListener(
+      "click",
+      function (ev) {
+        if (ev.defaultPrevented) return;
+        var t = ev.target;
+        var a = t && t.closest ? t.closest("a[href]") : null;
+        if (!a) return;
+        var href = a.getAttribute("href") || "";
+        if (href.charAt(0) !== "#") return;
+        var res = null;
+        try {
+          res = new URL(href, document.baseURI);
+        } catch (e) {
+          return;
+        }
+        var doc = null;
+        try {
+          doc = new URL(location.href);
+        } catch (e) {
+          return;
+        }
+        if (res.origin !== doc.origin) return;
+        /* Same document: the browser's own same-document navigation
+           is already correct (the un-rooted /zl-ext/ page case). */
+        if (res.pathname === doc.pathname && res.search === doc.search) return;
+        ev.preventDefault();
+        try {
+          location.hash = href === "#" ? "" : href.slice(1);
+        } catch (e2) {
+          /* An unsettable hash still must not leave the page. */
+        }
+        window.scrollTo(0, 0);
+      },
+      true
+    );
+  }
   window.browser = browser;
   window.chrome = browser;
 })();
