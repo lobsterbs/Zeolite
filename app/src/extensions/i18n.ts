@@ -1,11 +1,14 @@
 /* Zeolite extension subsystem: chrome.i18n (#560 residual).
 
    getMessage answers from the package's own _locales exactly like
-   Chrome resolves at runtime: candidate locales are the worker
+   Firefox resolves at runtime: candidate locales are the worker
    navigator's language, its primary subtag, then the manifest
-   default_locale; the first messages.json that exists wins. Lookups
-   are case-insensitive (Chrome folds message names); a missing name
-   answers "". $NAME$ placeholders from the entry expand first (their
+   default_locale; the first messages.json that exists owns the UI
+   locale, and a name missing there falls back PER KEY to the
+   default_locale catalog (Firefox's own per-key fallback) before
+   answering "". Lookups are case-insensitive (Chrome folds message
+   names); a name missing from both catalogs answers "". $NAME$
+   placeholders from the entry expand first (their
    content may itself carry $n), then $1..$9 map onto the
    substitutions. getUILanguage/getAcceptLanguages report the resolved
    locale - the engine has no locale host beyond the worker's
@@ -74,18 +77,32 @@ export async function resolvePackageI18n(
     if (primary && primary !== nav) candidates.push(primary);
   }
   if (defaultLocale) candidates.push(defaultLocale);
-  for (const lc of candidates) {
+  const catalog = async (lc: string): Promise<Record<string, I18nEntry> | null> => {
     for (const p of ["_locales/" + lc + "/messages.json", "/_locales/" + lc + "/messages.json"]) {
       const bytes = await read(p);
       if (!bytes) continue;
       try {
-        return { locale: lc, messages: messagesFromJson(JSON.parse(new TextDecoder().decode(bytes))), ...(id ? { id } : {}) };
+        return messagesFromJson(JSON.parse(new TextDecoder().decode(bytes)));
       } catch {
         /* malformed messages.json: keep looking; Chrome falls back too */
       }
     }
+    return null;
+  };
+  /* #523: Firefox falls back per KEY to the default_locale catalog,
+     not per catalog: the UI-locale winner still owns the locale
+     (getUILanguage) and its own keys, and the default catalog fills
+     every name it lacks (the Tampermonkey 5.5.0 nb catalog ships
+     without v0version0, which en defines). */
+  let fallback: Record<string, I18nEntry> = {};
+  if (defaultLocale) fallback = (await catalog(defaultLocale)) ?? {};
+  for (const lc of candidates) {
+    if (lc === defaultLocale) continue; /* already the fallback base */
+    const ui = await catalog(lc);
+    if (!ui) continue;
+    return { locale: lc, messages: { ...fallback, ...ui }, ...(id ? { id } : {}) };
   }
-  return { locale: defaultLocale || "en", messages: {}, ...(id ? { id } : {}) };
+  return { locale: defaultLocale || "en", messages: fallback, ...(id ? { id } : {}) };
 }
 
 export function i18nGetMessage(res: I18nResolved, name: unknown, substitutions?: unknown): string {
@@ -180,6 +197,33 @@ export function substituteCss(css: string, res: I18nResolved): string {
     out += css.slice(i, at) + (hit ? i18nGetMessage(res, key) : css.slice(at, end + 2));
     i = end + 2;
   }
+}
+
+/* #523: runtime.getManifest and the pagejs bridge expose the RECORD's
+   manifest copy, which still carries the raw __MSG_*__ tokens for
+   records installed before the name resolution also wrote the raw
+   copy (and Chrome localizes getManifest to the active UI locale
+   anyway). Message-name substitution only, matching the install-time
+   resolveManifestI18n semantics: $placeholder$/$n inside the message
+   text stay as written, an unresolvable token keeps its literal
+   bytes, arrays are not localized (Chrome does not localize there
+   either). Returns a fresh object; the record is never mutated. */
+export function substituteManifestStrings<T>(manifest: T, res: I18nResolved): T {
+  if (typeof manifest !== "object" || manifest === null) return manifest;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(manifest as Record<string, unknown>)) {
+    if (typeof v === "string") {
+      out[k] = v.replace(/__MSG_([A-Za-z0-9_@]+)__/g, (full, key: string): string => {
+        const entry = res.messages[key.toLowerCase()];
+        return entry ? entry.message : full;
+      });
+    } else if (typeof v === "object" && v !== null && !Array.isArray(v)) {
+      out[k] = substituteManifestStrings(v, res);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out as T;
 }
 
 /* #523: CSS substitution resolves the record's locales once per

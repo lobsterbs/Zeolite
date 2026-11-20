@@ -74,7 +74,7 @@ import { bootEnabled, bootExtension, idleTerminate, backgroundIsServiceWorker, r
 import { browsingDataRemoveCache, browsingDataRemoveCookies, browsingDataRemoveDownloads, browsingDataRemoveIndexedDB, browsingDataRemoveServiceWorkers, browsingDataSettings, browsingDataUnreachable, type BrowsingDataOptions } from "./browsingdata";
 import { chromeApi } from "./chrome";
 import { extPageOpenUrl, pageClientsOf } from "./serve";
-import { makeI18nNs } from "./i18n";
+import { makeI18nNs, substituteManifestStrings } from "./i18n";
 import type { I18nResolved } from "./i18n";
 
 export interface EventNamespace<L> {
@@ -380,10 +380,23 @@ export function buildApi(
   if (sender.context === "background" && backgroundIsServiceWorker(ext)) {
     registerSuspendEvent(ext.id, onSuspendEvent);
   }
+  /* The context's locale resolution: deps.i18n when the context
+     resolved the package (context.ts), else an empty-catalog default
+     that keeps getMessage at Chrome's "" answer (the w572 TM lesson:
+     a missing namespace there is fatal, an empty one is honest). */
+  const i18nRes: I18nResolved =
+    deps.i18n ?? {
+      locale: typeof ext.manifest.default_locale === "string" ? ext.manifest.default_locale : "en",
+      messages: {},
+    };
   const runtime = {
     id: ext.id,
+    /* #523: getManifest localizes the manifest's __MSG_*__ string
+       fields against the context-resolved locales, like Chrome;
+       without deps.i18n the empty map keeps every literal token (an
+       honest no-locale env, not a fabricated one). */
     getManifest: (): Record<string, unknown> =>
-      JSON.parse(JSON.stringify(ext.manifest)) as Record<string, unknown>,
+      substituteManifestStrings(JSON.parse(JSON.stringify(ext.manifest)) as Record<string, unknown>, i18nRes),
     getURL: (path: string): string => extensionUrl(ext.id, path),
     /* #560: platform identity. TM-class background init awaits both
        methods through callback-only Promises; when one is missing the
@@ -534,16 +547,8 @@ export function buildApi(
       : undefined;
   /* #560: chrome.i18n from the package own _locales, resolved once
      per context by context.ts (serve.ts embeds the same data for
-     page worlds). The fallback covers API builds without deps.i18n:
-     an empty message map keeps getMessage at Chrome "" answer for a
-     missing name instead of a fatal undefined-namespace seam (the
-     w572 TM boot hit exactly that). */
-  const i18nNs = makeI18nNs(
-    deps.i18n ?? {
-      locale: typeof ext.manifest.default_locale === "string" ? ext.manifest.default_locale : "en",
-      messages: {},
-    },
-  );
+     page worlds); i18nRes above carries the missing-deps fallback. */
+  const i18nNs = makeI18nNs(i18nRes);
   /* #50: Firefox gates browser.storage on the "storage" permission;
      mounted only when granted - like cookies/notifications/webRequest -
      so feature detection answers honestly and the background/page

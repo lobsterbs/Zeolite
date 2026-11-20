@@ -1,12 +1,19 @@
 import "fake-indexeddb/auto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { extensions } from "../manager";
 import { buildApi } from "../runtime";
 import { ExtensionMessenger } from "../messaging";
 import { ExtensionStorageArea } from "../storage";
 import { serveExtensionAsset, EXT_ROUTE, CS_ROUTE } from "../serve";
 import { PAGE_BRIDGE_SOURCE } from "../pagebridge";
-import { messagesFromJson, resolvePackageI18n, i18nGetMessage, makeI18nNs, substituteCss } from "../i18n";
+import {
+  messagesFromJson,
+  resolvePackageI18n,
+  i18nGetMessage,
+  makeI18nNs,
+  substituteCss,
+  substituteManifestStrings,
+} from "../i18n";
 import type { ExtensionRecord } from "../types";
 
 const enc = new TextEncoder();
@@ -51,6 +58,32 @@ describe("chrome.i18n (#560)", () => {
     expect(i18nGetMessage(res, "missing")).toBe("");
     expect(i18nGetMessage(res, 5)).toBe("");
     expect(i18nGetMessage(res, "NUM", ["a", "b"])).toBe("n=b then a");
+  });
+
+  it("falls back per key to the default_locale catalog when the UI catalog misses the key (#523)", async () => {
+    /* Tampermonkey 5.5.0's exact shape: the nb catalog ships without
+       v0version0, which the en default_locale defines with a $1
+       placeholder (its options header rendered the raw key). */
+    const en = {
+      extName: { message: "Extension" },
+      v0version0: { message: "v$version$", placeholders: { version: { content: "$1" } } },
+    };
+    const nb = { extName: { message: "Utvidelse" } };
+    const read = (p: string): Promise<Uint8Array | null> => {
+      if (p === "_locales/nb/messages.json") return Promise.resolve(enc.encode(JSON.stringify(nb)));
+      if (p === "_locales/en/messages.json") return Promise.resolve(enc.encode(JSON.stringify(en)));
+      return Promise.resolve(null);
+    };
+    vi.stubGlobal("navigator", { language: "nb-NO" });
+    try {
+      const res = await resolvePackageI18n("en", read);
+      expect(res.locale).toBe("nb");
+      expect(i18nGetMessage(res, "extName")).toBe("Utvidelse");
+      expect(i18nGetMessage(res, "v0version0", ["5.5.0"])).toBe("v5.5.0");
+      expect(i18nGetMessage(res, "missingFromBoth")).toBe("");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("falls back to an empty map when no messages.json exists", async () => {
@@ -149,5 +182,109 @@ describe("CSS __MSG_ substitution (#523)", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("div{color:teal;border:1px solid __MSG_missing__}");
+  });
+});
+
+describe("manifest surface localization (#523)", () => {
+  it("substitutes __MSG_*__ string fields, keeps literals and never mutates the source", () => {
+    const res = {
+      locale: "nb",
+      messages: messagesFromJson({
+        extName: { message: "Utvidelse" },
+        v0version0: { message: "v$version$", placeholders: { version: { content: "$1" } } },
+      }),
+    };
+    const manifest = {
+      name: "__MSG_extName__",
+      description: "__MSG_missing__",
+      version: "5.5.0",
+      action: { default_title: "__MSG_extName__" },
+      arr: ["__MSG_extName__"],
+    };
+    const out = substituteManifestStrings(manifest, res) as typeof manifest;
+    expect(out.name).toBe("Utvidelse");
+    expect(out.description).toBe("__MSG_missing__");
+    expect(out.action.default_title).toBe("Utvidelse");
+    /* Arrays keep their literals: Chrome localizes no array field. */
+    expect(out.arr[0]).toBe("__MSG_extName__");
+    expect(manifest.name).toBe("__MSG_extName__");
+    /* Install-time semantics: $placeholder$ text stays unexpanded. */
+    expect(substituteManifestStrings({ v: "__MSG_v0version0__" }, res).v).toBe("v$version$");
+  });
+
+  it("serves the pagejs bridge with a localized manifest for a record that predates the name fix (#523)", async () => {
+    const manifest = {
+      manifest_version: 2,
+      name: "__MSG_extName__",
+      version: "5.5.0",
+      permissions: [],
+      default_locale: "en",
+    };
+    const m = new Map<string, Uint8Array>([
+      ["manifest.json", enc.encode(JSON.stringify(manifest))],
+      [
+        "_locales/en/messages.json",
+        enc.encode(JSON.stringify({ extName: { message: "Tampermonkey" } })),
+      ],
+    ]);
+    await extensions.startup();
+    const { id } = await extensions.installFiles(m);
+    const rec = extensions.get(id)!;
+    /* A pre-fix record still carries the raw token on its manifest
+       copy (the Tampermonkey 5.5.0 options header rendered
+       "__MSG_extName__ by Jan Biniok" from exactly this). */
+    (rec.manifest as Record<string, unknown>).name = "__MSG_extName__";
+    const url = "https://sw.example" + EXT_ROUTE + id + "/__page.js";
+    const served = await serveExtensionAsset(new Request(url), new URL(url));
+    expect(served.status).toBe(200);
+    const body = await served.text();
+    expect(body).not.toContain("__MSG_extName__");
+    expect(body).toContain('"name":"Tampermonkey"');
+  });
+
+  it("localizes runtime.getManifest from the context locales and keeps literals without them", async () => {
+    const files = (v: string) =>
+      new Map<string, Uint8Array>([
+        [
+          "manifest.json",
+          enc.encode(
+            JSON.stringify({
+              manifest_version: 2,
+              name: "__MSG_extName__",
+              version: v,
+              permissions: [],
+              default_locale: "en",
+            }),
+          ),
+        ],
+        [
+          "_locales/en/messages.json",
+          enc.encode(JSON.stringify({ extName: { message: "HighSeas" } })),
+        ],
+      ]);
+    await extensions.startup();
+    const { id } = await extensions.installFiles(files("1.0"));
+    const rec = extensions.get(id)!;
+    (rec.manifest as Record<string, unknown>).name = "__MSG_extName__";
+    const storage = {
+      local: new ExtensionStorageArea(id, "local", "local"),
+      sync: new ExtensionStorageArea(id, "sync", "sync"),
+      session: new ExtensionStorageArea(id, "session", "session"),
+    };
+    const i18n = await resolvePackageI18n("en", (p) => extensions.getResource(id, p, { fromWeb: false }));
+    const withI18n = buildApi(
+      rec,
+      { extensionId: id, context: "background", url: null },
+      { messenger: new ExtensionMessenger(), storage, i18n },
+    );
+    const noI18n = buildApi(
+      rec,
+      { extensionId: id, context: "background", url: null },
+      { messenger: new ExtensionMessenger(), storage },
+    );
+    const get = (api: { chrome: Record<string, unknown> }): unknown =>
+      ((api.chrome.runtime as Record<string, unknown>).getManifest as () => Record<string, unknown>)().name;
+    expect(get(withI18n)).toBe("HighSeas");
+    expect(get(noI18n)).toBe("__MSG_extName__");
   });
 });
