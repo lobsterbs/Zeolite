@@ -236,6 +236,29 @@ export function extPageOpenUrl(
   return norm + "?zlExt=" + rec.id + "&zlPageTok=" + mintPageToken(rec.id, norm, which === "devtools" ? (tabId as number) : undefined);
 }
 
+/* #698: rooted pages inject a <base href="/zl-ext/<id>/">, so an
+   in-page fragment anchor (href="#") resolves as a FULL navigation to
+   the extension's bare root, which is neither a declared page nor a
+   WAR file. Redirect that navigation to the granted rooted options
+   page instead of dead-ending on the raw 404, using the same token
+   machinery zl:openExtPage mints. Navigations only: a subresource
+   fetch, an extension without a declared options page, and any real
+   resource path keep the honest notFound. */
+function bareRootNavRedirect(rec: ExtensionRecord, path: string): Response | null {
+  if (path !== "/") return null;
+  const raw = rec.options?.page;
+  if (!raw) return null;
+  const norm = normalizeExtensionPath(raw.startsWith("/") ? raw : "/" + raw);
+  if (!norm || norm === "/") return null;
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: norm + "?zlExt=" + rec.id + "&zlPageTok=" + mintPageToken(rec.id, norm),
+      "cache-control": "no-store",
+    },
+  });
+}
+
 /* Registered extension-page clients, keyed by the SW-observed client
    id of a granted navigation. Subresource fetches and zl:extPage
    messages from these clients authenticate as the extension's page.
@@ -538,7 +561,8 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
     const dtab = dtok ? pageTokenDevtoolsTab(sr.id, sr.path, dtok) : null;
     if (dtab !== null) registerDevtoolsClient(ctx?.resultingClientId, sr.id, dtab);
     const own = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
-    if (!own) return notFound();
+    /* #698: a granted bare-root self-navigation lands on the options page. */
+    if (!own) return bareRootNavRedirect(rec, sr.path) ?? notFound();
     return isHtmlPath(sr.path) ? htmlWithPageScript(own, sr.id) : await cssAssetResponse(rec, own, sr.path);
   }
   if (!nav && pageExt === sr.id) {
@@ -571,5 +595,8 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
     pageUrl: ctx?.pageUrl ?? null,
     fromExtensionId: pageClientOf(ctx?.clientId),
   });
-  return bytes ? await cssAssetResponse(rec, bytes, sr.path) : notFound();
+  /* #698: an anonymous bare-root navigation gets the same rescue;
+     everything else stays the honest 404. */
+  if (bytes) return await cssAssetResponse(rec, bytes, sr.path);
+  return ctx?.nav === true ? (bareRootNavRedirect(rec, sr.path) ?? notFound()) : notFound();
 }
