@@ -33,54 +33,53 @@
 
 /// <reference lib="webworker" />
 import { initCookiesWasm, jarLoad } from "./cookies";
-/* #90: the download registry (DL) lives in ./downloads; the boot
-   below restores it and the request engine calls adoptResponse. */
+/* The download registry (DL) lives in ./downloads; the boot below
+   restores it and the request engine calls adoptResponse. */
 import { DL } from "./downloads";
-/* #89: the network inspector ring lives in ./netlog; the boot stamps
-   the generation and the request engine / control plane push rows. */
+/* The network inspector ring lives in ./netlog; the boot stamps the
+   generation and the request engine / control plane push rows. */
 import { stampNetGeneration } from "./netlog";
 import { initTransport, wispTransport } from "./transport";
 import { configureGhostery } from "./ghostery";
-/* #86: the streaming rewrite pipelines + wasm rewriter lifecycle
+/* The streaming rewrite pipelines and the wasm rewriter lifecycle
    live in ./transform; this entrypoint wires the state seam and
    prewarms the rewriter wasm on install. */
 import { initTransform, prewarmRewriter } from "./transform";
 import { initSeamWasm } from "./seam";
-/* #243-#247: client isolation, install lifetime, phased extension
-   boot and dispatcher wiring live in ./lifecycle; this entrypoint
-   is the composition root only. */
+/* Client isolation, install lifetime, phased extension boot and
+   dispatcher wiring live in ./lifecycle; this entrypoint is the
+   composition root only. */
 import { bootExtensionSubsystem, installLifecycle, raceBoot, wireDispatchers } from "./lifecycle";
-/* #87: the shared service-worker runtime state (degraded flag, route
+/* The shared service-worker runtime state (degraded flag, route
    key, fingerprint scripts, per-site profile cache) lives in
-   ./swstate; this entrypoint and the request engine are call sites. */
+   ./swstate. */
 import { getFpScript, getRouteKey, isImageLazy, setEngineDegraded, siteProfileFor, ZEOLITE_VERSION } from "./swstate";
 import { ALARMS, MGMT, TABS, SCRIPTING, DOWNLOADS, NOTIFY, ACTION, DEVTOOLS, PERMS, bootEnabled, extensions, wakeExtension } from "./extensions";
 
 import { messageListener } from "./control";
-/* sw torture: the respondWith seam records an escaped engine rejection
-   as a RUNTIME diagnostic (#250's mirror at the fetch plane) instead
-   of letting it vanish as a silent browser network error. */
+/* The respondWith seam records an escaped engine rejection as a
+   RUNTIME diagnostic instead of letting it vanish as a silent
+   browser network error. */
 import { DIAG } from "./diag";
-/* #82: the request engine (route decode, page cache, upstream hop
-   chain, header surgery, rewrite branches, navigation strands) lives
-   in ./request.ts; this module is the entrypoint and composition
-   root: it boots the runtime and wires browser events to the engine
-   and the control plane. */
+/* The request engine (route decode, page cache, upstream hop chain,
+   header surgery, rewrite branches, navigation strands) lives in
+   ./request.ts; this module boots the runtime and wires browser
+   events to the engine and the control plane. */
 import { ghosteryListFetch, handleFetch, initEngine, persistRoute, routeReady } from "./request";
 /* CORP parity for COEP embedders: withCorp (./corp) opts every
    engine-served response into cross-origin embedding at the
    respondWith seam, so a split-origin host that runs COOP/COEP
    on its top document can embed the content-origin frames. */
 import { withCorp } from "./corp";
-/* #121: engine-update alerting (update poll + activation broadcast)
-   lives in ./updates; this entrypoint owns the worker lifecycle
-   seams that call it. */
+/* Engine-update alerting (update poll + activation broadcast) lives
+   in ./updates; this entrypoint owns the worker lifecycle seams
+   that call it. */
 import { broadcastEngineUpdate, startUpdateChecks } from "./updates";
 
 declare const self: ServiceWorkerGlobalScope;
 
 /* ---- HTTP over wisp ----------------------------------------------- */
-/* Phase 1: libcurl wasm transport (BareMux-compatible), the same proven
+/* Phase 1: libcurl wasm transport (BareMux-compatible), the same
    TLS-termination path ScramJet uses. The vendored bundle is loaded by
    src/libcurl-transport-vendored.ts. Both this module and the loader use
    STATIC imports only: dynamic import() is not available on
@@ -89,24 +88,22 @@ declare const self: ServiceWorkerGlobalScope;
    preload helper. Until the CI vendoring step runs, calls throw and
    the suite records transport-missing. */
 
-/* #84: the wisp/libcurl transport lifecycle (init, connect-class
-   reset + single retry, engine switch) moved to transport.ts; sw.ts
-   depends on the Transport interface. The degraded-flag seam keeps
-   reporting init failures to zl:ping exactly as before (finding 5:
-   the flag itself lives in ./swstate). */
+/* The wisp/libcurl transport lifecycle (init, connect-class reset +
+   single retry, engine switch) moved to transport.ts; sw.ts depends
+   on the Transport interface. The degraded-flag seam keeps reporting
+   init failures to zl:ping as before (the flag lives in ./swstate). */
 initTransport({ setDegraded: setEngineDegraded });
-/* #381: Ghostery's subscription fetches ride the same transport
-   decision as page traffic (relay included): the raw wisp client
-   is auth-refused on relay-only embedders, so remote lists
-   silently never loaded. Global fetch stays forbidden: it would
-   expose the user's direct network address to the filter-list
-   hosts. */
+/* Ghostery's subscription fetches ride the same transport decision
+   as page traffic (relay included): the raw wisp client is
+   auth-refused on relay-only embedders, so remote lists silently
+   never loaded. Global fetch stays forbidden: it would expose the
+   user's direct network address to the filter-list hosts. */
 configureGhostery((input, init) => {
   const dest = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   return ghosteryListFetch(dest, init);
 });
 
-/* #86: the streaming rewrite pipelines + wasm rewriter lifecycle
+/* The streaming rewrite pipelines and the wasm rewriter lifecycle
    moved to transform.ts. */
 initTransform({
   routeReady: () => routeReady,
@@ -117,9 +114,8 @@ initTransform({
   lazyImages: isImageLazy,
 });
 
-/* #614/#615/#616 wiring: instantiate the seam wasm at boot. One
-   attempt, one DIAG row on failure - every seam caller keeps its
-   TS fallback, so a failed init is a degradation, not an error. */
+/* Instantiate the seam wasm at boot: one attempt, one DIAG row on
+   failure. Every seam caller keeps its TS fallback. */
 initSeamWasm().catch((err) => {
   DIAG.emit({
     category: "SERVICE_WORKER",
@@ -129,10 +125,9 @@ initSeamWasm().catch((err) => {
   });
 });
 
-/* #614: the cookie jar wasm arm boots the same way - one attempt,
-   one DIAG row on failure. Every jar seam in cookies.ts keeps its
-   TS body as the fallback, so a failed init is a degradation, not
-   an error. */
+/* The cookie jar wasm arm boots the same way - one attempt, one DIAG
+   row on failure; jar seams in cookies.ts keep their TS bodies as
+   the fallback. */
 initCookiesWasm().catch((err) => {
   DIAG.emit({
     category: "SERVICE_WORKER",
@@ -159,8 +154,8 @@ console.info("[Zeolite] runtime " + ZEOLITE_VERSION);
 
 self.addEventListener("install", (e) => {
   /* Prewarm: instantiate the rewriter wasm during install, not on the
-     first HTML response (instantiation is the slowest cold-path step).
-     #244: the async prewarm is held by waitUntil (./lifecycle). */
+     first HTML response (instantiation is the slowest cold-path
+     step); the async prewarm is held by waitUntil (./lifecycle). */
   installLifecycle(e, prewarmRewriter);
 });
 
@@ -186,15 +181,15 @@ const initReady = (async () => {
     /* in-memory jar only */
   }
   /* 2.2 Arsenide: restore the persisted download registry. Entries
-     that were active across the restart are honestly marked
-     interrupted by the load itself; #118: paused entries restore
-     with their stored partial bytes and stay resumable. */
+     that were active across the restart are marked interrupted by
+     the load itself; paused entries restore with their stored
+     partial bytes and stay resumable. */
   try {
     await DL.load();
   } catch {
     /* in-memory registry only */
   }
-  /* #541: restore the extension download handoff registry. Records
+  /* Restore the extension download handoff registry. Records
      the host never finished recover as their last known non-terminal
      state (recoveredAt marker); terminal states stay final. Storage
      failure means an in-memory registry, never an init failure. */
@@ -203,12 +198,12 @@ const initReady = (async () => {
   } catch {
     /* in-memory registry only */
   }
-  /* #118: the download resume path issues its Range request through
-     the engine transport; the wisp tunnel relays the header
-     end-to-end (the seam test pins that it is sent). */
+  /* The download resume path issues its Range request through the
+     engine transport; the wisp tunnel relays the header end-to-end
+     (the seam test pins that it is sent). */
   DL.setResumeFetch((url, init) => wispTransport.fetch(url, { method: "GET", headers: init.headers }));
   /* Extensions: load the installed set, then boot enabled
-     background scripts. #245: independent phases - a failed registry
+     background scripts. The phases are independent - a failed registry
      restore or boot no longer silently skips alarm wake wiring and
      management wiring; each failure lands in DIAG (./lifecycle). */
   await bootExtensionSubsystem({
@@ -219,7 +214,7 @@ const initReady = (async () => {
     wireAlarm: () => ALARMS.setWake(wakeExtension),
     wireMgmt: () => MGMT.wire(extensions),
   });
-  /* #243: tab/download/notify ops reach host clients only; a
+  /* Tab/download/notify ops reach host clients only; a
      tabs.sendMessage or scripting payload reaches only the client
      whose decoded destination matches the target (an unmatched
      scripting payload is dropped, never broadcast to proxied
@@ -237,7 +232,7 @@ const initReady = (async () => {
 })();
 
 
-/* #82: the request engine awaits the same boot promise the control
+/* The request engine awaits the same boot promise the control
    plane does; injecting it keeps the engine importable without the
    worker entrypoint (and lets the engine own its lifecycle seams). */
 initEngine(initReady);
@@ -253,7 +248,7 @@ self.addEventListener("activate", (e) => {
       } catch {
         /* the next activation cycle retries the claim */
       }
-      /* #121: the freshly-activated worker announces itself to every
+      /* The freshly-activated worker announces itself to every
          window client (proxied pages get a console note + window
          CustomEvent once per engine sha, never a reload; the
          embedding host's own window can surface the alert). After
@@ -274,16 +269,15 @@ self.addEventListener("activate", (e) => {
     })(),
   );
 });
-/* #121: long-lived tabs never run the browser's navigation-time
-   update check, so the active worker polls registration.update()
-   itself (the browser's own byte-compare oracle). */
+/* Long-lived tabs never run the browser's navigation-time update
+   check, so the active worker polls registration.update() itself
+   (the browser's byte-compare decides). */
 startUpdateChecks();
 
-/* #82: pure wiring - the request lifecycle is the engine's. The
-   event is proxied so every respondWith call site inside
-   handleFetch gets funneled through withCorp without touching the
-   engine's internal branches (redirects, rewrite streams, honest
-   error pages, cache hits). */
+/* Pure wiring - the request lifecycle is the engine's. The event is
+   proxied so every respondWith call site inside handleFetch is
+   funneled through withCorp without touching the engine's internal
+   branches (redirects, rewrite streams, error pages, cache hits). */
 self.addEventListener("fetch", (e) => {
   handleFetch(
     new Proxy(e, {
@@ -292,11 +286,10 @@ self.addEventListener("fetch", (e) => {
           return (r: Response | Promise<Response>) => {
             void target.respondWith(
               Promise.resolve(r).then(withCorp, (err: unknown) => {
-                /* The engine contract is "every failure becomes an honest
-                   Response" (error pages, 502 strands). A rejection that
-                   escapes anyway is an engine contract violation: record
-                   it, then rethrow - the browser still sees the network
-                   error, nothing is fabricated on the engine's behalf. */
+                /* The engine contract is one Response per failure (error
+                   pages, 502 strands). A rejection escaping anyway is a
+                   contract violation: record it, then rethrow; the browser
+                   still sees the network error. */
                 DIAG.emit({
                   category: "RUNTIME",
                   severity: "error",
@@ -319,17 +312,17 @@ self.addEventListener("fetch", (e) => {
 });
 
 /* ---- Control plane ----------------------------------------------- */
-// Core zl: dispatch lives in ./control.ts; the extension facade lives in
-// ./extensions/control.ts. This listener only wires them up (#85, #91).
+// Core zl: dispatch lives in ./control.ts; the extension facade lives
+// in ./extensions/control.ts. This listener only wires them up.
 self.addEventListener(
   "message",
-  /* #250: the whole handler (boot gate included) extends the
+  /* The whole handler (boot gate included) extends the
      message event lifetime, and a handler failure is answered
      instead of surfacing as an unhandled rejection. */
   messageListener({
     ready: (async () => {
       await routeReady;
-      /* #249: bounded - a hung boot step must not wedge the control
+      /* Bounded: a hung boot step must not wedge the control
          plane (netLog and diag queries) too. */
       await raceBoot(initReady, "control-plane boot");
     })(),

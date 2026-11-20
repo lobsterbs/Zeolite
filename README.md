@@ -34,7 +34,7 @@ Every claim below is gated by the repository's own tests; run them yourself with
 
 ## What is partial or not real
 
-Read this before deploying. The engine reports honestly instead of pretending.
+Read this before deploying. The engine surfaces real errors rather than masking them.
 
 - **CAPTCHA** - rendering and interaction are verified for Google reCAPTCHA and Anubis proof-of-work. Zeolite is not a universal CAPTCHA solver, does not promise challenge completion, and does not bypass Cloudflare interstitials. Per-stage challenge tracing is open work.
 - **Service workers** - partial: register() spawns the site's worker script in an isolated guest realm (a page-created DedicatedWorker with a harness prelude) with install/activate/fetch events, bounded waitUntil, a bridged fetch() through the engine pipeline, quota-bounded caches, and update()/unregister() lifecycle; accepted in real Chromium (suite/e2e/guest-sw.mjs). Honest limits: cache-hit-speed answers only (250 ms dispatch budget), session-scoped caches, no client enumeration, no controller/controllerchange, no push, no messaging into virtual pages (docs/virtual-service-worker-phase2.md).
