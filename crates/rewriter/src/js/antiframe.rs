@@ -82,6 +82,17 @@ fn replace_bound_fold(s: &str, pat: &str, rep: &str) -> String {
 }
 
 fn replace_bound_opt(s: &str, pat: &str, rep: &str, fold: bool) -> String {
+    // #664: antiframe runs one replace pass per frame-buster pattern
+    // (~120 passes on a full body), each a per-byte scan plus a fresh
+    // output allocation. On a multi-MB minified bundle (one long line,
+    // speedtest.net's 4.4 MB r.cdnst.net entry) the stage cost 40s+ and
+    // blocked the service worker's event loop long enough to kill the
+    // page's other script loads. A pattern that does not occur makes
+    // the pass an identity replace, so gate on a memchr-accelerated
+    // substring search and skip the scan entirely.
+    if !s.contains(pat) {
+        return s.to_string();
+    }
     let bytes = s.as_bytes();
     let pb = pat.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -293,6 +304,15 @@ fn antiframe_scan(s: &str) -> String {
         b"top.location",
         b"parent.location",
     ];
+    // #664: same absent-pattern gate as replace_bound_opt - the sink
+    // scan is one more full per-byte pass, skip it when no sink token
+    // occurs in the body.
+    if !TOKS
+        .iter()
+        .any(|t| s.contains(std::str::from_utf8(t).unwrap_or("")))
+    {
+        return s.to_string();
+    }
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len() + 32);
     let mut i = 0usize;
@@ -430,6 +450,7 @@ fn scan_sink(bytes: &[u8], i: &mut usize, out: &mut String, tlen: usize) {
 #[cfg(test)]
 mod tests {
     use super::antiframe;
+    use std::time::Instant;
 
     #[test]
     fn folds_framed_guards() {
@@ -616,5 +637,30 @@ mod tests {
         assert_eq!(out2, "self.zl_antiframe = u;");
         let out3 = antiframe("var h = window.top.location.hostname;");
         assert_eq!(out3, "var h = self.location.hostname;");
+    }
+
+    /// #664: a large minified body (speedtest.net's 4.4 MB entry is one
+    /// long line) with NO frame-buster pattern must not pay for the
+    /// ~120 replace passes - before the absent-pattern gate each pass
+    /// was a full per-byte scan, costing 40s+ on such a body and
+    /// stalling the engine's whole serve. The bound is generous (the
+    /// unfixed code needs minutes on this size even in release); the
+    /// fixed code answers in milliseconds.
+    #[test]
+    fn large_body_without_patterns_is_fast_and_unchanged() {
+        let chunk = "var x=(a,b)=>a.replace(/\\//g,'/')+b?\"https://cdn.example.com/x\":'y';";
+        let mut body = String::with_capacity(2 * 1024 * 1024);
+        while body.len() < 2 * 1024 * 1024 {
+            body.push_str(chunk);
+        }
+        assert!(!body.contains("window.top"));
+        let t = Instant::now();
+        let out = antiframe(&body);
+        let elapsed = t.elapsed();
+        assert_eq!(out, body, "absent patterns must be an identity replace");
+        assert!(
+            elapsed.as_secs() < 10,
+            "antiframe on a 2 MB pattern-free body took {elapsed:?} (#664 regression)"
+        );
     }
 }
