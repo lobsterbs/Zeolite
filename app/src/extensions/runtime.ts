@@ -492,6 +492,14 @@ export function buildApi(
        onSuspend is dispatched by idleTerminate at teardown. */
     onInstalled: makeEvent<(details: unknown) => void>(),
     onStartup: makeEvent<() => void>(),
+    /* TM-class background boot registers runtime.onUpdateAvailable
+       during init; an undefined event member aborts the whole
+       bootstrap with a TypeError inside the init chain (the same
+       #573 failure class that once left options pages pinging into
+       a deaf background). No engine update channel exists to ever
+       fire it, so the surface mounts inert like the register-only
+       lifecycle events above. */
+    onUpdateAvailable: makeEvent<(details: unknown) => void>(),
     onSuspend: onSuspendEvent,
     /* #573: Chrome exposes the external messaging event surfaces on
        runtime. TM-class background boot registers every listener

@@ -23,7 +23,14 @@
    silent. Nested storage areas are keyed by dotted path
    (storage.local.get). Honest gaps that remain open for later slices:
    Firefox's StorageArea.getKeys is not mounted (recorded here, feeds
-   #520), and return-value/enum validation is not covered yet. */
+   #520), and return-value/enum validation is not covered yet.
+
+   The counts are EFFECTIVE argument counts: trailing arguments the
+   caller explicitly forwarded as undefined are trimmed (JS calls f(a,
+   undefined) with arguments.length 2 - Tampermonkey's MV2 init chain
+   died on exactly that until the 2026-11-20 arity fix), and one
+   trailing function beyond max resolves to the optional WebExtension
+   response callback (sliced and honored; see resolveCallArgs). */
 
 export type ArgKind = "string" | "number" | "boolean" | "object" | "array" | "function" | "null" | "any";
 
@@ -242,11 +249,11 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   /* One registry under both names; the table keys both namespaces.
      Firefox requires createProperties and accepts a trailing callback
      the engine does not take; update requires updateProperties. */
-  "contextMenus.create": { min: 0, max: 1, types: [["object"]], ff: [1, 2], note: "the engine also mounts the no-arg form and does not accept Firefox's trailing callback" },
+  "contextMenus.create": { min: 0, max: 1, types: [["object"]], ff: [1, 2], note: "the engine also mounts the no-arg form; the generic argument contract resolves one trailing function beyond the maximum as the response callback (impl-return fires it async)" },
   "contextMenus.update": { min: 0, max: 2, types: [["string", "number"], ["object"]], ff: [2, 2], note: "the engine also mounts the no-props form" },
   "contextMenus.remove": { min: 1, max: 1, types: [["string", "number"]] },
   "contextMenus.removeAll": { min: 0, max: 0 },
-  "menus.create": { min: 0, max: 1, types: [["object"]], ff: [1, 2], note: "the engine also mounts the no-arg form and does not accept Firefox's trailing callback" },
+  "menus.create": { min: 0, max: 1, types: [["object"]], ff: [1, 2], note: "the engine also mounts the no-arg form; the generic argument contract resolves one trailing function beyond the maximum as the response callback (impl-return fires it async)" },
   "menus.update": { min: 0, max: 2, types: [["string", "number"], ["object"]], ff: [2, 2], note: "the engine also mounts the no-props form" },
   "menus.remove": { min: 1, max: 1, types: [["string", "number"]] },
   "menus.removeAll": { min: 0, max: 0 },
@@ -318,27 +325,65 @@ export function argKindOf(v: unknown): ArgKind {
   return typeof v as ArgKind;
 }
 
-/** Reject out-of-contract calls with a precise TypeError. The arity
-    check runs first, so a too-many/too-few call never also reports a
-    type complaint. */
-export function validateArgs(path: string, schema: ArgSchema, args: unknown[]): void {
-  if (args.length < schema.min) {
-    throw new TypeError(`zeolite: ${path}: expected at least ${schema.min} argument(s), got ${args.length}`);
+/** The argument vector a call resolves to. Explicit trailing
+    undefined arguments are omitted: real SDK wrappers forward the
+    optional slots they never received (Tampermonkey's MV2 adapter
+    compiles setIcon(details, callback) and calls it with an undefined
+    callback, so arguments.length reports 2 for a one-argument call;
+    the engine's validator used to reject exactly that and killed the
+    extension's whole init chain). The trim never goes below
+    schema.min: too few real arguments stay an arity error. Exactly
+    one trailing function argument BEYOND schema.max is the optional
+    WebExtension response callback: sliced off and returned so the
+    wrapper can honor it (a second trailing function is not a
+    callback slot and stays an arity error, as in Chrome). */
+export interface ResolvedCallArgs {
+  /** The effective argument vector the implementation receives. */
+  args: unknown[];
+  /** The sliced-off trailing response callback, when one was passed. */
+  callback?: (value?: unknown) => void;
+}
+
+/** Resolve a raw call into its effective argument vector plus the
+    optional trailing response callback (same semantics on browser.*
+    and chrome.*: the chrome adapter's CALLBACK_METHODS list pops its
+    own callbacks before this wrapper runs, so the two wirings never
+    double-fire). */
+export function resolveCallArgs(schema: ArgSchema, raw: unknown[]): ResolvedCallArgs {
+  let end = raw.length;
+  while (end > schema.min && raw[end - 1] === undefined) end--;
+  let callback: ((value?: unknown) => void) | undefined;
+  if (end === schema.max + 1 && typeof raw[end - 1] === "function") {
+    callback = raw[end - 1];
+    end--;
   }
-  if (args.length > schema.max) {
-    throw new TypeError(`zeolite: ${path}: expected at most ${schema.max} argument(s), got ${args.length}`);
+  if (end === raw.length) return { args: raw };
+  return { args: raw.slice(0, end), callback };
+}
+
+/** Reject out-of-contract calls with a precise TypeError. The arity
+    check runs first over the EFFECTIVE argument vector (trailing
+    undefined trimmed, the optional response callback sliced), so a
+    too-many/too-few call never also reports a type complaint. */
+export function validateArgs(path: string, schema: ArgSchema, args: unknown[]): void {
+  const eff = resolveCallArgs(schema, args).args;
+  if (eff.length < schema.min) {
+    throw new TypeError(`zeolite: ${path}: expected at least ${schema.min} argument(s), got ${eff.length}`);
+  }
+  if (eff.length > schema.max) {
+    throw new TypeError(`zeolite: ${path}: expected at most ${schema.max} argument(s), got ${eff.length}`);
   }
   const types = schema.types;
   if (!types) return;
-  for (let i = 0; i < args.length && i < types.length; i++) {
+  for (let i = 0; i < eff.length && i < types.length; i++) {
     const allowed = types[i];
     if (!allowed || allowed.includes("any")) continue;
     /* Standard optional-argument semantics: an explicit undefined at
        an optional position (i >= min) means "omitted" - real callers
        write f(id, undefined) - while undefined at a required position
        still fails the kind check, as Firefox's schema would. */
-    if (args[i] === undefined && i >= schema.min) continue;
-    const kind = argKindOf(args[i]);
+    if (eff[i] === undefined && i >= schema.min) continue;
+    const kind = argKindOf(eff[i]);
     if (!allowed.includes(kind)) {
       throw new TypeError(`zeolite: ${path}: argument ${i + 1} must be ${allowed.join(" | ")}, got ${kind}`);
     }
@@ -368,8 +413,29 @@ export function installArgValidation(api: Record<string, unknown>): void {
     const fn = parent[key];
     if (typeof fn !== "function") continue;
     parent[key] = (...args: unknown[]): unknown => {
-      validateArgs(path, schema, args);
-      return (fn as (...a: unknown[]) => unknown).apply(parent, args);
+      const { args: call, callback } = resolveCallArgs(schema, args);
+      validateArgs(path, schema, call);
+      const result = (fn as (...a: unknown[]) => unknown).apply(parent, call);
+      if (!callback) return result;
+      /* Honor the sliced-off response callback on both surfaces (a
+         deliberate Firefox deviation: browser.* is promise-only
+         there, recorded in COMPAT under "chrome.* callback
+         style"): invoked once with the fulfillment value, no
+         arguments when the value is undefined, and no arguments on
+         rejection while the returned promise stays rejected so the
+         failure remains visible to promise-style callers. */
+      Promise.resolve(result).then(
+        (value) => {
+          queueMicrotask(() => {
+            if (value === undefined) callback();
+            else callback(value);
+          });
+        },
+        () => {
+          queueMicrotask(() => callback());
+        },
+      );
+      return result;
     };
   }
 }
