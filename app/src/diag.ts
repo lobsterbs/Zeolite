@@ -80,7 +80,12 @@ export type DiagStage =
      WS_CLOSE at info severity, never a failure. */
   | "WS_OPEN"
   | "WS_CLOSE"
-  | "WS_ERROR";
+  | "WS_ERROR"
+  /* #685 follow-up: a cf-mitigated challenge document had its inline cZone
+     literal relabeled to location.hostname so the orchestrator's
+     hostname===cZone gate passes on the opaque /j/ realm. Informational,
+     never a failure point. */
+  | "CHALLENGE_ZONE_RELABEL";
 
 export type DiagDeliveryState =
   | "definitely-not-delivered"

@@ -29,7 +29,7 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, isChallengeMitigated, type TransitDecision } from "./transit";
+import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, isChallengeMitigated, relabelChallengeZone, CHALLENGE_ZONE_PATCH_CAP, type TransitDecision } from "./transit";
 import { loadPolicy, behaviorMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
 import { boundedBody, cssRewriteStream, isCss, isHtml, isJs, originPinningRelaxed, passthroughStream, rawFrom, recaptchaReleaseScript, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
@@ -6367,6 +6367,45 @@ export function handleFetch(e: FetchEvent): void {
              rides along: only navigations register (the destination
              gate in ./downloads). */
 
+          /* #685 follow-up (CF_CHALLENGE_ZONE_RELABEL): a cf-mitigated
+             challenge document still serves verbatim except one relabeled
+             literal - the inline `cZone: '<site host>'` becomes
+             `cZone: location.hostname`. The chl_page orchestrator refuses
+             to mount the Turnstile widget unless location.hostname ===
+             cZone (deobfuscated lc(); on mismatch it shows "Unable to
+             connect to the website" and returns before the
+             challenges.cloudflare.com api.js load), and on the opaque /j/
+             realm the hostname is the engine host, so the site-host cZone
+             never matches (live: rumble.com, dash.cloudflare.com @2c1799b
+             - zero widget requests; with the relabel the widget mounts).
+             Byte-minimal and fail-open: over the cap, or no cZone literal
+             found, the raw body streams untouched exactly as before.
+             Never solves or bypasses a challenge. Challenge docs are 403 +
+             no-store, so they are never page-cached and this fresh path
+             is the only serving path. */
+          if (
+            dec.reason === "CF_CHALLENGE_VERBATIM" &&
+            DOC_DESTS.has(dest) &&
+            isHtml(resp) &&
+            resp.body &&
+            e.request.method === "GET"
+          ) {
+            const zoneClen = Number(resp.headers.get("content-length") ?? -1);
+            if (zoneClen < 0 || zoneClen <= CHALLENGE_ZONE_PATCH_CAP) {
+              const zoneText = await resp.text();
+              const zonePatched = relabelChallengeZone(zoneText);
+              if (zonePatched !== zoneText) {
+                DIAG.stage(traceId, "CHALLENGE_ZONE_RELABEL", {
+                  url: target,
+                  message: "inline cZone relabeled to location.hostname so the Turnstile hostname gate passes on the /j/ realm",
+                });
+                outHeaders.delete("content-length");
+                outHeaders.set("content-type", utf8ContentType(respCt));
+                return new Response(zonePatched, { status: resp.status, headers: outHeaders });
+              }
+              return new Response(zoneText, { status: resp.status, headers: outHeaders });
+            }
+          }
           const dl = adoptResponse(target, resp, outHeaders, resp.status, e.request.destination);
           if (dl) return dl;
           return new Response(resp.body, { status: resp.status, headers: outHeaders });
