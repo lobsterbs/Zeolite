@@ -70,8 +70,14 @@ const RECEIVERS: [&str; 6] = ["window", "self", "globalThis", "document", "top",
 
 /// Scripts above this size skip the AST pass: parse cost grows with
 /// size and the huge-heap case gains nothing a router needs.
-/// ponytail: raise only when a live site needs it.
-pub const MAX_BYTES: usize = 2 * 1024 * 1024;
+/// Raised 2 MiB -> 8 MiB (#663, duck.ai): the live duck.ai entry bundle
+/// is ~2.45 MiB, so at 2 MiB the whole location pass size-capped on it,
+/// window.location.origin stayed native, the engine origin leaked into
+/// the page's vqd-hash header, and Duck's edge rejected the chat. 8 MiB
+/// matches the SW's JS_BODY_CAP, so every body the request layer buffers
+/// also gets the location pass; the worker's per-request budget (256 MiB)
+/// still dwarfs the parse heap.
+pub const MAX_BYTES: usize = 8 * 1024 * 1024;
 
 static PARSED: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -655,5 +661,26 @@ mod tests {
         // location, and the scope-resolved check keeps it native.
         let js = "function w(window) { return window.location.pathname; }";
         assert_eq!(rw(js), js);
+    }
+
+    #[test]
+    fn large_entry_bundles_still_rewrite_location_reads() {
+        // #663: the duck.ai entry bundle is ~2.45 MiB. Under the old
+        // 2 MiB cap the whole location pass size-capped on it, so
+        // window.location.origin stayed native, the engine origin
+        // leaked into the page's vqd-hash header, and Duck's edge
+        // rejected the chat. MAX_BYTES now matches the SW's 8 MiB
+        // JS_BODY_CAP, so every body the request layer buffers also
+        // gets the location pass.
+        let filler = "var a=1;".repeat(360_000); // 2.52 MiB
+        let js = format!("{filler}var o = window.location.origin;");
+        assert!(js.len() > 2 * 1024 * 1024);
+        let (out, reason) = rewrite_with_reason(&js, MAX_BYTES);
+        assert_eq!(reason, "rewritten");
+        assert!(out.contains("__zl.origin"), "location read not renamed");
+        // The bound still holds above the cap.
+        let huge = format!("{}var a=1;", "x".repeat(MAX_BYTES));
+        let (_, reason) = rewrite_with_reason(&huge, MAX_BYTES);
+        assert_eq!(reason, "size-cap");
     }
 }

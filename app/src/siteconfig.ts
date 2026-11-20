@@ -103,9 +103,14 @@ export function rulesFromNodes(nodes: KdlNode[]): SiteRules {
       const strs = child.args.filter((a): a is string => typeof a === "string");
       if (child.name === "location-rewrite") {
         const mode = child.args[0];
-        const maxBytes = child.props["max-bytes"] ?? (mode === "hybrid" ? 512 * 1024 : 2 * 1024 * 1024);
+        /* #663: the hybrid default cap is 8 MiB, aligned with
+           JS_BODY_CAP (the wasm location pass clamps at its own
+           MAX_BYTES, also 8 MiB) so a large entry bundle never
+           size-caps the location pass while the request layer still
+           buffers and rewrites it. */
+        const maxBytes = child.props["max-bytes"] ?? (mode === "hybrid" ? 8 * 1024 * 1024 : 2 * 1024 * 1024);
         if ((mode === "legacy" || mode === "hybrid" || mode === "off") &&
-            typeof maxBytes === "number" && Number.isInteger(maxBytes) && maxBytes > 0 && maxBytes <= 2 * 1024 * 1024)
+            typeof maxBytes === "number" && Number.isInteger(maxBytes) && maxBytes > 0 && maxBytes <= 8 * 1024 * 1024)
           rule.locationRewrite = { mode, maxBytes };
       }
       else if (child.name === "inject") rule.inject = strs;

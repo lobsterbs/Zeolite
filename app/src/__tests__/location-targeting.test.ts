@@ -22,6 +22,7 @@ import {
   resolveLocationPolicy,
 } from "../location-targeting";
 import { setLocationTargeting } from "../swstate";
+import { JS_BODY_CAP } from "../transform";
 
 const markOrigin = () => {
   recordDocumentLocationReads("https://spa.example/app?v=1");
@@ -61,9 +62,22 @@ describe("automatic location targeting (#456 gate 4)", () => {
     recordSpa404Report("https://spa.example/app", "client-a");
     expect(resolveLocationPolicy("https://spa.example/app", {}).mode).toBe("legacy");
     recordSpa404Report("https://spa.example/app", "client-b");
-    expect(resolveLocationPolicy("https://spa.example/app", {})).toEqual({ mode: "hybrid", maxBytes: 512 * 1024 });
+    expect(resolveLocationPolicy("https://spa.example/app", {})).toEqual({ mode: "hybrid", maxBytes: 8 * 1024 * 1024 });
     /* The mark is per-host: a subdomain does not inherit it. */
     expect(resolveLocationPolicy("https://sub.spa.example/", {}).mode).toBe("legacy");
+  });
+
+  it("#663: the hybrid location pass never size-caps a body the request layer buffers", () => {
+    /* duck.ai: the 2.45 MiB entry bundle reached the rewriter (under
+       the 8 MiB JS_BODY_CAP) but the hybrid location pass size-capped
+       at 512 KiB, so window.location.origin stayed native, leaked the
+       engine origin into the x-vqd-hash-1 header, and Duck's edge
+       rejected the chat. The hybrid cap must cover every body the
+       request layer is willing to buffer and rewrite. */
+    selectExperimental({ hybridLocation: true });
+    const policy = resolveLocationPolicy("https://duck.ai/", {});
+    expect(policy.mode).toBe("hybrid");
+    expect(policy.maxBytes).toBeGreaterThanOrEqual(JS_BODY_CAP);
   });
 
   it("the host hybridLocation selection promotes unlisted origins; explicit rules still win", () => {
@@ -71,7 +85,7 @@ describe("automatic location targeting (#456 gate 4)", () => {
        the 2026-11-01 operator flip) takes the bounded hybrid pass
        for every origin without an explicit siteconfig rule. */
     selectExperimental({ hybridLocation: true });
-    expect(resolveLocationPolicy("https://plain.example/", {})).toEqual({ mode: "hybrid", maxBytes: 512 * 1024 });
+    expect(resolveLocationPolicy("https://plain.example/", {})).toEqual({ mode: "hybrid", maxBytes: 8 * 1024 * 1024 });
     const rules = rulesFromNodes(parseKdl('site "plain.example" { location-rewrite "off" }'));
     expect(resolveLocationPolicy("https://plain.example/", rules["plain.example"]!).mode).toBe("off");
     /* Deselected, the same origin keeps the legacy default. */
