@@ -115,14 +115,18 @@ function marked(target: string): boolean {
     2026-11-01 operator flip) takes the
     hybrid pass for every origin without an explicit rule; a
     corroborated origin takes the hybrid pass; everything else keeps
-    the legacy default. The swstate flag is the host kill switch. */
+    the legacy default. The swstate flag is the host kill switch.
+    #663: the hybrid cap is 8 MiB, aligned with JS_BODY_CAP - the
+    duck.ai entry bundle (~2.45 MiB) size-capped the location pass at
+    512 KiB, window.location.origin leaked the engine origin into the
+    page's vqd-hash header, and Duck's edge rejected the chat. */
 export function resolveLocationPolicy(target: string | null | undefined, rule: SiteRule): LocationPolicy {
   if (rule.locationRewrite) return rule.locationRewrite;
   if (experimentalEnabled("hybridLocation")) {
-    return { mode: "hybrid", maxBytes: 512 * 1024 };
+    return { mode: "hybrid", maxBytes: 8 * 1024 * 1024 };
   }
   if (target && locationTargetingEnabled() && marked(target)) {
-    return { mode: "hybrid", maxBytes: 512 * 1024 };
+    return { mode: "hybrid", maxBytes: 8 * 1024 * 1024 };
   }
   return locationPolicy(rule);
 }
