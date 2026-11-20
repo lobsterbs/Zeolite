@@ -299,6 +299,97 @@ describe("argument schemas (#516 slice 3)", () => {
     /* chrome arity errors surface as rejections like on browser */
     expect(() => (api.chrome as Record<string, any>).runtime.getURL()).toThrow(TypeError);
   });
+
+  /* ---- 2026-11-20: the Tampermonkey white-options-page fix ------ */
+
+  it("explicit trailing undefined arguments resolve to omitted, not arity errors", async () => {
+    /* TM's MV2 SDK wrapper forwards the optional callback slot it
+       never received: setIcon(details, undefined) has
+       arguments.length 2 but is a one-argument call. The pre-fix
+       validator rejected that on arity (browserAction.setIcon:
+       "expected at most 1 argument(s), got 2"), TM's init promise
+       Dp rejected, every runtime.onMessage stayed queued behind
+       registerLateCallback, and the options page never answered its
+       ping: white page. */
+    api = await allPermsApi();
+    const ba = await mv2Api("browser_action");
+    await expect(resolveFn(ba.browser, "browserAction.setBadgeText")({ text: "z" }, undefined)).resolves.toBeUndefined();
+    await expect(resolveFn(ba.browser, "browserAction.getBadgeText")()).resolves.toBe("z");
+    await expect(call("alarms.get", "n", undefined)).resolves.toBeUndefined();
+    /* the trim stops at min: too few real arguments stay arity errors */
+    expect(() => call("bookmarks.move", undefined)).toThrow(TypeError);
+    /* trailing undefined never launders real extra arguments */
+    expect(() => resolveFn(ba.browser, "browserAction.setTitle")({ title: "x" }, "y", undefined)).toThrow(TypeError);
+  });
+
+  it("one trailing function beyond max is the optional response callback (both surfaces)", async () => {
+    api = await allPermsApi();
+    await call("storage.local.set", { cbk: 7 });
+    let fromCb: unknown = "unset";
+    await new Promise<void>((done) => {
+      const p = call("storage.local.get", "cbk", (v: unknown) => {
+        fromCb = v;
+        done();
+      }) as Promise<unknown>;
+      /* the promise return stays intact; the callback consumes nothing */
+      void p.then((v) => expect(v).toEqual({ cbk: 7 }));
+    });
+    expect(fromCb).toEqual({ cbk: 7 });
+    /* a synchronous implementation wires its callback asynchronously too */
+    let fromSync = "unset";
+    await new Promise<void>((done) => {
+      expect(call("runtime.getURL", "x", (u: unknown) => {
+        fromSync = u;
+        done();
+      })).toContain("x");
+    });
+    expect(String(fromSync)).toContain("x");
+    /* exactly ONE callback slot: two trailing functions still reject */
+    expect(() => call("alarms.get", "n", (): void => undefined, (): void => undefined)).toThrow(TypeError);
+    /* the chrome surface keeps its own promisified CALLBACK_METHODS
+       wiring: no double-fire through the validator's slot */
+    await new Promise<void>((done) => {
+      (api.chrome as Record<string, any>).alarms.get("missing", (alarm: unknown) => {
+        expect(alarm).toBeUndefined();
+        done();
+      });
+    });
+  });
+
+  it("a trailing response callback on a rejecting call fires with no arguments and the promise stays rejected", async () => {
+    api = await allPermsApi();
+    let fired = 0;
+    let cbArgs: unknown[] = ["sentinel"];
+    const result = call("cookies.set", undefined, (...a: unknown[]) => {
+      fired++;
+      cbArgs = a;
+    }) as Promise<unknown>;
+    await expect(result).rejects.toThrow();
+    /* the rejection precedes the callback microtask; a macrotask
+       await waits it out deterministically */
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fired).toBe(1);
+    expect(cbArgs).toEqual([]);
+  });
+
+  it("runtime.onUpdateAvailable mounts inert so TM-class init never breaks on it", async () => {
+    /* TM's init registers the update event; an undefined member here
+       aborted the whole bootstrap in the #573 failure class. Firefox
+       declares the event (added 51), so the gap doc drops it. */
+    api = await allPermsApi();
+    type Ev = {
+      addListener(l: (details: unknown) => void): void;
+      removeListener(l: (details: unknown) => void): void;
+      hasListener(l: (details: unknown) => void): boolean;
+    };
+    const ev = (api.browser as Record<string, Record<string, unknown>>).runtime.onUpdateAvailable as Ev;
+    expect(ev).toBeTruthy();
+    const l = (details: unknown): void => void details;
+    expect(() => ev.addListener(l)).not.toThrow();
+    expect(ev.hasListener(l)).toBe(true);
+    expect(() => ev.removeListener(l)).not.toThrow();
+    expect(typeof ((api.chrome as Record<string, Record<string, unknown>>).runtime.onUpdateAvailable as Ev).addListener).toBe("function");
+  });
 });
 
 /** Resolve a dotted method path on one surface (the sweeps and the
