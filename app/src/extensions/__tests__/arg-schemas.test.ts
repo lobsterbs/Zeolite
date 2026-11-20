@@ -260,7 +260,7 @@ describe("argument schemas (#516 slice 3)", () => {
        least 1, got 0" twice-deep; a simple call still works). */
     const fresh = await allPermsApi();
     api = fresh;
-    await expect(call("storage.local.get", "zz")).resolves.toEqual({ zz: null });
+    await expect(call("storage.local.get", "zz")).resolves.toEqual({});
     /* MV2 surfaces: the action-family aliases and chrome.extension
        carry the same contract the table pins (browserAction mirrors
        action; pageAction has no badge surface; extension shares the

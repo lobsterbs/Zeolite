@@ -207,7 +207,16 @@ export class ExtensionStorageArea {
     const defaults: Record<string, StorageValue> = typeof keys === "object" && !Array.isArray(keys) ? keys : {};
     for (const k of wanted) {
       const json = this.mem.get(k);
-      out[k] = json !== undefined ? thaw(json) : (defaults[k] ?? null);
+      /* #697: Chrome and Firefox omit missing keys from the result instead
+         of returning null entries. Tampermonkey probes its storage back end
+         with a never-set key and treats present entries as packed records,
+         so a present null entry threw inside its callback and wedged the
+         background boot before it ever answered a runtime ping. */
+      if (json !== undefined) {
+        out[k] = thaw(json);
+      } else if (k in defaults) {
+        out[k] = defaults[k] ?? null;
+      }
     }
     return out;
   }

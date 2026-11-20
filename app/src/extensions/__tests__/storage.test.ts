@@ -23,7 +23,7 @@ describe("ExtensionStorageArea", () => {
     expect(await a.get(["k", "n"])).toEqual({ k: "v", n: 5 });
     expect(changes).toHaveLength(1);
     await a.remove("k");
-    expect(await a.get("k")).toEqual({ k: null });
+    expect(await a.get("k")).toEqual({});
   });
   it("honors get(null) = everything and defaults in get(object)", async () => {
     const a = await freshArea("gn");
@@ -50,6 +50,6 @@ describe("ExtensionStorageArea", () => {
     await s.set({ m: 1 });
     const s2 = new ExtensionStorageArea(mkId("se"), "session", "session");
     await s2.load(db);
-    expect(await s2.get("m")).toEqual({ m: null });
+    expect(await s2.get("m")).toEqual({});
   });
 });
