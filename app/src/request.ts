@@ -6406,7 +6406,16 @@ export function handleFetch(e: FetchEvent): void {
               return new Response(zoneText, { status: resp.status, headers: outHeaders });
             }
           }
-          const dl = adoptResponse(target, resp, outHeaders, resp.status, e.request.destination);
+          const dl = adoptResponse(
+            target,
+            resp,
+            outHeaders,
+            resp.status,
+            e.request.destination,
+            /* #541: navigations carry the a[download] intent probe so
+               anchor downloads register like attachment ones. */
+            e.request.mode === "navigate" ? { url: url.href, clientId: e.clientId } : undefined,
+          );
           if (dl) return dl;
           return new Response(resp.body, { status: resp.status, headers: outHeaders });
         } catch (err) {
