@@ -798,3 +798,101 @@ describe("DownloadTracker.clearHistory (#593)", () => {
     t.reset();
   });
 });
+
+/* #541: the a[download] anchor intent seam. */
+describe("anchor download intents (#541)", () => {
+  it("registerIntent/takeIntent are single-use, TTL-etched and client-bound", () => {
+    DL.reset();
+    DL.registerIntent("https://eng.test/j/abc", "notes.txt", "c1");
+    expect(DL.takeIntent("https://eng.test/j/abc", "c1")).not.toBeNull();
+    expect(DL.takeIntent("https://eng.test/j/abc", "c1")).toBeNull();
+    DL.registerIntent("https://eng.test/j/def", "a.txt", "c1", Date.now() - 21000);
+    expect(DL.takeIntent("https://eng.test/j/def", "c1")).toBeNull();
+    DL.registerIntent("https://eng.test/j/ghi", "b.txt", "c1");
+    expect(DL.takeIntent("https://eng.test/j/ghi", "other")).toBeNull();
+    DL.reset();
+  });
+
+  it("the intent ring is bounded drop-oldest", () => {
+    DL.reset();
+    for (let i = 0; i < 33; i++) DL.registerIntent("https://eng.test/j/n" + i, "f" + i, "c1");
+    expect(DL.takeIntent("https://eng.test/j/n0", "c1")).toBeNull();
+    expect(DL.takeIntent("https://eng.test/j/n32", "c1")).not.toBeNull();
+    DL.reset();
+  });
+
+  it("downloadFilename honors a sanitized attr hint below the disposition", () => {
+    const h = new Headers();
+    expect(downloadFilename("https://x.test/f/data.bin", h, "user hint.bin")).toBe("user hint.bin");
+    expect(downloadFilename("https://x.test/f/data.bin", h, "../../evil.sh")).toBe("evil.sh");
+    expect(downloadFilename("https://x.test/f/data.bin", h, "")).toBe("data.bin");
+    const cd = new Headers({ "content-disposition": 'attachment; filename="server.bin"' });
+    expect(downloadFilename("https://x.test/f/data.bin", cd, "hint.bin")).toBe("server.bin");
+  });
+
+  it("adoptResponse registers a plain anchor-intent navigation as a download", async () => {
+    DL.reset();
+    DL.registerIntent("https://eng.test/j/doc", "report.pdf", "c1");
+    const resp = new Response(streamOf([new Uint8Array(7)]), {
+      status: 200,
+      headers: new Headers({ "content-type": "application/pdf" }),
+    });
+    const adopted = adoptResponse("https://real.site/doc.pdf", resp, new Headers({ "content-type": "application/pdf" }), 200, "document", {
+      url: "https://eng.test/j/doc",
+      clientId: "c1",
+    });
+    expect(adopted).not.toBeNull();
+    await drain(adopted!.body as ReadableStream<Uint8Array>);
+    const snap = DL.snapshot();
+    expect(snap).toHaveLength(1);
+    expect(snap[0].filename).toBe("report.pdf");
+    expect(snap[0].initiator).toBe("anchor");
+    DL.reset();
+  });
+
+  it("an attachment navigation with a matching intent stays a single anchor row", async () => {
+    DL.reset();
+    DL.registerIntent("https://eng.test/j/att", "client.bin", "c1");
+    const resp = new Response(streamOf([new Uint8Array(5)]), {
+      status: 200,
+      headers: headers({ "content-disposition": 'attachment; filename="server.bin"', "content-length": "5" }),
+    });
+    const adopted = adoptResponse("https://x.test/att.bin", resp, new Headers({ "content-disposition": 'attachment; filename="server.bin"' }), 200, "document", {
+      url: "https://eng.test/j/att",
+      clientId: "c1",
+    });
+    expect(adopted).not.toBeNull();
+    await drain(adopted!.body as ReadableStream<Uint8Array>);
+    const snap = DL.snapshot();
+    expect(snap).toHaveLength(1);
+    expect(snap[0].filename).toBe("server.bin");
+    expect(snap[0].initiator).toBe("anchor");
+    DL.reset();
+  });
+
+  it("a probe that matches no live intent registers nothing", () => {
+    DL.reset();
+    DL.registerIntent("https://eng.test/j/other", "x.bin", "c1");
+    const resp = new Response(streamOf([new Uint8Array(4)]), { status: 200 });
+    expect(
+      adoptResponse("https://x.test/n.bin", resp, new Headers({ "content-type": "application/octet-stream" }), 200, "document", {
+        url: "https://eng.test/j/doc",
+        clientId: "c1",
+      }),
+    ).toBeNull();
+    expect(DL.snapshot()).toHaveLength(0);
+    DL.reset();
+  });
+
+  it("a wrong-client probe never counts another client's intent as its own", () => {
+    DL.reset();
+    DL.registerIntent("https://eng.test/j/att2", "y.bin", "c1");
+    const resp = new Response(streamOf([new Uint8Array(4)]), { status: 200 });
+    expect(adoptResponse("https://x.test/y.bin", resp, new Headers(), 200, "document", {
+      url: "https://eng.test/j/att2",
+      clientId: "c2",
+    })).toBeNull();
+    expect(DL.takeIntent("https://eng.test/j/att2", "c1")).toBeNull();
+    DL.reset();
+  });
+});
