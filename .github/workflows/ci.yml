@@ -702,29 +702,18 @@ jobs:
         # kind, cross-origin hops, Authorization drops, and SHA-256
         # content verification. Ports 6025/7125/7126 never collide
         # with the other suites.
-        # TEMPORARY (tracked under #556): this suite wedges deterministically
-        # in CI and has never been green since it landed; it starved every
-        # later browser suite of its run and burned the full 30-minute job
-        # timeout on each push. Keep the failure loud (annotations) but
-        # bounded and non-blocking so the #527/#533/#535/#537 suites still
-        # execute. Restore the hard gate when the #556 fix lands.
-        # 2026-11-02 (run 41437602567): TERM alone is not enough. When
-        # the suite's Chromium dies mid-run the harness prints its
-        # summary but its own SIGTERM teardown deadlocks, so timeout's
-        # TERM never reaps node, tee never sees EOF and the step hangs
-        # until the job's own timeout-minutes: 30 cancels the whole run
-        # (conclusion "cancelled"; orphans timeout/tee/node at cleanup).
-        # -k 30 force-kills 30 s after TERM; the step-level 12-minute
-        # bound below is the second line of defense so a wedged RSPOOL
-        # can never burn the whole job again.
+        # The harness teardown now closes the relay hop server it
+        # creates, so this is a hard gate again: before that fix the
+        # listening hop server pinned the node event loop past the
+        # summary and the bounded kill masked green results as exit
+        # 124. The step-level 12-minute bound stays so a future wedge
+        # starves no later suite.
         timeout-minutes: 12
-        continue-on-error: true
         run: |
-          timeout -k 30 480 node suite/e2e/replay-spool.mjs 2>&1 | tee rspool.out
+          node suite/e2e/replay-spool.mjs 2>&1 | tee rspool.out
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
             grep -E "^\[FAIL\]|HARNESS-ERROR" rspool.out | head -20 | while IFS= read -r l; do echo "::error::RSPOOL $l"; done
-            echo "::error::RSPOOL exited $code (bounded 480s, non-blocking until #556 lands)"
             exit 1
           fi
       - name: CSP enforcement differential suite (#527)
