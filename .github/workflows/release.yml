@@ -18,6 +18,9 @@ jobs:
       - name: Package
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            TAG="v$(grep -m1 '^version' Cargo.toml | tr -d ' \" ' | cut -d= -f2 | tr -d ' ')"
+          fi
           DIR="zeolite-server-${TAG}-x86_64-linux"
           mkdir -p "${DIR}"
           cp target/release/zeolite-server "${DIR}/"
@@ -76,6 +79,9 @@ jobs:
       - name: Package
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            TAG="v$(grep -m1 '^version' Cargo.toml | tr -d ' \" ' | cut -d= -f2 | tr -d ' ')"
+          fi
           zip -qr "zeolite-engine-${TAG}-dist.zip" app/dist
           sha256sum "zeolite-engine-${TAG}-dist.zip" > "zeolite-engine-${TAG}-dist.zip.sha256"
       - uses: actions/upload-artifact@v4
