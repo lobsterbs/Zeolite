@@ -3474,6 +3474,36 @@ export function handleFetch(e: FetchEvent): void {
         }
         dest0 = unwrapDest(raw);
         routeCarriesQuery = carriesQuery;
+      } else if (
+        /* #703: the apps-widget fetch class. Page JS builds the widget
+           loader URL from window.location.origin (LegacyUnforgeable,
+           the #112 co= class), so the fetch lands here as a bare
+           engine-origin /widget/app/so path: no route mint, nothing
+           to decode, and the #420 origin= virtualizer never sees
+           it because the URL never becomes an ogs.google.com
+           request. Rebase the known widget surface to its real
+           host ahead of the context recovery, sinking into the
+           same pipeline as the sub-frame form (virtualOgsOrigin
+           below then repairs the origin= parameter from the
+           referrer page origin). ponytail: one observed
+           fetch-built path; a new widget surface gets its own
+           entry. Fail closed: no proxied client context and no
+           decodable route referrer keeps the #101 passthrough. */
+        url.pathname === "/widget/app/so" &&
+        (contextOf(VCTX, e.clientId) ||
+          referrerOrigin(e.request.referrer) !== null)
+      ) {
+        dest0 = "https://ogs.google.com/widget/app/so" + url.search;
+        const wtrace = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: wtrace,
+          requestId: wtrace,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "apps widget fetch rebased to ogs.google.com (#703)",
+          url: dest0,
+        });
       } else {
         if (isEngineAsset(url.pathname)) return fetch(e.request); // engine asset: passthrough
         /* #63: with the navHandles opt-in on, the plaintext ?url=
