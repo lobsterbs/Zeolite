@@ -18,6 +18,12 @@ export { ExtensionMessenger } from "./messaging";
 export { ExtensionStorageArea } from "./storage";
 export { readZip, locateManifest } from "./package";
 export { resolveContentScripts, contentScriptMatches, globToRegExp } from "./content-scripts";
+/* #515 wave: the engine-owned history store and the programmatic
+   content-script registration store (contentScripts/scripting/
+   userScripts registrations). */
+export { HISTORY } from "./history";
+export { REGISTRATIONS, normalizeRegistration } from "./registrations";
+export type { RegisteredScript, RegistrationOrigin, RegistrationOptions } from "./registrations";
 export { EXT_SCHEME, parseExtensionUrl, extensionUrl, normalizeExtensionPath } from "./origin";
 export { MESSENGER, getExtensionContext } from "./context";
 export {

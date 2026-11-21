@@ -12,11 +12,13 @@ const DB_NAME = "zl-extensions";
    table (dynamic rules plus the enabled static-ruleset snapshot, one
    record per extension id); #520 v7 adds the bookmarks table (one
    record per extension id: the stored node list of the extension's
-   bookmark tree). The upgrade path below only CREATES
-   missing stores, so every older store (meta/files/storage/cookies/
-   downloads/download-partials/download-handoffs/alarms/dnr-rules)
-   and its data survives untouched. */
-const DB_VERSION = 7;
+   bookmark tree). #520 wave: v8 adds the history table (the
+   engine-owned browsing history ring, one record per visited URL).
+   The upgrade path below only CREATES missing stores, so every older
+   store (meta/files/storage/cookies/downloads/download-partials/
+   download-handoffs/alarms/dnr-rules/bookmarks) and its data
+   survives untouched. */
+const DB_VERSION = 8;
 export const STORE_META = "meta";
 export const STORE_FILES = "files";
 export const STORE_STORAGE = "storage";
@@ -37,6 +39,13 @@ export const STORE_DNR = "dnr-rules";
 /* #520: the browser.bookmarks table, one record per extension id
    (the stored node list of that extension's bookmark tree). */
 export const STORE_BOOKMARKS = "bookmarks";
+/* #520 wave: the engine-owned browsing history (#520), one record
+   per visited URL. */
+export const STORE_HISTORY = "history";
+/* #520 wave: programmatically registered content scripts / user
+   scripts (contentScripts.register, scripting.registerContentScripts,
+   userScripts.register), one record per extension id. */
+export const STORE_CSREG = "cs-registrations";
 let dbp: Promise<IDBDatabase> | null = null;
 
 export function openDb(): Promise<IDBDatabase> {
@@ -55,6 +64,8 @@ export function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_ALARMS)) db.createObjectStore(STORE_ALARMS);
       if (!db.objectStoreNames.contains(STORE_DNR)) db.createObjectStore(STORE_DNR);
       if (!db.objectStoreNames.contains(STORE_BOOKMARKS)) db.createObjectStore(STORE_BOOKMARKS);
+      if (!db.objectStoreNames.contains(STORE_HISTORY)) db.createObjectStore(STORE_HISTORY);
+      if (!db.objectStoreNames.contains(STORE_CSREG)) db.createObjectStore(STORE_CSREG);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => {
