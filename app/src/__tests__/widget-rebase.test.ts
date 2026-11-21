@@ -145,7 +145,8 @@ describe("apps widget fetch rebase (#703)", () => {
      client context and the strict referrer policy sends the origin
      form (undecodable), but the injector appends the page's MAC zlNavh
      handle to the widget URL itself. The riding token rebase-arms the
-     guard and the origin= repair; the token never reaches upstream. */
+     guard and the origin= repair, and the engine token is stripped
+     before the request crosses to upstream. */
   it("rebases and repairs from the zlNavh riding the widget URL (#703 wild)", async () => {
     const token = encodeNavHandle(PAGE)!;
     const path =
@@ -168,7 +169,7 @@ describe("apps widget fetch rebase (#703)", () => {
       "/widget/app/so?origin=" + encodeURIComponent(ORIGIN) + "&zlNavh=not-a-token";
     const { ev, armed } = mkEvent(path, ORIGIN + "/");
     handleFetch(ev);
-    const served = await armed[0]!;
+    await armed[0]!;
     /* rebase arms on the token (MAC checked later, not here), but the
        origin repair fails closed: upstream still names the engine. */
     expect(transportMock.calls).toBe(1);

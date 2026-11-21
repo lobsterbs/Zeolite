@@ -3113,7 +3113,17 @@ export function handleFetch(e: FetchEvent): void {
            navguard encode, the worker prelude): functional by
            design, recorded as a downgrade. */
         if (strictOpacityEnabled()) opacityDowngrade(e, "plaintext cross-origin request", url.href);
-      } else if (qHandle !== null) {
+      } else if (qHandle !== null && url.pathname !== "/widget/app/so") {
+        /* #703 wild: the apps-widget loader surface owns its pathname
+           ahead of the committed-query class. The injector (phase 2)
+           grafts the page's zlNavh onto the widget URL page JS builds,
+           so a live token on /widget/app/so is the widget fetch
+           class, not a committed route; the widget branch below
+           rebase-arms on the token with a MAC-gated, fail-closed
+           origin repair and the engine token never reaches upstream.
+           Committed subframe srcs ride engine prefix routes by
+           construction (#611), so no committed route loses its
+           decode. */
         /* Injector phase 2: the query-shape committed route. The live
            token names the origin; the real path and query are the
            committed URL itself. The destination carries its own real
@@ -6841,7 +6851,22 @@ export function virtualOgsOrigin(target: string, referrer: string, engineOrigin:
     }
   }
   if (!parent) return target;
-  return u.href.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
+  /* The riding engine token never crosses the proxy boundary with the
+     repaired widget request: every MAC-verifying zlNavh occurrence
+     (live or expired engine history, the #558/#633 contract) is
+     stripped from the emitted search, raw-split so every surviving
+     param byte round-trips; impostor values fail the MAC by
+     definition and keep the documented ride. */
+  const wHead = NAVQ_PARAM + "=";
+  const wRaw = u.search === "" ? "" : u.search.slice(1);
+  const wKept = wRaw.split("&").filter((part) => {
+    if (!part.startsWith(wHead)) return true;
+    const v = part.slice(wHead.length);
+    return decodeNavHandle(v) === null && decodeExpiredNavHandle(v) === null;
+  });
+  const wSearch = (wKept.length > 0 ? "?" : "") + wKept.join("&");
+  const rebuilt = u.origin + u.pathname + wSearch + u.hash;
+  return rebuilt.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
 }
 
 /** #509: the Telegram Login widget loader builds oauth.telegram.org/auth
