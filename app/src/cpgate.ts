@@ -62,6 +62,13 @@ export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
      bounded stylesheet text built from filter rules. No new
      capability: a page cannot read or aim at another document. */
   "zl:cosmeticTokens",
+  /* #541: the a[download] anchor intent report (injected by the init
+     script, like zl:spa404). The intent carries the sender's own
+     engine URL and a filename hint, and can only label the sender's
+     OWN client's next navigation to that URL (worker-side client
+     binding, TTL, single use): no cross-site capability, no reach
+     into host downloads. */
+  "zl:dlIntent",
 ]);
 
 /** Pathname half of the sender classification: true when a client at

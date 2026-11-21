@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { initScript, siteToken, initSplicePoint, SPA404_WATCHER, BLOCKED_NOTICE_WATCHER } from "../pageload";
+import { initScript, siteToken, initSplicePoint, SPA404_WATCHER, BLOCKED_NOTICE_WATCHER, ANCHOR_DL_WATCHER } from "../pageload";
 import { b64uEncode, setRouteKey } from "../codec";
 
 const DEST = "https://real.site/deep/page?q=1";
@@ -35,6 +35,8 @@ describe("initScript (issue #32)", () => {
         SPA404_WATCHER +
         "</script><script>" +
         BLOCKED_NOTICE_WATCHER +
+        "</script><script>" +
+        ANCHOR_DL_WATCHER +
         "</script>",
     );
     /* #236: the hostless vpath rides the identity, the host never */
@@ -52,6 +54,8 @@ describe("initScript (issue #32)", () => {
         SPA404_WATCHER +
         "</script><script>" +
         BLOCKED_NOTICE_WATCHER +
+        "</script><script>" +
+        ANCHOR_DL_WATCHER +
         '</script><script>/*fp*/</script>',
     );
   });
@@ -99,6 +103,8 @@ describe("siteToken (keyed mode)", () => {
         SPA404_WATCHER +
         "</script><script>" +
         BLOCKED_NOTICE_WATCHER +
+        "</script><script>" +
+        ANCHOR_DL_WATCHER +
         "</script>",
     );
     expect(s).not.toContain("real.site");

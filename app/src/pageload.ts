@@ -88,12 +88,32 @@ export const BLOCKED_NOTICE_WATCHER =
   "console.warn(\"[zeolite] blocked by \"+by+\": \"+u+\" (retry storms expected)\");" +
   "});}catch(e){}})();";
 
+/** #541: the a[download] anchor intent watcher. The download
+    attribute is invisible to the SW fetch event: the browser never
+    tells the interceptor why it navigates. This capture-phase
+    listener reports the intent to the controller (zl:dlIntent)
+    BEFORE the navigation runs, and only for anchors the browser
+    itself would honor - the same-origin filter mirrors the
+    attribute's documented semantics, so cross-origin clicks stay
+    ordinary navigations (today's behavior). Static source: the URL
+    rides the message at runtime, never in the injected script (the
+    #32 leak property holds). */
+export const ANCHOR_DL_WATCHER =
+  '(function(){function h(ev){try{var t=(ev.composedPath?ev.composedPath()[0]:ev.target);' +
+  'while(t&&t.nodeName!=="A"&&t.nodeName!=="AREA")t=t.parentElement;if(!t)return;' +
+  'var d=t.getAttribute("download");if(d===null)return;' +
+  'var u=new URL(t.getAttribute("href")||"",document.baseURI);' +
+  'if(u.origin!==location.origin)return;' +
+  'navigator.serviceWorker.controller.postMessage({type:"zl:dlIntent",url:u.href,filename:String(d).slice(0,512)})' +
+  '}catch(e){}}' +
+  'document.addEventListener("click",h,true)})();';
+
 /** The inline init script spliced into the rewritten stream head
     AFTER the doctype (quirks fix; it used to ride the very first
     chunk, before the doctype, which forced quirks mode on every
     proxied document). An active fingerprint profile rides the same
     splice (1.8). #236 adds the hostless vpath the virtual location
-    seeds from. #456 gate 4 adds the own-404 watcher. #643 adds the deliberate-block console marker watcher. */
+    seeds from. #456 gate 4 adds the own-404 watcher. #643 adds the deliberate-block console marker watcher. #541 adds the a[download] anchor intent watcher. */
 export function initScript(dest: string, fpScript: string | null): string {
   const virtualPath = vPath(dest);
   let hash = "";
@@ -115,6 +135,7 @@ export function initScript(dest: string, fpScript: string | null): string {
     fragmentFix +
     `<script>${SPA404_WATCHER}</script>` +
     `<script>${BLOCKED_NOTICE_WATCHER}</script>` +
+    `<script>${ANCHOR_DL_WATCHER}</script>` +
     (fpScript ? `<script>${fpScript}</script>` : "")
   );
 }

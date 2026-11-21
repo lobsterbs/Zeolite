@@ -12,10 +12,10 @@
    by severing the stream.
 
    Honesty notes (docs/downloads.md):
-   - A download is only visible when the response carries
-     Content-Disposition: attachment. Anchor downloads without it are
-     served as ordinary responses; the browser may still save them,
-     but the engine honestly does not classify them.
+   - A download is visible when the response carries
+     Content-Disposition: attachment, or when the page reported an
+     a[download] anchor intent and the navigation arrived (#541);
+     see the intent seam notes at adoptResponse.
    - DoubleClick ad artefacts (f.txt) are an upstream convention,
      not a user download: they are served untouched but not
      registered (isAdArtefact).
@@ -54,6 +54,10 @@ export interface DownloadEntry {
   resumable: boolean;
   /** The target (upstream) URL the file came from. */
   source: string;
+  /** #541: how the browser initiated the download. "attachment" is
+      the disposition-driven classic; "anchor" marks a page-reported
+      a[download] intent. Absent on records from older versions. */
+  initiator?: "attachment" | "anchor";
   /** Whole-lifetime average bytes/second, computed at read time. */
   speed: number;
   error?: string;
@@ -62,7 +66,7 @@ export interface DownloadEntry {
 /** Parse the filename of an attachment response: RFC 6265/6266 style
     Content-Disposition filename (quoted or token), falling back to the
     last path segment of the source URL, then to "download". */
-export function downloadFilename(source: string, headers: Headers): string {
+export function downloadFilename(source: string, headers: Headers, hint?: string): string {
   const cd = headers.get("content-disposition") ?? "";
   /* #292: RFC 6266/5987 filename* ext-value wins over plain
      filename: strip the charset'lang' prefix and percent-decode;
@@ -86,6 +90,14 @@ export function downloadFilename(source: string, headers: Headers): string {
   if (token && token[1].trim()) return token[1].trim();
 
 
+  /* #541: the a[download] attribute hint (the browser's own order:
+     the disposition filename wins over the attribute). Untrusted
+     page data, so only a sanitized basename survives. */
+  if (hint !== undefined) {
+    const base = hint.split(/[\\/]/).pop() ?? "";
+    const clean = base.replace(/[\u0000-\u001f]/g, "").trim().slice(0, 255);
+    if (clean) return clean;
+  }
   try {
     const p = new URL(source).pathname.split("/").filter(Boolean).pop();
     if (p) return decodeURIComponent(p);
@@ -135,11 +147,31 @@ function isValidEntry(e: unknown): e is DownloadEntry {
       r.status === "cancelled" ||
       r.status === "paused") &&
     (r.resumable === undefined || typeof r.resumable === "boolean") &&
+    (r.initiator === undefined || r.initiator === "attachment" || r.initiator === "anchor") &&
     (r.error === undefined || typeof r.error === "string")
   );
 }
 
 const RING = 200;
+
+/* #541: pending a[download] anchor intents. Bounded, TTL-etched and
+   single-use: a click posts the engine URL it is about to navigate
+   to, the navigation's response seam consumes it. ponytail: intents
+   that never see a navigation age out at the next match/insert, not
+   via a timer (a SW timer is waste and a lie across restarts). */
+const INTENT_LIMIT = 32;
+const INTENT_TTL_MS = 20 * 1000;
+
+export interface DownloadIntent {
+  /** The engine URL the page computed from the anchor - exactly what
+      the navigation fetch will request. Never a page-claimed
+      upstream target. */
+  url: string;
+  /** a[download] attribute value; "" means derive from the URL. */
+  filename: string;
+  clientId: string;
+  ts: number;
+}
 
 /** #118: partial-byte buffering cap for resumable downloads. The
     bytes must be held by the engine (a worker cannot reach the file
@@ -170,6 +202,8 @@ export class DownloadTracker {
   private readonly partials = new Map<string, { chunks: Uint8Array[]; n: number }>();
   private readonly resumePumps = new Set<string>();
   private resumeFetch: ((url: string, init: { headers: Record<string, string> }) => Promise<Response>) | null = null;
+  /* #541: pending anchor intents, keyed by engine URL. */
+  private readonly intents = new Map<string, DownloadIntent>();
 
   /** @param bufferBudget global ceiling on buffered partial bytes
       across every entry (#192); tests inject a small one. */
@@ -226,12 +260,44 @@ export class DownloadTracker {
     p.n += chunk.byteLength;
   }
 
-  /** Register a new attachment response; returns its entry id. */
-  begin(source: string, headers: Headers, mime: string, size: number): string {
+  /** #541: record a page-reported a[download] intent for its own
+      client. Bounded: drop-oldest at the cap, recency-touched on
+      repeat clicks. */
+  registerIntent(url: string, filename: string, clientId: string, ts = Date.now()): void {
+    this.intents.delete(url); /* recency touch (the #358 FIFO lesson) */
+    this.intents.set(url, { url, filename, clientId, ts });
+    if (this.intents.size > INTENT_LIMIT) {
+      const first = this.intents.keys().next();
+      if (!first.done) this.intents.delete(first.value);
+    }
+  }
+
+  /** #541: consume the intent a navigation just matched. Single
+      use, TTL-etched, and client-bound: an intent minted in one
+      client can only label that same client's navigation. */
+  takeIntent(url: string, clientId: string, now = Date.now()): DownloadIntent | null {
+    const it = this.intents.get(url);
+    if (!it) return null;
+    this.intents.delete(url);
+    if (now - it.ts > INTENT_TTL_MS) return null;
+    if (it.clientId !== "" && clientId !== "" && it.clientId !== clientId) return null;
+    return it;
+  }
+
+  /** Register a new downloadable response (#541: attachment or
+      anchor-intent); returns its entry id. */
+  begin(
+    source: string,
+    headers: Headers,
+    mime: string,
+    size: number,
+    intent?: DownloadIntent,
+  ): string {
     const id = "dl" + ++this.seq;
     this.entries.push({
       id,
-      filename: downloadFilename(source, headers),
+      filename: downloadFilename(source, headers, intent?.filename),
+      initiator: intent ? "anchor" : "attachment",
       mime,
       size,
       received: 0,
@@ -760,6 +826,7 @@ export class DownloadTracker {
     this.controllers.clear();
     this.partials.clear();
     this.resumePumps.clear();
+    this.intents.clear();
     this.seq = 0;
   }
 }
@@ -787,15 +854,29 @@ export const DL = new DownloadTracker();
     only a navigation ("document") registers - a background fetch
     never reaches the browser's download machinery, so claiming it
     would forge a row no user asked for. */
+export interface DlIntentProbe {
+  /** The navigation's own request URL (engine form). */
+  url: string;
+  /** The navigating client's id (#541 client-bound intents). */
+  clientId: string;
+}
+
 export function adoptResponse(
   target: string,
   resp: Response,
   outHeaders: Headers,
   status: number,
   destination?: string,
+  probe?: DlIntentProbe,
 ): Response | null {
   if (!resp.body) return null;
-  if (!(outHeaders.get("content-disposition") ?? "").toLowerCase().includes("attachment")) return null;
+  const isAttachment = (outHeaders.get("content-disposition") ?? "").toLowerCase().includes("attachment");
+  /* #541: a page-reported a[download] intent makes a plain (no
+     disposition) navigation response a tracked download too: the
+     browser's own machinery saves the file, and the registry must not
+     pretend it did not happen. Single-use, client-bound, TTL-etched. */
+  const intent = probe ? DL.takeIntent(probe.url, probe.clientId) : null;
+  if (!isAttachment && !intent) return null;
   /* The ad artefact is served untouched (the stream keeps flowing to
      the browser); only the registration is skipped. */
   if (isAdArtefact(target, downloadFilename(target, resp.headers))) return null;
@@ -811,6 +892,7 @@ export function adoptResponse(
     resp.headers,
     outHeaders.get("content-type") ?? "application/octet-stream",
     Number(resp.headers.get("content-length") ?? -1),
+    intent ?? undefined,
   );
   return new Response(DL.wrap(id, resp.body), { status, headers: outHeaders });
 }
