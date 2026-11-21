@@ -3113,7 +3113,17 @@ export function handleFetch(e: FetchEvent): void {
            navguard encode, the worker prelude): functional by
            design, recorded as a downgrade. */
         if (strictOpacityEnabled()) opacityDowngrade(e, "plaintext cross-origin request", url.href);
-      } else if (qHandle !== null) {
+      } else if (qHandle !== null && url.pathname !== "/widget/app/so") {
+        /* #703 wild: the apps-widget loader surface owns its pathname
+           ahead of the committed-query class. The injector (phase 2)
+           grafts the page's zlNavh onto the widget URL page JS builds,
+           so a live token on /widget/app/so is the widget fetch
+           class, not a committed route; the widget branch below
+           rebase-arms on the token with a MAC-gated, fail-closed
+           origin repair and the engine token never reaches upstream.
+           Committed subframe srcs ride engine prefix routes by
+           construction (#611), so no committed route loses its
+           decode. */
         /* Injector phase 2: the query-shape committed route. The live
            token names the origin; the real path and query are the
            committed URL itself. The destination carries its own real
@@ -3488,10 +3498,19 @@ export function handleFetch(e: FetchEvent): void {
            referrer page origin). ponytail: one observed
            fetch-built path; a new widget surface gets its own
            entry. Fail closed: no proxied client context and no
-           decodable route referrer keeps the #101 passthrough. */
+           decodable route referrer keeps the #101 passthrough.
+           #703 wild follow-up: the injector (phase 2) appends the
+           page's zlNavh query handle to the engine-origin URL page
+           JS builds, so the request can carry the MAC-verified page
+           origin on itself even with no client context and an
+           origin-form referrer (strict referrer policy strips the
+           route). That handle is an honest third arm: no token keeps
+           the passthrough, and the origin virtualizer below re-derives
+           and verifies the token before any rewrite. */
         url.pathname === "/widget/app/so" &&
         (contextOf(VCTX, e.clientId) ||
-          referrerOrigin(e.request.referrer) !== null)
+          referrerOrigin(e.request.referrer) !== null ||
+          queryHandleToken(url.search) !== null)
       ) {
         dest0 = "https://ogs.google.com/widget/app/so" + url.search;
         const wtrace = DIAG.trace(e.resultingClientId || e.clientId);
@@ -6805,9 +6824,49 @@ export function virtualOgsOrigin(target: string, referrer: string, engineOrigin:
     return target;
   /* Without a verified page origin there is no honest widget-side
      fallback, so the request passes through unchanged. */
-  const parent = referrerOrigin(referrer, initiator);
+  let parent: string | null = referrerOrigin(referrer, initiator);
+  /* #703 wild class: the engine origin is never an honest widget
+     parent - the widget answering for the proxy origin is exactly
+     what upstream rejects - so an engine-origin parent (an
+     engine-shaped initiator) is discarded, not trusted. */
+  if (parent === engineOrigin || parent === engineOrigin + ":443" || parent === engineOrigin + ":80")
+    parent = null;
+  /* #703 wild class: the injector (phase 2) appends the page's zlNavh
+     query handle to every engine-origin URI the page builds, so the
+     widget URL itself carries the MAC-verified page origin even when
+     the referrer is the strict-policy origin form (undecodable) and
+     the client context is absent or engine-shaped. #633/#634 trust:
+     live token first, then the MAC-verified expired token
+     (origin-only payload, so only the origin is ever used). Fail
+     closed: no token or no MAC match keeps the passthrough. */
+  if (!parent) {
+    const tok = queryHandleToken(u.search);
+    const decoded = tok === null ? null : decodeNavHandle(tok) ?? decodeNavHandle(tok, { expired: true });
+    if (decoded !== null) {
+      try {
+        parent = new URL(decoded).origin;
+      } catch {
+        parent = null;
+      }
+    }
+  }
   if (!parent) return target;
-  return u.href.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
+  /* The riding engine token never crosses the proxy boundary with the
+     repaired widget request: every MAC-verifying zlNavh occurrence
+     (live or expired engine history, the #558/#633 contract) is
+     stripped from the emitted search, raw-split so every surviving
+     param byte round-trips; impostor values fail the MAC by
+     definition and keep the documented ride. */
+  const wHead = NAVQ_PARAM + "=";
+  const wRaw = u.search === "" ? "" : u.search.slice(1);
+  const wKept = wRaw.split("&").filter((part) => {
+    if (!part.startsWith(wHead)) return true;
+    const v = part.slice(wHead.length);
+    return decodeNavHandle(v) === null && decodeExpiredNavHandle(v) === null;
+  });
+  const wSearch = (wKept.length > 0 ? "?" : "") + wKept.join("&");
+  const rebuilt = u.origin + u.pathname + wSearch + u.hash;
+  return rebuilt.replace(m[0], m[1] + "origin=" + encodeURIComponent(parent));
 }
 
 /** #509: the Telegram Login widget loader builds oauth.telegram.org/auth
