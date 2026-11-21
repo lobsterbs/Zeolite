@@ -21,6 +21,7 @@
 import { extensions } from "./manager";
 import { normalizeExtensionPath } from "./origin";
 import { contentScriptMatches } from "./content-scripts";
+import { REGISTRATIONS } from "./registrations";
 import { BRIDGE_SOURCE } from "./bridge";
 import { LISTENER_SOURCE } from "./scripting";
 import { PAGE_BRIDGE_SOURCE } from "./pagebridge";
@@ -145,7 +146,7 @@ function htmlWithPageScript(bytes: Uint8Array, id: string): Response {
 function csFilesForPage(rec: ExtensionRecord, pageUrl: string | null | undefined): Set<string> {
   const s = new Set<string>();
   if (!pageUrl) return s;
-  for (const cs of rec.contentScripts) {
+  for (const cs of [...rec.contentScripts, ...REGISTRATIONS.specsFor(rec.id)]) {
     if (!contentScriptMatches(cs, pageUrl, false)) continue;
     for (const f of cs.js) s.add(f.startsWith("/") ? f : "/" + f);
     for (const f of cs.css) s.add(f.startsWith("/") ? f : "/" + f);

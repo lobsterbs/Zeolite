@@ -7,6 +7,7 @@
    phase, so nothing here fakes execution. */
 
 import type { ContentScriptSpec, ExtensionId, ExtensionRecord } from "./types";
+import { REGISTRATIONS } from "./registrations";
 import { hostPatternsMatch } from "./permissions";
 
 export function globToRegExp(glob: string): RegExp {
@@ -52,7 +53,7 @@ export function resolveContentScripts(
   const out: ResolvedContentScripts[] = [];
   for (const ext of exts) {
     if (!ext.enabled) continue;
-    for (const spec of ext.contentScripts) {
+    for (const spec of [...ext.contentScripts, ...REGISTRATIONS.specsFor(ext.id)]) {
       if (!contentScriptMatches(spec, url, isSubframe)) continue;
       out.push({ extId: ext.id, js: spec.js, css: spec.css, runAt: spec.run_at });
     }
