@@ -132,7 +132,7 @@ jobs:
           mkdir -p package/dist
           cd artifacts/zeolite-engine-dist
           unzip -q zeolite-engine-*-dist.zip
-          cp -r zeolite-engine-*-dist/. ../../package/dist/
+          cp -r app/dist/. ../../package/dist/
       - name: Write the package manifest
         run: |
           VER="$(grep -m1 '^version' Cargo.toml | tr -d ' " ' | cut -d= -f2 | tr -d ' ')"
