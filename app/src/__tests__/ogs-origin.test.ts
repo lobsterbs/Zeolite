@@ -87,4 +87,40 @@ describe("virtualOgsOrigin (#112 ogs class)", () => {
     expect(virtualOgsOrigin(inUrl, ENGINE + "/zl/garbage!!", ENGINE)).toBe(inUrl);
     expect(virtualOgsOrigin(inUrl, "", ENGINE)).toBe(inUrl);
   });
+
+  /* #703 wild reopen: the injector appends the page's zlNavh query
+     handle to the engine-origin URL page JS builds, so the widget URL
+     itself carries the MAC-verified page origin while the referrer is
+     the strict-policy origin form and the client context is absent
+     (or engine-shaped). The repair reads the riding token; no token or
+     a non-verifying token fails closed. */
+  it("repairs origin= from a zlNavh handle riding the widget URL (#703 wild)", () => {
+    setRouteKey(KEY);
+    const token = encodeNavHandle(PAGE)!;
+    const wild = widget(ENGINE) + "&dm=&zlNavh=" + token;
+    expect(virtualOgsOrigin(wild, ENGINE + "/", ENGINE))
+      .toBe(widget("https://www.google.com") + "&dm=&zlNavh=" + token);
+  });
+
+  it("discards an engine-origin initiator and repairs from the handle instead", () => {
+    setRouteKey(KEY);
+    const token = encodeNavHandle(PAGE)!;
+    const wild = widget(ENGINE) + "&zlNavh=" + token;
+    expect(virtualOgsOrigin(wild, "", ENGINE, ENGINE + "/guest-host.html"))
+      .toBe(widget("https://www.google.com") + "&zlNavh=" + token);
+  });
+
+  it("repairs from an expired riding handle (#633 derived-context trust)", () => {
+    setRouteKey(KEY);
+    const token = encodeNavHandle(PAGE, -1)!;
+    const wild = widget(ENGINE) + "&zlNavh=" + token;
+    expect(virtualOgsOrigin(wild, "", ENGINE))
+      .toBe(widget("https://www.google.com") + "&zlNavh=" + token);
+  });
+
+  it("fails closed when the riding zlNavh does not MAC-verify", () => {
+    setRouteKey(KEY);
+    const wild = widget(ENGINE) + "&zlNavh=not-a-token";
+    expect(virtualOgsOrigin(wild, "", ENGINE)).toBe(wild);
+  });
 });

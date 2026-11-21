@@ -28,7 +28,7 @@ vi.mock("../transport", () => ({
 }));
 
 import { handleFetch, routeReady } from "../request";
-import { b64uEncode, buildQueryHandleUrl, setRouteKey, setScheme } from "../codec";
+import { b64uEncode, buildQueryHandleUrl, encodeNavHandle, setRouteKey, setScheme } from "../codec";
 
 describe("apps widget fetch rebase (#703)", () => {
   const ORIGIN = "https://shell.example";
@@ -139,6 +139,41 @@ describe("apps widget fetch rebase (#703)", () => {
     await armed[0]!;
     expect(transportMock.calls).toBe(0);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  /* #703 wild reopen (night capture, pin 189): the launcher nav has no
+     client context and the strict referrer policy sends the origin
+     form (undecodable), but the injector appends the page's MAC zlNavh
+     handle to the widget URL itself. The riding token rebase-arms the
+     guard and the origin= repair; the token never reaches upstream. */
+  it("rebases and repairs from the zlNavh riding the widget URL (#703 wild)", async () => {
+    const token = encodeNavHandle(PAGE)!;
+    const path =
+      "/widget/app/so?eom=1&awwd=1&origin=" + encodeURIComponent(ORIGIN) +
+      "&cn=app&pid=1&hl=en&dm=&zlNavh=" + token;
+    const { ev, armed } = mkEvent(path, ORIGIN + "/");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    expect(served.status).toBe(200);
+    expect(transportMock.calls).toBe(1);
+    const up = new URL(transportMock.urls[0]);
+    expect(up.origin).toBe("https://ogs.google.com");
+    expect(up.pathname).toBe("/widget/app/so");
+    expect(up.searchParams.get("origin")).toBe("https://www.google.com");
+    expect(up.searchParams.get("zlNavh")).toBeNull();
+  });
+
+  it("keeps the fail-closed passthrough when the riding zlNavh is garbage", async () => {
+    const path =
+      "/widget/app/so?origin=" + encodeURIComponent(ORIGIN) + "&zlNavh=not-a-token";
+    const { ev, armed } = mkEvent(path, ORIGIN + "/");
+    handleFetch(ev);
+    const served = await armed[0]!;
+    /* rebase arms on the token (MAC checked later, not here), but the
+       origin repair fails closed: upstream still names the engine. */
+    expect(transportMock.calls).toBe(1);
+    const up = new URL(transportMock.urls[0]);
+    expect(up.searchParams.get("origin")).toBe(ORIGIN);
   });
 
   afterAll(() => {
