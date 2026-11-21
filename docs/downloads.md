@@ -113,10 +113,10 @@ data survive untouched):
 
 ## Honest limits
 
-- Only `Content-Disposition: attachment` responses are classified as
-  downloads. An anchor download without that header is served as an
-  ordinary response; the browser may still save it, but Zeolite does
-  not claim to track it.
+- A download is classified by a `Content-Disposition: attachment`
+  response OR by a page-reported `a[download]` anchor intent whose
+  navigation arrived while the intent was live (#541). Everything
+  else (plain navigation, background fetch) stays unclassified.
 - DoubleClick ad artefacts (`f.txt` attachments from the
   doubleclick.net ad host) are an upstream anti-clickjacking
   convention, not user downloads: the response is served untouched,
