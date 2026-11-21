@@ -5,7 +5,7 @@
 formalized from docs/plugins.md (origin-local signed ES modules, typed
 permissions, stream hooks)"). Nothing in here ships today; the shipped capability
 remains the static build-time registry documented in `docs/plugins.md`. Per the
-AGENTS.md status vocabulary this is **Planned**, not Partial.
+project's status vocabulary this is **Planned**, not Partial.
 
 Related: #542 (this design), #256 (closed, static registry loader), #551
 (consumer of a future stream-capable filter module), `docs/power-features.md` §1
@@ -48,7 +48,7 @@ modules, signed as bundles, and *bound into the service-worker graph at build or
 boot by the host*, with the signature verified before the binding is trusted.
 What signatures buy here is attribution, integrity and revocation — not late
 loading. Late loading inside the SW is impossible and this design does not
-pretend otherwise (AGENTS.md: never describe planned behavior as implemented).
+pretend otherwise (never describe planned behavior as implemented).
 
 ## 3. Module format
 
