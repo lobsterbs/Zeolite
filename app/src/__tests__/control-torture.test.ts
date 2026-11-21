@@ -1107,7 +1107,7 @@ describe("F. seeded message-soup fuzz (seed 0x5ee17c)", () => {
   const TYPES = [
     "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle",
     "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport",
-    "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:spa404",
+    "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:spa404", "zl:dlIntent",
     "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint",
     "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload",
     "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession",
@@ -1211,7 +1211,7 @@ describe("F. seeded message-soup fuzz (seed 0x5ee17c)", () => {
           wsState.opens.some((o) => o.port === (ev.ev.ports[0] ?? null)) ||
           wsState.relayOpens.some((o) => o.port === (ev.ev.ports[0] ?? null));
         const observable =
-          ev.posted.length > 0 || bridged || escaped !== null || msg.type === "zl:spa404";
+          ev.posted.length > 0 || bridged || escaped !== null || msg.type === "zl:spa404" || msg.type === "zl:dlIntent";
         expect(observable).toBe(true);
         /* Invariant 3: whatever reached the transport handshake is
            token-shaped - the page never injects non-token protocol

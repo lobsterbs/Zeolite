@@ -144,6 +144,7 @@ export interface ControlMessage {
     | "zl:docCookie"
     | "zl:cosmeticTokens"
     | "zl:spa404"
+    | "zl:dlIntent"
     | "zl:getVirtualOrigin"
     | "zl:embedderOrigin"
     | "zl:getEmbedder"
@@ -1204,6 +1205,20 @@ case "zl:tracing":
       if (origin) recordSpa404Report(origin, sourceClientId);
       break;
     }
+    case "zl:dlIntent": {
+      /* #541: the a[download] intent report (fire and forget like
+         zl:spa404). The URL key is the raw engine URL the page
+         computed - never a decoded or page-claimed upstream target -
+         and the response seam matches it against the navigation's
+         own request URL with a client binding, TTL and single use.
+         A forged intent can only label the sender's own client;
+         grants no capability, so no reply is sent. */
+      const p = msg as { url?: unknown; filename?: unknown };
+      const url = typeof p.url === "string" ? p.url.slice(0, 8192) : "";
+      const filename = typeof p.filename === "string" ? p.filename.slice(0, 512) : "";
+      if (url) DL.registerIntent(url, filename, sourceClientId ?? "");
+      break;
+    }
     case "zl:getVirtualOrigin": {
       /* #130: this client's own virtual origin, recovered from the
          sender's engine route (never a page-supplied claim). The page
@@ -1789,7 +1804,7 @@ export async function handleControlEvent(
 // minified build intact; control.test.ts pins it against that switch, so
 // the dispatch and the registry can never drift apart.
 export const CORE_CONTROL_TYPES: ReadonlySet<string> = new Set([
-  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:cosmeticTokens", "zl:spa404", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:captchaTrace", "zl:domInspect", "zl:privacy", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
+  "zl:ping", "zl:config", "zl:wispAuth", "zl:mint", "zl:decodeRoutes", "zl:navHandle", "zl:adblock", "zl:rules", "zl:jarProfile", "zl:getJars", "zl:clearJar", "zl:transport", "zl:tracing", "zl:getTracing", "zl:siteRoute", "zl:wsOpen", "zl:docCookie", "zl:cosmeticTokens", "zl:spa404", "zl:dlIntent", "zl:getVirtualOrigin", "zl:embedderOrigin", "zl:getEmbedder", "zl:fingerprint", "zl:recordStart", "zl:recordStop", "zl:find", "zl:downloads", "zl:cancelDownload", "zl:pauseDownload", "zl:resumeDownload", "zl:saveDownload", "zl:exportSession", "zl:importSession", "zl:sameSite", "zl:teardown", "zl:getNetLog", "zl:getDiag", "zl:doctor", "zl:exportDiagnostics", "zl:captchaTrace", "zl:domInspect", "zl:privacy", "zl:loadState", "zl:relayRegister", "zl:reloadBypass", "zl:wispRegister", "zl:wispPrimary", "zl:guestHost", "zl:guestSpawn", "zl:guestTerminate", "zl:guestRegister", "zl:guestUnregister",
 ]);
 
 
