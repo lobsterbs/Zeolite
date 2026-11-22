@@ -19,6 +19,7 @@ const ALL_NS_PERMISSIONS = [
   "storage", "tabs", "notifications", "contextMenus", "downloads", "cookies",
   "webRequest", "webRequestBlocking", "webNavigation", "alarms", "management",
   "browsingData", "declarativeNetRequest", "bookmarks",
+  "history", "topSites",
 ];
 
 function pkg(name: string, permissions: string[], extra: Record<string, unknown> = {}): Map<string, Uint8Array> {
@@ -214,10 +215,12 @@ describe("Firefox API inventory conformance (#516 slice 2)", () => {
        belongs here: the #520 slice mounts it (drop it from this list
        when a namespace gains its implementation). */
     const absent = new Map(report.absentNamespaces.map((a) => [a.name, a.reason]));
-    for (const ns of ["history", "idle", "sessions", "sidebarAction", "userScripts"]) {
+    for (const ns of ["idle", "sessions", "sidebarAction", "userScripts"]) {
       expect(absent.get(ns)?.length, `${ns} absent without a reason`).toBeGreaterThan(0);
     }
     expect(absent.has("bookmarks"), "bookmarks mounted by the #520 slice").toBe(false);
+    expect(absent.has("history"), "history mounted by the #520 slice").toBe(false);
+    expect(absent.has("topSites"), "topSites mounted by the #520 slice").toBe(false);
     /* member-level gaps the compat matrix documents; storage.managed
        left the list when the #520 slice mounted the read-only
        enterprise-policy area. */

@@ -6,8 +6,9 @@
    ARG_SCHEMAS is a machine-readable table: per mounted method of the
    covered namespaces (alarms, action, bookmarks, browserAction,
    browsingData, contextMenus + menus, cookies, declarativeNetRequest,
-   downloads, extension, i18n, management, notifications, permissions,
-   pageAction, runtime, scripting, storage, tabs, windows), the
+   downloads, extension, history, i18n, management, notifications,
+   permissions, pageAction, runtime, scripting, storage, tabs,
+   topSites, windows), the
    accepted argument count and the JS kind every position may carry.
    installArgValidation() wraps the mounted methods so out-of-contract
    calls reject with a TypeError before any engine work happens, and
@@ -71,6 +72,14 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   "cookies.getAll": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (all cookies of the active profile)" },
   "cookies.set": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form; the call itself rejects without a usable details object" },
   "cookies.remove": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form; the call itself rejects without a usable details object" },
+  "cookies.getAllCookieStores": { min: 0, max: 0 },
+  "history.search": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (every page by recency); query text matches the URL because titles are not part of the store" },
+  "history.getVisits": { min: 1, max: 1, types: [["object"]] },
+  "history.addUrl": { min: 1, max: 1, types: [["object"]], ff: [1, 1], note: "records the visit; title/transition are accepted but not stored (no titles reach the worker)" },
+  "history.deleteUrl": { min: 1, max: 1, types: [["object"]] },
+  "history.deleteRange": { min: 1, max: 1, types: [["object"]] },
+  "history.deleteAll": { min: 0, max: 0 },
+  "topSites.get": { min: 0, max: 1, types: [["object"]] },
 
   /* ---- runtime --------------------------------------------------------- */
   "runtime.connect": {
@@ -235,17 +244,20 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
      but the call itself rejects (browsingdata.ts unreachable). */
   "browsingData.remove": { min: 2, max: 2, types: [["object"], ["object"]] },
   "browsingData.settings": { min: 0, max: 0 },
+  "browsingData.removeAppcache": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (no appcache store exists in this engine)" },
   "browsingData.removeCache": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (defaults to every origin)" },
   "browsingData.removeCookies": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (defaults to every origin)" },
   "browsingData.removeDownloads": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (defaults to every origin)" },
   "browsingData.removeIndexedDB": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (defaults to every origin)" },
+  "browsingData.removeFileSystems": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (no FileSystem store exists in this engine)" },
   "browsingData.removeFormData": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (host-browser-owned data type)" },
-  "browsingData.removeHistory": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (host-browser-owned data type)" },
+  "browsingData.removeHistory": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "really clears the engine visit store (#520): origins scopes the clear (excludeOrigins honored through the shared validation) and since filters per-URL by visit times, whole store otherwise" },
   "browsingData.removeLocalStorage": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (host-browser-owned data type)" },
   "browsingData.removePasswords": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (host-browser-owned data type)" },
   "browsingData.removePluginData": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (host-browser-owned data type)" },
   /* Engine extra (Chrome parity), documented in COMPAT and the gap
      report; Firefox has no removeServiceWorkers. */
+  "browsingData.removeWebSQL": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine mounts the no-arg form; the call itself rejects (no WebSQL store exists in this engine)" },
   "browsingData.removeServiceWorkers": { min: 0, max: 0 },
 
   /* ---- contextMenus / menus ---------------------------------------------- */

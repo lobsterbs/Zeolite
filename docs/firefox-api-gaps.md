@@ -12,9 +12,9 @@ ZL_UPDATE_GAPS_DOC=1 npx vitest run src/extensions/__tests__/gaps-doc.test.ts   
 
 ## Summary
 
-- Mounted namespaces: **23** (209 members), the union of the action-family fixtures
-- Firefox namespaces not mounted: **40**, each with its honest reason
-- Mounted namespaces with member-level gaps: **18**
+- Mounted namespaces: **25** (222 members), the union of the action-family fixtures
+- Firefox namespaces not mounted: **38**, each with its honest reason
+- Mounted namespaces with member-level gaps: **17**
 - Engine extras (mounted members Firefox does not have): **4**, each justified in COMPAT
 
 The wave issues #517-#524 diff against this baseline; a namespace that gains an implementation removes its reason from `FIREFOX_UNMOUNTED_REASONS` and this document regenerates with it gone.
@@ -41,7 +41,6 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `extensionTypes` | schema enum types (RunAt, CSSOrigin); no runtime object in Firefox either |
 | `find` | the engine finder is a page feature, not an extension API surface (#520/#523) |
 | `geckoProfiler` | privileged namespace; no engine surface |
-| `history` | no history store exists in the engine; browsingData.removeHistory rejects for the same reason (#520) |
 | `identity` | no OAuth redirect host surface (#522) |
 | `idle` | no OS idle source; reporting 'active' unconditionally would fake a signal, so the namespace stays unmounted (#522: 'where platform capability exists') |
 | `networkStatus` | no host network-status source (#521/#522) |
@@ -59,7 +58,6 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `tabGroups` | the UI tab model has no group concept (#519) |
 | `telemetry` | privileged namespace; no engine surface |
 | `theme` | theme manifest keys are parsed and recorded (#524); no host theme engine consumes them |
-| `topSites` | no history store to rank (#520) |
 | `types` | schema type namespace (types.Setting); no runtime surface in Firefox either |
 | `urlbar` | privileged namespace; no engine surface |
 | `userScripts` | userScripts registration needs the isolated-world work (#517) |
@@ -81,8 +79,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `webRequest` | filterResponseData, getSecurityInfo, onAuthRequired |
 | `action` | getUserSettings, openPopup |
 | `notifications` | onPermissionLevelChanged, onShowSettings, onShown |
-| `cookies` | getAllCookieStores |
-| `browsingData` | removeAppcache, removeFileSystems, removeWebSQL |
+| `history` | onTitleChanged |
 | `extension` | setUpdateUrlData |
 | `browserAction` | getUserSettings, onUserSettingsChanged, openPopup |
 | `pageAction` | openPopup |
@@ -104,12 +101,13 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `alarms` | `clear` (method), `clearAll` (method), `create` (method), `get` (method), `getAll` (method), `onAlarm` (event) |
 | `bookmarks` | `create` (method), `get` (method), `getChildren` (method), `getRecent` (method), `getSubTree` (method), `getTree` (method), `move` (method), `onChanged` (event), `onCreated` (event), `onMoved` (event), `onRemoved` (event), `remove` (method), `removeTree` (method), `search` (method), `update` (method) |
 | `browserAction` | `disable` (method), `enable` (method), `getBadgeBackgroundColor` (method), `getBadgeText` (method), `getBadgeTextColor` (method), `getPopup` (method), `getTitle` (method), `isEnabled` (method), `onClicked` (event), `setBadgeBackgroundColor` (method), `setBadgeText` (method), `setBadgeTextColor` (method), `setIcon` (method), `setPopup` (method), `setTitle` (method) |
-| `browsingData` | `remove` (method), `removeCache` (method), `removeCookies` (method), `removeDownloads` (method), `removeFormData` (method), `removeHistory` (method), `removeIndexedDB` (method), `removeLocalStorage` (method), `removePasswords` (method), `removePluginData` (method), `removeServiceWorkers` (method), `settings` (method) |
+| `browsingData` | `remove` (method), `removeAppcache` (method), `removeCache` (method), `removeCookies` (method), `removeDownloads` (method), `removeFileSystems` (method), `removeFormData` (method), `removeHistory` (method), `removeIndexedDB` (method), `removeLocalStorage` (method), `removePasswords` (method), `removePluginData` (method), `removeServiceWorkers` (method), `removeWebSQL` (method), `settings` (method) |
 | `contextMenus` | `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
-| `cookies` | `get` (method), `getAll` (method), `onChanged` (event), `remove` (method), `set` (method) |
+| `cookies` | `get` (method), `getAll` (method), `getAllCookieStores` (method), `onChanged` (event), `remove` (method), `set` (method) |
 | `declarativeNetRequest` | `DYNAMIC_RULESET_ID` (constant), `GUARANTEED_MINIMUM_STATIC_RULES` (constant), `MAX_NUMBER_OF_DISABLED_STATIC_RULES` (constant), `MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES` (constant), `MAX_NUMBER_OF_DYNAMIC_RULES` (constant), `MAX_NUMBER_OF_ENABLED_STATIC_RULESETS` (constant), `MAX_NUMBER_OF_REGEX_RULES` (constant), `MAX_NUMBER_OF_SESSION_RULES` (constant), `MAX_NUMBER_OF_STATIC_RULESETS` (constant), `SESSION_RULESET_ID` (constant), `getAvailableStaticRuleCount` (method), `getDisabledRuleIds` (method), `getDynamicRules` (method), `getEnabledRulesets` (method), `getSessionRules` (method), `isRegexSupported` (method), `testMatchOutcome` (method), `updateDynamicRules` (method), `updateEnabledRulesets` (method), `updateSessionRules` (method), `updateStaticRules` (method) |
 | `downloads` | `download` (method), `onChanged` (event), `search` (method) |
 | `extension` | `getBackgroundPage` (method), `getURL` (method), `getViews` (method), `inIncognitoContext` (constant), `isAllowedFileSchemeAccess` (method), `isAllowedIncognitoAccess` (method), `lastError` (constant) |
+| `history` | `addUrl` (method), `deleteAll` (method), `deleteRange` (method), `deleteUrl` (method), `getVisits` (method), `onVisitRemoved` (event), `onVisited` (event), `search` (method) |
 | `i18n` | `getAcceptLanguages` (method), `getMessage` (method), `getPreferredSystemLanguages` (method), `getUILanguage` (method) |
 | `management` | `get` (method), `getAll` (method), `getSelf` (method), `onDisabled` (event), `onEnabled` (event), `onInstalled` (event), `onUninstalled` (event), `setEnabled` (method), `uninstall` (method), `uninstallSelf` (method) |
 | `menus` | `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
@@ -120,6 +118,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `scripting` | `executeScript` (method), `insertCSS` (method) |
 | `storage` | `local` (constant), `managed` (constant), `onChanged` (event), `session` (constant), `sync` (constant) |
 | `tabs` | `TAB_ID_NONE` (constant), `create` (method), `duplicate` (method), `get` (method), `getCurrent` (method), `highlight` (method), `onActivated` (event), `onCreated` (event), `onRemoved` (event), `onUpdated` (event), `query` (method), `remove` (method), `sendMessage` (method), `update` (method) |
+| `topSites` | `get` (method) |
 | `webNavigation` | `onBeforeNavigate` (event), `onCommitted` (event), `onCompleted` (event), `onDOMContentLoaded` (event) |
 | `webRequest` | `MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES` (constant), `handlerBehaviorChanged` (method), `onBeforeRedirect` (event), `onBeforeRequest` (event), `onBeforeSendHeaders` (event), `onCompleted` (event), `onErrorOccurred` (event), `onHeadersReceived` (event), `onResponseStarted` (event), `onSendHeaders` (event) |
 | `windows` | `WINDOW_ID_CURRENT` (constant), `WINDOW_ID_NONE` (constant), `get` (method), `getAll` (method), `getCurrent` (method), `getLastFocused` (method), `onFocusChanged` (event) |

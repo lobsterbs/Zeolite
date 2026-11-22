@@ -13,6 +13,7 @@ import {
   setBrowsingDataGuestTerminator,
 } from "../browsingdata";
 import { DOWNLOADS } from "../downloads";
+import { HISTORY } from "../history";
 import type { ExtensionRecord } from "../types";
 import { siteToken } from "../../pageload";
 import {
@@ -110,15 +111,18 @@ describe("browser.browsingData (#520 slice)", () => {
        boolean is the honest runtime capability check and
        fake-indexeddb provides databases(). */
     expect(s.dataTypes.downloads).toBe(true);
-    expect(s.dataTypes.history).toBe(false);
+    /* #520: the visit-history store is real now, so settings reports
+       it removable (see the history namespace slice). */
+    expect(s.dataTypes.history).toBe(true);
     expect(s.dataTypes.localStorage).toBe(false);
     expect(s.dataTypes.indexedDB).toBe(true);
     expect(s.dataTypes.serviceWorkers).toBe(true);
     /* Every documented remover is mounted - no TypeErrors on the
        documented surface. */
     for (const k of [
-      "removeCache", "removeCookies", "removeDownloads", "removeFormData", "removeHistory",
-      "removeIndexedDB", "removeLocalStorage", "removePasswords", "removePluginData", "removeServiceWorkers",
+      "removeAppcache", "removeCache", "removeCookies", "removeDownloads", "removeFileSystems",
+      "removeFormData", "removeHistory", "removeIndexedDB", "removeLocalStorage", "removePasswords",
+      "removePluginData", "removeServiceWorkers", "removeWebSQL",
     ]) {
       expect(typeof ns[k], k).toBe("function");
     }
@@ -136,8 +140,31 @@ describe("browser.browsingData (#520 slice)", () => {
     seed();
     await rm({}, { serviceWorkers: true, cookies: true, history: false, nosuch: false });
     expect(kills).toBe(1);
-    await expect(rm({}, { history: true })).rejects.toThrow();
+    /* #520: the visit store is real, so the compose arm clears it and
+       the new absent-store types reject like their Firefox peers. */
+    HISTORY.noteVisit("https://bd-compose.example/x");
+    await rm({}, { history: true });
+    expect(HISTORY.search({ text: "bd-compose.example" })).toEqual([]);
+    await expect(rm({}, { appcache: true })).rejects.toThrow();
+    await expect(rm({}, { fileSystems: true })).rejects.toThrow();
+    await expect(rm({}, { webSQL: true })).rejects.toThrow();
     await expect(rm({}, { nosuch: true })).rejects.toThrow(/unknown data type/);
+  });
+
+  it("removeHistory really clears the visit store, dead-store removers reject (#520)", async () => {
+    const { api } = await apiFor(m, ["browsingData"]);
+    const bd2 = (api.browser as Record<string, any>).browsingData;
+    const base = 1_700_000_000_000;
+    HISTORY.noteVisit("https://bd-keep.example/", base);
+    HISTORY.noteVisit("https://bd-gone.example/", base + 60_000);
+    await bd2.removeHistory({ origins: ["https://bd-gone.example"] });
+    expect(HISTORY.search({ text: "bd-keep.example" }).map((r: { url: string }) => r.url)).toContain("https://bd-keep.example/");
+    expect(HISTORY.search({ text: "bd-gone.example" })).toEqual([]);
+    await bd2.removeHistory({ origins: ["https://bd-keep.example"], since: base });
+    expect(HISTORY.search({ text: "bd-keep.example" })).toEqual([]);
+    await expect(bd2.removeAppcache()).rejects.toThrow();
+    await expect(bd2.removeFileSystems()).rejects.toThrow();
+    await expect(bd2.removeWebSQL()).rejects.toThrow();
   });
 
   it("removeCache purges every CacheStorage bucket", async () => {
@@ -209,9 +236,11 @@ describe("browser.browsingData (#520 slice)", () => {
     seed();
     const { api } = await apiFor(m, ["browsingData"]);
     const ns = (api.browser as Record<string, any>).browsingData;
+    /* #520: removeHistory left this list when the visit store mounted
+       (it really clears now); the three absent-store arms join it. */
     for (const k of [
-      "removeFormData", "removeHistory",
-      "removeLocalStorage", "removePasswords", "removePluginData",
+      "removeAppcache", "removeFileSystems", "removeFormData",
+      "removeLocalStorage", "removePasswords", "removePluginData", "removeWebSQL",
     ]) {
       await expect(ns[k]()).rejects.toThrow(/worker cannot reach/);
     }

@@ -29,7 +29,9 @@ import type {
   NotificationClosedListener,
   ButtonClickedListener,
 } from "./notifications";
-import { cookiesGet, cookiesGetAll, cookiesSet, cookiesRemove, onCookieChanged } from "./cookies";
+import { cookiesGet, cookiesGetAll, cookiesSet, cookiesRemove, cookiesGetAllCookieStores, onCookieChanged } from "./cookies";
+import { HISTORY } from "./history";
+import type { HistoryItem, HistoryChange } from "./history";
 import type { CookieChangeListener } from "./cookies";
 import { hostPatternsMatch } from "./permissions";
 import { isApiDetached } from "./apis";
@@ -71,7 +73,7 @@ import { MGMT, infoOf } from "./management";
 import type { MgmtListener } from "./management";
 import type { ExtensionManager } from "./manager";
 import { bootEnabled, bootExtension, idleTerminate, backgroundIsServiceWorker, registerSuspendEvent } from "./background";
-import { browsingDataRemoveCache, browsingDataRemoveCookies, browsingDataRemoveDownloads, browsingDataRemoveIndexedDB, browsingDataRemoveServiceWorkers, browsingDataSettings, browsingDataUnreachable, type BrowsingDataOptions } from "./browsingdata";
+import { browsingDataRemoveCache, browsingDataRemoveCookies, browsingDataRemoveDownloads, browsingDataRemoveIndexedDB, browsingDataRemoveServiceWorkers, browsingDataSettings, browsingDataUnreachable, keptOrigins, type BrowsingDataOptions } from "./browsingdata";
 import { chromeApi } from "./chrome";
 import { extPageOpenUrl, pageClientsOf } from "./serve";
 import { makeI18nNs, substituteManifestStrings } from "./i18n";
@@ -885,6 +887,8 @@ export function buildApi(
           getAll: (d?: Record<string, unknown>) => cookiesGetAll(ext, d),
           set: (d: Record<string, unknown> = {}) => cookiesSet(ext, d),
           remove: (d: Record<string, unknown> = {}) => cookiesRemove(ext, d),
+          /* One durable store: the id carries every open tab. */
+          getAllCookieStores: () => cookiesGetAllCookieStores(),
           /* #281: the listener travels with its owning extension so
              delivery can re-check the cookies permission and a host
              permission for the changed cookie. */
@@ -1152,16 +1156,22 @@ export function buildApi(
      browser-owned type requested here rejects exactly like its named
      method, never silently clearing an absent store. */
   const browsingDataRemoveTypes: Record<string, (o: BrowsingDataOptions) => Promise<void>> = {
+    appcache: () => browsingDataUnreachable("removeAppcache")(),
     cache: (o) => browsingDataRemoveCache(o),
     cookies: (o) => browsingDataRemoveCookies(o),
     downloads: (o) => browsingDataRemoveDownloads(o),
     formData: () => browsingDataUnreachable("removeFormData")(),
-    history: () => browsingDataUnreachable("removeHistory")(),
+    fileSystems: () => browsingDataUnreachable("removeFileSystems")(),
+    history: async (o: BrowsingDataOptions) => {
+      const origins = keptOrigins(o);
+      HISTORY.removeHistory({ since: o.since, origins: origins ?? undefined });
+    },
     indexedDB: (o) => browsingDataRemoveIndexedDB(o),
     localStorage: () => browsingDataUnreachable("removeLocalStorage")(),
     passwords: () => browsingDataUnreachable("removePasswords")(),
     pluginData: () => browsingDataUnreachable("removePluginData")(),
     serviceWorkers: () => browsingDataRemoveServiceWorkers(),
+    webSQL: () => browsingDataUnreachable("removeWebSQL")(),
   };
   const browsingDataNs = ext.permissions.includes("browsingData")
     ? {
@@ -1174,16 +1184,86 @@ export function buildApi(
           }
         },
         settings: browsingDataSettings,
+        removeAppcache: browsingDataUnreachable("removeAppcache"),
         removeCache: (options: BrowsingDataOptions = {}) => browsingDataRemoveCache(options),
         removeCookies: (options: BrowsingDataOptions = {}) => browsingDataRemoveCookies(options),
         removeDownloads: (options: BrowsingDataOptions = {}) => browsingDataRemoveDownloads(options),
         removeFormData: browsingDataUnreachable("removeFormData"),
-        removeHistory: browsingDataUnreachable("removeHistory"),
+        removeFileSystems: browsingDataUnreachable("removeFileSystems"),
+        removeHistory: async (options: BrowsingDataOptions = {}) => {
+          const origins = keptOrigins(options);
+          HISTORY.removeHistory({ since: options.since, origins: origins ?? undefined });
+        },
         removeIndexedDB: (options: BrowsingDataOptions = {}) => browsingDataRemoveIndexedDB(options),
         removeLocalStorage: browsingDataUnreachable("removeLocalStorage"),
         removePasswords: browsingDataUnreachable("removePasswords"),
         removePluginData: browsingDataUnreachable("removePluginData"),
         removeServiceWorkers: () => browsingDataRemoveServiceWorkers(),
+        removeWebSQL: browsingDataUnreachable("removeWebSQL"),
+      }
+    : undefined;
+
+  /* #520: history over the engine-owned visit store (see ./history):
+     pages the engine serves land through the request seams, addUrl
+     records through the same store, and every query or deletion
+     answers it. Mounted only with the "history" permission so feature
+     detection answers honestly; onTitleChanged stays absent because
+     titles never reach the worker. */
+  const historyNs = ext.permissions.includes("history")
+    ? (() => {
+        return {
+          search: (q: Record<string, unknown> = {}) => Promise.resolve(HISTORY.search(q as { text?: string; startTime?: number; endTime?: number; maxResults?: number })),
+          getVisits: (d: Record<string, unknown> = {}) => {
+            const url = typeof d.url === "string" ? d.url : null;
+            if (url === null) return Promise.reject(new Error("zeolite: history.getVisits requires a url"));
+            return Promise.resolve(HISTORY.getVisits(url));
+          },
+          addUrl: (d: Record<string, unknown> = {}) => {
+            const url = typeof d.url === "string" && d.url.length > 0 ? d.url : null;
+            if (url === null) return Promise.reject(new Error("zeolite: history.addUrl requires a url"));
+            HISTORY.noteVisit(url);
+            return Promise.resolve();
+          },
+          deleteUrl: (d: Record<string, unknown> = {}) => {
+            const url = typeof d.url === "string" ? d.url : null;
+            if (url === null) return Promise.reject(new Error("zeolite: history.deleteUrl requires a url"));
+            HISTORY.deleteUrl(url);
+            return Promise.resolve();
+          },
+          deleteRange: (d: Record<string, unknown> = {}) => {
+            const startTime = typeof d.startTime === "number" ? d.startTime : NaN;
+            const endTime = typeof d.endTime === "number" ? d.endTime : NaN;
+            if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime < startTime) {
+              return Promise.reject(new Error("zeolite: history.deleteRange requires startTime <= endTime"));
+            }
+            HISTORY.deleteRange(startTime, endTime);
+            return Promise.resolve();
+          },
+          deleteAll: () => Promise.resolve(HISTORY.deleteAll()),
+          /* The listener travels with its owning extension so delivery
+             re-checks the history permission (#281 pattern). */
+          onVisited: bridged((l: (item: HistoryItem) => void) =>
+            HISTORY.onVisited((item) => {
+              if (ext.permissions.includes("history")) l(item);
+            })),
+          onVisitRemoved: bridged((l: (change: HistoryChange) => void) =>
+            HISTORY.onVisitRemoved((change) => {
+              if (ext.permissions.includes("history")) l(change);
+            })),
+        };
+      })()
+    : undefined;
+
+  /* #520: topSites ranks the same visit store; Firefox gates it on
+     the topSites permission and so does the engine. The engine has
+     no titles, so entries carry the url with the empty title. */
+  const topSitesNs = ext.permissions.includes("topSites")
+    ? {
+        get: (details?: { limit?: unknown }) =>
+          Promise.resolve(
+            HISTORY.topSites(typeof details?.limit === "number" && details.limit > 0 ? details.limit : 12)
+              .map((x) => ({ title: "", url: x.url })),
+          ),
       }
     : undefined;
 
@@ -1234,6 +1314,8 @@ export function buildApi(
     ...(notificationsNs && !isApiDetached("notifications") ? { notifications: notificationsNs } : {}),
     ...(cookiesNs && !isApiDetached("cookies") ? { cookies: cookiesNs } : {}),
     ...(browsingDataNs && !isApiDetached("browsingData") ? { browsingData: browsingDataNs } : {}),
+    ...(historyNs && !isApiDetached("history") ? { history: historyNs } : {}),
+    ...(topSitesNs && !isApiDetached("topSites") ? { topSites: topSitesNs } : {}),
     ...(bookmarksNs && !isApiDetached("bookmarks") ? { bookmarks: bookmarksNs } : {}),
   };
   /* #516 slice 3: the mounted surface validates its argument contract

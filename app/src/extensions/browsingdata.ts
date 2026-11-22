@@ -135,7 +135,7 @@ function isPlainOrigin(o: unknown): o is string {
     scoped remover: returns the kept plain origins, or null when the
     call is the whole-store clear. Throws Firefox-style TypeErrors on
     malformed input before anything is touched. */
-function keptOrigins(options: BrowsingDataOptions): string[] | null {
+export function keptOrigins(options: BrowsingDataOptions): string[] | null {
   const origins = options.origins ?? null;
   if (origins === null) {
     if (options.excludeOrigins) throw new TypeError("zeolite: excludeOrigins requires origins");
@@ -170,7 +170,9 @@ export const browsingDataSettings = (): { options: Record<string, never>; dataTy
     cookies: true,
     downloads: true,
     formData: false,
-    history: false,
+    /* #520: the visit store is real now, so history is removable like
+       cache; Firefox callers can really clear it. */
+    history: true,
     /* Reported honestly at call time: the partition clear needs
        indexedDB.databases(), which not every host factory provides
        (never faked, the storage.md rule). */

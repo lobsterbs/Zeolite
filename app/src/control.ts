@@ -34,6 +34,7 @@ import { DL } from "./downloads";
 import { EXT_CONTROL_TYPES, dispatchExtControl } from "./extensions/control";
 import { ALARMS } from "./extensions/alarms";
 import { BOOKMARKS } from "./extensions/bookmarks";
+import { HISTORY } from "./extensions/history";
 import { DNR } from "./extensions/dnr";
 import { extensions } from "./extensions/manager";
 import { setBrowsingDataCacheDropper, setBrowsingDataDownloadClear, setBrowsingDataGuestTerminator } from "./extensions/browsingdata";
@@ -54,6 +55,10 @@ void ALARMS.hydrate();
    boot; a broken store degrades honestly to in-memory trees (hydrate
    never throws). */
 void BOOKMARKS.hydrate();
+/* #520: hydrate the persisted visit-history store at worker boot; a
+   broken store degrades honestly to in-memory records (hydrate never
+   throws). */
+void HISTORY.hydrate();
 /* #521: hydrate persisted declarativeNetRequest dynamic rules and
    enabled static-ruleset snapshots at worker boot, and expose the
    live extension view (enabled state, host permissions, declared

@@ -218,4 +218,31 @@ describe("cookies.onChanged scoping (#281)", () => {
     await expect(setA({ url: "https://a.example/", name: "zl_rev", value: "v" })).rejects.toThrow(/permission 'cookies' not granted/);
     expect(seen).toHaveLength(0);
   });
+
+  /* #520: the engine exposes one durable cookie store; getAllCookieStores
+     reports it with the live tab ids, and a foreign storeId filters reads
+     to the empty answer (set rejects, remove answers null). */
+  it("getAllCookieStores reports the single store with the open tabs", async () => {
+    const { api } = await install("CoStores", ["cookies"]);
+    const ns = (api.browser.cookies as Record<string, unknown>);
+    expect(typeof ns.getAllCookieStores).toBe("function");
+    const stores = await (ns.getAllCookieStores as () => Promise<Array<{ id: string; tabIds: number[] }>>)();
+    expect(stores.length).toBe(1);
+    expect(stores[0].id).toBe("zeolite-default");
+    expect(Array.isArray(stores[0].tabIds)).toBe(true);
+  });
+
+  it("a foreign storeId filters reads to the empty answer and rejects set", async () => {
+    const { api } = await install("CoStoreId", ["cookies"], ["https://sid.example/*"]);
+    const ns = (api.browser.cookies as Record<string, unknown>);
+    documentCookieWrite("https://sid.example/", "zl_store=1; Path=/");
+    expect(await (ns.get as (d: Record<string, unknown>) => Promise<unknown>)({ url: "https://sid.example/", name: "zl_store", storeId: "firefox-default" })).toBeNull();
+    expect(await (ns.get as (d: Record<string, unknown>) => Promise<unknown>)({ url: "https://sid.example/", name: "zl_store" })).toBeTruthy();
+    expect(await (ns.getAll as (d: Record<string, unknown>) => Promise<unknown[]>)({ url: "https://sid.example/", storeId: "other-store" })).toEqual([]);
+    expect((await (ns.getAll as (d: Record<string, unknown>) => Promise<unknown[]>)({ url: "https://sid.example/" })).length).toBeGreaterThan(0);
+    await expect((ns.set as (d: Record<string, unknown>) => Promise<unknown>)({ url: "https://sid.example/", name: "zl_store", value: "2", storeId: "other-store" })).rejects.toThrow();
+    expect(await (ns.remove as (d: Record<string, unknown>) => Promise<unknown>)({ url: "https://sid.example/", name: "zl_store", storeId: "other-store" })).toBeNull();
+    const gone = await (ns.remove as (d: Record<string, unknown>) => Promise<unknown>)({ url: "https://sid.example/", name: "zl_store" });
+    expect(gone).toBeTruthy();
+  });
 });

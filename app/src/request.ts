@@ -98,7 +98,7 @@ const MAPS = newImportmapRegistry();
 import { classifyServeFailure, literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome, recordServeFailure } from "./adaptive-evidence";
 import { spoolBody, spoolFromReader, SpoolHandle, SpoolUnavailableError } from "./bodyspool";
 
-import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrTabFor, wrType, extensions, resolveContentScripts, rootedPageGrant, serveExtensionAsset, serveRootedExtPage, DNR } from "./extensions";
+import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrTabFor, wrType, extensions, resolveContentScripts, rootedPageGrant, serveExtensionAsset, serveRootedExtPage, DNR, HISTORY } from "./extensions";
 
 
 declare const self: ServiceWorkerGlobalScope;
@@ -4920,6 +4920,7 @@ export function handleFetch(e: FetchEvent): void {
             WEBREQ.completed({ ...wrDetails, statusCode: 200 });
             if (e.request.mode === "navigate") {
               WEBNAV.committed(target);
+              HISTORY.noteVisit(target);
               WEBNAV.completed(target);
             }
             return ghosteryResponse;
@@ -5034,6 +5035,7 @@ export function handleFetch(e: FetchEvent): void {
               (hit.headers.get("content-type") ?? "").includes("text/html")
             ) {
               WEBNAV.committed(target);
+              HISTORY.noteVisit(target);
             }
             netLogPush({
               method: e.request.method, traceId,
@@ -6244,7 +6246,10 @@ export function handleFetch(e: FetchEvent): void {
             traceDecision({ subsystem: "rewriter", rule: "html", original: target, result: "streaming", resource: rtype, traceId });
             /* Main-frame document loads feed the webNavigation bridge;
                subresource fetches do not arrive in navigate mode. */
-            if (e.request.mode === "navigate") WEBNAV.committed(target);
+            if (e.request.mode === "navigate") {
+              WEBNAV.committed(target);
+              HISTORY.noteVisit(target);
+            }
             const csInject = csInjectUrls(target, e.request, e.request.referrer);
             /* #551: cosmetic styles for this document, from the same
                engine the network matcher answers from. Gated on the

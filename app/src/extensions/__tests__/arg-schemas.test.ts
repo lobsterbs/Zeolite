@@ -26,7 +26,7 @@ const ALL_NS_PERMISSIONS = [
   "storage", "tabs", "notifications", "contextMenus", "downloads", "cookies",
   "webRequest", "webRequestBlocking", "webNavigation", "alarms", "management",
   "browsingData", "declarativeNetRequest", "declarativeNetRequestFeedback",
-  "bookmarks",
+  "bookmarks", "history", "topSites",
 ];
 
 /* #516 slice 5: the namespaces the argument contract covers.
@@ -37,8 +37,9 @@ const ALL_NS_PERMISSIONS = [
 const COVERED_NAMESPACES = new Set([
   "alarms", "action", "bookmarks", "browserAction", "browsingData",
   "contextMenus", "menus", "cookies", "declarativeNetRequest", "downloads",
-  "extension", "i18n", "management", "notifications", "pageAction",
-  "permissions", "runtime", "scripting", "storage", "tabs", "windows",
+  "extension", "history", "i18n", "management", "notifications", "pageAction",
+  "permissions", "runtime", "scripting", "storage", "tabs", "topSites",
+  "windows",
 ]);
 
 async function allPermsApi() {

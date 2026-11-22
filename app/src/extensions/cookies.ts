@@ -18,6 +18,7 @@
 import type { ExtensionRecord } from "./types";
 import { hostPatternsMatch } from "./permissions";
 import { documentCookieWrite, jarDefaultEnumeration, jarRemoveIdentities, onCookieJarChange, isDefaultJarNamespace } from "../cookies";
+import { TABS } from "./tabs";
 import type { Cookie } from "../cookies";
 
 interface UrlFacts {
@@ -178,6 +179,23 @@ function gate(ext: ExtensionRecord, url: unknown): UrlFacts | string {
   return f;
 }
 
+/** The single extension-visible cookie store: the engine has exactly
+    one durable default-profile jar, so getAllCookieStores reports one
+    store carrying every open tab. */
+export const ZEOLITE_COOKIE_STORE_ID = "zeolite-default";
+
+/** Firefox honors details.storeId in get/getAll/set/remove; a storeId
+    other than the single store answers the empty result while set
+    errors, exactly like asking a store that holds nothing. */
+function storeIdGate(details: Record<string, unknown>): boolean {
+  return typeof details?.storeId !== "string" || details.storeId === ZEOLITE_COOKIE_STORE_ID;
+}
+
+/** Zero-arg store enumeration: one store, every open tab id in it. */
+export function cookiesGetAllCookieStores(): Array<Record<string, unknown>> {
+  return [{ id: ZEOLITE_COOKIE_STORE_ID, tabIds: TABS.list().map((t) => t.id) }];
+}
+
 export function cookiesGet(
   ext: ExtensionRecord,
   details: Record<string, unknown>,
@@ -188,6 +206,7 @@ export function cookiesGet(
   if (typeof name !== "string" || name.length === 0) {
     return Promise.reject(new Error("zeolite: cookies.get requires a name"));
   }
+  if (!storeIdGate(details)) return Promise.resolve(null);
   const f = g;
   const now = Date.now();
   let best: Cookie | null = null;
@@ -208,6 +227,7 @@ export function cookiesGetAll(
   ext: ExtensionRecord,
   details: Record<string, unknown> = {},
 ): Promise<Record<string, unknown>[]> {
+  if (!storeIdGate(details)) return Promise.resolve([]);
   const now = Date.now();
   const name = typeof details.name === "string" ? details.name : null;
   const domain = typeof details.domain === "string"
@@ -257,6 +277,9 @@ export function cookiesSet(
 ): Promise<Record<string, unknown> | null> {
   const g = gate(ext, details?.url);
   if (typeof g === "string") return Promise.reject(new Error(g));
+  if (!storeIdGate(details)) {
+    return Promise.reject(new Error("zeolite: cookies.set targets an unknown cookie store: " + String(details?.storeId)));
+  }
   const name = details?.name;
   const value = details?.value;
   if (typeof name !== "string" || !name || /[\s;,]/.test(name)) {
@@ -300,6 +323,7 @@ export function cookiesRemove(
   if (typeof name !== "string" || name.length === 0) {
     return Promise.reject(new Error("zeolite: cookies.remove requires a name"));
   }
+  if (!storeIdGate(details)) return Promise.resolve(null);
   const f = g;
   const now = Date.now();
   /* One deletion per (domain, hostOnly, path) identity: the same

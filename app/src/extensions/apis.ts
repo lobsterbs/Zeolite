@@ -20,10 +20,12 @@ export const OPTIONAL_API_MODULES = [
   "cookies",
   "declarativeNetRequest",
   "downloads",
+  "history",
   "management",
   "menus",
   "notifications",
   "storage",
+  "topSites",
   "webNavigation",
   "webRequest",
 ] as const;
