@@ -125,6 +125,18 @@ export class NotificationsHost {
     return Promise.resolve(out);
   }
 
+  /** Firefox grants the notifications API permission at install and never
+      changes it at runtime: a mounted record always answers 'granted' and
+      onPermissionLevelChanged never fires (#523 member-slice). */
+  getPermissionLevel(ext: ExtensionRecord): Promise<'granted'> {
+    if (!ext.permissions.includes('notifications')) {
+      return Promise.reject(
+        new Error('zeolite: permission \'notifications\' not granted to this extension'),
+      );
+    }
+    return Promise.resolve('granted');
+  }
+
   /** Registry view for the host/UI; one extension's own entries. */
   listFor(extId: ExtensionId): NotificationRecord[] {
     return [...this.notes.values()].filter((n) => n.extId === extId).map((n) => ({ ...n }));

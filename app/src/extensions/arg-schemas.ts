@@ -304,6 +304,7 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   "notifications.update": { min: 2, max: 2, types: [["string"], ["object"]] },
   "notifications.clear": { min: 1, max: 1, types: [["string"]] },
   "notifications.getAll": { min: 0, max: 0 },
+  "notifications.getPermissionLevel": { min: 0, max: 0 },
 
   /* ---- permissions -------------------------------------------------------------------- */
   "permissions.contains": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (an empty permission set)" },

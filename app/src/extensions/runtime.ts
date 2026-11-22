@@ -766,6 +766,7 @@ export function buildApi(
           update: (id: string, opts: Record<string, unknown>) => NOTIFY.update(ext, id, opts),
           clear: (id: string) => NOTIFY.clear(ext, id),
           getAll: () => NOTIFY.getAll(ext),
+          getPermissionLevel: () => NOTIFY.getPermissionLevel(ext),
           onClicked: bridged<NotificationClickedListener>((l) => NOTIFY.onClicked(ext.id, l)),
           onClosed: bridged<NotificationClosedListener>((l) => NOTIFY.onClosed(ext.id, l)),
           onButtonClicked: bridged<ButtonClickedListener>((l) => NOTIFY.onButtonClicked(ext.id, l)),

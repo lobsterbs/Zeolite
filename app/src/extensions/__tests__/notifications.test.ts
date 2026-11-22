@@ -147,4 +147,14 @@ describe("browser.notifications", () => {
     expect(await (na.clear as (i: string) => Promise<boolean>)("own")).toBe(false);
     NOTIFY.setDispatch(null);
   });
+
+  it("getPermissionLevel answers granted for the install-granted permission and rejects records without it", async () => {
+    const { api } = await install("NotifyLevel", ["notifications"]);
+    const n = api.browser.notifications as Record<string, unknown>;
+    await expect((n.getPermissionLevel as () => Promise<string>)()).resolves.toBe("granted");
+    const bare = await install("NoNotifyLevel", []);
+    await expect(NOTIFY.getPermissionLevel(bare.rec)).rejects.toThrow(
+      "permission 'notifications' not granted to this extension",
+    );
+  });
 });

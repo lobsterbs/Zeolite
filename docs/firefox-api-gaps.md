@@ -12,7 +12,7 @@ ZL_UPDATE_GAPS_DOC=1 npx vitest run src/extensions/__tests__/gaps-doc.test.ts   
 
 ## Summary
 
-- Mounted namespaces: **23** (208 members), the union of the action-family fixtures
+- Mounted namespaces: **23** (209 members), the union of the action-family fixtures
 - Firefox namespaces not mounted: **40**, each with its honest reason
 - Mounted namespaces with member-level gaps: **18**
 - Engine extras (mounted members Firefox does not have): **4**, each justified in COMPAT
@@ -80,7 +80,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `management` | install |
 | `webRequest` | filterResponseData, getSecurityInfo, onAuthRequired |
 | `action` | getUserSettings, openPopup |
-| `notifications` | getPermissionLevel, onPermissionLevelChanged, onShowSettings, onShown |
+| `notifications` | onPermissionLevelChanged, onShowSettings, onShown |
 | `cookies` | getAllCookieStores |
 | `browsingData` | removeAppcache, removeFileSystems, removeWebSQL |
 | `extension` | setUpdateUrlData |
@@ -113,7 +113,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `i18n` | `getAcceptLanguages` (method), `getMessage` (method), `getPreferredSystemLanguages` (method), `getUILanguage` (method) |
 | `management` | `get` (method), `getAll` (method), `getSelf` (method), `onDisabled` (event), `onEnabled` (event), `onInstalled` (event), `onUninstalled` (event), `setEnabled` (method), `uninstall` (method), `uninstallSelf` (method) |
 | `menus` | `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
-| `notifications` | `clear` (method), `create` (method), `getAll` (method), `onButtonClicked` (event), `onClicked` (event), `onClosed` (event), `update` (method) |
+| `notifications` | `clear` (method), `create` (method), `getAll` (method), `getPermissionLevel` (method), `onButtonClicked` (event), `onClicked` (event), `onClosed` (event), `update` (method) |
 | `pageAction` | `getPopup` (method), `getTitle` (method), `hide` (method), `isShown` (method), `onClicked` (event), `setIcon` (method), `setPopup` (method), `setTitle` (method), `show` (method) |
 | `permissions` | `contains` (method), `getAll` (method), `onAdded` (event), `onRemoved` (event), `remove` (method), `request` (method) |
 | `runtime` | `connect` (method), `getBrowserInfo` (method), `getContexts` (method), `getManifest` (method), `getPlatformInfo` (method), `getURL` (method), `id` (constant), `lastError` (constant), `onConnect` (event), `onConnectExternal` (event), `onInstalled` (event), `onMessage` (event), `onMessageExternal` (event), `onStartup` (event), `onSuspend` (event), `onUpdateAvailable` (event), `openOptionsPage` (method), `reload` (method), `requestUpdateCheck` (method), `sendMessage` (method), `setUninstallURL` (method) |
