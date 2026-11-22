@@ -95,6 +95,7 @@ const PAGE2 = [
   "function j2(r){ return r.text().then(function(t){ try { return JSON.parse(t).path; } catch(e){ return 'BAD:'+t.slice(0,60); } }); }",
   "rec2('imgBase', new Promise(function(res, rej){ var i = new Image(); i.onload = function(){ res('loaded'); }; i.onerror = function(){ rej(new Error('img error')); }; i.src = 'hero.png' + ''; }));",
   "rec2('imgSub', new Promise(function(res, rej){ var i = new Image(); i.onload = function(){ res('loaded'); }; i.onerror = function(){ rej(new Error('img error')); }; i.src = 'deep/hero2.png' + ''; }));",
+  "rec2('fetchBase', fetch('data' + '.json').then(j2));",
   "window.__r2.baseShape = { ok: true, val: (document.querySelector('base') && document.querySelector('base').getAttribute('href')) || 'none' };",
   "<" + "/script>",
   "</body></html>",
@@ -375,7 +376,7 @@ async function main() {
   /* #705: a runtime-set img src and a relative fetch must resolve
      against the emitted base across modes, byte-parity on the echoed
      upstream path. */
-  for (const k of ["imgBase", "imgSub"]) {
+  for (const k of ["imgBase", "imgSub", "fetchBase"]) {
     await check("base-anchored " + k + " direct-vs-proxied parity", () => {
       const d = baseDirect[k], p = baseProxied[k];
       if (!d || !d.ok) throw new Error("direct control failed: " + JSON.stringify(d));

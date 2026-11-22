@@ -452,6 +452,33 @@ describe("senderIsHostPage (#170: the host gate fails closed)", () => {
     expect(senderIsHostPage(O + "/app/unknown", O)).toBe(false);
     expect(senderIsHostPage("https://evil.example/", O)).toBe(false);
   });
+  /* #707: the effective base (the transform's folded <base>,
+     registered per client) wins for RELATIVE tails per HTML
+     effective-base semantics; absolute tails ignore it; without it
+     the parent-route destination stays the resolution anchor. */
+  it("resolves a relative tail against the effective base (#707)", () => {
+    setRouteKey(KEY_A);
+    const parent = encodeDest("https://example.com/dir/basedir/base.html");
+    expect(
+      navpResolve(parent + "/__zl_prel__/" + encodeURIComponent("data.json"), undefined, null, "https://example.com/dir/assets/"),
+    ).toBe("https://example.com/dir/assets/data.json");
+  });
+
+  it("ignores the effective base for absolute tails (#707)", () => {
+    setRouteKey(KEY_A);
+    const parent = encodeDest("https://example.com/dir/basedir/base.html");
+    expect(
+      navpResolve(parent + "/__zl_prel__/" + encodeURIComponent("/svc/x.json"), undefined, null, "https://example.com/dir/assets/"),
+    ).toBe("https://example.com/svc/x.json");
+  });
+
+  it("falls back to the parent destination without an effective base (#707)", () => {
+    setRouteKey(KEY_A);
+    const parent = encodeDest("https://example.com/dir/basedir/base.html");
+    expect(
+      navpResolve(parent + "/__zl_prel__/" + encodeURIComponent("data.json")),
+    ).toBe("https://example.com/dir/basedir/data.json");
+  });
 });
 
 /* The prel peel: a handle route carrying a #101 re-anchor tail is

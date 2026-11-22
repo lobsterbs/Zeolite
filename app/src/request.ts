@@ -248,9 +248,32 @@ export function withBodyStallDeadline(
    __zl.baseURI). Best-effort and bounded: a page that never
    receives it keeps the honest fallback (the virtual document
    URL, the spec default without a base element). */
+/* #707: SW-side record of the same effective-base fold the page
+   receives through zl:vbase (the HOSTLESS #532 form), keyed by the
+   owning client. A relative prel tail re-emitted by the page's
+   fetch/XHR/beacon wrappers resolves against this fold per HTML
+   effective-base semantics - a real browser resolves such inputs
+   against the base element, not the document URL. Bounded like every
+   registry: 256 clients, insertion-order eviction, and the entry dies
+   with its client id (ids are never reused). Same-origin by
+   construction: the stored form is path-only, so composing with the
+   client's home origin can never leave it. */
+const VBASE_CLIENT_CAP = 256;
+const vbaseOfClient = new Map<string, string>();
+function rememberVbase(clientId: string, resultingClientId: string, vbase: string): void {
+  const id = resultingClientId || clientId;
+  if (!id || typeof vbase !== "string" || vbase.charAt(0) !== "/") return;
+  if (!vbaseOfClient.has(id) && vbaseOfClient.size >= VBASE_CLIENT_CAP) {
+    const oldest = vbaseOfClient.keys().next();
+    if (!oldest.done) vbaseOfClient.delete(oldest.value);
+  }
+  vbaseOfClient.set(id, vbase);
+}
+
 function pushVbase(clientId: string, resultingClientId: string, vbase: string): void {
   const id = resultingClientId || clientId;
   if (!id) return;
+  rememberVbase(clientId, resultingClientId, vbase);
   void (async () => {
     try {
       const client = await raceBoot(self.clients.get(id), "vbase client lookup", PRE_DEADLINE_BOUND_MS);
@@ -1963,7 +1986,7 @@ export function markerPathDest(dest: string): string | null {
     path to its destination. The parent may be a scheme route or a
     NAVH handle (decodeClientUrl) or a NAV navigation route (legacy
     b64 marker payload). Null = bad route, never a guess. */
-export function navpResolve(pathname: string, engineOrigin?: string, baseFallback?: string | null): string | null {
+export function navpResolve(pathname: string, engineOrigin?: string, baseFallback?: string | null, effectiveBase?: string | null): string | null {
   /* #157/#159: emitters that predate the own-origin re-anchor (or
      unpatched realms) can still pass an absolute engine-origin URL
      as the tail; resolved as absolute it would fetch the engine
@@ -2043,7 +2066,10 @@ export function navpResolve(pathname: string, engineOrigin?: string, baseFallbac
     if (r && (r.startsWith("http://") || r.startsWith("https://"))) return r;
   }
   try {
-    const dest = new URL(rel, base);
+    /* #707: the effective base (the transform's folded <base>)
+       wins for RELATIVE tails - HTML semantics; an absolute tail
+       ignores both anchors by URL construction. */
+    const dest = new URL(rel, effectiveBase ?? base);
     /* #157/#159: an engine-origin absolute tail re-resolves as its
        path against the parent destination: the page meant the
        site's path, not the engine origin root. */
@@ -3163,7 +3189,36 @@ export function handleFetch(e: FetchEvent): void {
             navpBase = ctx && /^https?:/i.test(ctx.targetOrigin) ? ctx.targetOrigin : null;
           }
         }
-        const navpDest = navpResolve(url.pathname, undefined, navpBase);
+        /* #707: HTML effective-base semantics for RELATIVE prel tails.
+           The transform registered the document's folded <base>
+           (hostless) for this client while the document streamed, and
+           a browser resolves a relative input against the base
+           element, not the document URL. The home is the parked
+           decode when one decoded, the client context origin
+           otherwise; the join is path-only (hostless plus an
+           absolute home stays home-origin by construction), and the
+           parent-route destination remains the fallback when no
+           fold is on record. */
+        let effBase7: string | null = null;
+        const vbCid7 = e.resultingClientId || e.clientId || "";
+        const vb7 = vbCid7 ? vbaseOfClient.get(vbCid7) : undefined;
+        if (vb7) {
+          const vbCtx7 = contextOf(VCTX, e.clientId);
+          const vbHome7 =
+            navpBase && /^https?:\/\//i.test(navpBase)
+              ? navpBase
+              : vbCtx7 && /^https?:/i.test(vbCtx7.targetOrigin)
+                ? vbCtx7.targetOrigin
+                : null;
+          if (vbHome7) {
+            try {
+              effBase7 = new URL(vb7, vbHome7).href;
+            } catch {
+              effBase7 = null;
+            }
+          }
+        }
+        const navpDest = navpResolve(url.pathname, undefined, navpBase, effBase7);
         if (!navpDest) return navOutcome(e, url, 404, "route", "zeolite: bad route");
         /* URL fidelity (the Google sei reload class): a GET
            navigation on a NAVH-parent prel tail resolves correctly,
