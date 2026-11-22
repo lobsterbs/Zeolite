@@ -1,27 +1,26 @@
 /* Zeolite extension subsystem: exhaustive Firefox API inventory
    (#516, slice 2).
 
-   The seed inventory (./inventory.ts) made the engine's own mounted
-   surface self-describing. This module adds the other side of the
-   diff: the Firefox browser.* API surface itself, member by member,
-   so the conformance tests can hold the mounted surface against
-   Firefox instead of only against the compat matrix.
+   The seed inventory (./inventory.ts) made the engine's mounted
+   surface self-describing; this module adds the other side of the
+   diff, the Firefox browser.* surface itself, so conformance tests
+   can hold the mount against Firefox, not just the compat matrix.
 
    Data: member-level namespace inventory transcribed from
-   @types/firefox-webext-browser 143.0.1 (the community types
-   generated from Firefox's own toolkit/browser components
-   extensions/schemas JSON). Taxonomy matches buildInventory():
-   method | event | constant. Argument schemas live in
-   ./arg-schemas.ts (#516 slice 3) and per-member Firefox version
-   annotations in ./firefox-versions.ts (#516 slice 4); shortcut:
-   this file must be regenerated when Firefox's schema changes, the
-   source package version is pinned in this header.
+   @types/firefox-webext-browser 143.0.1 (community types generated
+   from Firefox's own schemas JSON). Taxonomy matches
+   buildInventory(): method | event | constant. Argument schemas
+   live in ./arg-schemas.ts, version annotations in
+   ./firefox-versions.ts; regenerate when Firefox's schema changes.
 
-   Three conformance facts live here:
+   Four conformance facts live here:
    - FIREFOX_UNMOUNTED_REASONS: every Firefox namespace the engine
      does NOT mount, with the honest reason. A namespace that gains
      an implementation must remove its reason (the conformance test
      enforces the 1:1 match), so the gap list cannot go stale.
+   - FIREFOX_MEMBER_GAP_REASONS: every Firefox member missing from a
+     mounted namespace, with the honest reason it stays unmounted;
+     firefoxGapReport() refuses a stale or unmotivated entry.
    - ENGINE_EXTRA_MEMBERS: members the engine mounts that Firefox
      does NOT have. Each carries the reason and the COMPAT key that
      documents it, so every deviation from Firefox stays justified.
@@ -176,6 +175,116 @@ export const ENGINE_EXTRA_MEMBERS: Record<string, Record<string, { reason: strin
   },
 };
 
+/** Every Firefox member missing from a mounted namespace, with the
+    honest reason it stays unmounted. Kept 1:1 with the live gap set
+    by firefoxGapReport() itself: a reason for a mounted member, or
+    a gap without a reason, throws. */
+export const FIREFOX_MEMBER_GAP_REASONS: Record<string, string> = {
+  "action.getUserSettings": "toolbar placement and user toggles are host-UI state the engine cannot see",
+  "action.openPopup": "opening the action popup is a host-UI gesture; no popup host verb exists",
+  "browserAction.getUserSettings": "toolbar placement and user toggles are host-UI state the engine cannot see",
+  "browserAction.onUserSettingsChanged": "user action settings are host-UI state with no change reporting",
+  "browserAction.openPopup": "opening the action popup is a host-UI gesture; no popup host verb exists",
+  "contextMenus.ACTION_MENU_TOP_LEVEL_LIMIT": "the top-level action limit bounds a menu host surface the engine does not have (#519)",
+  "contextMenus.getTargetElement": "menu targets live in the page realm; unreachable without content-script worlds (#517)",
+  "contextMenus.onHidden": "menu visibility is host-UI state; no menu host reports it",
+  "contextMenus.onShown": "menu visibility is host-UI state; no menu host reports it",
+  "contextMenus.overrideContext": "privileged Firefox UI override; no menu host exists",
+  "contextMenus.refresh": "no host menu surface to refresh",
+  "downloads.acceptDanger": "no OS download manager or danger-prompt surface exists",
+  "downloads.cancel": "the engine hands downloads to the host; it holds no live transfer to cancel",
+  "downloads.drag": "drag-on-demand is a host-UI gesture with no download surface",
+  "downloads.erase": "the download record store exposes no erase surface",
+  "downloads.getFileIcon": "no OS file-icon surface exists",
+  "downloads.onCreated": "download lifecycle events beyond onChanged are not surfaced from the store (#522)",
+  "downloads.onErased": "no erase verb exists, so an erased event has no source (#522)",
+  "downloads.open": "no OS opener surface inside the engine",
+  "downloads.pause": "the engine hands downloads to the host; it holds no live transfer to pause",
+  "downloads.removeFile": "no OS file-system surface exists",
+  "downloads.resume": "the engine hands downloads to the host; it holds no live transfer to resume",
+  "downloads.setShelfEnabled": "no download shelf exists in the engine or host",
+  "downloads.show": "no OS download-folder surface exists",
+  "downloads.showDefaultFolder": "no OS download-folder surface exists",
+  "extension.setUpdateUrlData": "update-URL state belongs to a host updater; the engine ships no updater",
+  "history.onTitleChanged": "titles never reach the worker; the visit store records URLs only",
+  "i18n.detectLanguage": "no language-detection model ships with the engine; a guess would fake the detection",
+  "management.install": "no fetch-and-prompt install host; packages install through the engine's own manager",
+  "menus.ACTION_MENU_TOP_LEVEL_LIMIT": "the top-level action limit bounds a menu host surface the engine does not have (#519)",
+  "menus.getTargetElement": "menu targets live in the page realm; unreachable without content-script worlds (#517)",
+  "menus.onHidden": "menu visibility is host-UI state; no menu host reports it",
+  "menus.onShown": "menu visibility is host-UI state; no menu host reports it",
+  "menus.overrideContext": "privileged Firefox UI override; no menu host exists",
+  "menus.refresh": "no host menu surface to refresh",
+  "notifications.onPermissionLevelChanged": "the permission level is install-granted and immutable in this engine, so it can never honestly fire",
+  "notifications.onShowSettings": "no OS notification-settings surface exists",
+  "notifications.onShown": "the notification host reports click and close only; no shown event exists",
+  "pageAction.openPopup": "opening the action popup is a host-UI gesture; no popup host verb exists",
+  "runtime.connectNative": "native-messaging hosts are host-OS processes; the sandboxed worker has no process bridge",
+  "runtime.getBackgroundPage": "MV2 background pages have no DOM window in a service-worker engine",
+  "runtime.getFrameId": "frame identity exists only for content-script contexts (#517); the background context owns no frame",
+  "runtime.getPackageDirectoryEntry": "the legacy DirectoryEntry API is not available inside a service worker",
+  "runtime.onBrowserUpdateAvailable": "deprecated alias of onUpdateAvailable; host update lifecycle is not observable in-engine",
+  "runtime.onPerformanceWarning": "no performance-warning emitter exists for extension contexts",
+  "runtime.onRestartRequired": "host restart lifecycle is not observable in-engine",
+  "runtime.onSuspendCanceled": "no suspend-cancel event source exists in the engine",
+  "runtime.onUserScriptConnect": "userScripts messaging needs the isolated-world work (#517)",
+  "runtime.onUserScriptMessage": "userScripts messaging needs the isolated-world work (#517)",
+  "runtime.restart": "restarting the host browser is outside an embedded engine's authority",
+  "runtime.sendNativeMessage": "native-messaging hosts are host-OS processes; the sandboxed worker has no process bridge",
+  "scripting.getRegisteredContentScripts": "persistent content-script registration targets the content-script world (#517)",
+  "scripting.registerContentScripts": "persistent content-script registration targets the content-script world (#517)",
+  "scripting.removeCSS": "injected styles carry no removal token; rides the scripting CSS work (#519)",
+  "scripting.unregisterContentScripts": "persistent content-script registration targets the content-script world (#517)",
+  "scripting.updateContentScripts": "persistent content-script registration targets the content-script world (#517)",
+  "tabs.captureTab": "the engine never rasterizes pages; no rendering surface exists",
+  "tabs.captureVisibleTab": "the engine never rasterizes pages; no rendering surface exists",
+  "tabs.connect": "per-tab channel messaging needs content-script contexts (#517)",
+  "tabs.detectLanguage": "no language-detection model ships with the engine; a guess would fake the detection",
+  "tabs.discard": "tab lifecycle (memory pressure, discard) belongs to the host UI; the tab registry is synchronized, not driven",
+  "tabs.executeScript": "tab-legacy injection routes through the scripting engine; not mounted yet (#519 lane)",
+  "tabs.getZoom": "zoom is host-UI state; the virtualized page has no zoom surface",
+  "tabs.getZoomSettings": "zoom is host-UI state; the virtualized page has no zoom surface",
+  "tabs.goBack": "session-history control is a host-UI verb; the tab bridge carries no history verb",
+  "tabs.goForward": "session-history control is a host-UI verb; the tab bridge carries no history verb",
+  "tabs.group": "the UI tab model has no group concept",
+  "tabs.hide": "tab visibility is host-UI state; the tab bridge carries no visibility verb",
+  "tabs.insertCSS": "tab-legacy style injection routes through the scripting engine; not mounted yet (#519 lane)",
+  "tabs.move": "tab placement belongs to the host UI; the bridge has no move verb",
+  "tabs.moveInSuccession": "tab placement belongs to the host UI; the bridge has no move verb",
+  "tabs.onAttached": "window/tab attachment events need host-UI reporting; the bridge does not report them",
+  "tabs.onDetached": "window/tab attachment events need host-UI reporting; the bridge does not report them",
+  "tabs.onHighlighted": "the UI tab model has no selection surface to highlight",
+  "tabs.onMoved": "the tab bridge does not report movement",
+  "tabs.onReplaced": "prerender swaps do not exist; the tab model is UI-owned",
+  "tabs.onZoomChange": "zoom is host-UI state; the virtualized page has no zoom surface",
+  "tabs.print": "no rendering surface exists to print a proxied page",
+  "tabs.printPreview": "no rendering surface exists to print a proxied page",
+  "tabs.reload": "reload is a host-UI verb; the tab bridge carries no reload verb",
+  "tabs.removeCSS": "injected styles carry no removal token; rides the scripting CSS work (#519)",
+  "tabs.saveAsPDF": "no rendering surface exists to rasterize a proxied page to PDF",
+  "tabs.setZoom": "zoom is host-UI state; the virtualized page has no zoom surface",
+  "tabs.setZoomSettings": "zoom is host-UI state; the virtualized page has no zoom surface",
+  "tabs.show": "tab visibility is host-UI state; the tab bridge carries no visibility verb",
+  "tabs.toggleReaderMode": "reader mode is a Firefox UI feature with no engine or host equivalent",
+  "tabs.ungroup": "the UI tab model has no group concept",
+  "tabs.warmup": "preloading is a host tab-scheduler hint with no engine equivalent",
+  "webNavigation.getAllFrames": "no frame-tree query surface exists; navigation events carry what the bridge reports",
+  "webNavigation.getFrame": "no frame-tree query surface exists; navigation events carry what the bridge reports",
+  "webNavigation.onCreatedNavigationTarget": "target-attribute navigations are not reported by the navigation bridge",
+  "webNavigation.onErrorOccurred": "navigation errors are engine-internal; the bridge reports stages only",
+  "webNavigation.onHistoryStateUpdated": "same-document session-history updates happen in the page realm; the worker cannot see them",
+  "webNavigation.onReferenceFragmentUpdated": "hash-only navigation happens in the page realm; the worker cannot see it",
+  "webNavigation.onTabReplaced": "instant/prerender swaps do not exist; the tab model is UI-owned",
+  "webRequest.filterResponseData": "response streams belong to the rewriter pipeline; per-listener body filters have no engine surface",
+  "webRequest.getSecurityInfo": "transport security details stay inside the transport layer; no security-info surface reaches extensions",
+  "webRequest.onAuthRequired": "auth challenges terminate inside the transport; no auth-prompt surface exists",
+  "windows.create": "window lifecycle verbs belong to the host UI; the engine window view is synchronized, not driven",
+  "windows.onCreated": "window lifecycle events need host-UI reporting; the bridge does not report them",
+  "windows.onRemoved": "window lifecycle events need host-UI reporting; the bridge does not report them",
+  "windows.remove": "window lifecycle verbs belong to the host UI; the engine window view is synchronized, not driven",
+  "windows.update": "window lifecycle verbs belong to the host UI; the engine window view is synchronized, not driven",
+};
+
 export interface FirefoxGapReport {
   /** Firefox namespaces not mounted, with their reasons, sorted. */
   absentNamespaces: { name: string; reason: string }[];
@@ -204,6 +313,21 @@ export function firefoxGapReport(mounted: Record<string, unknown>): FirefoxGapRe
       .filter((m) => !have.includes(m))
       .sort();
     if (missing.length > 0) missingMembers.push({ namespace: ns, members: missing });
+  }
+
+  for (const gap of missingMembers) {
+    for (const member of gap.members) {
+      if (!FIREFOX_MEMBER_GAP_REASONS[gap.namespace + "." + member])
+        throw new Error("member gap lacks a reason: " + gap.namespace + "." + member);
+    }
+  }
+  for (const key of Object.keys(FIREFOX_MEMBER_GAP_REASONS)) {
+    const dot = key.indexOf(".");
+    const ns = key.slice(0, dot);
+    if (!mountedNamespaces.has(ns)) continue;
+    const have = Object.keys((mounted[ns] ?? {}) as Record<string, unknown>);
+    if (have.includes(key.slice(dot + 1)))
+      throw new Error("stale member gap reason: " + key + " is mounted");
   }
   const engineExtras: FirefoxGapReport["engineExtras"] = [];
   for (const ns of Object.keys(ENGINE_EXTRA_MEMBERS).sort()) {

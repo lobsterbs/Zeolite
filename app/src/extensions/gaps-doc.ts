@@ -10,7 +10,7 @@
      ZL_UPDATE_GAPS_DOC=1 npx vitest run src/extensions/__tests__/gaps-doc.test.ts
    from app/. */
 
-import type { FirefoxGapReport } from "./firefox-inventory";
+import { FIREFOX_MEMBER_GAP_REASONS, type FirefoxGapReport } from "./firefox-inventory";
 import type { InventoryNamespace } from "./inventory";
 
 function esc(s: string): string {
@@ -58,10 +58,14 @@ export function renderGapsDoc(report: FirefoxGapReport, mounted: InventoryNamesp
   if (report.missingMembers.length === 0) {
     lines.push("None - every mounted namespace carries every Firefox member its inventory declares.");
   } else {
-    lines.push("| Namespace | Firefox members not mounted |");
-    lines.push("| --- | --- |");
+    lines.push("| Namespace | Member | Reason |");
+    lines.push("| --- | --- | --- |");
     for (const m of report.missingMembers) {
-      lines.push(`| \`${esc(m.namespace)}\` | ${m.members.map(esc).join(", ")} |`);
+      for (const member of m.members) {
+        lines.push(
+          "| `" + esc(m.namespace) + "` | `" + esc(member) + "` | " + esc(FIREFOX_MEMBER_GAP_REASONS[m.namespace + "." + member]) + " |",
+        );
+      }
     }
   }
   lines.push("");

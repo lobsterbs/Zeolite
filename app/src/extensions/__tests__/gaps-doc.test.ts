@@ -10,7 +10,7 @@ import { buildApi } from "../runtime";
 import { ExtensionMessenger } from "../messaging";
 import { ExtensionStorageArea } from "../storage";
 import { buildInventory } from "../inventory";
-import { firefoxGapReport } from "../firefox-inventory";
+import { FIREFOX_API, FIREFOX_MEMBER_GAP_REASONS, firefoxGapReport } from "../firefox-inventory";
 import { renderGapsDoc } from "../gaps-doc";
 
 const DOC_URL = new URL("../../../../docs/firefox-api-gaps.md", import.meta.url);
@@ -73,5 +73,28 @@ describe("firefox-api-gaps.md staleness (#516)", () => {
     expect(existsSync(DOC_URL), "docs/firefox-api-gaps.md exists").toBe(true);
     const committed = readFileSync(DOC_URL, "utf-8");
     expect(committed).toBe(rendered);
+  });
+
+  it("member-gap reasons stay grounded and 1:1 (#516)", () => {
+    for (const key of Object.keys(FIREFOX_MEMBER_GAP_REASONS)) {
+      const space = key.indexOf(".");
+      expect(FIREFOX_API[key.slice(0, space)]?.[key.slice(space + 1)], key + " is a Firefox member").toBeDefined();
+      expect(FIREFOX_MEMBER_GAP_REASONS[key].length, key + " carries a reason").toBeGreaterThan(0);
+    }
+    expect(() => firefoxGapReport({ webRequest: {} })).toThrow(/lacks a reason/);
+    const menusAll: Record<string, unknown> = {
+      ACTION_MENU_TOP_LEVEL_LIMIT: 6,
+      create: () => {},
+      getTargetElement: () => null,
+      onClicked: { addListener: () => {} },
+      onHidden: { addListener: () => {} },
+      onShown: { addListener: () => {} },
+      overrideContext: () => {},
+      refresh: () => {},
+      remove: () => {},
+      removeAll: () => {},
+      update: () => {},
+    };
+    expect(() => firefoxGapReport({ menus: menusAll })).toThrow(/stale member gap reason/);
   });
 });
