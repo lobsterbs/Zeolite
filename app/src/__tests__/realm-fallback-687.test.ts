@@ -74,6 +74,8 @@ import { initTransform, type TransformDeps } from "../transform";
 
 import { VCTX } from "../swstate";
 
+import { capContexts, establishContext, VCTX_CAP } from "../vctx";
+
 import { applySetCookie, cookieHeaderFor, cookiesResetForTests } from "../cookies";
 
 const ORIGIN = "https://w.example.org";
@@ -106,12 +108,13 @@ describe("#687: context-less realm fallback never crosses sites", () => {
     clientId: string,
     credentials = "include",
     resultingClientId?: string,
+    method = "GET",
   ) => {
     const armed: Promise<Response>[] = [];
     const ev = {
       request: {
         url,
-        method: "GET",
+        method,
         mode,
         destination,
         credentials,
@@ -264,4 +267,97 @@ describe("#687: context-less realm fallback never crosses sites", () => {
     expect(cookieHeaderFor("https://en.wikipedia.org/", { clientId: "blob-w7" })).toBe("cf_clearance=wiki-secret");
     expect(cookieHeaderFor("https://other.example/", ctx)).toBeNull();
   });
+
+  /* ---- #695: the #690 fail-close is volatility-bypassable (the two
+     live suspects from the issue, each pinned fail-closed below):
+
+     VCTX is memory-only and shared across kinds. A restart wipes it
+     (rehydration is per-client-on-own-request, so an idle attacker tab
+     re-establishes nothing while the victim's traffic restores its
+     context), and the 256-entry shared cap lets a page's own worker
+     flood evict its own window context while the victim's newer one
+     survives. In either shape unambiguousWindowContext() sees a single
+     victim context at request time and the fallback grants the blob
+     realm the FULL (method, path) surface with the victim's jar.
+
+     Post-fix contract: the fallback is the challenge-platform rescue
+     arm only - GET on /cdn-cgi/ - so a mis-attributed realm can never
+     carry an arbitrary method or path to another site's cookies. */
+
+  it("#695 SW-restart volatility: only the victim's context re-establishes, and the attacker blob realm's POST /account keeps the passthrough (the engine transport never sees the victim's site)", async () => {
+    await establish("https://attacker.example/", "doc-at");
+    await establish("https://bank.example/", "doc-vi");
+    /* the worker restart wipes the in-memory map; the idle attacker tab
+       re-establishes nothing, the victim's own navigation restores it */
+    VCTX.clear();
+    await establish("https://bank.example/", "doc-vi");
+    expect(VCTX.size).toBe(1);
+
+    applySetCookie("https://bank.example/", resp(["session=bank-secret; Path=/"]));
+    clientsMap["blob-w9"] = { type: "worker", url: "blob:" + ORIGIN + "/9f2c-restart" };
+    const sub = mkEvent(ORIGIN + "/account", "no-cors", "empty", "", "blob-w9", "include", undefined, "POST");
+    handleFetch(sub.ev);
+    const served = await sub.armed[0]!;
+    expect(await served.text()).toBe("shell-asset");
+    /* FAIL-CLOSED: no engine-transport row ever names the victim's
+       /account path, on the victim's jar or otherwise */
+    expect(transportMock.urls.some((u) => u.includes("bank.example/account"))).toBe(false);
+  });
+
+  it("#695 shared-cap eviction: the attacker's own worker flood cannot evict its window context into a surviving-victim sole-context and then POST /account upstream", async () => {
+    await establish("https://attacker.example/", "doc-at");
+    await establish("https://bank.example/", "doc-vi");
+    /* ~255 worker-script routes evict the OLDER attacker window context;
+       the victim's newer window context survives the shared cap */
+    for (let i = 0; i < 255; i++) {
+      establishContext(VCTX, "fw-" + i, "https://fw.example/" + i, "worker");
+    }
+    capContexts(VCTX, VCTX_CAP);
+    expect(VCTX.has("doc-at")).toBe(false);
+    expect(VCTX.has("doc-vi")).toBe(true);
+
+    applySetCookie("https://bank.example/", resp(["session=bank-secret; Path=/"]));
+    clientsMap["blob-w10"] = { type: "worker", url: "blob:" + ORIGIN + "/9f2c-flood" };
+    const sub = mkEvent(ORIGIN + "/account", "no-cors", "empty", "", "blob-w10", "include", undefined, "POST");
+    handleFetch(sub.ev);
+    const served = await sub.armed[0]!;
+    expect(await served.text()).toBe("shell-asset");
+    expect(transportMock.urls.some((u) => u.includes("bank.example/account"))).toBe(false);
+  });
+
+  it("#695 method restriction: even on the unambiguous single tab, a blob realm's POST on /cdn-cgi/ keeps the passthrough", async () => {
+    await establish("https://example.com/", "doc-b");
+    clientsMap["blob-w11"] = { type: "worker", url: "blob:" + ORIGIN + "/9f2c-post" };
+    const sub = mkEvent(ORIGIN + "/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=r1", "no-cors", "empty", "", "blob-w11", "include", undefined, "POST");
+    handleFetch(sub.ev);
+    const served = await sub.armed[0]!;
+    expect(await served.text()).toBe("shell-asset");
+    expect(transportMock.urls.some((u) => u.includes("/cdn-cgi/"))).toBe(false);
+  });
+
+  it("#695 path restriction: even on the unambiguous single tab, a blob realm's GET outside /cdn-cgi/ keeps the passthrough", async () => {
+    await establish("https://example.com/", "doc-b");
+    clientsMap["blob-w12"] = { type: "worker", url: "blob:" + ORIGIN + "/9f2c-path" };
+    const sub = mkEvent(ORIGIN + "/account", "no-cors", "empty", "", "blob-w12", "include");
+    handleFetch(sub.ev);
+    const served = await sub.armed[0]!;
+    expect(await served.text()).toBe("shell-asset");
+    expect(transportMock.urls.some((u) => u.endsWith("example.com/account"))).toBe(false);
+  });
+
+  it("#695 rescue arm preserved: after the restart shape, the challenge-platform GET script still resolves against the single live tab", async () => {
+    await establish("https://example.com/", "doc-b");
+    VCTX.clear();
+    await establish("https://example.com/", "doc-b");
+    clientsMap["blob-w13"] = { type: "worker", url: "blob:" + ORIGIN + "/9f2c-rescue" };
+    transportMock.queue.push(new Response("window._cf_chl_opt={};", { status: 200, headers: { "content-type": "application/javascript" } }));
+    const sub = mkEvent(ORIGIN + "/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=r1", "no-cors", "script", "", "blob-w13", "include");
+    handleFetch(sub.ev);
+    const served = await sub.armed[0]!;
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe("window._cf_chl_opt={};");
+    expect(transportMock.urls).toContain("https://example.com/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=r1");
+  });
+
+
 });

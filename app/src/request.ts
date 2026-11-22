@@ -2228,11 +2228,26 @@ async function rehydrateClientContext(
     Returns null on unknown client, shell client, no open proxied window,
     an AMBIGUOUS set of window contexts (more than one upstream origin,
     #687 - never route a context-less realm to another tab's site), or
+    a method or path outside the GET /cdn-cgi/ challenge rescue (#695), or
     any error - every failure keeps the honest passthrough. */
 async function fallbackRealmDest(
   clientId: string | undefined,
   url: URL,
+  method: string,
 ): Promise<string | null> {
+  /* #695: the fallback is the challenge-platform rescue arm, nothing
+     wider. "Unambiguous" is computed over a VOLATILE map: the worker
+     restart wipes it and rehydration is per-client on the client's own
+     request (an idle tab restores nothing), and the shared 256-entry
+     cap mixes worker contexts in, so a page can flood worker routes
+     to evict its own older window context while the victim's newer
+     one survives. Either way a context-less blob realm can meet a
+     single victim context at request time, and the resolved dest
+     carries the victim's jar. A tie the map cannot vouch for must
+     never grant capability: GET on /cdn-cgi/ (the challenge shapes
+     this arm exists for), fail closed otherwise. */
+  if (method !== "GET") return null;
+  if (!url.pathname.startsWith("/cdn-cgi/")) return null;
   if (!clientId) return null;
   let client = null as null | Awaited<ReturnType<typeof self.clients.get>>;
   try {
@@ -3789,7 +3804,7 @@ export function handleFetch(e: FetchEvent): void {
                  serve from dist. Fail closed: unknown client, no open
                  proxied window, ambiguous windows, or any error keeps the
                  old passthrough. */
-              const realmDest = await fallbackRealmDest(e.clientId, url);
+              const realmDest = await fallbackRealmDest(e.clientId, url, e.request.method);
               if (realmDest) {
                 dest0 = realmDest;
               } else {
