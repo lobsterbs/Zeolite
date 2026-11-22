@@ -886,10 +886,59 @@ export function decodeQueryHandle(u: URL, opts?: {expired?: boolean}): { destina
   const cleaned = keep.length > 0 ? "?" + keep.join("&") : "";
   /* #410: builder-escaped surplus leading slashes restore to the
      real "//" pathname, the NAVH decode contract. */
-  return {
-    destination: origin + restoreLeadingSlashes(u.pathname) + cleaned,
-    rootClientId: root,
-  };
+  /* #708: the committed path can carry a #101 prel tail - the
+     navguard token arm mints
+     <real path>/__zl_prel__/<encodeURIComponent(input)> for a
+     query-shape parent - and the raw pathname compose used to ship
+     the tail upstream verbatim (the bscframe ghost 404 class). Peel
+     the tail, bounded, the decodeNavHandlePath contract, and resolve
+     it against the peeled parent: a root-relative input anchors at
+     the token-named origin, a relative input keeps document
+     semantics. The peeled input carries its own query (the mint
+     encoded it); the cleaned search was the plain-parent contract,
+     so it stays with the plain-parent branch only. */
+  const navpCut = u.pathname.indexOf(NAVP + "/");
+  if (navpCut < 0)
+    return {
+      destination: origin + restoreLeadingSlashes(u.pathname) + cleaned,
+      rootClientId: root,
+    };
+  const parentPath = restoreLeadingSlashes(u.pathname.slice(0, navpCut));
+  let cur: string;
+  try {
+    const first = u.pathname.slice(navpCut + NAVP.length);
+    cur = decodeURIComponent((first.startsWith("/") ? first.slice(1) : first).split("#")[0]);
+  } catch {
+    return null;
+  }
+  for (let hop = 0; hop < 4 && cur.indexOf(NAVP + "/") >= 0; hop++) {
+    const seg = cur.slice(cur.indexOf(NAVP + "/") + NAVP.length);
+    try {
+      cur = decodeURIComponent((seg.startsWith("/") ? seg.slice(1) : seg).split("#")[0]);
+    } catch {
+      return null;
+    }
+  }
+  /* a stack deeper than four, or a peel that cannot decode, is the
+     honest null, never a guess */
+  if (cur.indexOf(NAVP + "/") >= 0) return null;
+  try {
+    /* decodePrel parity: the peeled input can itself be a plaintext
+       route (a page-authored /prefix/ input the guard minted);
+       a decodable route wins, a non-route falls to the resolve */
+    if (cur.startsWith(currentPrefix())) {
+      const r = decodePath(cur) ?? recoverPath(cur);
+      if (r && (r.startsWith("http://") || r.startsWith("https://")))
+        return { destination: r, rootClientId: root };
+    }
+    const dest = new URL(cur, origin + parentPath + "/");
+    /* the input binds to the token-named origin: an absolute
+       impostor tail decoded out of the body fails closed */
+    if (dest.origin !== origin) return null;
+    return { destination: dest.href, rootClientId: root };
+  } catch {
+    return null;
+  }
 }
 
 /** #611: the minted browsing-context handle shapes. True only for the

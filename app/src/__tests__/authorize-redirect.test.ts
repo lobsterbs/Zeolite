@@ -7,7 +7,7 @@ import {
   setRouteKey,
   setScheme,
 } from "../codec";
-import { isAuthorizeTokenEndpoint, virtualAuthorizeRedirect, virtualAuthorizeTokenBody } from "../request";
+import { isAuthorizeTokenEndpoint, virtualAuthorizeRedirect, virtualAuthorizeTokenBody, dedupeMsAuthorizeIframeRequestId } from "../request";
 
 /* The MSAL/AAD redirect_uri seam (#431, the #112 co= class): MSAL
    computes redirect_uri from window.location.origin
@@ -232,5 +232,111 @@ describe("isAuthorizeTokenEndpoint (#634 shape gate)", () => {
     expect(isAuthorizeTokenEndpoint("https://contoso.com/oauth2/v2.0/token")).toBe(false);
     expect(isAuthorizeTokenEndpoint("javascript:alert(1)")).toBe(false);
     expect(isAuthorizeTokenEndpoint("not a url")).toBe(false);
+  });
+});
+
+/* #706 (the white sign-in page): the ESTS ssoReload chain replays
+   the authorize request from a stored login page, so the referrer
+   decodes to a Microsoft login host and both the authorize and the
+   token seams fail closed (#634 arm B) - the engine-origin
+   redirect_uri rode upstream on every ESTS hop. The request's own
+   MAC-verified zlNavh lineage names the root browsing context, and
+   its established context names the origin the chain started from:
+   the caller passes that home in, both seams rewrite to it
+   together (RFC 6749 4.1.3), and any dishonest input (no home, a
+   login-host home) keeps the fail-closed pass-through. */
+describe("authorize rootHome recovery (#706 ssoReload replay)", () => {
+  beforeEach(() => {
+    setScheme("/j/");
+    setRouteKey(null);
+  });
+
+  const ROOT = "https://outlook.office.com";
+
+  const body = (redirect: string) =>
+    "grant_type=authorization_code&code=abc123&client_id=9199bf20-a13f-4107-85dc-02114787ef48&redirect_uri=" +
+    encodeURIComponent(redirect) +
+    "&code_verifier=vv";
+
+  const loginParentRef = () => {
+    setRouteKey(KEY);
+    const h = buildQueryHandleUrl(
+      "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=abc",
+    );
+    expect(h).not.toBeNull();
+    return ENGINE + h;
+  };
+
+  it("rewrites a login-host parent authorize to the root home, preserving path and query", () => {
+    const ref = loginParentRef();
+    expect(virtualAuthorizeRedirect(auth(ENGINE + "/mail/?x=1"), ref, ENGINE, undefined, ROOT))
+      .toBe(auth(ROOT + "/mail/?x=1"));
+  });
+
+  it("keeps the fail-closed pass-through without a root home or with a login-host home", () => {
+    const ref = loginParentRef();
+    const inUrl = auth(ENGINE + "/mail/");
+    expect(virtualAuthorizeRedirect(inUrl, ref, ENGINE, undefined, null)).toBe(inUrl);
+    expect(virtualAuthorizeRedirect(inUrl, ref, ENGINE, undefined, "https://login.live.com")).toBe(inUrl);
+    expect(virtualAuthorizeRedirect(inUrl, ref, ENGINE, undefined, "https://login.microsoftonline.com")).toBe(inUrl);
+  });
+
+  it("never recovers into a non-http root home", () => {
+    const ref = loginParentRef();
+    const inUrl = auth(ENGINE + "/mail/");
+    expect(virtualAuthorizeRedirect(inUrl, ref, ENGINE, undefined, "ftp://outlook.office.com")).toBe(inUrl);
+  });
+
+  it("ignores a root home when the parent is healthy (the referrer arm wins)", () => {
+    setRouteKey(KEY);
+    const ref = ENGINE + encodeDest(PAGE);
+    expect(virtualAuthorizeRedirect(auth(ENGINE + "/mail/"), ref, ENGINE, undefined, ROOT))
+      .toBe(auth("https://outlook.office.com/mail/"));
+  });
+
+  it("rewrites the token body to the same root home the authorize seam wrote", () => {
+    const ref = loginParentRef();
+    expect(virtualAuthorizeTokenBody(body(ENGINE + "/mail/?x=1"), ref, ENGINE, undefined, ROOT))
+      .toBe(body(ROOT + "/mail/?x=1"));
+  });
+
+  it("keeps the body byte-identical when the root home is dishonest (RFC 6749 4.1.3)", () => {
+    const ref = loginParentRef();
+    const inBody = body(ENGINE + "/mail/");
+    expect(virtualAuthorizeTokenBody(inBody, ref, ENGINE, undefined, null)).toBe(inBody);
+    expect(virtualAuthorizeTokenBody(inBody, ref, ENGINE, undefined, "https://login.live.com")).toBe(inBody);
+  });
+});
+
+/* #706 (AADSTS9000411): the ESTS sign-in document runs in-frame under
+   the engine (window.top !== self), so its ssoReload boot loop
+   appends one iframe-request-id per boot onto its own url and the
+   committed url accumulates them across reload cycles; ESTS refuses
+   the duplicated shape with the ConvergedError error document - the
+   white page. The engine dedupes last-wins at the authorize
+   destination (the boot minted the freshest id last). */
+describe("dedupeMsAuthorizeIframeRequestId (#706 AADSTS9000411)", () => {
+  const base =
+    "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=9199bf20-a13f-4107-85dc-02114787ef48&response_mode=fragment";
+
+  it("keeps only the freshest (last) iframe-request-id", () => {
+    const acc =
+      base +
+      "&iframe-request-id=id-1&iframe-request-id=id-2&iframe-request-id=id-3&iframe-request-id=id-4&iframe-request-id=id-5";
+    const out = new URL(dedupeMsAuthorizeIframeRequestId(acc));
+    expect(out.searchParams.getAll("iframe-request-id")).toEqual(["id-5"]);
+    /* the surrounding params survive */
+    expect(out.searchParams.get("client_id")).toBe("9199bf20-a13f-4107-85dc-02114787ef48");
+    expect(out.searchParams.get("response_mode")).toBe("fragment");
+  });
+
+  it("passes a single-id url, a token path, another host and non-authorize paths byte-unchanged", () => {
+    const single = base + "&iframe-request-id=id-1";
+    expect(dedupeMsAuthorizeIframeRequestId(single)).toBe(single);
+    const tokenPath = "https://login.microsoftonline.com/common/oauth2/v2.0/token?iframe-request-id=a&iframe-request-id=b";
+    expect(dedupeMsAuthorizeIframeRequestId(tokenPath)).toBe(tokenPath);
+    const otherHost = "https://contoso.com/oauth2/v2.0/authorize?iframe-request-id=a&iframe-request-id=b";
+    expect(dedupeMsAuthorizeIframeRequestId(otherHost)).toBe(otherHost);
+    expect(dedupeMsAuthorizeIframeRequestId("not a url")).toBe("not a url");
   });
 });

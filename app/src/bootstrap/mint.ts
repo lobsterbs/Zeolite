@@ -21,7 +21,7 @@
    request); a failed mint is deleted from the memo so a retry after
    the worker settles can succeed. */
 
-import { makeRel, tokenShaped } from "./navguard";
+import { makeRel, navExcluded, navqToken, tokenShaped } from "./navguard";
 import { NativeURL } from "./anchorshim";
 import { controlQuery } from "./controlquery";
 
@@ -67,24 +67,36 @@ export function mintRoute(dest: string, nav = false, timeout = 5000): Promise<st
   return p;
 }
 
-/** #54 residual 2: wrap the page's subresource seams so cross-origin
-    inputs ride minted engine routes instead of plaintext URLs. */
 /** #157: the top-level proxied page anchors its own re-emissions
-    the same way the nav guard anchors a child realm. Only an
+    the same way the nav guard anchors a child realm. An
     engine-route-shaped pathname anchors (a /__zl_ marker route or
     a token-bearing scheme route); a non-route same-origin context
-    (the demo page, devtools) stays inert. */
+    (the demo page, devtools) stays inert. #511: a query-shape
+    committed page (real path + zlNavh in the search) anchors too;
+    its token arm owns the re-emit (makeRel), the search token
+    itself never enters the anchor. */
 export function routeAnchor(loc: string): string | undefined {
-  let p: string;
+  let u: URL;
   try {
-    p = new NativeURL(loc).pathname;
+    u = new NativeURL(loc);
   } catch {
     return undefined;
   }
-  return p.startsWith("/__zl_") || tokenShaped(p) ? p : undefined;
+  const p = u.pathname;
+  if (p.startsWith("/__zl_") || tokenShaped(p)) return p;
+  /* #511 fail-closed: an engine surface (devtools, bootstrap, the
+     reserved roots) is never a re-emit anchor, token or not - an
+     impostor query token on an engine page must not turn its
+     passes-through fetches into prel bad-routes. */
+  if (navExcluded(p)) return undefined;
+  return navqToken(u.search) !== null ? p : undefined;
 }
 
-export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string): void {
+export function applyReemit(
+  w: Record<string, unknown>,
+  parentRoutePath?: string,
+  parentNavq?: string | null,
+): void {
   const loc = w.location as { href: string; origin: string } | undefined;
   if (!loc || typeof loc.href !== "string") return;
   /* Absolute http(s) URL off the page origin, resolved against the
@@ -110,8 +122,10 @@ export function applyReemit(w: Record<string, unknown>, parentRoutePath?: string
      the SW decodes the parent route and resolves the tail against
      its destination. Absolute and scheme inputs are unchanged
      (crossDest / native), engine-route-shaped paths stay native,
-     and without an anchor nothing changes. */
-  const relRoute = makeRel(parentRoutePath, loc.origin);
+     and without an anchor nothing changes. #511: when the parent
+     is a query-shape committed page, the live zlNavh token
+     anchors the tail instead of the prefix (makeRel token arm). */
+  const relRoute = makeRel(parentRoutePath, loc.origin, parentNavq);
 
   /* Internal label stays on engine-routed requests. */
   const mark = (init: RequestInit | undefined, kind: string): RequestInit => {

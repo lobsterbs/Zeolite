@@ -1986,7 +1986,7 @@ export function markerPathDest(dest: string): string | null {
     path to its destination. The parent may be a scheme route or a
     NAVH handle (decodeClientUrl) or a NAV navigation route (legacy
     b64 marker payload). Null = bad route, never a guess. */
-export function navpResolve(pathname: string, engineOrigin?: string, baseFallback?: string | null, effectiveBase?: string | null): string | null {
+export function navpResolve(pathname: string, engineOrigin?: string, baseFallback?: string | null, effectiveBase?: string | null, parentSearch?: string | null): string | null {
   /* #157/#159: emitters that predate the own-origin re-anchor (or
      unpatched realms) can still pass an absolute engine-origin URL
      as the tail; resolved as absolute it would fetch the engine
@@ -2009,8 +2009,15 @@ export function navpResolve(pathname: string, engineOrigin?: string, baseFallbac
   } else {
     try {
       /* the base origin never matters: decodeClientUrl reads only
-         the pathname and the search */
-      base = decodeClientUrl(new URL(parent, "https://engine.invalid"));
+         the pathname and the search. #708: a query-shape parent
+         carries its committed zlNavh in the REQUEST's search (the
+         navguard token arm), so the caller passes it here; without
+         it the parent decoded to nothing and the prel died at the
+         fallbacks. A parentSearch without zlNavh changes nothing
+         (the decode nulls exactly as before). */
+      base = decodeClientUrl(
+        new URL(parent + (parentSearch === undefined ? "" : parentSearch ?? ""), "https://engine.invalid"),
+      );
     } catch {
       base = null;
     }
@@ -3218,7 +3225,7 @@ export function handleFetch(e: FetchEvent): void {
             }
           }
         }
-        const navpDest = navpResolve(url.pathname, undefined, navpBase, effBase7);
+        const navpDest = navpResolve(url.pathname, undefined, navpBase, effBase7, url.search);
         if (!navpDest) return navOutcome(e, url, 404, "route", "zeolite: bad route");
         /* URL fidelity (the Google sei reload class): a GET
            navigation on a NAVH-parent prel tail resolves correctly,
@@ -4110,7 +4117,29 @@ export function handleFetch(e: FetchEvent): void {
          engine-origin URL the proxy never re-enters (Outlook's
          login chain ends blank). Virtualize a redirect_uri whose
          origin names this deployment at the seam the engine owns. */
-      const arFixed = virtualAuthorizeRedirect(target, e.request.referrer, self.location.origin, initiator);
+      /* #706: the authorize chain's root home. The request's own
+         MAC-verified zlNavh lineage names the root browsing
+         context, and its established context names the origin the
+         chain started from (the app page behind the proxy); the
+         authorize seam needs it when the referrer itself is a
+         stored login page (the #634 fail-closed case). Absent
+         lineage or context keeps the honest null and the #634 rule
+         unchanged. */
+      let navRootHome: string | null = null;
+      const navRootTok = queryHandleToken(url.search);
+      if (navRootTok) {
+        const navRootId = decodeNavHandleRoot(navRootTok);
+        const navRootCtx = navRootId ? contextOf(VCTX, navRootId) : undefined;
+        navRootHome =
+          navRootCtx && /^https?:/i.test(navRootCtx.targetOrigin) ? navRootCtx.targetOrigin : null;
+      }
+      const arFixed = virtualAuthorizeRedirect(
+        target,
+        e.request.referrer,
+        self.location.origin,
+        initiator,
+        navRootHome,
+      );
       if (arFixed !== target) {
         const atid = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.emit({
@@ -4123,6 +4152,28 @@ export function handleFetch(e: FetchEvent): void {
           url: target,
         });
         target = arFixed;
+      }
+
+      /* #706: the ESTS ssoReload boot loop appends one
+         iframe-request-id per boot onto its own url and the
+         committed url accumulates them across reload cycles;
+         ESTS refuses the duplicated shape with AADSTS9000411 (the
+         white ConvergedError page). Last wins: the boot minted the
+         freshest id last. Only the Microsoft authorize endpoints
+         dedupe; everything else passes byte-unchanged. */
+      const irDup = dedupeMsAuthorizeIframeRequestId(target);
+      if (irDup !== target) {
+        const itid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: itid,
+          requestId: itid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "microsoft authorize iframe-request-id deduplicated (last wins)",
+          url: target,
+        });
+        target = irDup;
       }
 
       /* #634: the token exchange must present the SAME redirect_uri
@@ -4139,7 +4190,7 @@ export function handleFetch(e: FetchEvent): void {
       ) {
         try {
           const raw = await e.request.clone().text();
-          const fixed = virtualAuthorizeTokenBody(raw, e.request.referrer, self.location.origin, initiator);
+          const fixed = virtualAuthorizeTokenBody(raw, e.request.referrer, self.location.origin, initiator, navRootHome);
           if (fixed !== raw) {
             tokenBodyOverride = fixed;
             const tbid = DIAG.trace(e.resultingClientId || e.clientId);
@@ -7234,7 +7285,7 @@ function isMicrosoftLoginHost(host: string): boolean {
   );
 }
 
-export function virtualAuthorizeRedirect(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+export function virtualAuthorizeRedirect(target: string, referrer: string, engineOrigin: string, initiator?: string, rootHome?: string | null): string {
   let u: URL;
   try {
     u = new URL(target);
@@ -7276,15 +7327,33 @@ export function virtualAuthorizeRedirect(target: string, referrer: string, engin
      sso_reload flow the browser re-drives from app state on every
      open): a login host never registered this redirect_uri, so a
      rewrite here mints a value the ESTS hop rejects with
-     invalid_request. A mid-chain replay has no recoverable app
-     origin - fail closed, pass through unchanged. */
+     invalid_request. #706: the request's own MAC-verified zlNavh
+     lineage names the root browsing context, and its established
+     context names the origin the chain actually started from (the
+     app page behind the proxy) - the caller passes that home in.
+     No root home (a native app tab, a missing route key, a missing
+     context) or a root home that is itself a login host keeps the
+     honest fail-closed pass-through. */
   let pu: URL;
   try {
     pu = new URL(parent);
   } catch {
     return target;
   }
-  if (isMicrosoftLoginHost(pu.host)) return target;
+  if (isMicrosoftLoginHost(pu.host)) {
+    if (!rootHome || !/^https?:\/\//i.test(rootHome)) return target;
+    let ru: URL;
+    try {
+      ru = new URL(rootHome);
+    } catch {
+      return target;
+    }
+    if (isMicrosoftLoginHost(ru.host)) return target;
+    return u.href.replace(
+      m[0],
+      m[1] + "redirect_uri=" + encodeURIComponent(ru.origin + du.pathname + (du.search || "")),
+    );
+  }
   return u.href.replace(
     m[0],
     m[1] + "redirect_uri=" + encodeURIComponent(parent + du.pathname + (du.search || "")),
@@ -7302,7 +7371,7 @@ export function virtualAuthorizeRedirect(target: string, referrer: string, engin
     set, same honest-fallback rule: only a body redirect_uri whose
     origin names THIS deployment is ours to fix, and a value that
     never decodes to a page origin passes through unchanged. */
-export function virtualAuthorizeTokenBody(body: string, referrer: string, engineOrigin: string, initiator?: string): string {
+export function virtualAuthorizeTokenBody(body: string, referrer: string, engineOrigin: string, initiator?: string, rootHome?: string | null): string {
   const m = /(^|&)redirect_uri=([^&]*)/.exec(body);
   if (!m || !m[2]) return body;
   let dec: string;
@@ -7325,16 +7394,59 @@ export function virtualAuthorizeTokenBody(body: string, referrer: string, engine
   /* #634: the login-host parent rule mirrors the authorize seam: the
      token exchange must present the redirect_uri the authorize step
      used (RFC 6749 4.1.3), so the two seams rewrite together or pass
-     through together. */
+     through together. #706: the rootHome recovery mirrors the
+     authorize seam identically - whatever that seam wrote, the body
+     presents, or AADSTS50011 refuses the code at the exchange. */
   let pu: URL;
   try {
     pu = new URL(parent);
   } catch {
     return body;
   }
-  if (isMicrosoftLoginHost(pu.host)) return body;
+  if (isMicrosoftLoginHost(pu.host)) {
+    if (!rootHome || !/^https?:\/\//i.test(rootHome)) return body;
+    let ru: URL;
+    try {
+      ru = new URL(rootHome);
+    } catch {
+      return body;
+    }
+    if (isMicrosoftLoginHost(ru.host)) return body;
+    const fixedRoot = encodeURIComponent(ru.origin + du.pathname + (du.search || ""));
+    return body.slice(0, m.index) + m[1] + "redirect_uri=" + fixedRoot + body.slice(m.index + m[0].length);
+  }
   const fixed = encodeURIComponent(parent + du.pathname + (du.search || ""));
   return body.slice(0, m.index) + m[1] + "redirect_uri=" + fixed + body.slice(m.index + m[0].length);
+}
+
+/** #706: the ESTS sign-in document runs in-frame under the engine
+    (window.top !== self), so its ssoReload boot loop appends a fresh
+    iframe-request-id onto its OWN url on every boot - and the
+    committed url the engine re-serves accumulates one id per boot.
+    ESTS rejects the accumulated shape with AADSTS9000411 (the
+    parameter 'iframe-request-id' is duplicated) and serves the
+    ConvergedError error document instead: Outlook's white sign-in
+    page. The boot appends the FRESHEST id last, so last-wins dedup
+    restores the single-id shape the ESTS boot flow itself minted.
+    Only the Microsoft login hosts' authorize endpoints serve this;
+    any other url, and a url that never accumulated, passes through
+    byte-unchanged. */
+export function dedupeMsAuthorizeIframeRequestId(target: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (!isMicrosoftLoginHost(u.host)) return target;
+  if (!u.pathname.includes("/oauth2/") || !u.pathname.endsWith("/authorize")) return target;
+  const vals = u.searchParams.getAll("iframe-request-id");
+  if (vals.length < 2) return target;
+  const last = vals[vals.length - 1];
+  u.searchParams.delete("iframe-request-id");
+  u.searchParams.set("iframe-request-id", last);
+  return u.href;
 }
 
 /** The token-endpoint shape the #634 body seam serves: the same

@@ -99,6 +99,24 @@ export const tokenShaped = (v: string): boolean => {
   return /^[\w-]{12,}$/.test(seg);
 };
 
+/** #511 follow-up: raw search -> the zlNavh param value, or null.
+    Raw on purpose (byte-faithful round-trip, mirroring vloc's
+    navqStrip); the page realm cannot MAC-verify the token, it only
+    carries it, and the SW fails impostors closed. An empty value is
+    null: a bare "zlNavh=" is not a token any seam can decode. */
+export function navqToken(search: string): string | null {
+  const raw = search.startsWith("?") ? search.slice(1) : search;
+  if (raw === "") return null;
+  for (const part of raw.split("&")) {
+    if (!part.startsWith("zlNavh=")) continue;
+    /* an empty value is not a token: an anchor on it would arm the
+       prefix arm without a decodable committed route (impostor) */
+    const v = part.slice("zlNavh=".length);
+    return v === "" ? null : v;
+  }
+  return null;
+}
+
 /** #101/#157/#159 shared re-emit helper: a root-relative input
     re-emits as <routePath>/NAVP/<encodeURIComponent(path)>
     through the parent route (the SW decodes the parent and
@@ -109,18 +127,47 @@ export const tokenShaped = (v: string): boolean => {
     class, #157/#159). Excluded: the own prefix, engine
     surfaces, scheme and protocol-relative inputs, fragments,
     empties and token-shaped routes; without a routePath
-    nothing re-emits. */
+    nothing re-emits.
+    #511 follow-up (the bscframe class): a query-shape committed
+    page (real path + zlNavh in the search) has no engine route
+    prefix to anchor on: a 1-segment path ("/ServiceLogin") made
+    engPrefix undefined so relative navigation-bound writes went
+    BARE to the proxy origin and died at the escape seam, and a
+    deeper path minted a prel whose parent the SW cannot decode
+    without the dropped token. With a live zlNavh (navq) the
+    re-emit carries the token in the prel URL's search: the SW's
+    committed-query decode owns the restore, MAC-verified. */
 export function makeRel(
   routePath: string | undefined,
   origin: string,
+  navq?: string | null,
 ): (v: string) => string | null {
   const engPrefix = routePath?.match(/^\/[^\/]+\//)?.[0];
+  /* The token arm anchors on the same honest never-re-emit set as
+     the prefix arm: no marker-shaped parent, no token-shaped
+     parent (a real site path never carries a 12+ b64u second
+     segment), no prel-carrying parent. Fail-closed null keeps
+     the raw write when nothing anchors. */
+  const navArm =
+    !!navq &&
+    !!routePath &&
+    routePath !== "/" &&
+    !routePath.startsWith("/__zl_") &&
+    !navExcluded(routePath) &&
+    !tokenShaped(routePath) &&
+    routePath.indexOf(NAVP + "/") < 0;
   return (v: string): string | null => {
     /* Callers may pass a URL object (EventSource, Request); normalize
        before any string method runs on it. */
     const s = String(v);
     const p = ownOriginPath(s, origin) ?? s;
-    if (!routePath || !engPrefix || navExcluded(p, engPrefix) || tokenShaped(p))
+    if (
+      !routePath ||
+      (!engPrefix && !navArm) ||
+      navExcluded(p, engPrefix) ||
+      tokenShaped(p) ||
+      p.indexOf(NAVP + "/") >= 0
+    )
       return null;
     /* #543: a fragment in the input rides the committed URL raw and
        stays out of the encoded prel tail (the SW decodes pathname
@@ -128,6 +175,9 @@ export function makeRel(
     const cut = p.indexOf("#");
     const body = cut < 0 ? p : p.slice(0, cut);
     const tail = cut < 0 ? "" : p.slice(cut);
+    if (navArm)
+      return routePath + NAVP + "/" + encodeURIComponent(body) + "?zlNavh=" + navq + tail;
+    if (!engPrefix) return null;
     return routePath + NAVP + "/" + encodeURIComponent(body) + tail;
   };
 }
@@ -201,12 +251,17 @@ export function applyNavGuard(
      fragments and empty values; without a route-shaped own URL
      (an about:blank child) nothing changes. */
   let ownRoutePath: string | undefined;
+  let ownNavq: string | null = null;
   try {
-    ownRoutePath = new NativeURL(loc).pathname;
+    const own = new NativeURL(loc);
+    ownRoutePath = own.pathname;
+    /* #511: a query-shape committed page carries the live zlNavh in
+       its own search; the token arm re-emits through it. */
+    ownNavq = navqToken(own.search);
   } catch {
     /* a realm whose loc is not a URL anchors nothing */
   }
-  const navRel = makeRel(ownRoutePath, engineOrigin);
+  const navRel = makeRel(ownRoutePath, engineOrigin, ownNavq);
   /* Reads must return what the page wrote: frameworks compare href
      values, so the raw string is kept per element and attribute and
      the marker only reaches the browser. Keyed by name since #58:
@@ -680,15 +735,20 @@ export function applyNavGuard(
          loc is not a route, so the grandchild keeps the honest
          native degrade. */
       let routePath: string | undefined;
+      let parentNavq: string | null = null;
       try {
         /* the pathname carries no validation of its own: relRoute's
            engine-prefix check rejects non-route pages (an
            about:blank parent), an empty path anchors nothing. */
-        routePath = new NativeURL(loc).pathname;
+        const pu = new NativeURL(loc);
+        routePath = pu.pathname;
+        /* #511: a query-shape committed parent passes its live
+           zlNavh down with the route path. */
+        parentNavq = navqToken(pu.search);
       } catch {
         /* not a URL: no parent route to anchor to */
       }
-      applyReemit(win, routePath);
+      applyReemit(win, routePath, parentNavq);
       /* #131: the guarded child realm also gets the sender-side
          identity repair, so its parent.postMessage calls deliver
          with its own window as ev.source. */
