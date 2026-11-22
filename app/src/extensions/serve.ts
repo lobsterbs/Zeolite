@@ -396,6 +396,12 @@ export interface ServeCtx {
   nav: boolean;
   clientId?: string;
   resultingClientId?: string;
+  /* #700: the fetch destination (Request.destination, sec-fetch-dest
+     fallback resolved by the caller). "worker" marks a
+     dedicated-worker script load: the fetch carries the PARENT page's
+     client id while resultingClientId is the new worker's own client
+     id, which is how the worker inherits its page's grant below. */
+  dest?: string;
   /* #51: the requesting page destination, SW-observed from the fetch
      client. MV3 matches-scoped web_accessible_resources are checked
      against it; unknown means the scoped gate fails closed. */
@@ -567,7 +573,22 @@ export async function serveExtensionAsset(req: Request, url: URL, ctx?: ServeCtx
     return isHtmlPath(sr.path) ? htmlWithPageScript(own, sr.id) : await cssAssetResponse(rec, own, sr.path);
   }
   if (!nav && pageExt === sr.id) {
-    /* Subresource of a served extension page: full package access. */
+    /* Subresource of a served extension page: full package access.
+       #700: a dedicated worker booted by that page fetches its script
+       HERE (the fetch carries the parent page's client id, so the
+       gate above passed), while the worker's OWN importScripts and
+       fetches ride the worker's new client id, which no grant covers:
+       Tampermonkey's vendored worker bundles 404ed behind the
+       fail-closed WAR gate. The worker-script load names the new
+       worker client in resultingClientId; register that client as
+       this extension's page client so the worker inherits exactly
+       its parent page's package access, nothing wider. A plain
+       subresource fetch carries an empty resultingClientId, so this
+       fires only on a real worker script load, and only for a client
+       already registered as this extension's page. */
+    if (ctx?.dest === "worker" && ctx?.resultingClientId) {
+      registerPageClient(ctx.resultingClientId, sr.id);
+    }
     const own = await extensions.getResource(sr.id, sr.path, { fromWeb: false });
     return own ? await cssAssetResponse(rec, own, sr.path) : notFound();
   }

@@ -2699,6 +2699,7 @@ export function handleFetch(e: FetchEvent): void {
                 reqDest(e.request) === "document",
               clientId: e.clientId || undefined,
               resultingClientId: e.resultingClientId || undefined,
+              dest: reqDest(e.request),
               pageUrl,
             },
           );

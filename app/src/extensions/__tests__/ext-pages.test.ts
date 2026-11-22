@@ -415,3 +415,58 @@ describe("page namespace objects (#560)", () => {
     expect(PAGE_BRIDGE_SOURCE).toContain("inIncognitoContext");
   });
 });
+describe("extension page workers (#700)", () => {
+  it("registers the worker client so its own importScripts inherit the page grant", async () => {
+    const rec = await install("WkrInherit", [], {
+      "options.html": PAGE_HTML,
+      "lint.js": "self.lint = 1;",
+      "vendor/lib.js": "self.lib = 42;",
+    });
+    registerPageClient("wparent700a", rec.id);
+    /* the worker SCRIPT load: the parent page's client id, the new
+       worker client in resultingClientId, destination "worker" */
+    const wreq = new Request("https://sw.example" + EXT_ROUTE + rec.id + "/lint.js");
+    const served = await serveExtensionAsset(wreq, new URL(wreq.url), {
+      nav: false,
+      clientId: "wparent700a",
+      resultingClientId: "wworker700a",
+      dest: "worker",
+    });
+    expect(served.status).toBe(200);
+    expect(pageClientOf("wworker700a")).toBe(rec.id);
+    /* the worker's own importScripts then ride the worker client id */
+    const vreq = new Request("https://sw.example" + EXT_ROUTE + rec.id + "/vendor/lib.js");
+    const vend = await serveExtensionAsset(vreq, new URL(vreq.url), {
+      nav: false,
+      clientId: "wworker700a",
+      dest: "script",
+    });
+    expect(vend.status).toBe(200);
+  });
+
+  it("keeps the fail-closed WAR gate for a client the page never registered", async () => {
+    const rec = await install("WkrClosed", [], { "vendor2.js": "self.v2 = 1;" });
+    const req = new Request("https://sw.example" + EXT_ROUTE + rec.id + "/vendor2.js");
+    const denied = await serveExtensionAsset(req, new URL(req.url), {
+      nav: false,
+      clientId: "wstranger700",
+      dest: "script",
+    });
+    expect(denied.status).toBe(404);
+    expect(pageClientOf("wstranger700")).toBeNull();
+  });
+
+  it("does not register a page client on a plain subresource fetch", async () => {
+    const rec = await install("WkrPlain", [], { "plain.js": "self.p = 1;" });
+    registerPageClient("wparent700b", rec.id);
+    const req = new Request("https://sw.example" + EXT_ROUTE + rec.id + "/plain.js");
+    const res = await serveExtensionAsset(req, new URL(req.url), {
+      nav: false,
+      clientId: "wparent700b",
+      resultingClientId: "wother700b",
+      dest: "script",
+    });
+    expect(res.status).toBe(200);
+    expect(pageClientOf("wother700b")).toBeNull();
+  });
+});

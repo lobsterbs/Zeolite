@@ -340,6 +340,23 @@ async function main() {
     return 'options text ok; popup "ext <runtime id>" ok';
   });
 
+  await check('ext workers (#700): a package worker the options page boots loads its own vendored bundle', async () => {
+    const oid = idOf('Zeolite Options Fixture');
+    const op = await ctl({ type: 'zl:openExtPage', extId: oid, which: 'options' });
+    if (!op.ok) throw new Error('options openExtPage failed: ' + JSON.stringify(op));
+    const pgw = await ctx.newPage();
+    await pgw.goto(ENGINE + op.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    const msg = await pgw.evaluate(() => new Promise((res, rej) => {
+      const w = new Worker('lint.js');
+      w.onmessage = (ev) => res(ev.data);
+      w.onerror = () => rej(new Error('worker bootstrap failed (importScripts 404 class)'));
+      setTimeout(() => rej(new Error('worker timeout')), 10000);
+    }));
+    if (msg !== 'vendor-ok:42') throw new Error('worker message: ' + JSON.stringify(msg));
+    await pgw.close();
+    return msg;
+  });
+
   await check('menus: crafted context-menu item registers (zl:listMenus)', async () => {
     const lm = await ctl({ type: 'zl:listMenus' });
     if (!lm.ok) throw new Error('listMenus failed: ' + JSON.stringify(lm));
