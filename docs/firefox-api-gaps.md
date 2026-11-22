@@ -12,7 +12,7 @@ ZL_UPDATE_GAPS_DOC=1 npx vitest run src/extensions/__tests__/gaps-doc.test.ts   
 
 ## Summary
 
-- Mounted namespaces: **23** (203 members), the union of the action-family fixtures
+- Mounted namespaces: **23** (208 members), the union of the action-family fixtures
 - Firefox namespaces not mounted: **40**, each with its honest reason
 - Mounted namespaces with member-level gaps: **18**
 - Engine extras (mounted members Firefox does not have): **4**, each justified in COMPAT
@@ -69,7 +69,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | Namespace | Firefox members not mounted |
 | --- | --- |
 | `runtime` | connectNative, getBackgroundPage, getFrameId, getPackageDirectoryEntry, onBrowserUpdateAvailable, onPerformanceWarning, onRestartRequired, onSuspendCanceled, onUserScriptConnect, onUserScriptMessage, restart, sendNativeMessage |
-| `i18n` | detectLanguage, getPreferredSystemLanguages |
+| `i18n` | detectLanguage |
 | `tabs` | captureTab, captureVisibleTab, connect, detectLanguage, discard, executeScript, getZoom, getZoomSettings, goBack, goForward, group, hide, insertCSS, move, moveInSuccession, onAttached, onDetached, onHighlighted, onMoved, onReplaced, onZoomChange, print, printPreview, reload, removeCSS, saveAsPDF, setZoom, setZoomSettings, show, toggleReaderMode, ungroup, warmup |
 | `windows` | create, onCreated, onRemoved, remove, update |
 | `scripting` | getRegisteredContentScripts, registerContentScripts, removeCSS, unregisterContentScripts, updateContentScripts |
@@ -82,8 +82,8 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `action` | getUserSettings, openPopup |
 | `notifications` | getPermissionLevel, onPermissionLevelChanged, onShowSettings, onShown |
 | `cookies` | getAllCookieStores |
-| `browsingData` | remove, removeAppcache, removeFileSystems, removeWebSQL |
-| `extension` | isAllowedFileSchemeAccess, isAllowedIncognitoAccess, lastError, setUpdateUrlData |
+| `browsingData` | removeAppcache, removeFileSystems, removeWebSQL |
+| `extension` | setUpdateUrlData |
 | `browserAction` | getUserSettings, onUserSettingsChanged, openPopup |
 | `pageAction` | openPopup |
 
@@ -104,13 +104,13 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `alarms` | `clear` (method), `clearAll` (method), `create` (method), `get` (method), `getAll` (method), `onAlarm` (event) |
 | `bookmarks` | `create` (method), `get` (method), `getChildren` (method), `getRecent` (method), `getSubTree` (method), `getTree` (method), `move` (method), `onChanged` (event), `onCreated` (event), `onMoved` (event), `onRemoved` (event), `remove` (method), `removeTree` (method), `search` (method), `update` (method) |
 | `browserAction` | `disable` (method), `enable` (method), `getBadgeBackgroundColor` (method), `getBadgeText` (method), `getBadgeTextColor` (method), `getPopup` (method), `getTitle` (method), `isEnabled` (method), `onClicked` (event), `setBadgeBackgroundColor` (method), `setBadgeText` (method), `setBadgeTextColor` (method), `setIcon` (method), `setPopup` (method), `setTitle` (method) |
-| `browsingData` | `removeCache` (method), `removeCookies` (method), `removeDownloads` (method), `removeFormData` (method), `removeHistory` (method), `removeIndexedDB` (method), `removeLocalStorage` (method), `removePasswords` (method), `removePluginData` (method), `removeServiceWorkers` (method), `settings` (method) |
+| `browsingData` | `remove` (method), `removeCache` (method), `removeCookies` (method), `removeDownloads` (method), `removeFormData` (method), `removeHistory` (method), `removeIndexedDB` (method), `removeLocalStorage` (method), `removePasswords` (method), `removePluginData` (method), `removeServiceWorkers` (method), `settings` (method) |
 | `contextMenus` | `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
 | `cookies` | `get` (method), `getAll` (method), `onChanged` (event), `remove` (method), `set` (method) |
 | `declarativeNetRequest` | `DYNAMIC_RULESET_ID` (constant), `GUARANTEED_MINIMUM_STATIC_RULES` (constant), `MAX_NUMBER_OF_DISABLED_STATIC_RULES` (constant), `MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES` (constant), `MAX_NUMBER_OF_DYNAMIC_RULES` (constant), `MAX_NUMBER_OF_ENABLED_STATIC_RULESETS` (constant), `MAX_NUMBER_OF_REGEX_RULES` (constant), `MAX_NUMBER_OF_SESSION_RULES` (constant), `MAX_NUMBER_OF_STATIC_RULESETS` (constant), `SESSION_RULESET_ID` (constant), `getAvailableStaticRuleCount` (method), `getDisabledRuleIds` (method), `getDynamicRules` (method), `getEnabledRulesets` (method), `getSessionRules` (method), `isRegexSupported` (method), `testMatchOutcome` (method), `updateDynamicRules` (method), `updateEnabledRulesets` (method), `updateSessionRules` (method), `updateStaticRules` (method) |
 | `downloads` | `download` (method), `onChanged` (event), `search` (method) |
-| `extension` | `getBackgroundPage` (method), `getURL` (method), `getViews` (method), `inIncognitoContext` (constant) |
-| `i18n` | `getAcceptLanguages` (method), `getMessage` (method), `getUILanguage` (method) |
+| `extension` | `getBackgroundPage` (method), `getURL` (method), `getViews` (method), `inIncognitoContext` (constant), `isAllowedFileSchemeAccess` (method), `isAllowedIncognitoAccess` (method), `lastError` (constant) |
+| `i18n` | `getAcceptLanguages` (method), `getMessage` (method), `getPreferredSystemLanguages` (method), `getUILanguage` (method) |
 | `management` | `get` (method), `getAll` (method), `getSelf` (method), `onDisabled` (event), `onEnabled` (event), `onInstalled` (event), `onUninstalled` (event), `setEnabled` (method), `uninstall` (method), `uninstallSelf` (method) |
 | `menus` | `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
 | `notifications` | `clear` (method), `create` (method), `getAll` (method), `onButtonClicked` (event), `onClicked` (event), `onClosed` (event), `update` (method) |

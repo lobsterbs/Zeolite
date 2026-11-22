@@ -543,6 +543,15 @@ export function buildApi(
           getURL: runtime.getURL,
           getBackgroundPage: (): null => null,
           getViews: (): unknown[] => [],
+          /* #523: Firefox gates. The engine serves no file: scheme and
+             has no incognito browsing, so both answers are the honest
+             constants; lastError is the runtime alias (null when no
+             send error is pending). */
+          isAllowedFileSchemeAccess: (): Promise<boolean> => Promise.resolve(false),
+          isAllowedIncognitoAccess: (): Promise<boolean> => Promise.resolve(false),
+          get lastError(): null {
+            return null;
+          },
         }
       : undefined;
   /* #560: chrome.i18n from the package own _locales, resolved once
@@ -1137,8 +1146,32 @@ export function buildApi(
      the guest service-worker realms). The host-browser-owned types
      mount and reject honestly - see ./browsingdata. Mounted only with
      the permission, so feature detection answers honestly. */
+  /* #520: remove(options, dataToRemove) is Firefox's compose arm over
+     the same per-type removers the named methods expose; a host-
+     browser-owned type requested here rejects exactly like its named
+     method, never silently clearing an absent store. */
+  const browsingDataRemoveTypes: Record<string, (o: BrowsingDataOptions) => Promise<void>> = {
+    cache: (o) => browsingDataRemoveCache(o),
+    cookies: (o) => browsingDataRemoveCookies(o),
+    downloads: (o) => browsingDataRemoveDownloads(o),
+    formData: () => browsingDataUnreachable("removeFormData")(),
+    history: () => browsingDataUnreachable("removeHistory")(),
+    indexedDB: (o) => browsingDataRemoveIndexedDB(o),
+    localStorage: () => browsingDataUnreachable("removeLocalStorage")(),
+    passwords: () => browsingDataUnreachable("removePasswords")(),
+    pluginData: () => browsingDataUnreachable("removePluginData")(),
+    serviceWorkers: () => browsingDataRemoveServiceWorkers(),
+  };
   const browsingDataNs = ext.permissions.includes("browsingData")
     ? {
+        remove: async (options: BrowsingDataOptions = {}, dataToRemove: Record<string, unknown> = {}) => {
+          for (const [kind, want] of Object.entries(dataToRemove)) {
+            if (!want) continue;
+            const fn = browsingDataRemoveTypes[kind];
+            if (!fn) throw new Error("zeolite: unknown data type: " + kind);
+            await fn(options);
+          }
+        },
         settings: browsingDataSettings,
         removeCache: (options: BrowsingDataOptions = {}) => browsingDataRemoveCache(options),
         removeCookies: (options: BrowsingDataOptions = {}) => browsingDataRemoveCookies(options),

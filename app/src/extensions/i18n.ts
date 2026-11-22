@@ -13,7 +13,9 @@
    substitutions. getUILanguage/getAcceptLanguages report the resolved
    locale - the engine has no locale host beyond the worker's
    navigator, which compat.ts states plainly. detectLanguage is
-   absent: no language detector ships in a service-worker engine. */
+   absent: no language detector ships in a service-worker engine;
+   getPreferredSystemLanguages answers the worker navigator too (#523,
+   the getAcceptLanguages twin). */
 
 export interface I18nEntry {
   message: string;
@@ -134,11 +136,23 @@ export function makeI18nNs(res: I18nResolved): {
   getMessage(name: unknown, substitutions?: unknown): string;
   getUILanguage(): string;
   getAcceptLanguages(): Promise<string[]>;
+  getPreferredSystemLanguages(): Promise<string[]>;
 } {
   return {
     getMessage: (name, substitutions) => i18nGetMessage(res, name, substitutions),
     getUILanguage: () => res.locale,
     getAcceptLanguages: () =>
+      Promise.resolve(
+        typeof navigator !== "undefined" &&
+          Array.isArray(navigator.languages) &&
+          navigator.languages.length
+          ? [...navigator.languages]
+          : [res.locale],
+      ),
+    /* #523: Firefox OS-locale list. The worker navigator is the host
+       browser languages, the same honest source getAcceptLanguages
+       reports. */
+    getPreferredSystemLanguages: (): Promise<string[]> =>
       Promise.resolve(
         typeof navigator !== "undefined" &&
           Array.isArray(navigator.languages) &&

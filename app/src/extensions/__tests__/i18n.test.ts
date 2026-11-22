@@ -98,6 +98,8 @@ describe("chrome.i18n (#560)", () => {
     expect(ns.getUILanguage()).toBe("en");
     const langs = await ns.getAcceptLanguages();
     expect(Array.isArray(langs)).toBe(true);
+    const sysLangs = await ns.getPreferredSystemLanguages();
+    expect(Array.isArray(sysLangs)).toBe(true);
     expect(ns.getMessage("nope")).toBe("");
   });
 

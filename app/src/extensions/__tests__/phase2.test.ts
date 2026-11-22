@@ -238,6 +238,9 @@ describe("MV2 chrome.extension namespace (#560)", () => {
     expect(typeof e!.getURL).toBe("function");
     expect((e!.getBackgroundPage as () => null)()).toBeNull();
     expect((e!.getViews as () => unknown[])()).toEqual([]);
+    expect(await (e!.isAllowedFileSchemeAccess as () => Promise<boolean>)()).toBe(false);
+    expect(await (e!.isAllowedIncognitoAccess as () => Promise<boolean>)()).toBe(false);
+    expect(e!.lastError).toBe(null);
     const c = api.chrome.extension as Record<string, unknown> | undefined;
     expect(c).toBeDefined();
     expect(c!.inIncognitoContext).toBe(false);

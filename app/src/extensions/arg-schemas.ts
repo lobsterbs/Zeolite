@@ -210,6 +210,8 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
      a constant, not a method - no argument contract. */
   "extension.getURL": { min: 1, max: 1, types: [["string"]] },
   "extension.getBackgroundPage": { min: 0, max: 0 },
+  "extension.isAllowedFileSchemeAccess": { min: 0, max: 0 },
+  "extension.isAllowedIncognitoAccess": { min: 0, max: 0 },
   "extension.getViews": { min: 0, max: 1, types: [["object"]], note: "the engine accepts Firefox's properties filter and ignores it (no live page views)" },
 
   /* ---- bookmarks ------------------------------------------------------- */
@@ -231,6 +233,7 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   /* The engine-owned types accept the no-arg form (defaults to every
      origin); the host-browser-owned types mount the no-arg form too
      but the call itself rejects (browsingdata.ts unreachable). */
+  "browsingData.remove": { min: 2, max: 2, types: [["object"], ["object"]] },
   "browsingData.settings": { min: 0, max: 0 },
   "browsingData.removeCache": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (defaults to every origin)" },
   "browsingData.removeCookies": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (defaults to every origin)" },
@@ -283,6 +286,7 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   /* ---- i18n ------------------------------------------------------------------ */
   "i18n.getAcceptLanguages": { min: 0, max: 0 },
   "i18n.getMessage": { min: 1, max: 2, types: [["string"], ["any"]] },
+  "i18n.getPreferredSystemLanguages": { min: 0, max: 0 },
   "i18n.getUILanguage": { min: 0, max: 0 },
 
   /* ---- management --------------------------------------------------------------- */

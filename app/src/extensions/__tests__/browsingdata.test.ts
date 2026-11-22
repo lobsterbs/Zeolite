@@ -124,6 +124,22 @@ describe("browser.browsingData (#520 slice)", () => {
     }
   });
 
+  it("remove composes the per-type removers and rejects unowned types (#520)", async () => {
+    const { api } = await apiFor(m, ["browsingData"]);
+    const bd = (api.browser as Record<string, unknown>).browsingData as Record<string, unknown>;
+    const rm = bd.remove as (o: unknown, t: Record<string, unknown>) => Promise<void>;
+    let kills = 0;
+    setBrowsingDataGuestTerminator(() => {
+      kills++;
+      return 1;
+    });
+    seed();
+    await rm({}, { serviceWorkers: true, cookies: true, history: false, nosuch: false });
+    expect(kills).toBe(1);
+    await expect(rm({}, { history: true })).rejects.toThrow();
+    await expect(rm({}, { nosuch: true })).rejects.toThrow(/unknown data type/);
+  });
+
   it("removeCache purges every CacheStorage bucket", async () => {
     const deleted: string[] = [];
     (globalThis as unknown as { caches: unknown }).caches = {
