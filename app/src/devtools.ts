@@ -739,7 +739,7 @@ function renderDomTree(node: DomNode | undefined, parent: HTMLElement, depth: nu
     "<" + (node.tag ?? "?") + ">" +
     (node.id ? " #" + node.id : "") +
     (node.class ? " ." + node.class.split(/\s+/).slice(0, 3).join(".") : "") +
-    (node.truncated ? " â¦" : "");
+    (node.truncated ? " …" : "");
   row.textContent = label;
   if (typeof node.i === "number") {
     row.addEventListener("click", () => {
