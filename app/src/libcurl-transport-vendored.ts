@@ -1430,8 +1430,11 @@ export async function fetch(url: string, init?: RequestInit): Promise<Response> 
     /* A UA-default change (setEpoxyUserAgent) drops the singletons
        after init; rebuild lazily from the last config so the next
        request carries the current wire default. An unconfigured
-       transport keeps the honest "call init first" error. */
-    if (!epoxyClient && lastCfg) await init(lastCfg);
+       transport keeps the honest "call init first" error. The fetch
+       param is also named `init` and shadows the module init(), so
+       the rebuild rides getEpoxy directly - the same arm init()
+       takes for this engine. */
+    if (!epoxyClient && lastCfg) await getEpoxy(lastCfg);
     if (!epoxyClient) throw new Error("zeolite: transport not initialized (call init first)");
     const res = await epoxyClient.fetch(url, epoxyFetchOptions(init));
     /* Rebuild so rawHeaders is the Zeolite pair shape (epoxy's own
