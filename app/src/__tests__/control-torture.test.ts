@@ -27,6 +27,10 @@ vi.mock("../transport", () => ({
     u === "" || (typeof u === "string" && (u.startsWith("ws://") || u.startsWith("wss://"))),
   altRegister: () => {},
   altConfigured: () => false,
+  /* control.ts calls the epoxy UA exporter (setEpoxyUserAgent) on the
+     wire-default UA set arm; the torture harness keeps no real
+     transport singletons, so the arm is a plain no-op here. */
+  setEpoxyUserAgent: () => {},
   wispTransport: {
     ready: () => transportState.readyImpl(),
     switchEngine: (e: string) => {
