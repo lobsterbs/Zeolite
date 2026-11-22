@@ -23,6 +23,7 @@
    never handles (engine assets, other origins) are never reported. */
 
 import { hostPatternsMatch } from "./permissions";
+import { TABS } from "./tabs";
 import type { ExtensionId } from "./types";
 
 export type WrKind =
@@ -46,6 +47,15 @@ export interface WrDetails {
   method: string;
   type: string;
   originUrl?: string;
+  /* #702: the tab this request belongs to, resolved at interception
+     from the UI tab registry by exact destination match (the same
+     discipline as the webNavigation bridge). -1 when no known tab
+     owns the request; a tab id is never fabricated. */
+  tabId: number;
+  /* #702: top-level frame markers, present only on main_frame
+     loads, where the engine can vouch for them. */
+  frameId?: number;
+  parentFrameId?: number;
   timeStamp: number;
 }
 
@@ -129,6 +139,23 @@ export function wrType(destHeader: string): string {
     default:
       return "other";
   }
+}
+
+/** #702: request-to-tab attribution. The UI tab registry is the
+    only tab authority: a request belongs to a tab when the
+    initiating page's virtual URL (or, for a main-frame load, the
+    navigation target) is exactly one tab's url - the same
+    exact-match rule as the webNavigation bridge. Loads belonging
+    to no known tab report -1; a tab id is never invented, and
+    sub-frame requests stay -1 unless their own URL matches a tab
+    (the SW cannot see the frame's parent tab). */
+export function wrTabFor(initiator: string | undefined, mainFrameUrl: string | undefined): number {
+  for (const t of TABS.list()) {
+    if ((initiator !== undefined && t.url === initiator) || (mainFrameUrl !== undefined && t.url === mainFrameUrl)) {
+      return t.id;
+    }
+  }
+  return -1;
 }
 
 /** Headers -> name/value pairs for listener-visible header arrays. */

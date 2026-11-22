@@ -48,7 +48,7 @@ async function apiFor(name: string, permissions: string[], hostPermissions: stri
 }
 
 function details(url = "https://example.com/x"): WrDetails {
-  return { requestId: "r1", url, method: "GET", type: "main_frame", timeStamp: Date.now() };
+  return { requestId: "r1", url, method: "GET", type: "main_frame", tabId: -1, timeStamp: Date.now() };
 }
 
 describe("WebRequestRegistry observe lifecycle (#521)", () => {

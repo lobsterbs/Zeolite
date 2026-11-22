@@ -98,7 +98,7 @@ const MAPS = newImportmapRegistry();
 import { classifyServeFailure, literalPassDemotion, noteDemotionServed, recordBodyPassFailure, recordJsServeOutcome, recordServeFailure } from "./adaptive-evidence";
 import { spoolBody, spoolFromReader, SpoolHandle, SpoolUnavailableError } from "./bodyspool";
 
-import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrType, extensions, resolveContentScripts, rootedPageGrant, serveExtensionAsset, serveRootedExtPage, DNR } from "./extensions";
+import { CS_ROUTE, EXT_ROUTE, WEBNAV, WEBREQ, wrTabFor, wrType, extensions, resolveContentScripts, rootedPageGrant, serveExtensionAsset, serveRootedExtPage, DNR } from "./extensions";
 
 
 declare const self: ServiceWorkerGlobalScope;
@@ -4653,11 +4653,18 @@ export function handleFetch(e: FetchEvent): void {
            must describe the URL the response actually came from, not
            the pre-redirect target; lastHopUrl tracks the final hop for
            the error path outside the try. */
+        const wrTypeOf = wrType(dest);
         const wrDetails = {
           requestId: traceId,
           url: target,
           method: e.request.method,
-          type: wrType(dest),
+          type: wrTypeOf,
+          /* #702: honest request-to-tab attribution. The initiating
+             page's virtual URL (or the navigation target on a
+             main-frame load) is matched exactly against the UI tab
+             registry; -1 when no known tab owns the request. */
+          tabId: wrTabFor(initiator, wrTypeOf === "main_frame" ? target : undefined),
+          ...(wrTypeOf === "main_frame" ? { frameId: 0, parentFrameId: -1 } : {}),
           timeStamp: Date.now(),
         };
         let lastHopUrl = target;

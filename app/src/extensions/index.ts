@@ -58,7 +58,7 @@ export type { DevtoolsOp, DevtoolsPanel, DevtoolsBinding } from "./devtools";
 export type { ScriptingInjection, ScriptingMessage } from "./scripting";
 export { WEBNAV, NavigationRegistry } from "./webnavigation";
 export type { NavigationCommitted, NavigationListener, NavigationInfo, NavigationKind } from "./webnavigation";
-export { WEBREQ, WebRequestRegistry, wrType, headersToPairs, pairsToHeaders } from "./webrequest";
+export { WEBREQ, WebRequestRegistry, wrTabFor, wrType, headersToPairs, pairsToHeaders } from "./webrequest";
 export type {
   WrKind,
   WrDetails,

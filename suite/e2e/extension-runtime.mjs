@@ -82,6 +82,11 @@ const CRAFTED = {
     'bg.js': 'browser.runtime.onMessage.addListener(async (m) => { if (!m || m.type !== "dnrcmd") return; try { if (m.cmd === "arm") { await browser.declarativeNetRequest.updateSessionRules({ addRules: [{ id: 1, priority: 1, condition: { urlFilter: "wikipedia", resourceTypes: ["main_frame"] }, action: { type: "block" } }] }); } else if (m.cmd === "disarm") { await browser.declarativeNetRequest.updateSessionRules({ removeRuleIds: [1] }); } else { return { ok: false, err: "unknown cmd" }; } const rules = await browser.declarativeNetRequest.getSessionRules(); return { ok: true, rules: rules.length }; } catch (e) { return { ok: false, err: String(e) }; } });',
     'cs.js': '(async () => { const D = document.documentElement; for (;;) { await new Promise((r) => setTimeout(r, 300)); const cmd = D.getAttribute("data-zl-dnr-cmd"); if (!cmd) continue; D.removeAttribute("data-zl-dnr-cmd"); try { const r = await browser.runtime.sendMessage({ type: "dnrcmd", cmd }); D.setAttribute("data-zl-dnr", JSON.stringify(r)); } catch (e) { D.setAttribute("data-zl-dnr", JSON.stringify({ ok: false, err: String(e) })); } } })();',
   },
+  'zl-wrtab': {
+    "manifest.json": JSON.stringify({ manifest_version: 2, name: 'zl-wrtab', version: '1.0', description: 'w15: webRequest tab attribution probe (#702)', permissions: ['webRequest'], host_permissions: ['<all_urls>'], background: { scripts: ['bg.js'] }, content_scripts: [{ matches: ['https://example.com/*'], js: ['cs.js'], run_at: 'document_idle' }] }, null, 2),
+    'bg.js': "const rows = []; try { browser.webRequest.onBeforeRequest.addListener(function (d) { rows.push({ url: d.url, type: d.type, tabId: d.tabId, frameId: d.frameId, parentFrameId: d.parentFrameId }); if (rows.length > 800) rows.shift(); }, { urls: ['<all_urls>'] }); } catch (e) { console.log('zl-wrtab addListener err: ' + e); } browser.runtime.onMessage.addListener(function (m) { if (m && m.type === 'wrpull') return { ok: true, rows: rows.slice() }; });",
+    'cs.js': "(async () => { const D = document.documentElement; for (;;) { await new Promise((r) => setTimeout(r, 300)); const cmd = D.getAttribute('data-zl-wrcmd'); if (!cmd) continue; D.removeAttribute('data-zl-wrcmd'); try { const r = await browser.runtime.sendMessage({ type: 'wrpull' }); D.setAttribute('data-zl-wr', JSON.stringify(r)); } catch (e) { D.setAttribute('data-zl-wr', JSON.stringify({ ok: false, err: String(e) })); } } })();",
+  },
 };
 
 let browser = null, host = null, consoleBuf = [];
@@ -365,6 +370,63 @@ async function main() {
     return flat.slice(0, 200);
   });
 
+  await check('webrequest-tabs: webRequest details carry the UI tab id, and -1 when not attributable (#702)', async () => {
+    if (!fr) throw new Error('no frame');
+    const TAB = 90210;
+    const WRCMD = 'document.documentElement.setAttribute(String.fromCharCode(100,97,116,97,45,122,108,45,119,114,99,109,100), "pull")';
+    const WRGET = 'document.documentElement.getAttribute(String.fromCharCode(100,97,116,97,45,122,108,45,119,114))';
+    const WRCLR = 'document.documentElement.removeAttribute(String.fromCharCode(100,97,116,97,45,122,108,45,119,114))';
+    const askWr = async () => {
+      await fr.evaluate(WRCMD);
+      for (let i = 0; i < 20; i++) {
+        const v = await Promise.race([fr.evaluate(WRGET), sleep(4000).then(() => null)]) ?? '';
+        if (v) {
+          fr.evaluate(WRCLR);
+          const o = JSON.parse(v);
+          if (o && o.ok) return o;
+          throw new Error('wrpull reply: ' + v);
+        }
+        await sleep(500);
+      }
+      throw new Error('zl-wrtab bridge never answered');
+    };
+    const waitRow = async (pred, label) => {
+      for (let i = 0; i < 15; i++) {
+        const o = await askWr();
+        const row = pred(o);
+        if (row) return row;
+        await sleep(700);
+      }
+      throw new Error('no row matched: ' + label);
+    };
+    /* UI tab sync: exactly the zl:tabs control message the host sends. */
+    const syn = await ctl({ type: 'zl:tabs', tabs: [{ id: TAB, index: 0, url: 'https://example.com/', title: 'Example', active: true }] });
+    if (!syn.ok) throw new Error('zl:tabs sync failed: ' + JSON.stringify(syn));
+    /* A relative in-page fetch goes through the adapter and must report the synced tab. */
+    await fr.evaluate('fetch("probe-wrtab.txt").catch(function () { return 0; })');
+    const row1 = await waitRow(o => o.rows.filter(r => r.type === 'xmlhttprequest').pop(), 'xmlhttprequest');
+    if (row1.tabId !== TAB) throw new Error('subresource tabId: ' + JSON.stringify(row1));
+    /* A fresh top-level navigation to the tab's exact URL attributes itself. */
+    const h = await ctl({ type: 'zl:navHandle', dest: 'https://example.com/' });
+    if (!h.ok) throw new Error('navHandle failed: ' + JSON.stringify(h));
+    const pgw = await ctx.newPage();
+    await pgw.goto(ENGINE + h.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await pgw.close();
+    const row2 = await waitRow(o => o.rows.filter(r => r.type === 'main_frame').pop(), 'main_frame');
+    if (row2.tabId !== TAB) throw new Error('main_frame tabId: ' + JSON.stringify(row2));
+    if (row2.frameId !== 0 || row2.parentFrameId !== -1) throw new Error('main_frame frame markers: ' + JSON.stringify(row2));
+    /* Honesty: once the tab points elsewhere, the same request reports -1, never a stale id. */
+    const syn2 = await ctl({ type: 'zl:tabs', tabs: [{ id: TAB, index: 0, url: 'https://elsewhere.example/', title: 'Else', active: true }] });
+    if (!syn2.ok) throw new Error('zl:tabs resync failed');
+    await fr.evaluate('fetch("probe-wrtab.txt").catch(function () { return 0; })');
+    await waitRow(o => {
+      const last = o.rows.filter(r => r.type === 'xmlhttprequest').pop();
+      return last && last.tabId === -1 ? last : null;
+    }, 'unattributed -1');
+    /* Leave the registry empty for later checks. */
+    await ctl({ type: 'zl:tabs', tabs: [] });
+    return 'subresource tabId=' + row1.tabId + '; main_frame tabId=' + row2.tabId + ' frame 0/-1; honest -1 after resync';
+  });
   await check('gate: a proxied page cannot install extensions (host-only refusal)', async () => {
     if (!fr) throw new Error('no frame');
     const r = await fr.evaluate(() => new Promise((res) => {
