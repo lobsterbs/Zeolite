@@ -23,6 +23,8 @@ import { policyDoctorState } from "./policy";
 import { rulesDoctorState } from "./rules";
 import { siteconfigDoctorState } from "./siteconfig";
 import { DIAG, traceClient } from "./diag";
+/* #711 C0: lag stats for the zl:getDiag piggyback. */
+import { loopLagStats } from "./looplag";
 /* #451: the bounded per-attempt captcha trace snapshot (zl:captchaTrace). */
 import { CAPTCHA_TRACE } from "./captcha-trace";
 import { buildCompatibilityReport, compatibilityKdl } from "./compat-debugger";
@@ -1590,7 +1592,7 @@ case "zl:tracing":
          zl:getNetLog so the devtools page can poll both cheaply. */
       const since = (msg as { since?: number }).since ?? 0;
       const clientId = msg.clientId === undefined ? undefined : String(msg.clientId).slice(0, 256);
-      reply({ ok: true, generation: netLogGeneration(), clientId: clientId ?? null, ...DIAG.snapshot(since, clientId) });
+      reply({ ok: true, generation: netLogGeneration(), clientId: clientId ?? null, /* #711 C0 piggyback: */ loopLag: loopLagStats(), ...DIAG.snapshot(since, clientId) });
       break;
     }
     case "zl:privacy": {

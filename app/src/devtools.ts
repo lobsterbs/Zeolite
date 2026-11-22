@@ -337,6 +337,8 @@ function tick(): void {
     lastSeq = seq ?? lastSeq;
   });
   post({ type: "zl:getDiag", since: diagLast }, (data) => {
+    /* #711 C0: keep the last lag snapshot reachable for e2e + console. */
+    (window as unknown as { __zlLoopLag?: unknown }).__zlLoopLag = (data as { loopLag?: unknown }).loopLag ?? null;
     const d = (data ?? {}) as { events?: DiagEvent[]; lastSeq?: number };
     if (d.events?.length) {
       diagEvents = [...diagEvents, ...d.events].slice(-300);
@@ -737,7 +739,7 @@ function renderDomTree(node: DomNode | undefined, parent: HTMLElement, depth: nu
     "<" + (node.tag ?? "?") + ">" +
     (node.id ? " #" + node.id : "") +
     (node.class ? " ." + node.class.split(/\s+/).slice(0, 3).join(".") : "") +
-    (node.truncated ? " …" : "");
+    (node.truncated ? " â¦" : "");
   row.textContent = label;
   if (typeof node.i === "number") {
     row.addEventListener("click", () => {

@@ -61,6 +61,9 @@ import { messageListener } from "./control";
    RUNTIME diagnostic instead of letting it vanish as a silent
    browser network error. */
 import { DIAG } from "./diag";
+/* #711 C0: the event-loop lag sampler - started at eval so every
+   worker boot resets the ring with the generation. */
+import { startLoopLag } from "./looplag";
 /* The request engine (route decode, page cache, upstream hop chain,
    header surgery, rewrite branches, navigation strands) lives in
    ./request.ts; this module boots the runtime and wires browser
@@ -77,6 +80,8 @@ import { withCorp } from "./corp";
 import { broadcastEngineUpdate, startUpdateChecks } from "./updates";
 
 declare const self: ServiceWorkerGlobalScope;
+
+startLoopLag();
 
 /* ---- HTTP over wisp ----------------------------------------------- */
 /* Phase 1: libcurl wasm transport (BareMux-compatible), the same
