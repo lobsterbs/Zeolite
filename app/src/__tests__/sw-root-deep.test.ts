@@ -252,9 +252,10 @@ describe("composition root wiring (real sw.ts import)", () => {
     }
   });
 
-  it("the update poll ran once at module evaluation and left no live interval", () => {
+  it("the update poll ran once at module evaluation; the loop-lag sampler adds the only other live interval (#711 C0)", () => {
     expect(workerWorld.registrationUpdateCalls).toBe(1);
-    expect(workerWorld.intervals.length).toBe(1);
+    /* #711 C0: startLoopLag() installs a second top-level interval (the 200ms loop-lag sampler). */
+    expect(workerWorld.intervals.length).toBe(2);
   });
 });
 
