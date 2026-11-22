@@ -70,14 +70,19 @@ const RECEIVERS: [&str; 6] = ["window", "self", "globalThis", "document", "top",
 
 /// Scripts above this size skip the AST pass: parse cost grows with
 /// size and the huge-heap case gains nothing a router needs.
-/// Raised 2 MiB -> 8 MiB (#663, duck.ai): the live duck.ai entry bundle
-/// is ~2.45 MiB, so at 2 MiB the whole location pass size-capped on it,
-/// window.location.origin stayed native, the engine origin leaked into
-/// the page's vqd-hash header, and Duck's edge rejected the chat. 8 MiB
-/// matches the SW's JS_BODY_CAP, so every body the request layer buffers
-/// also gets the location pass; the worker's per-request budget (256 MiB)
-/// still dwarfs the parse heap.
-pub const MAX_BYTES: usize = 8 * 1024 * 1024;
+/// #663 (duck.ai): the live bundle is ~2.45 MiB, so the bound must
+/// stay above it or window.location.origin stays native and Duck's
+/// edge rejects the chat. Lowered 8 MiB -> 4 MiB (#696): measured
+/// 2026-11-22 against the dist wasm (dense location-read bodies), an
+/// 8 MiB parse costs ~850 ms and leaves a ~145 MiB wasm linear-memory
+/// tank the isolate never returns (a 2.45 MiB body: 327 ms, tens of
+/// MiB); the only known value case is duck.ai, so 4 MiB keeps 63%
+/// headroom over it while halving the worst-case stall and retained
+/// heap. Bodies 4-8 MiB still buffer (JS_BODY_CAP) and still run the
+/// literal and antiframe passes; import.meta and location AST passes
+/// size-cap, and the runtime seams own the residual, exactly as
+/// parse-failure already does.
+pub const MAX_BYTES: usize = 4 * 1024 * 1024;
 
 static PARSED: AtomicU32 = AtomicU32::new(0);
 static FAILED: AtomicU32 = AtomicU32::new(0);
@@ -665,22 +670,31 @@ mod tests {
 
     #[test]
     fn large_entry_bundles_still_rewrite_location_reads() {
-        // #663: the duck.ai entry bundle is ~2.45 MiB. Under the old
-        // 2 MiB cap the whole location pass size-capped on it, so
-        // window.location.origin stayed native, the engine origin
-        // leaked into the page's vqd-hash header, and Duck's edge
-        // rejected the chat. MAX_BYTES now matches the SW's 8 MiB
-        // JS_BODY_CAP, so every body the request layer buffers also
-        // gets the location pass.
+        // #663: the duck.ai entry bundle is ~2.45 MiB; the pass must
+        // still fully cover it. #696: the AST bound is 4 MiB, so the
+        // boundary is pinned at absolute literals, never MAX_BYTES.
         let filler = "var a=1;".repeat(360_000); // 2.52 MiB
         let js = format!("{filler}var o = window.location.origin;");
         assert!(js.len() > 2 * 1024 * 1024);
         let (out, reason) = rewrite_with_reason(&js, MAX_BYTES);
         assert_eq!(reason, "rewritten");
         assert!(out.contains("__zl.origin"), "location read not renamed");
-        // The bound still holds above the cap.
-        let huge = format!("{}var a=1;", "x".repeat(MAX_BYTES));
-        let (_, reason) = rewrite_with_reason(&huge, MAX_BYTES);
+        // Just inside the #696 bound the pass still runs (4 MiB - 49).
+        let near = format!(
+            "{}
+var o = window.location.origin;",
+            "x".repeat(4 * 1024 * 1024 - 80)
+        );
+        let (_, reason) = rewrite_with_reason(&near, MAX_BYTES);
+        assert_eq!(reason, "rewritten");
+        // Just outside: size-cap, body unchanged, runtime seams own it.
+        let over = format!(
+            "{}
+var o = window.location.origin;",
+            "x".repeat(4 * 1024 * 1024)
+        );
+        let (out2, reason) = rewrite_with_reason(&over, MAX_BYTES);
         assert_eq!(reason, "size-cap");
+        assert_eq!(out2, over);
     }
 }

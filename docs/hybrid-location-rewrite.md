@@ -76,7 +76,13 @@ rollout.
 A token pre-scan avoids parsing irrelevant bodies. The AST pass skips bodies
 over the configured UTF-8 byte cap and returns its input unchanged on parse
 failure. Assignment/update/delete target spans remain native; shadowed locals
-remain untouched. This cap bounds AST work. Total candidate buffering is bounded across
+remain untouched. This cap bounds AST work. The default AST cap is 4 MiB,
+lowered from 8 MiB with #696 (2026-11-22: a measured 8 MiB parse cost ~850 ms and
+left a ~145 MiB retained wasm tank; duck.ai's 2.45 MiB entry bundle, the #663
+case, stays covered with 63% headroom; the site-config ceiling matches, so a
+rule can never request a bound the clamp drops silently). Bodies between the
+AST cap and JS_BODY_CAP buffer and run the literal passes, with runtime seams
+owning the AST residual. Total candidate buffering is bounded across
 all passes by one shared streaming cap (JS_BODY_CAP, raised 2 MiB -> 8 MiB
 with #456/#663: SPA entry bundles sit between 2 and 8 MiB): a script or
 worker body whose candidate content exceeds 8 MiB is served verbatim,

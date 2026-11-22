@@ -116,17 +116,20 @@ function marked(target: string): boolean {
     hybrid pass for every origin without an explicit rule; a
     corroborated origin takes the hybrid pass; everything else keeps
     the legacy default. The swstate flag is the host kill switch.
-    #663: the hybrid cap is 8 MiB, aligned with JS_BODY_CAP - the
-    duck.ai entry bundle (~2.45 MiB) size-capped the location pass at
-    512 KiB, window.location.origin leaked the engine origin into the
-    page's vqd-hash header, and Duck's edge rejected the chat. */
+    #663: the hybrid cap must clear the duck.ai entry bundle
+    (~2.45 MiB) or window.location.origin leaks the engine origin and
+    Duck's edge rejects the chat. #696 lowers the default 8 MiB -> 4 MiB
+    (measured 8 MiB parse: ~850 ms plus a ~145 MiB retained wasm tank):
+    63% headroom over duck.ai, half the worst-case stall and heap;
+    a body over the cap still buffers to JS_BODY_CAP and runs the
+    literal passes, and the runtime seams own the location residual. */
 export function resolveLocationPolicy(target: string | null | undefined, rule: SiteRule): LocationPolicy {
   if (rule.locationRewrite) return rule.locationRewrite;
   if (experimentalEnabled("hybridLocation")) {
-    return { mode: "hybrid", maxBytes: 8 * 1024 * 1024 };
+    return { mode: "hybrid", maxBytes: 4 * 1024 * 1024 };
   }
   if (target && locationTargetingEnabled() && marked(target)) {
-    return { mode: "hybrid", maxBytes: 8 * 1024 * 1024 };
+    return { mode: "hybrid", maxBytes: 4 * 1024 * 1024 };
   }
   return locationPolicy(rule);
 }

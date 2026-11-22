@@ -103,14 +103,16 @@ export function rulesFromNodes(nodes: KdlNode[]): SiteRules {
       const strs = child.args.filter((a): a is string => typeof a === "string");
       if (child.name === "location-rewrite") {
         const mode = child.args[0];
-        /* #663: the hybrid default cap is 8 MiB, aligned with
-           JS_BODY_CAP (the wasm location pass clamps at its own
-           MAX_BYTES, also 8 MiB) so a large entry bundle never
-           size-caps the location pass while the request layer still
-           buffers and rewrites it. */
-        const maxBytes = child.props["max-bytes"] ?? (mode === "hybrid" ? 8 * 1024 * 1024 : 2 * 1024 * 1024);
+        /* #663: the cap must clear the duck.ai entry bundle (~2.45
+           MiB) or the location pass size-caps on it. #696: default and
+           ceiling 8 MiB -> 4 MiB (measured 8 MiB parse: ~850 ms plus a
+           ~145 MiB retained wasm tank); the ceiling matches the wasm
+           MAX_BYTES so a rule can never request a bound the clamp
+           silently drops. Bodies 4-8 MiB still buffer to JS_BODY_CAP
+           and run the literal passes. */
+        const maxBytes = child.props["max-bytes"] ?? (mode === "hybrid" ? 4 * 1024 * 1024 : 2 * 1024 * 1024);
         if ((mode === "legacy" || mode === "hybrid" || mode === "off") &&
-            typeof maxBytes === "number" && Number.isInteger(maxBytes) && maxBytes > 0 && maxBytes <= 8 * 1024 * 1024)
+            typeof maxBytes === "number" && Number.isInteger(maxBytes) && maxBytes > 0 && maxBytes <= 4 * 1024 * 1024)
           rule.locationRewrite = { mode, maxBytes };
       }
       else if (child.name === "inject") rule.inject = strs;

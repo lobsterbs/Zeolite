@@ -187,7 +187,7 @@ fn rejects_invalid_modes_and_caps() {
     for spec in [
         "\"auto\"",
         "\"hybrid\" max-bytes=0",
-        "\"hybrid\" max-bytes=8388609",
+        "\"hybrid\" max-bytes=4194305",
         "\"hybrid\" max-bytes=1.5",
         "\"legacy\" max-bytes=\"x\"",
     ] {
@@ -211,7 +211,7 @@ fn ships_hybrid_for_the_play2048_class_only() {
         location_policy(&rules["play2048.co"]),
         LocationPolicy {
             mode: LocationMode::Hybrid,
-            max_bytes: 8 * 1024 * 1024,
+            max_bytes: 4 * 1024 * 1024,
         }
     );
 }

@@ -250,11 +250,13 @@ fn is_bare_hostname(key: &str) -> bool {
 }
 
 /// location-rewrite child: mode plus an optional integer byte
-/// cap; the default cap is 8MiB for hybrid (aligned with the SW's
-/// JS_BODY_CAP and the rewriter's MAX_BYTES - #663 duck.ai's ~2.45 MiB
-/// entry bundle size-capped the location pass at 512KiB), 2MiB
-/// otherwise (JS ??: an absent or #null prop takes the default). A bad
-/// mode or cap skips the child, never a silently enabled policy.
+/// cap; the default cap is 4MiB for hybrid and the validation ceiling
+/// is 4MiB (#696, matching the rewriter's MAX_BYTES: a measured 8MiB
+/// parse cost ~850ms and left a ~145MiB retained wasm tank; duck.ai's
+/// 2.45 MiB bundle, the #663 case, stays covered with 63% headroom),
+/// 2MiB otherwise (JS ??: an absent or #null prop takes the default).
+/// A bad mode or cap skips the child, never a silently enabled
+/// policy.
 fn apply_location_rewrite(rule: &mut SiteRule, child: &KdlNode) {
     let mode_str = match child.args.first() {
         Some(KdlValue::Str(s)) => Some(s.as_str()),
@@ -264,7 +266,7 @@ fn apply_location_rewrite(rule: &mut SiteRule, child: &KdlNode) {
         Some(KdlValue::Num(n)) => *n,
         Some(KdlValue::Null) | None => {
             if mode_str == Some("hybrid") {
-                8.0 * 1024.0 * 1024.0
+                4.0 * 1024.0 * 1024.0
             } else {
                 2.0 * 1024.0 * 1024.0
             }
@@ -281,7 +283,7 @@ fn apply_location_rewrite(rule: &mut SiteRule, child: &KdlNode) {
     };
     if let Some(mode) = mode {
         // NaN fails the fract test, so no NaN cast can happen.
-        if max.fract() == 0.0 && max > 0.0 && max <= 8.0 * 1024.0 * 1024.0 {
+        if max.fract() == 0.0 && max > 0.0 && max <= 4.0 * 1024.0 * 1024.0 {
             rule.location_rewrite = Some(LocationPolicy {
                 mode,
                 max_bytes: max as usize,
