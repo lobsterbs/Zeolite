@@ -10,6 +10,7 @@ vi.mock("../request", () => ({
   virtualHcaptchaFrameFragment: (dest: string) => dest,
 }));
 
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleControlEvent, type ControlMessage } from "../control";
 import { epoxyUserAgentValue, setEpoxyUserAgent } from "../libcurl-transport-vendored";
 
