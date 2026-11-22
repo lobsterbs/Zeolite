@@ -29,7 +29,7 @@ import { planRange, ZL_RANGE_MAX } from "./range";
 import { applyEngineCors } from "./cors";
 import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
-import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, isChallengeMitigated, relabelChallengeZone, CHALLENGE_ZONE_PATCH_CAP, type TransitDecision } from "./transit";
+import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, isChallengeMitigated, relabelChallengeZone, spliceChallengeFirewall, CHALLENGE_ZONE_PATCH_CAP, type TransitDecision } from "./transit";
 import { loadPolicy, behaviorMatch, transportMatch, type CompiledPolicy } from "./policy";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
 import { boundedBody, cssRewriteStream, isCss, isHtml, isJs, originPinningRelaxed, passthroughStream, rawFrom, recaptchaReleaseScript, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
@@ -6568,8 +6568,10 @@ export function handleFetch(e: FetchEvent): void {
              realm the hostname is the engine host, so the site-host cZone
              never matches (live: rumble.com, dash.cloudflare.com @2c1799b
              - zero widget requests; with the relabel the widget mounts).
-             Byte-minimal and fail-open: over the cap, or no cZone literal
-             found, the raw body streams untouched exactly as before.
+             Fail-open only over the size cap: under it the
+             storage-firewall prelude (#694) always splices and the cZone
+             relabel applies when the literal exists; over the cap the raw
+             body streams untouched (residual, documented on #694).
              Never solves or bypasses a challenge. Challenge docs are 403 +
              no-store, so they are never page-cached and this fresh path
              is the only serving path. */
@@ -6583,17 +6585,28 @@ export function handleFetch(e: FetchEvent): void {
             const zoneClen = Number(resp.headers.get("content-length") ?? -1);
             if (zoneClen < 0 || zoneClen <= CHALLENGE_ZONE_PATCH_CAP) {
               const zoneText = await resp.text();
-              const zonePatched = relabelChallengeZone(zoneText);
-              if (zonePatched !== zoneText) {
+              /* #694: a verbatim serve never exposes the engine's raw
+                 storage: the firewall prelude shadows indexedDB/caches
+                 for the engine-own zl- and zeolite- prefixed names before the doc
+                 first script runs, then the cZone relabel applies as
+                 before. The body always changes, so the stale upstream
+                 content-length never survives and the re-encoded UTF-8
+                 content-type is forced. */
+              const fired = spliceChallengeFirewall(zoneText);
+              const zonePatched = relabelChallengeZone(fired);
+              if (fired !== zoneText)
+                DIAG.stage(traceId, "CHALLENGE_FIREWALL", {
+                  url: target,
+                  message: "storage-firewall prelude spliced into the verbatim challenge serve (#694: engine-own zl- and zeolite- prefixed names denied in the doc realm)",
+                });
+              if (fired !== zonePatched)
                 DIAG.stage(traceId, "CHALLENGE_ZONE_RELABEL", {
                   url: target,
                   message: "inline cZone relabeled to location.hostname so the Turnstile hostname gate passes on the /j/ realm",
                 });
-                outHeaders.delete("content-length");
-                outHeaders.set("content-type", utf8ContentType(respCt));
-                return new Response(zonePatched, { status: resp.status, headers: outHeaders });
-              }
-              return new Response(zoneText, { status: resp.status, headers: outHeaders });
+              outHeaders.delete("content-length");
+              outHeaders.set("content-type", utf8ContentType(respCt));
+              return new Response(zonePatched, { status: resp.status, headers: outHeaders });
             }
           }
           const dl = adoptResponse(

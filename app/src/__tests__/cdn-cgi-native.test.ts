@@ -134,4 +134,11 @@ describe("isChallengeMitigated (cf-mitigated challenge documents)", () => {
     expect(isChallengeMitigated({ get: () => "blocked" })).toBe(false);
     expect(isChallengeMitigated({ get: () => null })).toBe(false);
   });
+
+  it("#694: the flag alone never flips the verbatim trust - the Cloudflare edge cf-ray stamp is required", () => {
+    expect(isChallengeMitigated({ get: (n: string) => (n.toLowerCase() === "cf-mitigated" ? "challenge" : null) })).toBe(false);
+    expect(
+      isChallengeMitigated({ get: (n: string) => (n.toLowerCase() === "cf-mitigated" ? "challenge" : n.toLowerCase() === "cf-ray" ? "8f44f9c24f07" : null) }),
+    ).toBe(true);
+  });
 });

@@ -9,6 +9,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
    NativeReason CF_CHALLENGE_VERBATIM existed in the taxonomy but no
    code path emitted it, so interstitials got DOCUMENT_REWRITE_REQUIRED
    and the bootstrap splice). Planner-level + handleFetch-level.
+   #694 hardened the trust: the flag only demotes together with the
+   Cloudflare edge cf-ray stamp, and the verbatim serve additionally
+   carries the storage-firewall prelude (engine-own zl- and zeolite-
+   prefixed names denied); a spoof falls back to the rewrite pipe.
 
    D2: a root-relative site path (/cdn-cgi/... challenge script) issued
    by a context-less child realm of a proxied page (blob: challenge
@@ -62,7 +66,7 @@ vi.mock("../rewriter_wasm/rewriter_wasm.js", () => {
 
 import { handleFetch } from "../request";
 import { encodeDestLegacy } from "../codec";
-import { decideTransport, planResponseTransit, relabelChallengeZone, CHALLENGE_ZONE_PATCH_CAP } from "../transit";
+import { decideTransport, planResponseTransit, relabelChallengeZone, spliceChallengeFirewall, CHALLENGE_FIREWALL_SCRIPT, CHALLENGE_ZONE_PATCH_CAP } from "../transit";
 import { initTransform, type TransformDeps } from "../transform";
 import { VCTX } from "../swstate";
 
@@ -83,7 +87,21 @@ function transformDeps(): TransformDeps {
 describe("D1: cf-mitigated challenge documents decide verbatim (planner)", () => {
   const site = "https://site.example/";
 
-  it("demotes a rewrite-fallback document to NativeTransit CF_CHALLENGE_VERBATIM when the response carries cf-mitigated: challenge", () => {
+  it("demotes a rewrite-fallback document to NativeTransit CF_CHALLENGE_VERBATIM when the response carries the edge-signed pair (cf-mitigated: challenge + cf-ray, #694)", () => {
+    const plan = planResponseTransit(
+      decideTransport(site, "document"),
+      "text/html; charset=utf-8",
+      "document",
+      site,
+      null,
+      { get: (n: string) => (n.toLowerCase() === "cf-mitigated" ? "challenge" : n.toLowerCase() === "cf-ray" ? "8f44f9c24f07-Tokyo" : null) },
+    );
+    expect(plan.decision).toEqual({ mode: "NativeTransit", reason: "CF_CHALLENGE_VERBATIM" });
+    expect(plan.strategy).toBe("native");
+    expect(plan.evidence).toBe("challenge-namespace");
+  });
+
+  it("#694: a header-only spoof (cf-mitigated: challenge without the cf-ray edge stamp) stays on the rewrite path", () => {
     const plan = planResponseTransit(
       decideTransport(site, "document"),
       "text/html; charset=utf-8",
@@ -92,9 +110,7 @@ describe("D1: cf-mitigated challenge documents decide verbatim (planner)", () =>
       null,
       { get: (n: string) => (n.toLowerCase() === "cf-mitigated" ? "challenge" : null) },
     );
-    expect(plan.decision).toEqual({ mode: "NativeTransit", reason: "CF_CHALLENGE_VERBATIM" });
-    expect(plan.strategy).toBe("native");
-    expect(plan.evidence).toBe("challenge-namespace");
+    expect(plan.decision).toEqual({ mode: "RewriteFallback", reason: "DOCUMENT_REWRITE_REQUIRED" });
   });
 
   it("leaves the document rewrite-required when no response headers are given (old call shape) or the flag is absent", () => {
@@ -187,11 +203,11 @@ describe("D1/D2: handleFetch serving (integration)", () => {
   const CHALLENGE_HTML =
     '<!DOCTYPE html><html><head><title>Just a moment...</title></head><body><script nonce="abc">window._cf_chl_opt={cH:"x"};</script></body></html>';
 
-  it("serves a cf-mitigated challenge document byte-verbatim (no bootstrap splice)", async () => {
+  it("serves an edge-signed cf-mitigated challenge document verbatim except the #694 storage-firewall prelude (no bootstrap splice)", async () => {
     transportMock.queue.push(
       new Response(CHALLENGE_HTML, {
         status: 403,
-        headers: { "content-type": "text/html; charset=utf-8", "cf-mitigated": "challenge" },
+        headers: { "content-type": "text/html; charset=utf-8", "cf-mitigated": "challenge", "cf-ray": "8f44f9c24f07-Tokyo" },
       }),
     );
     const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "navigate", "document", "", "doc-1");
@@ -200,8 +216,28 @@ describe("D1/D2: handleFetch serving (integration)", () => {
     const served = await armed[0]!;
     expect(served.status).toBe(403);
     const body = await served.text();
-    expect(body).toBe(CHALLENGE_HTML);
+    /* the whole verbatim contract reduces to: original bytes plus the
+       firewall prelude, and nothing else */
+    expect(body).toBe(spliceChallengeFirewall(CHALLENGE_HTML));
+    expect(body).toContain(CHALLENGE_FIREWALL_SCRIPT);
     expect(body).not.toContain("__ZL");
+  });
+
+  it("#694: a header-only spoofed flag falls back to the rewrite pipe (bootstrap isolation re-attached), never the verbatim serve", async () => {
+    const SPOOF = '<!DOCTYPE html><html><head><title>totally a challenge</title></head><body>hi</body></html>';
+    transportMock.queue.push(
+      new Response(SPOOF, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8", "cf-mitigated": "challenge" },
+      }),
+    );
+    const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://attacker.example/"), "navigate", "document", "", "doc-9");
+    handleFetch(ev);
+    expect(armed.length).toBe(1);
+    const served = await armed[0]!;
+    const body = await served.text();
+    expect(body).toContain("__ZL");
+    expect(body).not.toBe(SPOOF);
   });
 
   it("control: an ordinary 200 HTML document is still rewritten (bootstrap spliced)", async () => {
@@ -362,7 +398,7 @@ describe("D3: handleFetch relabels the cZone literal in cf-mitigated docs only",
     transportMock.queue.push(
       new Response(CHALLENGE_HTML_ZONE, {
         status: 403,
-        headers: { "content-type": "text/html; charset=utf-8", "cf-mitigated": "challenge", "content-length": String(CHALLENGE_HTML_ZONE.length) },
+        headers: { "content-type": "text/html; charset=utf-8", "cf-mitigated": "challenge", "cf-ray": "8f44f9c24f07-Tokyo", "content-length": String(CHALLENGE_HTML_ZONE.length) },
       }),
     );
     const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "navigate", "document", "", "doc-z1");
@@ -373,23 +409,23 @@ describe("D3: handleFetch relabels the cZone literal in cf-mitigated docs only",
     const body = await served.text();
     expect(body).toContain("cZone: location.hostname");
     expect(body).not.toContain("cZone: 'site.example'");
-    /* every other byte is untouched */
-    expect(body).toBe(CHALLENGE_HTML_ZONE.replace("cZone: 'site.example'", "cZone: location.hostname"));
+    /* every byte is untouched except the #694 firewall prelude */
+    expect(body).toBe(spliceChallengeFirewall(CHALLENGE_HTML_ZONE.replace("cZone: 'site.example'", "cZone: location.hostname")));
     expect(body).not.toContain("__ZL");
     /* the stale upstream content-length must not survive a changed body */
     expect(served.headers.get("content-length")).toBeNull();
   });
 
-  it("serves a cf-mitigated doc without a cZone literal byte-verbatim", async () => {
+  it("serves a cf-mitigated doc without a cZone literal with only the #694 firewall splice", async () => {
     const NOZONE = '<!DOCTYPE html><html><head><title>Just a moment...</title></head><body><script nonce="abc">window._cf_chl_opt={cH:"x"};</script></body></html>';
     transportMock.queue.push(
-      new Response(NOZONE, { status: 403, headers: { "content-type": "text/html; charset=utf-8", "cf-mitigated": "challenge" } }),
+      new Response(NOZONE, { status: 403, headers: { "content-type": "text/html; charset=utf-8", "cf-mitigated": "challenge", "cf-ray": "8f44f9c24f07-Tokyo" } }),
     );
     const { ev, armed } = mkEvent(ORIGIN + encodeDestLegacy("https://site.example/"), "navigate", "document", "", "doc-z2");
     handleFetch(ev);
     const served = await armed[0]!;
     expect(served.status).toBe(403);
-    expect(await served.text()).toBe(NOZONE);
+    expect(await served.text()).toBe(spliceChallengeFirewall(NOZONE));
   });
 
   it("does not relabel ordinary (non-challenge-flagged) HTML documents", async () => {
@@ -402,5 +438,62 @@ describe("D3: handleFetch relabels the cZone literal in cf-mitigated docs only",
     /* ordinary docs go through the rewrite stream; the cZone literal must
        not be relabeled by the challenge path */
     expect(body).not.toContain("cZone: location.hostname");
+  });
+});
+
+/* #694: the storage-firewall prelude riding every verbatim challenge
+   serve. Contract: engine-own zl- and zeolite- prefixed names are denied
+   and hidden from the doc realm; every other name passes through
+   untouched (a genuine CF challenge never opens engine-own names). */
+describe("#694: the challenge storage firewall denies engine-own names in the doc realm", () => {
+  const run = (w: unknown) => void new Function("window", CHALLENGE_FIREWALL_SCRIPT)(w);
+
+  it("indexedDB: zl-* opens throw, legit names pass through, databases() hides engine-own DBs", async () => {
+    const passed: string[] = [];
+    const fakeReq = { tag: "req" };
+    const w = {
+      indexedDB: {
+        open: (n: string) => { passed.push(n); return fakeReq; },
+        deleteDatabase: (n: string) => { passed.push("del:" + n); return fakeReq; },
+        databases: async () => [{ name: "zl-extensions" }, { name: "zl-route" }, { name: "site-notes" }],
+        cmp: <T>(a: T, b: T) => (a === b ? 0 : 1),
+      },
+    };
+    run(w);
+    const idb = (w as { indexedDB: { open(n: string): unknown; deleteDatabase(n: string): unknown; databases(): Promise<{ name: string }[]>; cmp<T>(a: T, b: T): number } }).indexedDB;
+    expect(() => idb.open("zl-extensions")).toThrow("blocked");
+    expect(() => idb.open("zl-route")).toThrow("blocked");
+    expect(() => idb.deleteDatabase("zl-extensions")).toThrow("blocked");
+    expect(passed).toEqual([]);
+    expect(idb.open("site-notes")).toBe(fakeReq);
+    expect(passed).toEqual(["site-notes"]);
+    expect(idb.cmp(fakeReq, fakeReq)).toBe(0);
+    const dbs = await idb.databases();
+    expect(dbs.map((d) => d.name)).toEqual(["site-notes"]);
+  });
+
+  it("caches: zeolite-* open rejects, keys() hides engine-own, has/delete answer false for engine-own, match is fail-closed on a named engine cache", async () => {
+    const opened: string[] = [];
+    const fakeCache = { tag: "cache" };
+    const w = {
+      caches: {
+        open: async (n: string) => { opened.push(n); return fakeCache; },
+        has: async () => true,
+        delete: async () => true,
+        keys: async () => ["zeolite-engine-v1", "zeolite-jar-profile-v1", "zeolite-pages-v2", "zeolite-pages-index-v1", "zeolite-route-v1", "site-cache"],
+        match: async () => "hit" as unknown,
+      },
+    };
+    run(w);
+    const c = (w as { caches: { open(n: string): Promise<unknown>; has(n: string): Promise<boolean>; delete(n: string): Promise<boolean>; keys(): Promise<string[]>; match(r: unknown, o?: { cacheName?: string }): Promise<unknown> } }).caches;
+    await expect(c.open("zeolite-jar-profile-v1")).rejects.toThrow("blocked");
+    await expect(c.open("zeolite-pages-v2")).rejects.toThrow("blocked");
+    expect(opened).toEqual([]);
+    expect(await c.open("site-cache")).toBe(fakeCache);
+    expect(await c.has("zeolite-route-v1")).toBe(false);
+    expect(await c.delete("zeolite-pages-index-v1")).toBe(false);
+    expect(await c.keys()).toEqual(["site-cache"]);
+    expect(await c.match("https://x/", { cacheName: "zeolite-engine-v1" })).toBeUndefined();
+    expect(await c.match("https://x/")).toBe("hit");
   });
 });

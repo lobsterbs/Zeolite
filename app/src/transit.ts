@@ -177,7 +177,17 @@ export function isCdnCgiUrl(target: string): boolean {
    cdn-cgi resources. Live evidence: claude.ai login interstitial,
    2026-10-24. Detection only - no bypass, no solve, ever. */
 export function isChallengeMitigated(h: { get(name: string): string | null }): boolean {
-  return (h.get("cf-mitigated") ?? "").trim().toLowerCase() === "challenge";
+  /* #694: cf-mitigated alone is origin-controlled - any proxied site can
+     flag its own HTML and ride the verbatim serve past the #171 bootstrap
+     isolation. The Cloudflare edge stamps cf-ray on every response it
+     serves, and a genuine managed challenge is always an edge response, so
+     the verbatim trust now requires both. A flagged doc without cf-ray
+     falls back to the rewrite path (full bootstrap isolation): the
+     fail-safe direction for a spoof. */
+  return (
+    (h.get("cf-mitigated") ?? "").trim().toLowerCase() === "challenge" &&
+    (h.get("cf-ray") ?? "").trim() !== ""
+  );
 }
 
 /* #685 follow-up (CF_CHALLENGE_ZONE_RELABEL). Live evidence 2026-11-19,
@@ -206,6 +216,61 @@ export function relabelChallengeZone(html: string): string {
   return html
     .replace(/\b(cZone\s*:\s*)'[^']*'/g, "$1location.hostname")
     .replace(/\b(cZone\s*:\s*)"[^"]*"/g, "$1location.hostname");
+}
+
+/* #694: the verbatim serve skips the per-site bootstrap (#171 scoping),
+   so a challenge-flagged doc's inline scripts would otherwise read the
+   engine origin's own storage raw: the jar (indexedDB zl-extensions), the
+   route keys (zl-route) and the zeolite-* caches. The cf-ray trust gate
+   above keeps header-only spoofs off this path entirely; a hostile origin
+   that still reaches it (nothing stops an origin from faking every header)
+   meets this prelude: it shadows the document realm's indexedDB and caches
+   so the engine's own zl- and zeolite- prefixed names are denied and hidden from every
+   IDBFactory/CacheStorage method before the doc's own scripts run (upstream
+   CSP is stripped by header surgery, so the splice executes). A genuine
+   Cloudflare challenge never touches those names. Child/worker realm
+   escapes are the #695 class lanes and stay out of scope here. */
+export const CHALLENGE_FIREWALL_SCRIPT = [
+  "(function(){",
+  "var RE=/^(?:zl|zeolite)-/;",
+  "function own(n){return typeof n===\"string\"&&RE.test(n);}",
+  "function rejp(){return Promise.reject(new Error(\"blocked\"));}",
+  "try{",
+  "var I=window.indexedDB;",
+  "if(I){",
+  "var F={",
+  "open:function(n){if(own(n))throw new Error(\"blocked\");return I.open.apply(I,arguments);},",
+  "deleteDatabase:function(n){if(own(n))throw new Error(\"blocked\");return I.deleteDatabase.apply(I,arguments);},",
+  "databases:I.databases?function(){return I.databases().then(function(ds){return (ds||[]).filter(function(d){return !own(d&&d.name);});});}:undefined,",
+  "cmp:function(a,b){return I.cmp(a,b);},",
+  "};",
+  "Object.defineProperty(window,\"indexedDB\",{value:F,configurable:true});",
+  "}",
+  "}catch(e){}",
+  "try{",
+  "var C=window.caches;",
+  "if(C){",
+  "var W={",
+  "open:function(n){return own(n)?rejp():C.open.apply(C,arguments);},",
+  "has:function(n){return own(n)?Promise.resolve(false):C.has.apply(C,arguments);},",
+  "delete:function(n){return own(n)?Promise.resolve(false):C.delete.apply(C,arguments);},",
+  "keys:function(){return C.keys().then(function(ks){return ks.filter(function(n){return !own(n);});});},",
+  "match:function(r,o){return (o&&own(o.cacheName))?Promise.resolve(undefined):C.match.apply(C,arguments);},",
+  "};",
+  "Object.defineProperty(window,\"caches\",{value:W,configurable:true});",
+  "}",
+  "}catch(e){}",
+  "})();",
+].join("");
+
+/* Spliced into every verbatim challenge serve; the tag prefers the head
+   open tag so the firewall runs before the doc's own scripts. */
+export function spliceChallengeFirewall(html: string): string {
+  const tag = "<script>" + CHALLENGE_FIREWALL_SCRIPT + "</script>";
+  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => m + tag);
+  if (/<html[^>]*>/i.test(html)) return html.replace(/<html[^>]*>/i, (m) => m + tag);
+  const dt = html.match(/^\s*<!doctype[^>]*>/i);
+  return dt ? dt[0] + tag + html.slice(dt[0].length) : tag + html;
 }
 
 /** Pre-fetch decision from the destination URL and the request

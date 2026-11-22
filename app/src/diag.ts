@@ -85,7 +85,11 @@ export type DiagStage =
      literal relabeled to location.hostname so the orchestrator's
      hostname===cZone gate passes on the opaque /j/ realm. Informational,
      never a failure point. */
-  | "CHALLENGE_ZONE_RELABEL";
+  | "CHALLENGE_ZONE_RELABEL"
+  /* #694: the verbatim challenge serve spliced the storage-firewall
+     prelude (engine-own zl- and zeolite- prefixed names denied in the
+     doc realm). Informational, never a failure point. */
+  | "CHALLENGE_FIREWALL";
 
 export type DiagDeliveryState =
   | "definitely-not-delivered"
