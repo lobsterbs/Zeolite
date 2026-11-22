@@ -71,8 +71,19 @@ describe("decodeQueryHandle prel peel (#708 ghost)", () => {
       ENGINE + "/_/bscframe" + NAVP + "/" + enc("guest-host.html") + "?zlNavh=" + tok,
     );
     /* the prel input was relative: it resolves against the parent
-       path's directory, exactly like the decodePrel seam */
-    expect(decodeQueryHandle(u)?.destination).toBe(SITE + "/_/bscframe/guest-host.html");
+       path exactly like a browser resolves the same input against
+       the parent document URL (the #63 e2e shape: landing.html +
+       "img.png" -> the landing's directory, not the landing itself
+       as a directory) */
+    expect(decodeQueryHandle(u)?.destination).toBe(SITE + "/_/guest-host.html");
+    /* the exact #63 e2e shape that caught the double-directory bug:
+       a /dir/landing.html page fetching "img.png" must land on
+       /dir/img.png, never the landing pathname as a directory */
+    const { tok: tok2 } = committed(SITE + "/dir/landing.html");
+    const u2 = new URL(
+      ENGINE + "/dir/landing.html" + NAVP + "/" + enc("img.png") + "?zlNavh=" + tok2,
+    );
+    expect(decodeQueryHandle(u2)?.destination).toBe(SITE + "/dir/img.png");
   });
 
   it("keeps the rootClientId lineage across the peel", () => {

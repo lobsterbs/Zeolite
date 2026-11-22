@@ -105,16 +105,8 @@ export const tokenShaped = (v: string): boolean => {
     carries it, and the SW fails impostors closed. An empty value is
     null: a bare "zlNavh=" is not a token any seam can decode. */
 export function navqToken(search: string): string | null {
-  const raw = search.startsWith("?") ? search.slice(1) : search;
-  if (raw === "") return null;
-  for (const part of raw.split("&")) {
-    if (!part.startsWith("zlNavh=")) continue;
-    /* an empty value is not a token: an anchor on it would arm the
-       prefix arm without a decodable committed route (impostor) */
-    const v = part.slice("zlNavh=".length);
-    return v === "" ? null : v;
-  }
-  return null;
+  const m = /(?:^|[?&])zlNavh=([^&#]+)/.exec(search);
+  return m ? m[1] : null;
 }
 
 /** #101/#157/#159 shared re-emit helper: a root-relative input
@@ -144,15 +136,16 @@ export function makeRel(
 ): (v: string) => string | null {
   const engPrefix = routePath?.match(/^\/[^\/]+\//)?.[0];
   /* The token arm anchors on the same honest never-re-emit set as
-     the prefix arm: no marker-shaped parent, no token-shaped
-     parent (a real site path never carries a 12+ b64u second
-     segment), no prel-carrying parent. Fail-closed null keeps
-     the raw write when nothing anchors. */
+     the prefix arm: no marker-shaped or engine-surface parent
+     (navExcluded covers the /__zl_ vocabulary, devtools, the
+     reserved roots), no token-shaped parent (a real site path
+     never carries a 12+ b64u second segment), no prel-carrying
+     parent, never the bare root. Fail-closed null keeps the raw
+     write when nothing anchors. */
   const navArm =
     !!navq &&
     !!routePath &&
     routePath !== "/" &&
-    !routePath.startsWith("/__zl_") &&
     !navExcluded(routePath) &&
     !tokenShaped(routePath) &&
     routePath.indexOf(NAVP + "/") < 0;
@@ -175,10 +168,16 @@ export function makeRel(
     const cut = p.indexOf("#");
     const body = cut < 0 ? p : p.slice(0, cut);
     const tail = cut < 0 ? "" : p.slice(cut);
-    if (navArm)
-      return routePath + NAVP + "/" + encodeURIComponent(body) + "?zlNavh=" + navq + tail;
-    if (!engPrefix) return null;
-    return routePath + NAVP + "/" + encodeURIComponent(body) + tail;
+    return (
+      routePath +
+      NAVP +
+      "/" +
+      encodeURIComponent(body) +
+      /* the token arm carries the committed route's own token in the
+         prel search: a navigation-bound write resolves to a URL
+         that must name its home for the SW decode */
+      (navArm ? "?zlNavh=" + navq + tail : tail)
+    );
   };
 }
 

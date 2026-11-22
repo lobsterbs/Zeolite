@@ -345,7 +345,17 @@ jobs:
         # legacy-alias delete (a live second constructor on real
         # Chromium, an ICE egress bypass) rides bootstrap.js via
         # navguard.ts; measured 49819, baseline 49800.
-        # Raised 50000 -> 51200 for #553 slice 2: the popup pid
+        # Raised 51200 -> 51600 for the #708/#706 committed-query
+        # wave: the query-shape re-emit anchor rides bootstrap.js -
+        # navqToken (the raw zlNavh extractor), the makeRel token
+        # arm (prel mints carry the committed route's own token in
+        # the prel search), the routeAnchor zlNavh extension and the
+        # applyNavGuard/guardChild/applyReemit/bootstrap.ts wiring.
+        # Measured 51519 pre-golf on run 45025152145 (319 bytes over
+        # the old gate), ~200 bytes golfed (navqToken regex form,
+        # merged prel return, subsumed navArm clause) - estimate
+        # 51320, to be corrected to the measured value CI prints.
+        # Raised 51200 for #553 slice 2 (kept above): the popup pid
         # correlation protocol rides bootstrap.js - lb:navigate
         # carries pid+name, the lb:popupClose/lb:popupFocus/
         # lb:popupMessage relay ops with targetOrigin validation,
@@ -359,7 +369,7 @@ jobs:
         run: |
           SIZE=$(wc -c < app/dist/bootstrap.js)
           echo "bootstrap.js: $SIZE bytes"
-          if [ "$SIZE" -ge 51200 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 51200)"; exit 1; fi
+          if [ "$SIZE" -ge 51600 ]; then echo "::error::BOOTSTRAP $SIZE bytes (budget 51600)"; exit 1; fi
       - name: Finder size budget (must stay under 4 KiB minified)
         # #29: dist/finder.js is shipped into the page inside the
         # first zl:findLoad message, so its size is a per-command

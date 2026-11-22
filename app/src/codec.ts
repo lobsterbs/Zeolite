@@ -931,7 +931,7 @@ export function decodeQueryHandle(u: URL, opts?: {expired?: boolean}): { destina
       if (r && (r.startsWith("http://") || r.startsWith("https://")))
         return { destination: r, rootClientId: root };
     }
-    const dest = new URL(cur, origin + parentPath + "/");
+    const dest = new URL(cur, origin + parentPath);
     /* the input binds to the token-named origin: an absolute
        impostor tail decoded out of the body fails closed */
     if (dest.origin !== origin) return null;
