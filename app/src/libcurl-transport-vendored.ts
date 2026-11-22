@@ -212,6 +212,7 @@ interface EpoxyFetchClient {
 
 interface EpoxyClientOptionsLike {
   wisp_v2: boolean;
+  user_agent: string;
 }
 
 interface EpoxyHandlersCtor {
@@ -351,6 +352,32 @@ let epoxyClient: EpoxyFetchClient | null = null;
 let epoxyHandlers: EpoxyHandlersCtor | null = null;
 let epoxyInitPromise: Promise<void> | null = null;
 
+/* 2026-11-22 (#708 follow-up): epoxy preloads its own wire default UA
+   (an X11 Linux Chrome) into every request that carries no user-agent
+   header, and the wisp WS handshake carries the same value; under a
+   spoofed fingerprint those requests would wire a contradicting
+   identity. The accepted zl:fingerprint profile owns this default
+   (control.ts arms it); per-site rule UAs stay per-request - the
+   engine's header surgery wins over the client-wide default. Empty
+   keeps epoxy's built-in default. */
+let epoxyUserAgent = "";
+
+/** Wire-default UA for the epoxy client ("" = epoxy's built-in). */
+export function epoxyUserAgentValue(): string {
+  return epoxyUserAgent;
+}
+
+/** Set the epoxy wire-default UA. A real change drops the epoxy
+    singletons (same shape as reset(), without tearing the libcurl
+    client) so the next fetch/init rebuilds on the new default. */
+export function setEpoxyUserAgent(ua: unknown): void {
+  const next = typeof ua === "string" ? ua : "";
+  if (next === epoxyUserAgent) return;
+  epoxyUserAgent = next;
+  epoxyClient = null;
+  epoxyInitPromise = null;
+}
+
 async function loadEpoxyModule(): Promise<EpoxyModule> {
   const res = await globalThis.fetch(epoxyModuleUrl(), { cache: "no-store" });
   if (!res.ok) throw new Error(EPOXY_MISSING);
@@ -372,6 +399,7 @@ async function getEpoxy(cfg: { websocket: string }): Promise<EpoxyFetchClient> {
       await mod.init({ module_or_path: epoxyWasmUrl() });
       const options = new mod.EpoxyClientOptions();
       options.wisp_v2 = true;
+      if (epoxyUserAgent) options.user_agent = epoxyUserAgent;
       epoxyClient = new mod.EpoxyClient(cfg.websocket, options);
       epoxyHandlers = mod.EpoxyHandlers ?? null;
     })();
@@ -1399,6 +1427,11 @@ export async function init(cfg: { websocket: string }): Promise<void> {
 
 export async function fetch(url: string, init?: RequestInit): Promise<Response> {
   if (engine === "epoxy") {
+    /* A UA-default change (setEpoxyUserAgent) drops the singletons
+       after init; rebuild lazily from the last config so the next
+       request carries the current wire default. An unconfigured
+       transport keeps the honest "call init first" error. */
+    if (!epoxyClient && lastCfg) await init(lastCfg);
     if (!epoxyClient) throw new Error("zeolite: transport not initialized (call init first)");
     const res = await epoxyClient.fetch(url, epoxyFetchOptions(init));
     /* Rebuild so rawHeaders is the Zeolite pair shape (epoxy's own

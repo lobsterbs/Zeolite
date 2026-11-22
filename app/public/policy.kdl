@@ -20,20 +20,21 @@
 // rejected file keeps the defaults active (diagnostics carry the
 // error).
 
-// Wave 17 (2026-10-13): the LobsterBrowse deployment keeps wisp
-// password auth ON (operator decision) while the engine bundle's
-// wisp client cannot authenticate - the vendored transport has no
-// password support and receives no credentials - so every wisp
-// connection from the service worker is refused (wisp v1 and v2
-// both close with auth reasons) and the wasm transit is dead on
-// that deployment. The match-less rule below routes every upstream
-// fetch onto the embedder relay so the engine serves pages at all;
-// it sits FIRST in the file so any later rule overrides it on equal
-// priority, and a future auth-capable wisp client can delete it.
-rule "default-relay" {
-  route "relay"
-  reason "deployment wisp auth rejects the wasm client: relay all fetches"
-}
+// 2026-11-22 epoxy switch (#708/#642 follow-up): the LB deployments
+// ride a public wisp transit by default now (anura, announced as
+// /build sjWisp from the SCRAMJET_WISP_URL env; the engine transport
+// is epoxy), because the Google risk gate refuses the datacenter
+// egress the embedder relay exits from. The wave-17 default-relay
+// catch-all is deleted: its reason (the deployment wisp being
+// password-authed, the wasm client refused) is gone for deployments
+// that announce a public endpoint, so the engine's default path - the
+// embedder-selected primary wisp client - carries everything again.
+// The per-host relay rules below survive unchanged (their hosts reject
+// the wasm TLS/h2 shapes), and the stall-storm cooldown still rides
+// the relay when an embedder channel is registered. A deployment that
+// keeps an auth-wisp and announces no endpoint restores the legacy
+// remedy: a match-less "relay" rule first in this file
+// (docs/integration-guide.md) or the armed zl:wispAuth lane.
 
 // #154: Google's gapi loader sanity-validates every generated module
 // URL against an origin-pinning regex (^https?://<host>.google(rs)?.com).
@@ -43,7 +44,7 @@ rule "default-relay" {
 // serves the script body raw; the module loads then run as ordinary
 // cross-origin requests from a controlled page, which the engine fetches
 // itself (#34), so nothing goes direct. The transport composes: the
-// default-relay rule above still carries the wire.
+// engine's default path carries the wire.
 rule "gapi-native" priority=10 {
   match host="apis.google.com"
   types "script"
@@ -122,17 +123,10 @@ rule "delta-relay" {
 
 // #642: Google risk-rejects the sign-in flow from datacenter egress
 // (triple-proven on #633; no engine defect remains on the sign-in path).
-// The fix class is a trusted egress for the sign-in hosts (option (a) on
-// #642): an operator hosts an auth-capable wisp endpoint at a trusted IP,
-// points the LB server env SCRAMJET_WISP_URL at it, uncomments the rule
-// below and re-pins the dist. KEEP THIS RULE COMMENTED on the shared
-// deployments: the deployment wisp endpoint is password-authed and the
-// wasm client cannot authenticate, so an active rule would carry the
-// sign-in hosts onto a refused transport and break sign-in outright.
-// Extend the host set (myaccount.google.com, www.google.com documents)
-// only with captured evidence that the wall applies there too.
-// rule "google-signin-wisp" {
-//   match host="accounts.google.com"
-//   route "wisp"
-//   reason "#642: trusted egress for the sign-in hosts (operator-armed wisp)"
-// }
+// #642: the sign-in hosts need no per-host rule after the 2026-11-22
+// epoxy switch: they ride the engine default path (the primary wisp
+// client the embedder selects) like every other unrouted host, so the
+// trusted-egress lane is now the deployment's announced endpoint
+// itself. Trusted-egress deployments that need a private passworded
+// wisp own credentials keep the zl:wispAuth lane instead
+// (docs/wisp-auth-client.md).

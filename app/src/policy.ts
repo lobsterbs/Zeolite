@@ -212,11 +212,12 @@ export function behaviorMatch(p: CompiledPolicy, url: string, rtype: ResourceTyp
    route "rewrite" choose a response's rewrite behavior (literal pass
    demotion, rewrite upgrade); route "relay" and route "wisp" choose
    the wire. A behavior rule winning the match must not also capture
-   the transport: on a relay-only deployment a "native" host rule
-   would otherwise demote its requests onto the default wasm wisp
-   transport the deployment refuses. upstreamFetch matches transports
-   only, so behavior rules compose with the transport rules (a
-   match-less default-relay still carries behavior-ruled hosts). */
+   the transport: on a deployment whose wisp endpoint the wasm client
+   cannot pass, a "native" host rule would otherwise demote its
+   requests onto the default wisp transport the deployment refuses.
+   upstreamFetch matches transports only, so behavior rules compose
+   with the transport rules (a match-less "relay" rule, the wave-17
+   remedy, still carries behavior-ruled hosts). */
 export function transportMatch(p: CompiledPolicy, url: string, rtype: ResourceType): PolicyRule | null {
   const transports = p.rules.filter((r) => r.route === "relay" || r.route === "wisp");
   return transports.length === 0 ? null : policyMatch({ rules: transports }, url, rtype);

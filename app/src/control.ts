@@ -85,7 +85,7 @@ import { locationTargetSnapshot, recordSpa404Report } from "./location-targeting
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
 import { relayAvailable, relayRegister } from "./relayfetch";
-import { altConfigured, altRegister, currentEngine, engineReady, setPrimaryWisp, wispTransport } from "./transport";
+import { altConfigured, altRegister, currentEngine, engineReady, setPrimaryWisp, setEpoxyUserAgent, wispTransport } from "./transport";
 import { loadInflight } from "./loadstate";
 import { activeStreams } from "./streams-alive";
 import { contextOf } from "./vctx";
@@ -1272,8 +1272,15 @@ case "zl:tracing":
           lastFingerprintKey = fpKey;
           void pageCacheClear();
         }
+        const r = setFingerprint(msg.profile ?? null);
+        /* 2026-11-22 (#708 follow-up): an accepted profile also owns
+           the epoxy transport's wire-default UA (header-less requests
+           and the wisp WS handshake would otherwise leak epoxy's
+           built-in X11 Linux identity under the spoofed browser);
+           per-request site-rule UAs still win at the header seam. */
+        if (r.ok) setEpoxyUserAgent(r.profile ? r.profile.userAgent : "");
+        reply(r);
       }
-      reply(setFingerprint(msg.profile ?? null));
       break;
     case "zl:recordStart": {
       /* 1.9 Fullerene: deterministic session recording. Forcing the
@@ -1839,4 +1846,3 @@ export function messageListener(deps: ControlDeps) {
     );
   };
 }
-

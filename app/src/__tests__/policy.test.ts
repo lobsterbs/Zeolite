@@ -257,14 +257,15 @@ describe("shipped policy.kdl", () => {
     expect(policyMatch(p, "https://search.brave.com/api/suggest?q=x", "fetch")).toMatchObject({ id: "brave-wisp", route: "wisp" });
   });
 
-  /* Wave 17: the shipped file carries a match-less catch-all
-     (first in the file, so later specific rules win ties) because the
-     LB deployment keeps wisp auth the wasm client cannot pass -
-     every upstream fetch rides the embedder relay there. */
-  it("rides the catch-all relay for unrelated hosts and hop domains", () => {
+  /* 2026-11-22 epoxy switch: the wave-17 match-less default-relay is
+     deleted from the shipped file (the LB deployments announce a
+     public wisp endpoint now). Unrouted hosts take the engine's
+     default path with NO rule matching - a shipped catch-all here
+     would silently own every host again. */
+  it("leaves unrouted hosts to the default transport (no shipped catch-all)", () => {
     for (const host of ["example.com", "slither.com", "wikipedia.org"]) {
-      expect(policyMatch(p, "https://" + host + "/", "document"), host).toMatchObject({ id: "default-relay", route: "relay" });
+      expect(policyMatch(p, "https://" + host + "/", "document"), host).toBeNull();
     }
-    expect(policyMatch(p, "https://example.com/x.js", "script")).toMatchObject({ id: "default-relay", route: "relay" });
+    expect(transportMatch(p, "https://example.com/x.js", "script")).toBeNull();
   });
 });
