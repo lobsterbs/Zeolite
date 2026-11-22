@@ -778,6 +778,23 @@ jobs:
             grep -E "^\\[FAIL\\]|HARNESS-ERROR" srcdocc.out | head -20 | while IFS= read -r l; do echo "::error::SRCDCC $l"; done
             exit 1
           fi
+      - name: Passthrough network-error gate (#709)
+        # #709 acceptance: an interrupted origin-root passthrough
+        # (a deploy swap resetting the connection before the first
+        # response byte) must surface the browser's own network
+        # error, never the standalone engine error page that would
+        # replace the embedder's app shell at its own origin. A real
+        # zeolite-server sits behind a TCP murder proxy after the SW
+        # controls the origin. Port 7114 never collides with the
+        # other suites.
+        run: |
+          node suite/e2e/passthrough-neterr.mjs 2>&1 | tee pneterr.out
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^\[FAIL\]|HARNESS-ERROR" pneterr.out | head -20 | while IFS= read -r l; do echo "::error::PNETERR $l"; done
+            exit 1
+          fi
+
       - name: Raw-block buffering suite (#526)
         # Real-Chromium acceptance for the bounded raw-block
         # buffering contract: normal inline styles are rewritten

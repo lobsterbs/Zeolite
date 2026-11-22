@@ -18,6 +18,32 @@ describe("classifyFailure (issue #3 categories)", () => {
     expect(classifyFailure("")).toBe("stream");
     expect(classifyFailure("totally novel error")).toBe("stream");
   });
+  it("keeps the fetch rejection vocabulary as stream (issue #709)", () => {
+    expect(classifyFailure("TypeError: Failed to fetch")).toBe("stream");
+    expect(classifyFailure("TypeError: NetworkError when attempting to fetch resource")).toBe("stream");
+    expect(classifyFailure("The operation was aborted")).toBe("stream");
+  });
+
+  it("names engine JS errors as internal, never stream (issue #709)", () => {
+    expect(classifyFailure("TypeError: t is not iterable")).toBe("internal");
+    expect(classifyFailure("TypeError: Cannot read properties of null (reading 'length')")).toBe("internal");
+    expect(classifyFailure("ReferenceError: zl is not defined")).toBe("internal");
+    expect(classifyFailure("RangeError: Maximum call stack size exceeded")).toBe("internal");
+  });
+
+  it("renders the internal category with its own line (issue #709)", () => {
+    const p = errorPage({
+      route: "/",
+      category: "internal",
+      engineVersion: "v",
+      reason: "TypeError: t is not iterable",
+      status: 502,
+    });
+    expect(p).toContain("The engine hit an internal failure (a Zeolite bug).");
+    expect(p).toContain("&quot;category&quot;:&quot;internal&quot;");
+    expect(p).toContain("t is not iterable");
+  });
+
 });
 
 describe("errorPage", () => {

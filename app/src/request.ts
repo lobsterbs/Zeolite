@@ -2266,6 +2266,33 @@ async function fallbackRealmDest(
     return null;
   }
 }
+/** #709 diagnostics: a raw JS error thrown from engine code (the
+    live incident: TypeError: t is not iterable at the origin root,
+    no site named) carries its throw site only in the stack head.
+    Record it next to the message in the failure rings; the page
+    reason stays the redacted message alone. Bounded so a stack-heavy
+    reason cannot grow the ring row. */
+const errDetail = (err: unknown): string => {
+  const head =
+    err instanceof Error && err.stack
+      ? err.stack.split("\n").slice(1, 4).join(" | ")
+      : "";
+  return head ? String(err) + " | " + head : String(err);
+};
+
+/** #709: a passthrough request is the browser's own, never the
+    engine's. When its native fetch fails (a deploy swap resetting
+    the connection before the first response byte), the failure must
+    surface as the honest network error, not as an engine-authored
+    page: the navigation catch turns a thrown failure into the
+    standalone error document, which replaces the embedder's app
+    shell at its own origin for real users (live: the pin-192 swap,
+    the lobsterbrowse root, issue #709). Response.error() answers
+    exactly what the browser would have shown with no worker at
+    all. */
+const passthroughFetch = (req: Request): Promise<Response> =>
+  fetch(req).catch(() => Response.error());
+
 function navOutcome(
   e: FetchEvent,
   url: URL,
@@ -3108,7 +3135,7 @@ export function handleFetch(e: FetchEvent): void {
             transport: "browser",
             detail: { internalUrl: e.request.url, ttfb: -1, initiator },
           });
-          return fetch(e.request);
+          return passthroughFetch(e.request);
         }
         if (policy === "preflight") {
           /* The engine answers the preflight locally; the actual
@@ -3786,7 +3813,7 @@ export function handleFetch(e: FetchEvent): void {
                   transport: "browser",
                   detail: { internalUrl: url.pathname + url.search, ttfb: -1 },
                 });
-                return fetch(e.request);
+                return passthroughFetch(e.request);
               }
             }
           } else {
@@ -6600,7 +6627,7 @@ export function handleFetch(e: FetchEvent): void {
             cause: failure.cause,
             stage: curStage,
             message: "proxied request failed at " + curStage.toLowerCase().replace(/_/g, " "),
-            technicalReason: String(err),
+            technicalReason: errDetail(err),
             url: target,
           });
           WEBREQ.errorOccurred({ ...wrDetails, url: lastHopUrl, error: String(err) });
@@ -6662,7 +6689,7 @@ export function handleFetch(e: FetchEvent): void {
         category: "SERVICE_WORKER",
         cause: "failure",
         message: "request orchestration failed before the engine pipeline",
-        technicalReason: String(err),
+        technicalReason: errDetail(err),
         url: url.href,
       });
       if (e.request.mode === "navigate") {

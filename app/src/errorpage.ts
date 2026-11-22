@@ -29,6 +29,7 @@ export type ErrorCategory =
   | "timeout"
   | "blocked"
   | "stream"
+  | "internal"
   | "route";
 
 /** Map a transport failure to one honest category from the issue #3
@@ -48,8 +49,23 @@ export function classifyFailure(reason: string): ErrorCategory {
   if (/blocked|forbidden|403|policy|denied|rejected/.test(r)) {
     return "blocked";
   }
+  /* #709: the fetch rejection vocabulary is itself TypeError-shaped
+     ("TypeError: Failed to fetch" and its user-agent cousins), so the
+     network words are matched ahead of the error-type sweep below:
+     they stay "stream", the transport truth. */
+  if (/failed to fetch|network ?error|load failed|abort/.test(r)) {
+    return "stream";
+  }
+  /* #709 diagnostics: a raw JS error (the live "TypeError: t is not
+     iterable" at the origin root) is an engine defect, not an
+     interrupted stream; it keeps its own category so it never hides
+     as "stream" again. */
+  if (/typeerror|referenceerror|rangeerror|evalerror|internalerror|urierror|syntaxerror/.test(r)) {
+    return "internal";
+  }
   return "stream";
 }
+
 
 const CATEGORY_TEXT: Record<ErrorCategory, string> = {
   dns: "The site could not be found (DNS).",
@@ -58,6 +74,7 @@ const CATEGORY_TEXT: Record<ErrorCategory, string> = {
   blocked: "The request was blocked by policy.",
   stream: "The connection was interrupted mid-response.",
   route: "The engine route for this page is malformed.",
+  internal: "The engine hit an internal failure (a Zeolite bug).",
 };
 
 /* The Zeolite logo (operator-supplied art, #129). Backslashes are
