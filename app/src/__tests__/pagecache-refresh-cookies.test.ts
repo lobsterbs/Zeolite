@@ -40,7 +40,7 @@ function fakeCaches(match: () => Response | null): Response[] {
   };
   const other = { match: async () => null, delete: async () => true, put: async () => {}, keys: async () => [] as Request[] };
   (globalThis as { caches?: unknown }).caches = {
-    open: async (name: string) => (name === "zeolite-pages-v2" ? fake : other),
+    open: async (name: string) => (name === "zeolite-pages-v2" || name === "zeolite-assets-v1" ? fake : other),
   };
   return puts;
 }

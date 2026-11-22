@@ -24,6 +24,11 @@ vi.mock("../transport", () => ({
 
 import { pageCacheStore } from "../request";
 
+/* #688: navigate-mode requests are not constructible in Node; the
+   fake pins stores to the PAGE bucket and its 60-entry cap. */
+const navReq = (url: string): Request =>
+  ({ url, headers: new Headers(), credentials: "omit", signal: undefined, mode: "navigate" } as unknown as Request);
+
 const mkResp = () =>
   new Response("body", {
     headers: { "cache-control": "max-age=600", "content-type": "text/plain" },
@@ -53,7 +58,7 @@ describe("page cache hard bound (#548)", () => {
 
     /* Fill exactly to the 60-entry cap: every store evicts nothing. */
     for (let i = 0; i < 60; i++) {
-      const r = await pageCacheStore(new Request(`https://e.example/p${i}`), mkResp(), true);
+      const r = await pageCacheStore(navReq(`https://e.example/p${i}`), mkResp(), true);
       if (!r) throw new Error(`store ${i} should have succeeded`);
     }
     expect(entries.size).toBe(60);
@@ -62,8 +67,8 @@ describe("page cache hard bound (#548)", () => {
        bound is hard), and every later store is refused too because
        the failure disabled caching for this worker lifetime. */
     failDelete = true;
-    expect(await pageCacheStore(new Request("https://e.example/p60"), mkResp(), true)).toBeNull();
-    expect(await pageCacheStore(new Request("https://e.example/p61"), mkResp(), true)).toBeNull();
+    expect(await pageCacheStore(navReq("https://e.example/p60"), mkResp(), true)).toBeNull();
+    expect(await pageCacheStore(navReq("https://e.example/p61"), mkResp(), true)).toBeNull();
     expect(entries.size).toBe(60);
   });
 });

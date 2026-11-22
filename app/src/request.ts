@@ -411,6 +411,27 @@ const ZL_DEFAULT_TTL = 10 * 60 * 1000;
 const ZL_PAGE_LIMIT = 60;
 const ZL_PAGE_TOTAL_MAX = 32 * 1024 * 1024;
 const ZL_PAGE_STORE_MAX = 4 * 1024 * 1024;
+/* #688: static subresources get their own persistent bucket with a
+   larger budget, so warm repeat visits keep the asset fleet instead
+   of documents and assets evicting each other out of one 60-entry
+   budget (the measured gap behind this issue: a single modern page
+   pushes a hundred-plus subresources, so pages churned the fleet out
+   before any of it could age into a warm hit). Global entry + byte
+   bound with the same LRU eviction the page bucket proves; no
+   per-origin split until a capture shows an origin imbalance. */
+const ZL_ASSETS = "zeolite-assets-v1";
+const ZL_ASSET_INDEX = "zeolite-assets-index-v1";
+const ZL_ASSET_LIMIT = 512;
+const ZL_ASSET_TOTAL_MAX = 64 * 1024 * 1024;
+const ZL_ASSET_STORE_MAX = 8 * 1024 * 1024;
+type ZlBucket = { cache: string; index: string; limit: number; totalMax: number; storeMax: number };
+const PAGE_BUCKET: ZlBucket = { cache: ZL_PAGES, index: ZL_PAGE_INDEX, limit: ZL_PAGE_LIMIT, totalMax: ZL_PAGE_TOTAL_MAX, storeMax: ZL_PAGE_STORE_MAX };
+const ASSET_BUCKET: ZlBucket = { cache: ZL_ASSETS, index: ZL_ASSET_INDEX, limit: ZL_ASSET_LIMIT, totalMax: ZL_ASSET_TOTAL_MAX, storeMax: ZL_ASSET_STORE_MAX };
+/* #688: a navigation (document or frame) keeps the page bucket; every
+   other GET rides the asset bucket. */
+function cacheBucketFor(req: Request): ZlBucket {
+  return req.mode === "navigate" ? PAGE_BUCKET : ASSET_BUCKET;
+}
 type PageCacheUsage = { bytes: number; lastUsed: number };
 const pageCacheUsage = new Map<string, PageCacheUsage>();
 let pageCacheReservedBytes = 0;
@@ -492,8 +513,11 @@ function storedVaryFields(headers?: Headers): string[] {
   return (headers?.get(ZL_VARY) ?? "").split(",").map((field) => field.trim().toLowerCase()).filter(Boolean);
 }
 
-function pageCacheIdentity(req: Request, fields: string[]): string {
-  return JSON.stringify([req.url, fields, fields.map((field) => req.headers.get(field))]);
+function pageCacheIdentity(req: Request, fields: string[], bk: ZlBucket): string {
+  /* #688: the bucket rides the identity so the same URL stored both
+     as a navigation and as a subresource keeps independent usage rows
+     instead of each stamping the other's lastUsed. */
+  return JSON.stringify([bk.cache, req.url, fields, fields.map((field) => req.headers.get(field))]);
 }
 
 function withPageCacheMutation<T>(work: () => Promise<T>): Promise<T> {
@@ -502,32 +526,32 @@ function withPageCacheMutation<T>(work: () => Promise<T>): Promise<T> {
   return next;
 }
 
-async function pageCacheIndex(pageCache: Cache): Promise<Cache | null> {
+async function pageCacheIndex(pageCache: Cache, indexName = ZL_PAGE_INDEX): Promise<Cache | null> {
   try {
     /* Full CacheStorage has keys(). Minimal host/test shims sometimes
        expose only open() and alias all names to one backing map. In that
        degraded environment, retain size metadata on the page entry and
        use its stored timestamp as FIFO fallback instead of polluting it. */
     if (typeof caches.keys !== "function") return null;
-    const index = await caches.open(ZL_PAGE_INDEX);
+    const index = await caches.open(indexName);
     return index === pageCache ? null : index;
   } catch {
     return null;
   }
 }
 
-function validPageCacheUsage(value: unknown): value is PageCacheUsage {
+function validPageCacheUsage(value: unknown, storeMax = ZL_PAGE_STORE_MAX): value is PageCacheUsage {
   if (!value || typeof value !== "object") return false;
   const usage = value as { bytes?: unknown; lastUsed?: unknown };
   return typeof usage.bytes === "number" && Number.isSafeInteger(usage.bytes) &&
-    usage.bytes >= 0 && usage.bytes <= ZL_PAGE_STORE_MAX &&
+    usage.bytes >= 0 && usage.bytes <= storeMax &&
     typeof usage.lastUsed === "number" && Number.isFinite(usage.lastUsed) && usage.lastUsed >= 0;
 }
 
-async function writePageCacheUsage(req: Request, index: Cache | null, fields: string[], usage: PageCacheUsage): Promise<void> {
+async function writePageCacheUsage(req: Request, index: Cache | null, fields: string[], usage: PageCacheUsage, bk: ZlBucket): Promise<void> {
   /* Keep exact in-memory accounting even when a minimal CacheStorage
      host has no separate persistent metadata cache. */
-  pageCacheUsage.set(pageCacheIdentity(req, fields), usage);
+  pageCacheUsage.set(pageCacheIdentity(req, fields, bk), usage);
   if (!index) return;
   const headers = new Headers({ "content-type": "application/json" });
   if (fields.length) headers.set("vary", fields.join(", "));
@@ -538,13 +562,29 @@ async function writePageCacheUsage(req: Request, index: Cache | null, fields: st
   }
 }
 
-async function pageCacheUsageFor(req: Request, cache: Cache, index: Cache | null, knownEntry?: Response): Promise<{ identity: string; fields: string[]; usage: PageCacheUsage }> {
+async function pageCacheUsageFor(req: Request, cache: Cache, index: Cache | null, bk: ZlBucket, knownEntry?: Response): Promise<{ identity: string; fields: string[]; usage: PageCacheUsage }> {
+  /* #688: memory-first fast path. Eviction scans call this once per
+     stored key on every store, and the no-Vary shape is the common case
+     on real fleets (image/font/asset traffic carries no Vary). Reading
+     the entry's Vary metadata off disk per key serialized the whole
+     mutation chain into O(n) CacheStorage reads per store (O(n^2) per
+     page), which stalled image-store bursts for seconds and raced the
+     entry out of the warm visit. The no-Vary identity is derivable from
+     the key alone; if it is in the in-memory usage map (always fresh in
+     a live session, rebuilt from the index after a restart), the disk
+     read is skipped. A Vary-carrying entry has a different identity and
+     still falls through to the full disk read. */
+  const bareIdentity = pageCacheIdentity(req, [], bk);
+  const bareMemory = pageCacheUsage.get(bareIdentity);
+  if (bareMemory && !knownEntry) {
+    return { identity: bareIdentity, fields: [], usage: bareMemory };
+  }
   let entry = knownEntry;
   if (!entry) {
     try { entry = await cache.match(req) ?? undefined; } catch { /* account conservatively */ }
   }
   const fields = (entry?.headers.get(ZL_VARY) ?? "").split(",").map((field) => field.trim().toLowerCase()).filter(Boolean);
-  const identity = pageCacheIdentity(req, fields);
+  const identity = pageCacheIdentity(req, fields, bk);
   const memory = pageCacheUsage.get(identity);
   if (memory) return { identity, fields, usage: memory };
   if (index) {
@@ -552,7 +592,7 @@ async function pageCacheUsageFor(req: Request, cache: Cache, index: Cache | null
       const metadata = await index.match(req);
       if (metadata) {
         const value: unknown = await metadata.json();
-        if (validPageCacheUsage(value)) {
+        if (validPageCacheUsage(value, bk.storeMax)) {
           pageCacheUsage.set(identity, value);
           return { identity, fields, usage: value };
         }
@@ -565,18 +605,18 @@ async function pageCacheUsageFor(req: Request, cache: Cache, index: Cache | null
   const declared = rawBytes !== null && rawBytes !== undefined && /^\d+$/.test(rawBytes) ? Number(rawBytes) : NaN;
   const cachedAt = Number(entry?.headers.get(ZL_CACHED_AT) ?? 0);
   const usage = {
-    bytes: Number.isSafeInteger(declared) && declared >= 0 && declared <= ZL_PAGE_STORE_MAX ? declared : ZL_PAGE_STORE_MAX,
+    bytes: Number.isSafeInteger(declared) && declared >= 0 && declared <= bk.storeMax ? declared : bk.storeMax,
     lastUsed: Number.isFinite(cachedAt) && cachedAt > 0 ? cachedAt : 0,
   };
-  await writePageCacheUsage(req, index, fields, usage);
+  await writePageCacheUsage(req, index, fields, usage, bk);
   return { identity, fields, usage };
 }
 
-function touchPageCache(req: Request, hit: Response, cache: Cache): void {
+function touchPageCache(req: Request, hit: Response, cache: Cache, bk: ZlBucket): void {
   void withPageCacheMutation(async () => {
-    const index = await pageCacheIndex(cache);
-    const old = await pageCacheUsageFor(req, cache, index, hit);
-    await writePageCacheUsage(req, index, old.fields, { ...old.usage, lastUsed: Date.now() });
+    const index = await pageCacheIndex(cache, bk.index);
+    const old = await pageCacheUsageFor(req, cache, index, bk, hit);
+    await writePageCacheUsage(req, index, old.fields, { ...old.usage, lastUsed: Date.now() }, bk);
   }).catch(() => {});
 }
 
@@ -615,17 +655,17 @@ async function deletePageCacheEntry(req: Request, cache: Cache, index: Cache | n
   });
 }
 
-async function reservePageCacheSpace(req: Request, cache: Cache, index: Cache | null, fields: string[], bytes: number): Promise<boolean> {
+async function reservePageCacheSpace(req: Request, cache: Cache, index: Cache | null, fields: string[], bytes: number, bk: ZlBucket): Promise<boolean> {
   return withPageCacheMutation(async () => {
     if (pageCacheDisabled) return false;
     const keys = await cache.keys();
-    const rows = await Promise.all(keys.map(async (key) => ({ key, ...(await pageCacheUsageFor(key, cache, index)) })));
-    const identity = pageCacheIdentity(req, fields);
+    const rows = await Promise.all(keys.map(async (key) => ({ key, ...(await pageCacheUsageFor(key, cache, index, bk)) })));
+    const identity = pageCacheIdentity(req, fields, bk);
     const candidates = rows.filter((row) => row.identity !== identity)
       .sort((a, b) => a.usage.lastUsed - b.usage.lastUsed || a.key.url.localeCompare(b.key.url));
     let count = candidates.length;
     let totalBytes = pageCacheReservedBytes + bytes + candidates.reduce((total, row) => total + row.usage.bytes, 0);
-    while (count + 1 > ZL_PAGE_LIMIT || totalBytes > ZL_PAGE_TOTAL_MAX) {
+    while (count + 1 > bk.limit || totalBytes > bk.totalMax) {
       const victim = candidates.shift();
       if (!victim) return false;
       let removed = false;
@@ -673,8 +713,9 @@ export async function pageCacheMatch(
 ): Promise<Response | null> {
   let hit: Response | undefined;
   let cache: Cache;
+  const bk = cacheBucketFor(req);
   try {
-    cache = await caches.open(ZL_PAGES);
+    cache = await caches.open(bk.cache);
     hit = await cache.match(req) ?? undefined;
   } catch {
     return null;
@@ -684,7 +725,7 @@ export async function pageCacheMatch(
      stored with; anything else is an honest miss that bypasses to the
      live path. */
   if (!varyMatches(hit.headers, req.headers)) return null;
-  touchPageCache(req, hit, cache);
+  touchPageCache(req, hit, cache, bk);
   const at = Number(hit.headers.get(ZL_CACHED_AT) ?? 0);
   const ttl = cacheTtl(hit.headers);
   /* #115: a stored no-store view can only be a legacy entry; it stays
@@ -704,8 +745,8 @@ export async function pageCacheMatch(
        revalidated - the raw upstream 200 must not overwrite the
        composed copy the next hit would serve. */
     if (cacheRefreshSkipsEntry(req, hit)) {
-      const index = await pageCacheIndex(cache);
-      await deletePageCacheEntry(req, cache, index, pageCacheIdentity(req, storedVaryFields(hit.headers)));
+      const index = await pageCacheIndex(cache, bk.index);
+      await deletePageCacheEntry(req, cache, index, pageCacheIdentity(req, storedVaryFields(hit.headers), bk));
       return null;
     }
     return await revalidateBeforeUse(req, hit, context);
@@ -737,8 +778,8 @@ export async function pageCacheMatch(
              skip must match the serve-time transform branches). */
           const jsServe = cacheRefreshSkipsEntry(req, hit);
           if (jsServe) {
-            const index = await pageCacheIndex(cache);
-            await deletePageCacheEntry(req, cache, index, pageCacheIdentity(req, storedVaryFields(hit.headers)));
+            const index = await pageCacheIndex(cache, bk.index);
+            await deletePageCacheEntry(req, cache, index, pageCacheIdentity(req, storedVaryFields(hit.headers), bk));
           } else {
             /* #115: the refresh carries the stored validators so the
                origin can answer 304; a 304 keeps the stored body and
@@ -915,9 +956,12 @@ export async function pageCacheStore(
   finalUrl?: string,
   clientId?: string,
 ): Promise<Response | null> {
+  const bk = cacheBucketFor(req);
   /* #548: once eviction has failed, new entries are refused: the
      entry bound stays hard instead of growing past the stuck count. */
   if (pageCacheDisabled) return null;
+  /* #548: once eviction has failed, new entries are refused: the
+     entry bound stays hard instead of growing past the stuck count. */
   /* #115: no-cache entries are stored too - cacheTtl gives them a zero
      TTL, so every use revalidates - and only no-store is never stored. */
   if (!cacheStorable(resp.headers) || resp.status !== 200) return null;
@@ -933,13 +977,13 @@ export async function pageCacheStore(
   }
   const lengthHeader = resp.headers.get("content-length");
   const declaredBytes = lengthHeader !== null && /^\d+$/.test(lengthHeader) ? Number(lengthHeader) : null;
-  if (declaredBytes !== null && declaredBytes > ZL_PAGE_STORE_MAX) return null;
-  const reserveBytes = declaredBytes ?? ZL_PAGE_STORE_MAX;
+  if (declaredBytes !== null && declaredBytes > bk.storeMax) return null;
+  const reserveBytes = declaredBytes ?? bk.storeMax;
   let reserved = false;
   let oversized = false;
   try {
-    const cache = await caches.open(ZL_PAGES);
-    const index = await pageCacheIndex(cache);
+    const cache = await caches.open(bk.cache);
+    const index = await pageCacheIndex(cache, bk.index);
     const storedHeaders = stripHostile(resp.headers);
     applyEngineCors(storedHeaders, self.location.origin, req.credentials);
     const cu = new URL(req.url);
@@ -947,7 +991,7 @@ export async function pageCacheStore(
     mapRefreshHeader(storedHeaders, croute ? mergeRouteSearch(croute, cu.search) : cu.href);
     const fields = varyFields(resp.headers);
     storeVaryMeta(storedHeaders, fields, req.headers);
-    if (!(await reservePageCacheSpace(req, cache, index, fields, reserveBytes))) return null;
+    if (!(await reservePageCacheSpace(req, cache, index, fields, reserveBytes, bk))) return null;
     reserved = true;
     /* #115 revalidation serves the original stream. Meter a clone so an
        oversized cache branch cannot error the live response branch. */
@@ -956,7 +1000,7 @@ export async function pageCacheStore(
     const body = cacheSource.body?.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
         bodyBytes += chunk.byteLength;
-        if (bodyBytes > ZL_PAGE_STORE_MAX || bodyBytes > reserveBytes) {
+        if (bodyBytes > bk.storeMax || bodyBytes > reserveBytes) {
           oversized = true;
           throw new RangeError("page cache body exceeded its byte budget");
         }
@@ -968,7 +1012,7 @@ export async function pageCacheStore(
     stored.headers.set(ZL_PAGE_BYTES, String(reserveBytes));
     if (finalUrl) stored.headers.set(ZL_FINAL_URL, finalUrl);
     await cache.put(req, stored);
-    await writePageCacheUsage(req, index, fields, { bytes: bodyBytes, lastUsed: Date.now() });
+    await writePageCacheUsage(req, index, fields, { bytes: bodyBytes, lastUsed: Date.now() }, bk);
     /* #632: the keepView fork serves the page, so the internal
        bookkeeping headers (#338) must be stripped from the served copy
        while the stored entry keeps them. */
@@ -1462,11 +1506,16 @@ async function guestBridgeBody(resp: Response): Promise<string> {
 export async function pageCacheClear(): Promise<void> {
   try {
     await discardLegacyPageCache();
-    const cache = await caches.open(ZL_PAGES);
-    const index = await pageCacheIndex(cache);
+    /* #688: the asset bucket shares the clear - its entries span the
+       same jar profiles and sessions as pages, so a profile switch
+       must drop both. */
     await withPageCacheMutation(async () => {
-      for (const k of await cache.keys()) await cache.delete(k);
-      if (index) for (const k of await index.keys()) await index.delete(k);
+      for (const bk of [PAGE_BUCKET, ASSET_BUCKET]) {
+        const cache = await caches.open(bk.cache);
+        const index = await pageCacheIndex(cache, bk.index);
+        for (const k of await cache.keys()) await cache.delete(k);
+        if (index) for (const k of await index.keys()) await index.delete(k);
+      }
       pageCacheUsage.clear();
     });
   } catch {
@@ -1552,7 +1601,7 @@ async function cacheRefreshFetch(
     stored entry into the cache. */
 async function bumpStoredEntry(req: Request, notModified: Response): Promise<void> {
   try {
-    const cache = await caches.open(ZL_PAGES);
+    const cache = await caches.open(cacheBucketFor(req).cache);
     const cur = await cache.match(req);
     if (!cur) return;
     const h = new Headers(cur.headers);

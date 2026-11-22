@@ -37,12 +37,18 @@ afterEach(() => {
 function setup(): void {
   (globalThis as { self?: unknown }).self = { location: { origin: "https://zl.test" } };
   (globalThis as { caches?: unknown }).caches = {
-    keys: async () => ["zeolite-pages-v2", "zeolite-pages-index-v1"],
-    open: async (name: string) => name === "zeolite-pages-index-v1" ? indexCache : pageCache,
+    keys: async () => ["zeolite-pages-v2", "zeolite-pages-index-v1", "zeolite-assets-v1", "zeolite-assets-index-v1"],
+    open: async (name: string) => name.endsWith("-index-v1") ? indexCache : pageCache,
   };
 }
 
 const headers = { "cache-control": "max-age=600", "content-type": "text/plain" };
+
+/* #688: navigate-mode requests are not constructible in Node; the fake
+   pins these stores to the PAGE bucket and its 4 MiB / 60-entry budget. */
+function navReq(url: string): Request {
+  return { url, headers: new Headers(), credentials: "omit", signal: undefined, mode: "navigate" } as unknown as Request;
+}
 
 describe("page cache byte budget and LRU", () => {
   it("measures unknown-length entries from the cache stream", async () => {
@@ -71,7 +77,7 @@ describe("page cache byte budget and LRU", () => {
     }), { headers });
     const live = response.clone();
 
-    expect(await pageCacheStore(new Request("https://assets.example/large"), live, true)).toBeNull();
+    expect(await pageCacheStore(navReq("https://assets.example/large-in"), live, true)).toBeNull();
     expect((await live.arrayBuffer()).byteLength).toBe(4 * 1024 * 1024 + 1);
   });
 
@@ -89,7 +95,7 @@ describe("page cache byte budget and LRU", () => {
       metadata.set(url, new Response(JSON.stringify({ bytes: 4 * 1024 * 1024, lastUsed: i + 1 })));
     }
 
-    const req = new Request("https://assets.example/new");
+    const req = navReq("https://assets.example/new-nav");
     expect(await pageCacheStore(req, new Response("new", { headers }))).not.toBeNull();
     expect(pages.has("https://assets.example/seed-0")).toBe(false);
     expect(pages.has("https://assets.example/seed-7")).toBe(true);

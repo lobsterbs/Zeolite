@@ -377,6 +377,12 @@ describe("page cache scope, final URL and size cap (#179, #184, #195)", () => {
     );
   });
 
+  /* #688: navigate-mode requests are not constructible in Node; the
+     fake pins the oversized case to the PAGE bucket and its 4 MiB
+     per-entry cap. */
+  const navReq = (url: string): Request =>
+    ({ url, headers: new Headers(), credentials: "omit", signal: undefined, mode: "navigate" } as unknown as Request);
+
   it("skips credential-bearing and oversized stores (#179, #195)", async () => {
     const puts: Response[] = [];
     (globalThis as { caches?: unknown }).caches = {
@@ -395,7 +401,7 @@ describe("page cache scope, final URL and size cap (#179, #184, #195)", () => {
     const auth = new Request("https://e.example/p", { headers: { authorization: "Bearer x" } });
     expect(await pageCacheStore(auth, mk({}))).toBeNull();
     expect(
-      await pageCacheStore(new Request("https://e.example/p"), mk({ "content-length": String(5 * 1024 * 1024) })),
+      await pageCacheStore(navReq("https://e.example/p"), mk({ "content-length": String(5 * 1024 * 1024) })),
     ).toBeNull();
     expect(puts.length).toBe(0);
     const stored = await pageCacheStore(
@@ -419,7 +425,10 @@ describe("page cache scope, final URL and size cap (#179, #184, #195)", () => {
       }),
     };
     await pageCacheClear();
-    expect(deleted.length).toBe(2);
+    /* #688: the clear walks both buckets; this stub aliases every
+       open() to one map, so each of the 2 keys deletes once per
+       bucket. A regression that skips a bucket drops back to 2. */
+    expect(deleted.length).toBe(4);
   });
 
   it("refresh follows the stored final URL and redirect hops (#184)", async () => {
