@@ -84,6 +84,21 @@ const PAGE = [
   "</body></html>",
 ].join("\n");
 
+const PAGE2 = [
+  "<!doctype html><html><head>",
+  "<base href=\"../runtime-assets/\">",
+  "</head><body>",
+  "<p id='bpm'>cs705-marker</p>",
+  "<script>",
+  "window.__r2 = {};",
+  "function rec2(n, p){ return p.then(function(v){window.__r2[n]={ok:true,val:v};},function(e){window.__r2[n]={ok:false,err:String(e && e.message || e)};}); }",
+  "function j2(r){ return r.text().then(function(t){ try { return JSON.parse(t).path; } catch(e){ return 'BAD:'+t.slice(0,60); } }); }",
+  "rec2('imgBase', new Promise(function(res, rej){ var i = new Image(); i.onload = function(){ res('loaded'); }; i.onerror = function(){ rej(new Error('img error')); }; i.src = 'hero.png' + ''; }));",
+  "rec2('imgSub', new Promise(function(res, rej){ var i = new Image(); i.onload = function(){ res('loaded'); }; i.onerror = function(){ rej(new Error('img error')); }; i.src = 'deep/hero2.png' + ''; }));",
+  "window.__r2.baseShape = { ok: true, val: (document.querySelector('base') && document.querySelector('base').getAttribute('href')) || 'none' };",
+  "<" + "/script>",
+  "</body></html>",
+].join("\n");
 const W_CLASSIC = "importScripts('./dep.js' + ''); postMessage({ dep: globalThis.DEP });";
 const DEP_CLASSIC = "globalThis.DEP = 'dep-ok';";
 const W_MODULE = [
@@ -98,6 +113,9 @@ const W_MODULE = [
    content types and bodies. */
 function fixtureRoute(p, u) {
   if (p === "/dir/page.html") return { ct: "text/html", body: PAGE };
+  if (p === "/dir/basedir/base.html") return { ct: "text/html", body: PAGE2 };
+  if (p === "/dir/runtime-assets/hero.png") return { ct: "image/png", body: PNG_1x1 };
+  if (p === "/dir/runtime-assets/deep/hero2.png") return { ct: "image/png", body: PNG_1x1 };
   if (p === "/dir/w.js") return { ct: "application/javascript", body: W_CLASSIC };
   if (p === "/dir/dep.js") return { ct: "application/javascript", body: DEP_CLASSIC };
   if (p === "/mw.js") return { ct: "application/javascript", body: W_MODULE };
@@ -262,6 +280,39 @@ async function main() {
   const proxied = await frame.evaluate("window.__r").catch((e) => ({ EVALFAIL: String(e) }));
   await pg.close();
   const proxiedHits = [...hits];
+  /* ---- #705: base-anchored runtime assets, their own passes ---- */
+  hits = [];
+  const dbpg = await browser.newPage();
+  await dbpg.goto(FX + "/dir/basedir/base.html");
+  await waitFor("direct base results", 30000, async () => {
+    const n = await dbpg.evaluate("Object.keys(window.__r2 || {}).length").catch(() => -1);
+    return n >= 3 ? n : null;
+  });
+  const baseDirect = await dbpg.evaluate("window.__r2").catch((e) => ({ EVALFAIL: String(e) }));
+  const baseDirectHits = [...hits];
+  await dbpg.close();
+  hits = [];
+  const bpg = await browser.newPage();
+  bpg.on("console", (m) => pageNoise.push("[basepage] " + m.type() + " " + m.text().slice(0, 200)));
+  bpg.on("pageerror", (e) => pageNoise.push("[basepage-error] " + String(e).slice(0, 300)));
+  await bpg.goto(ENGINE + "/?url=" + encodeURIComponent(FX + "/dir/basedir/base.html"));
+  const bframe = await waitFor("proxied base frame with marker", 90000, async () => {
+    for (const f of bpg.frames()) {
+      try {
+        if (!f.url().startsWith(ENGINE + "/j/") && !f.url().startsWith(ENGINE + "/__zl_")) continue;
+        if ((await f.locator("#bpm").count()) > 0) return f;
+      } catch {}
+    }
+    return null;
+  });
+  await waitFor("proxied base results", 60000, async () => {
+    const n = await bframe.evaluate("Object.keys(window.__r2 || {}).length").catch(() => -1);
+    return n >= 3 ? n : null;
+  });
+  await sleep(1500);
+  const baseProxied = await bframe.evaluate("window.__r2").catch((e) => ({ EVALFAIL: String(e) }));
+  const baseProxiedHits = [...hits];
+  await bpg.close();
   await browser.close();
   engineProc.kill("SIGKILL");
   fx.close();
@@ -314,6 +365,38 @@ async function main() {
   await check("upstream hit sets identical across modes", () => {
     const norm = (l) => [...new Set(l)].sort();
     const d = norm(directHits), p = norm(proxiedHits);
+    const missing = d.filter((h) => !p.includes(h));
+    const extra = p.filter((h) => !d.includes(h));
+    if (missing.length || extra.length) {
+      throw new Error("upstream mismatch; only-direct=" + JSON.stringify(missing) + " only-proxied=" + JSON.stringify(extra));
+    }
+    return d.length + " unique upstream requests";
+  });
+  /* #705: a runtime-set img src and a relative fetch must resolve
+     against the emitted base across modes, byte-parity on the echoed
+     upstream path. */
+  for (const k of ["imgBase", "imgSub"]) {
+    await check("base-anchored " + k + " direct-vs-proxied parity", () => {
+      const d = baseDirect[k], p = baseProxied[k];
+      if (!d || !d.ok) throw new Error("direct control failed: " + JSON.stringify(d));
+      if (!p || !p.ok) throw new Error("proxied failed (direct ok " + JSON.stringify(d.val) + "): " + JSON.stringify(p));
+      if (JSON.stringify(d.val) !== JSON.stringify(p.val)) {
+        throw new Error("value mismatch: direct " + JSON.stringify(d.val) + " vs proxied " + JSON.stringify(p.val));
+      }
+      return JSON.stringify(p.val);
+    });
+  }
+  await check("#705 base tag carries the real path plus the nav handle, never the opaque route", () => {
+    const p = baseProxied.baseShape;
+    if (!p || !p.ok) throw new Error("baseShape missing: " + JSON.stringify(p));
+    const u = new URL(p.val, ENGINE);
+    if (u.pathname !== "/dir/runtime-assets/") throw new Error("base path not visible: " + p.val);
+    if (!u.search.startsWith("?zlNavh=")) throw new Error("base lacks a nav handle: " + p.val);
+    return p.val;
+  });
+  await check("#705 base-anchored upstream hits identical across modes", () => {
+    const norm = (l) => [...new Set(l)].sort();
+    const d = norm(baseDirectHits), p = norm(baseProxiedHits);
     const missing = d.filter((h) => !p.includes(h));
     const extra = p.filter((h) => !d.includes(h));
     if (missing.length || extra.length) {

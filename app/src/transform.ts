@@ -15,10 +15,16 @@ import { charsetFromHeader, makeDecoder, resolveCharset } from "./headers";
 import { docKind, jsBody } from "./transit";
 import { traceDecision, tracingEnabled } from "./tracing";
 import { initScript, initSplicePoint, vPath } from "./pageload";
-import { currentPrefix } from "./codec";
+import { buildQueryHandleUrl, currentPrefix, NAVH_TTL_MS } from "./codec";
 import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
 import { sriScanner } from "./sri";
 import { importmapScanner } from "./importmaps";
+
+/* #705: a document base outlives the navigation hop that fetched it,
+   so the emitted base handle rides a longer-lived origin token than a
+   nav handle; a reload always re-mints. ponytail ceiling: 30 minutes -
+   revisit only if a live SPA outlives it and strands late assets. */
+const BASE_HANDLE_TTL_MS = 15 * NAVH_TTL_MS;
 
 /** SW-side state seam (issue #86). */
 export interface TransformDeps {
@@ -340,16 +346,55 @@ export function rewriteStream(
         if (tracingEnabled()) rw.set_trace?.(true);
         for (const path of rule.inject ?? []) rw.add_injection(path);
         /* #532: drain the folded base per chunk (first base wins,
-           the rewriter tracks it); one post per distinct value. */
+           the rewriter tracks it); one post per distinct value.
+           #705: the drain also returns the fresh folded absolute
+           base so the emit path can re-anchor it (emitOut). */
         let lastVbase: string | null = null;
-        const drainBase = () => {
-          if (!onVbase) return;
+        const drainBase = (): string | null => {
           const b = (rw as unknown as { take_base?: () => string | undefined }).take_base?.();
-          if (b && b !== lastVbase) {
-            lastVbase = b;
-            const vb = vPath(b);
-            if (vb) onVbase(vb);
+          if (!b || b === lastVbase) return null;
+          lastVbase = b;
+          const vb = vPath(b);
+          if (vb && onVbase) onVbase(vb);
+          return b;
+        };
+        /* #705: the wasm folds the first base href for rewrite-time
+           URL resolution, then emits the tag pointing at the opaque
+           one-segment route - a shape every LATE runtime resolution
+           (a src attribute set by page script at runtime, a fetch
+           with a relative URL) strips, landing engine-root 404s
+           (icloud hero assets). Re-anchor the emitted tag on the
+           committed query-shape route: the real upstream path plus
+           the origin-only MAC handle, so browser-side relative
+           resolution keeps the path and the decode side composes
+           the true destination. First base only; a mint refusal or
+           an engine-shaped base falls back to the opaque route,
+           exactly the behavior of today. The fold and its tag leave
+           the same wasm pump, but the tag can also land at finish;
+           the mint stays pending until it matches an emitted chunk. */
+        let pendingBaseHandle: string | null = null;
+        const emitOut = (out: string): string => {
+          const fresh = drainBase();
+          if (fresh !== null) {
+            const handle = buildQueryHandleUrl(fresh, BASE_HANDLE_TTL_MS);
+            if (handle !== null) pendingBaseHandle = handle;
           }
+          if (pendingBaseHandle === null) return out;
+          const tagAt = out.search(/<base[\s>\/]/i);
+          if (tagAt < 0) return out;
+          const tagEnd = out.indexOf(">", tagAt);
+          if (tagEnd < 0 || tagEnd - tagAt > 4096) return out;
+          const tag = out.slice(tagAt, tagEnd + 1);
+          const href = tag.match(/[\s"']href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+          if (href === null || href.index === undefined) return out;
+          const eq = href[0].indexOf("=");
+          const esc = pendingBaseHandle.replace(/&/g, "&amp;");
+          const tagNew =
+            tag.slice(0, href.index) +
+            href[0].slice(0, eq + 1) + '"' + esc + '"' +
+            tag.slice(href.index + href[0].length);
+          pendingBaseHandle = null;
+          return out.slice(0, tagAt) + tagNew + out.slice(tagEnd + 1);
         };
         if (rule.block?.length) rw.set_blocked_hosts(rule.block);
         if (deps!.lazyImages()) rw.set_lazy_images();
@@ -371,9 +416,9 @@ export function rewriteStream(
            fetch events dispatch mid-storm. */
         const pumpYield = makePumpYield();
         const splice = (at: number) => {
-          emit(rw.process(head.slice(0, at)));
+          emit(emitOut(rw.process(head.slice(0, at))));
           controller.enqueue(encoder.encode(init));
-          emit(rw.process(head.slice(at)));
+          emit(emitOut(rw.process(head.slice(at))));
           head = "";
           injected = true;
         };
@@ -401,8 +446,8 @@ export function rewriteStream(
               }
               splice(initSplicePoint(head, true) ?? 0);
             }
-            if (rest) emit(rw.process(rest));
-            const tail = rw.finish();
+            if (rest) emit(emitOut(rw.process(rest)));
+            const tail = emitOut(rw.finish());
             reportLocation(rw, base);
             drainBase();
             /* #529: drain the aggregated rewriter decisions into the
@@ -430,7 +475,7 @@ export function rewriteStream(
           if (injected) {
             const t = decoder!.decode(value, { stream: true });
             sriScan?.feed(t); mapScan?.feed(t);
-            emit(rw.process(t));
+            emit(emitOut(rw.process(t)));
             reportLocation(rw, base);
             drainBase();
             continue;

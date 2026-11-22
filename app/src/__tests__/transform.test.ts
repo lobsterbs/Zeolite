@@ -55,6 +55,7 @@ import { activeStreams } from "../streams-alive";
 import type { TransformDeps } from "../transform";
 import { initScript, vPath } from "../pageload";
 import { setTracing, tracingSnapshot, tracingResetForTests } from "../tracing";
+import { b64uEncode, decodeQueryHandle, setRouteKeys } from "../codec";
 
 const BASE = "https://target.example/page";
 const enc = new TextEncoder();
@@ -468,3 +469,46 @@ describe("cosmetic style splice (#551)", () => {
   });
 });
 
+
+describe("#705: the emitted base re-anchors on the query-shape route", () => {
+  const KEY = b64uEncode(new Uint8Array(16).map((_, i) => i * 3 + 1));
+
+  const TAG705 = "<style data-zl-cosmetic>705</style>";
+
+  afterEach(() => {
+    /* Route keys are module state; never leak into other suites. */
+    setRouteKeys([]);
+  });
+
+  it("mints the folded base into the emitted base tag", async () => {
+    setRouteKeys([KEY]);
+    mockState.base = "https://cdn.example/assets/dir/";
+    const onVbase = vi.fn();
+    const doc705 = "<!doctype html><html><head><base href=\"x\"><base href=\"y\"><title>t</title></head><body></body></html>";
+    const out = await readAll(
+      rewriteStream(streamOf([doc705]), BASE, {}, [], "text/html",
+        undefined, true, undefined, undefined, onVbase, undefined, TAG705),
+    );
+    const m705 = out.match(/<base href="([^"]*)"/);
+    if (m705 === null) throw new Error("#705: no base tag emitted");
+    /* The serve chain must decode the emitted handle back to the
+       exact folded base: the real acceptance contract. */
+    expect(decodeQueryHandle(new URL(m705[1], "https://engine.example")))
+      .toEqual({ destination: "https://cdn.example/assets/dir/" });
+    /* #532 contract kept: the runtime virtual base still posts. */
+    expect(onVbase).toHaveBeenCalledWith("/assets/dir/");
+    /* Only the first base rides the handle; the rewriter folds once. */
+    expect(out).toContain('<base href="y">');
+  });
+
+  it("falls back to the opaque route when the mint refuses", async () => {
+    setRouteKeys([]);
+    mockState.base = "https://cdn.example/assets/dir/";
+    const doc705 = "<!doctype html><html><head><base href=\"x\"></head><body></body></html>";
+    const out = await readAll(
+      rewriteStream(streamOf([doc705]), BASE, {}, [], "text/html",
+        undefined, true, undefined, undefined, undefined, undefined, TAG705),
+    );
+    expect(out).toContain('<base href="x">');
+  });
+});
