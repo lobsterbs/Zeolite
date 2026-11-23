@@ -82,6 +82,7 @@ type TabsApi = {
   tabs: {
     executeScript: (a: unknown, b?: unknown) => Promise<unknown[]>;
     insertCSS: (a: unknown, b?: unknown) => Promise<void>;
+    removeCSS: (a: unknown, b?: unknown) => Promise<void>;
   };
 };
 
@@ -234,5 +235,62 @@ describe("tabs.insertCSS (#519 MV2 legacy leg)", () => {
     await expect(tabs.insertCSS(10, { code: "a{}", cssOrigin: "author" })).resolves.toBeUndefined();
     await expect(tabs.insertCSS(10, { code: "a{}", cssOrigin: "user" })).rejects.toThrow(/author styles only/);
     await expect(tabs.insertCSS(10, { cssOrigin: "author" })).rejects.toThrow(/requires code or file/);
+  });
+});
+
+describe("tabs.removeCSS (#519 MV2 legacy leg)", () => {
+  it("sends the removal record for code and file and resolves undefined", async () => {
+    seedTabs();
+    captureDispatch();
+    const { api } = await apiFor("LegacyRmCss");
+    const tabs = (api.browser as unknown as TabsApi).tabs;
+    await expect(tabs.removeCSS(10, { code: "a{}", file: "/inject.js" })).resolves.toBeUndefined();
+    await vi.waitFor(() => {
+      if (capturedDispatch.length !== 1) throw new Error("dispatch not captured yet");
+    });
+    expect(capturedDispatch[0].msg.removeCss).toEqual(["a{}", "1 + 1;"]);
+    expect(capturedDispatch[0].msg.css).toEqual([]);
+    expect(capturedDispatch[0].msg.js).toEqual([]);
+    expect(capturedDispatch[0].msg.wantResult).toBe(false);
+    expect(capturedDispatch[0].port).toBeNull();
+  });
+
+  it("defaults to the active tab and honors the (details, callback) form", async () => {
+    seedTabs();
+    captureDispatch();
+    const { api } = await apiFor("LegacyRmCssCb");
+    const tabs = (api.browser as unknown as TabsApi).tabs;
+    let delivered = false;
+    const p = tabs.removeCSS({ code: "a{}" }, () => {
+      delivered = true;
+    });
+    await vi.waitFor(() => {
+      if (capturedDispatch.length !== 1) throw new Error("dispatch not captured yet");
+    });
+    expect(capturedDispatch[0].msg.dest).toBe("https://target.example/active");
+    await p;
+    await vi.waitFor(() => {
+      if (!delivered) throw new Error("callback not delivered");
+    });
+  });
+
+  it("keeps the author-origin gate, the main-frame gate and the host grant", async () => {
+    seedTabs();
+    captureDispatch();
+    const noGrant = await apiFor("LegacyRmCssNoGrant", []);
+    await expect((noGrant.api.browser as unknown as TabsApi).tabs.removeCSS(10, { code: "a{}" })).rejects.toThrow(
+      /host permission/,
+    );
+    const { api } = await apiFor("LegacyRmCssRejects");
+    const tabs = (api.browser as unknown as TabsApi).tabs;
+    await expect(tabs.removeCSS(10, { code: "a{}", cssOrigin: "user" })).rejects.toThrow(/author styles only/);
+    await expect(tabs.removeCSS(9, { code: "a{}", frameId: 3 })).rejects.toThrow(/main frame only/);
+    await expect(tabs.removeCSS(9, {})).rejects.toThrow(/requires code or file/);
+    expect(capturedDispatch).toHaveLength(0);
+  });
+
+  it("MV3 records do not mount tabs.removeCSS (Firefox's max_manifest_version gate)", async () => {
+    const { api } = await apiFor("LegacyRmCssMV3", ["*://target.example/*"], 3);
+    expect((api.browser.tabs as Record<string, unknown>).removeCSS).toBeUndefined();
   });
 });

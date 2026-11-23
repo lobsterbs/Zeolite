@@ -8,6 +8,7 @@ import { bootInstalled } from "../background";
 import { MESSENGER } from "../context";
 import { TABS } from "../tabs";
 import { chromeApi } from "../chrome";
+import { DOWNLOADS } from "../downloads";
 
 type Api = Record<string, unknown>;
 const enc = new TextEncoder();
@@ -122,5 +123,20 @@ describe("Chrome callback compatibility", () => {
     await bootInstalled(id);
     expect(extensions.get(id)?.state).toBe("running");
     await expect(MESSENGER.sendMessage(id, sender(id), "ready")).resolves.toEqual({ initialized: true, message: "ready" });
+  });
+});
+
+describe("downloads.erase callback adapter", () => {
+  it("delivers the erased ids to the movable callback while the promise keeps them (#519 slice fix)", async () => {
+    const { browser, chrome } = await api("ChromeDownloadsErase", ["downloads"]);
+    DOWNLOADS.setDispatch(() => {});
+    const id = await (method(browser, "downloads.download")({ url: "https://dl.example/file.bin" }) as Promise<number>);
+    DOWNLOADS.applyState(id, "done");
+    const erased = await new Promise<unknown[]>((resolve) => {
+      method(chrome, "downloads.erase")({}, (ids: unknown[]) => resolve(ids));
+    });
+    expect(erased).toEqual([id]);
+    await expect(method(chrome, "downloads.erase")({ id })).resolves.toEqual([]);
+    DOWNLOADS.setDispatch(null);
   });
 });

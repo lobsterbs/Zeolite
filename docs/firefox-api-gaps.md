@@ -12,7 +12,7 @@ ZL_UPDATE_GAPS_DOC=1 npx vitest run src/extensions/__tests__/gaps-doc.test.ts   
 
 ## Summary
 
-- Mounted namespaces: **26** (230 members), the union of the action-family fixtures
+- Mounted namespaces: **26** (232 members), the union of the action-family fixtures
 - Firefox namespaces not mounted: **37**, each with its honest reason
 - Mounted namespaces with member-level gaps: **18**
 - Engine extras (mounted members Firefox does not have): **4**, each justified in COMPAT
@@ -100,7 +100,6 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `tabs` | `print` | no rendering surface exists to print a proxied page |
 | `tabs` | `printPreview` | no rendering surface exists to print a proxied page |
 | `tabs` | `reload` | reload is a host-UI verb; the tab bridge carries no reload verb |
-| `tabs` | `removeCSS` | injected styles carry no removal token; rides the scripting CSS work (#519) |
 | `tabs` | `saveAsPDF` | no rendering surface exists to rasterize a proxied page to PDF |
 | `tabs` | `setZoom` | zoom is host-UI state; the virtualized page has no zoom surface |
 | `tabs` | `setZoomSettings` | zoom is host-UI state; the virtualized page has no zoom surface |
@@ -115,7 +114,6 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `windows` | `update` | window lifecycle verbs belong to the host UI; the engine window view is synchronized, not driven |
 | `scripting` | `getRegisteredContentScripts` | persistent content-script registration targets the content-script world (#517) |
 | `scripting` | `registerContentScripts` | persistent content-script registration targets the content-script world (#517) |
-| `scripting` | `removeCSS` | injected styles carry no removal token; rides the scripting CSS work (#519) |
 | `scripting` | `unregisterContentScripts` | persistent content-script registration targets the content-script world (#517) |
 | `scripting` | `updateContentScripts` | persistent content-script registration targets the content-script world (#517) |
 | `webNavigation` | `getAllFrames` | no frame-tree query surface exists; navigation events carry what the bridge reports |
@@ -200,9 +198,9 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `pageAction` | `getPopup` (method), `getTitle` (method), `hide` (method), `isShown` (method), `onClicked` (event), `setIcon` (method), `setPopup` (method), `setTitle` (method), `show` (method) |
 | `permissions` | `contains` (method), `getAll` (method), `onAdded` (event), `onRemoved` (event), `remove` (method), `request` (method) |
 | `runtime` | `connect` (method), `getBrowserInfo` (method), `getContexts` (method), `getManifest` (method), `getPlatformInfo` (method), `getURL` (method), `id` (constant), `lastError` (constant), `onConnect` (event), `onConnectExternal` (event), `onInstalled` (event), `onMessage` (event), `onMessageExternal` (event), `onStartup` (event), `onSuspend` (event), `onUpdateAvailable` (event), `openOptionsPage` (method), `reload` (method), `requestUpdateCheck` (method), `sendMessage` (method), `setUninstallURL` (method) |
-| `scripting` | `executeScript` (method), `insertCSS` (method) |
+| `scripting` | `executeScript` (method), `insertCSS` (method), `removeCSS` (method) |
 | `storage` | `local` (constant), `managed` (constant), `onChanged` (event), `session` (constant), `sync` (constant) |
-| `tabs` | `TAB_ID_NONE` (constant), `create` (method), `duplicate` (method), `executeScript` (method), `get` (method), `getCurrent` (method), `highlight` (method), `insertCSS` (method), `onActivated` (event), `onCreated` (event), `onRemoved` (event), `onUpdated` (event), `query` (method), `remove` (method), `sendMessage` (method), `update` (method) |
+| `tabs` | `TAB_ID_NONE` (constant), `create` (method), `duplicate` (method), `executeScript` (method), `get` (method), `getCurrent` (method), `highlight` (method), `insertCSS` (method), `onActivated` (event), `onCreated` (event), `onRemoved` (event), `onUpdated` (event), `query` (method), `remove` (method), `removeCSS` (method), `sendMessage` (method), `update` (method) |
 | `topSites` | `get` (method) |
 | `webNavigation` | `onBeforeNavigate` (event), `onCommitted` (event), `onCompleted` (event), `onDOMContentLoaded` (event) |
 | `webRequest` | `MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES` (constant), `handlerBehaviorChanged` (method), `onBeforeRedirect` (event), `onBeforeRequest` (event), `onBeforeSendHeaders` (event), `onCompleted` (event), `onErrorOccurred` (event), `onHeadersReceived` (event), `onResponseStarted` (event), `onSendHeaders` (event) |

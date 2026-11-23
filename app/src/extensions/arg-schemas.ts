@@ -168,6 +168,7 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
      generic slice. */
   "tabs.executeScript": { min: 1, max: 2, ff: [1, 3], note: "MV2-only (#519): resolves with the per-frame results array, injected-unit errors reject the promise per MDN; the omitted tabId defaults to the active tab; kinds unchecked (runtime.sendMessage precedent), shape + host-grant checked by the implementation" },
   "tabs.insertCSS": { min: 1, max: 2, ff: [1, 3], note: "MV2-only (#519): resolves void per MDN; code before file; frame targeting, allFrames and user cssOrigin reject (page world, main frame, author styles); kinds unchecked (runtime.sendMessage precedent), shape + host-grant checked by the implementation" },
+  "tabs.removeCSS": { min: 1, max: 2, ff: [1, 3], note: "MV2-only (#519): resolves void per MDN, removing styles tabs.insertCSS injected; exact-content record scoped to the listener-created styles of this extension; kinds unchecked (runtime.sendMessage precedent), shape + host-grant checked by the implementation" },
   /* ---- action family -----------------------------------------------------
      The toolbar action family mounts for MV3 `action`, MV2
      `browserAction` and MV2 `pageAction` (pageAction without badge /
@@ -347,6 +348,7 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   /* ---- scripting ------------------------------------------------------------------------ */
   "scripting.executeScript": { min: 1, max: 1, types: [["object"]] },
   "scripting.insertCSS": { min: 1, max: 1, types: [["object"]] },
+  "scripting.removeCSS": { min: 1, max: 1, types: [["object"]] },
 
   /* ---- windows ----------------------------------------------------------------------------- */
   "windows.get": { min: 1, max: 2, types: [["number"], ["object"]] },

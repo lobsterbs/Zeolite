@@ -92,6 +92,9 @@ export interface ScriptingMessage {
   dest: string;
   js: string[];
   css: string[];
+  /* #519: the removal arm; exact-content matches from the
+     style record this listener created for this extension. */
+  removeCss?: string[];
   /* #517: func injection and the results handshake. */
   func?: string;
   args?: unknown[];
@@ -230,6 +233,30 @@ export class ScriptingHost {
     this.dispatch?.({ type: "zl:scripting", extId: ext.id, dest, js: [], css: css.map((c) => substituteCss(c, res)), wantResult: false }, null);
   }
 
+  /* #519: the removal arm. Firefox keys the removed-stylesheet
+     record on content: the exact substituted string insertCSS
+     pushed is the one whose listener-created styles go. Mirrors
+     insertCSS's gates and fire-and-forget delivery (MDN resolves
+     with no arguments). */
+  async removeCSS(ext: ExtensionRecord, inj: ScriptingInjection): Promise<void> {
+    const dest = this.check(ext, inj?.target?.tabId);
+    if (inj?.func !== undefined) {
+      throw new Error("zeolite: scripting.removeCSS does not run scripts");
+    }
+    const css = await this.readFiles(ext.id, inj.files ?? []);
+    const res = await recordI18n(ext, (p) => extensions.getResource(ext.id, p, { fromWeb: false }));
+    const msg: ScriptingMessage = {
+      type: "zl:scripting",
+      extId: ext.id,
+      dest,
+      js: [],
+      css: [],
+      removeCss: css.map((c) => substituteCss(c, res)),
+      wantResult: false,
+    };
+    this.dispatch?.(msg, null);
+  }
+
   /* #519: the MV2 tabs.executeScript/insertCSS leg. Same page channel
      as the scripting namespace, but Firefox permissioned the legacy
      forms on the tab's host grant alone: no "scripting" permission,
@@ -281,6 +308,29 @@ export class ScriptingHost {
     );
   }
 
+  /* #519: the legacy removal leg; the exact string legacyInsertCss
+     substituted is the removal record (code before file, the same
+     order the insertion used). */
+  async legacyRemoveCss(ext: ExtensionRecord, tabId: number, opts: { code?: string; file?: string }): Promise<void> {
+    const dest = this.checkLegacy(ext, tabId);
+    const css: string[] = [];
+    if (opts.code !== undefined) css.push(opts.code);
+    if (opts.file !== undefined) css.push(...(await this.readFiles(ext.id, [opts.file])));
+    const res = await recordI18n(ext, (pa) => extensions.getResource(ext.id, pa, { fromWeb: false }));
+    this.dispatch?.(
+      {
+        type: "zl:scripting",
+        extId: ext.id,
+        dest,
+        js: [],
+        css: [],
+        removeCss: css.map((c) => substituteCss(c, res)),
+        wantResult: false,
+      },
+      null,
+    );
+  }
+
   /* #523: devtools.inspectedWindow.eval rides the same channel and the
      SAME checks as executeScript: the scripting permission plus a host
      permission for the inspected tab (stricter than Firefox, which
@@ -313,7 +363,12 @@ export const SCRIPTING = new ScriptingHost();
    page destination. #517: when the injection carries a reply port,
    the listener answers exactly once with one InjectionResult per
    executed unit - the func's return value or the file's completion
-   value (eval's completion value), errors as entries. */
+   value (eval's completion value), errors as entries.
+   #519: every <style> the listener appends is tagged with the
+   data-zl-css = <extId> record; a removeCss message drops the
+   listener-created styles of that extension whose content matches
+   exactly (Firefox keys the inserted-stylesheet record on
+   content), never page-native styles or another extension's. */
 export const LISTENER_SOURCE = [
   "(function (auth) {",
   "  \"use strict\";",
@@ -385,8 +440,20 @@ export const LISTENER_SOURCE = [
   "    var browser = api(m.extId);",
   "    for (var i = 0; i < (m.css || []).length; i++) {",
   "      var s = document.createElement(\"style\");",
+  "      s.setAttribute(\"data-zl-css\", m.extId);",
   "      s.textContent = m.css[i];",
   "      (document.head || document.documentElement).appendChild(s);",
+  "    }",
+  "    if (m.removeCss) {",
+  "      var tagged = document.querySelectorAll(\"style[data-zl-css]\");",
+  "      for (var k = 0; k < m.removeCss.length; k++) {",
+  "        for (var q = 0; q < tagged.length; q++) {",
+  "          var st = tagged[q];",
+  "          if (st.getAttribute(\"data-zl-css\") === m.extId && st.textContent === m.removeCss[k]) {",
+  "            st.remove();",
+  "          }",
+  "        }",
+  "      }",
   "    }",
   "    var out = [];",
   "    if (m.func) {",

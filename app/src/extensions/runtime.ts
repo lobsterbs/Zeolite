@@ -363,7 +363,7 @@ function hostBrowserInfo(): { name: string; version: string } {
    matchAboutBlank) pass through with honest delivery: injected
    code runs in the page world, main frame only. */
 function legacyInjectCall(
-  kind: "js" | "css",
+  kind: "js" | "css" | "rmcss",
   a: unknown,
   b?: unknown,
 ): { tabId?: number; details: { code?: string; file?: string }; callback?: (value?: unknown) => void } {
@@ -397,7 +397,9 @@ function legacyInjectCall(
     out.file = d.file;
   }
   if (out.code === undefined && out.file === undefined) {
-    throw new Error("zeolite: tabs." + (kind === "js" ? "executeScript" : "insertCSS") + " requires code or file");
+    throw new Error(
+      "zeolite: tabs." + (kind === "js" ? "executeScript" : kind === "css" ? "insertCSS" : "removeCSS") + " requires code or file",
+    );
   }
   if (d.frameId !== undefined && d.frameId !== 0) {
     throw new Error("zeolite: frame targeting is not supported (injected code runs in the page world, main frame only)");
@@ -408,7 +410,7 @@ function legacyInjectCall(
   if (d.runAt !== undefined && d.runAt !== "document_start" && d.runAt !== "document_end" && d.runAt !== "document_idle") {
     throw new Error("zeolite: tabs script injection: runAt must be document_start, document_end or document_idle");
   }
-  if (kind === "css" && d.cssOrigin !== undefined && d.cssOrigin !== "author") {
+  if (kind !== "js" && d.cssOrigin !== undefined && d.cssOrigin !== "author") {
     throw new Error("zeolite: cssOrigin '" + String(d.cssOrigin) + "' is not available (the page listener injects author styles only)");
   }
   /* matchAboutBlank: accepted; an about:-class page carries no
@@ -748,6 +750,18 @@ export function buildApi(
               return Promise.reject(e instanceof Error ? e : new Error(String(e)));
             }
           },
+          removeCSS: (a: unknown, b?: unknown): Promise<void> => {
+            try {
+              const call = legacyInjectCall("rmcss", a, b);
+              const tabId = call.tabId ?? TABS.activeTab()?.id;
+              if (tabId === undefined) {
+                return Promise.reject(new Error("zeolite: tabs.removeCSS requires a tabId (no active tab)"));
+              }
+              return finishLegacyInject(SCRIPTING.legacyRemoveCss(ext, tabId, call.details), call.callback);
+            } catch (e) {
+              return Promise.reject(e instanceof Error ? e : new Error(String(e)));
+            }
+          },
         }
       : undefined;
 
@@ -850,6 +864,7 @@ export function buildApi(
   const scriptingNs = {
     executeScript: (inj: ScriptingInjection) => SCRIPTING.executeScript(ext, inj),
     insertCSS: (inj: ScriptingInjection) => SCRIPTING.insertCSS(ext, inj),
+    removeCSS: (inj: ScriptingInjection) => SCRIPTING.removeCSS(ext, inj),
   };
   /* webNavigation: events derived from the real interception
      lifecycle. beforeNavigate fires at navigation interception,

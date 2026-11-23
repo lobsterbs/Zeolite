@@ -208,3 +208,112 @@ describe("LISTENER_SOURCE reply protocol (#517)", () => {
     expect(LISTENER_SOURCE).toContain("runFunc");
   });
 });
+
+describe("scripting.removeCSS (#519 removal record)", () => {
+  it("sends substituted package files as the removal record and resolves undefined", async () => {
+    seedTab();
+    captureDispatch();
+    const { api } = await apiFor("RmCssFiles");
+    const scripting = api.browser.scripting as { removeCSS: (inj: unknown) => Promise<void> };
+    await expect(scripting.removeCSS({ target: { tabId: 9 }, files: ["/inject.js"] })).resolves.toBeUndefined();
+    await vi.waitFor(() => {
+      if (capturedDispatch.length !== 1) throw new Error("dispatch not captured yet");
+    });
+    expect(capturedDispatch[0].msg.removeCss).toEqual(["1 + 1;"]);
+    expect(capturedDispatch[0].msg.css).toEqual([]);
+    expect(capturedDispatch[0].msg.js).toEqual([]);
+    expect(capturedDispatch[0].msg.wantResult).toBe(false);
+    expect(capturedDispatch[0].port).toBeNull();
+  });
+
+  it("enforces the same permission, target and argument gates as insertCSS", async () => {
+    seedTab();
+    captureDispatch();
+    const noGrant = await apiFor("RmCssNoGrant", []);
+    await expect(
+      (noGrant.api.browser.scripting as { removeCSS: (inj: unknown) => Promise<void> }).removeCSS({
+        target: { tabId: 9 },
+        files: ["/inject.js"],
+      }),
+    ).rejects.toThrow(/host permission/);
+    const { api } = await apiFor("RmCssGates");
+    const scripting = api.browser.scripting as { removeCSS: (inj: unknown) => Promise<void> };
+    await expect(scripting.removeCSS({ target: { tabId: 9 }, func: () => {} })).rejects.toThrow(/does not run scripts/);
+    await expect(scripting.removeCSS({ target: { tabId: 9 }, files: ["/nope.css"] })).rejects.toThrow(/file not found/);
+    await expect(scripting.removeCSS({ target: { tabId: 444 }, files: ["/inject.js"] })).rejects.toThrow(/Invalid tab ID/);
+    expect(capturedDispatch).toHaveLength(0);
+  });
+});
+
+describe("LISTENER_SOURCE removal arm (#519)", () => {
+  interface FakeStyle {
+    attrs: Record<string, string>;
+    textContent: string;
+    removed: boolean;
+    setAttribute: (k: string, v: string) => void;
+    getAttribute: (k: string) => string | null;
+    remove: () => void;
+  }
+  /* A stub DOM precise enough to EXECUTE the real listener source:
+     appended styles carry the data-zl-css record and remove(); the
+     assertions run the record/removal protocol instead of grepping
+     the source for it. */
+  function run(): { styles: FakeStyle[]; fire: (msg: Record<string, unknown>) => void } {
+    const styles: FakeStyle[] = [];
+    const doc = {
+      head: { appendChild: (el: FakeStyle) => { styles.push(el); } },
+      documentElement: { appendChild: (el: FakeStyle) => { styles.push(el); } },
+      createElement: (_tag: string): FakeStyle => {
+        const el: FakeStyle = {
+          attrs: {},
+          textContent: "",
+          removed: false,
+          setAttribute(k, v) { el.attrs[k] = v; },
+          getAttribute(k) { return k in el.attrs ? el.attrs[k] : null; },
+          remove() { el.removed = true; },
+        };
+        return el;
+      },
+      querySelectorAll: (sel: string) => (sel === "style[data-zl-css]" ? styles.filter((s) => !s.removed) : []),
+    };
+    const handlers: Array<(ev: unknown) => void> = [];
+    const ctl = {};
+    const nav = {
+      serviceWorker: {
+        controller: ctl,
+        addEventListener: (_t: string, fn: (ev: unknown) => void) => { handlers.push(fn); },
+      },
+    };
+    const win = { __ZL: { dest: "https://target.example/page" } };
+    new Function("navigator", "document", "window", LISTENER_SOURCE + ")('secret');")(nav, doc, win);
+    expect(handlers).toHaveLength(1);
+    return {
+      styles,
+      fire: (msg: Record<string, unknown>) => {
+        handlers.forEach((h) => h({ source: ctl, data: msg, ports: [] }));
+      },
+    };
+  }
+
+  it("tags inserted styles with the per-extension record and removes exact-content matches for the owner only", () => {
+    const { styles, fire } = run();
+    fire({ type: "zl:scripting", extId: "a@ext", dest: "https://target.example/page", js: [], css: ["a{}", "b{}"], wantResult: false });
+    fire({ type: "zl:scripting", extId: "b@ext", dest: "https://target.example/page", js: [], css: ["c{}"], wantResult: false });
+    expect(styles.map((s) => s.textContent)).toEqual(["a{}", "b{}", "c{}"]);
+    expect(styles[0].getAttribute("data-zl-css")).toBe("a@ext");
+    expect(styles[2].getAttribute("data-zl-css")).toBe("b@ext");
+    /* A foreign extension asking for a{} owns none of it: nothing goes. */
+    fire({ type: "zl:scripting", extId: "b@ext", dest: "https://target.example/page", js: [], css: [], removeCss: ["a{}"], wantResult: false });
+    expect(styles.filter((s) => !s.removed).map((s) => s.textContent)).toEqual(["a{}", "b{}", "c{}"]);
+    /* The owner removes its exact content only. */
+    fire({ type: "zl:scripting", extId: "a@ext", dest: "https://target.example/page", js: [], css: [], removeCss: ["a{}"], wantResult: false });
+    expect(styles.filter((s) => !s.removed).map((s) => s.textContent)).toEqual(["b{}", "c{}"]);
+  });
+
+  it("removes nothing for a removal string that was never inserted", () => {
+    const { styles, fire } = run();
+    fire({ type: "zl:scripting", extId: "a@ext", dest: "https://target.example/page", js: [], css: ["a{}"], wantResult: false });
+    fire({ type: "zl:scripting", extId: "a@ext", dest: "https://target.example/page", js: [], css: [], removeCss: ["different{}"], wantResult: false });
+    expect(styles.filter((s) => !s.removed).map((s) => s.textContent)).toEqual(["a{}"]);
+  });
+});
