@@ -169,20 +169,27 @@ jobs:
           node app/scripts/splice-libcurl-fork.mjs app/public/libcurl/index.mjs .vendor/libcurl_full.mjs app/public/libcurl/index.mjs
           grep -q "_http_set_upload_stream" app/public/libcurl/index.mjs
           grep -q "_http_pause" app/public/libcurl/index.mjs
-      # Vendor the epoxy transport (selectable second engine, #64).
-      # Same never-committed rule as libcurl: the package is
-      # AGPL-3.0-only too (verified in npm metadata 2.1.20-1), so the
-      # bundle is pulled pinned at build time only. Full variant (#64 slice 3): the WebSocket
-      # bridge + gzip/brotli + HTTP/2 sit behind the package "full"
-      # build; minimal has fetch only, so a WS open under the epoxy
-      # engine would fail on a minimal vendor.
-      - name: Vendor epoxy transport
+      # Vendor the epoxy transport from the lobsterbs/epoxy-tls fork
+      # (identity seam: ClientHello profiles from the lyrebird-patched
+      # rustls the fork vendors). Same never-committed rule as libcurl:
+      # the bundle is AGPL-3.0-only too, pulled pinned at build time
+      # only. Full variant (#64 slice 3): the WebSocket bridge +
+      # gzip/brotli + HTTP/2 sit behind "full"; minimal has fetch only,
+      # so a WS open under the epoxy engine would fail on a minimal
+      # vendor. The URL is the fork's rolling artifact release; the
+      # sha256 pair below IS the pin: bump both when the fork ships a
+      # new artifact.
+      - name: Vendor epoxy transport (fork artifact, sha-pinned)
+        env:
+          EPOXY_JS_SHA256: c3f79beb2649b782ac3cdb9c21bdae056168c9c3059660566c9b5fd838fdc2d2
+          EPOXY_WASM_SHA256: 5bee4469b46024a828bb0dc9601fd8add8408c243f67d10d6905cddee95389da
         run: |
           {
-            npm install --prefix .vendor @mercuryworkshop/epoxy-tls@2.1.20-1 &&
             mkdir -p app/public/epoxy &&
-            cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/full/epoxy.js app/public/epoxy/epoxy.js &&
-            cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/full/epoxy.wasm app/public/epoxy/epoxy.wasm
+            curl -fsSL "https://github.com/lobsterbs/epoxy-tls/releases/download/zeolite/epoxy.js" -o app/public/epoxy/epoxy.js &&
+            curl -fsSL "https://github.com/lobsterbs/epoxy-tls/releases/download/zeolite/epoxy.wasm" -o app/public/epoxy/epoxy.wasm &&
+            echo "$EPOXY_JS_SHA256  app/public/epoxy/epoxy.js" | sha256sum -c - &&
+            echo "$EPOXY_WASM_SHA256  app/public/epoxy/epoxy.wasm" | sha256sum -c -
           } 2>&1 | tee epoxy.out
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
@@ -593,10 +600,11 @@ jobs:
           npm install --prefix .vendor @mercuryworkshop/libcurl-transport@2.0.6
           mkdir -p app/public/libcurl
           cp -r .vendor/node_modules/@mercuryworkshop/libcurl-transport/dist/. app/public/libcurl/
-          npm install --prefix .vendor @mercuryworkshop/epoxy-tls@2.1.20-1
           mkdir -p app/public/epoxy
-          cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/full/epoxy.js app/public/epoxy/epoxy.js
-          cp .vendor/node_modules/@mercuryworkshop/epoxy-tls/full/epoxy.wasm app/public/epoxy/epoxy.wasm
+          curl -fsSL "https://github.com/lobsterbs/epoxy-tls/releases/download/zeolite/epoxy.js" -o app/public/epoxy/epoxy.js
+          curl -fsSL "https://github.com/lobsterbs/epoxy-tls/releases/download/zeolite/epoxy.wasm" -o app/public/epoxy/epoxy.wasm
+          echo "c3f79beb2649b782ac3cdb9c21bdae056168c9c3059660566c9b5fd838fdc2d2  app/public/epoxy/epoxy.js" | sha256sum -c -
+          echo "5bee4469b46024a828bb0dc9601fd8add8408c243f67d10d6905cddee95389da  app/public/epoxy/epoxy.wasm" | sha256sum -c -
       # #556: serve the forked libcurl.js build (streaming upload seam).
       # The fork dist lives on the libcurljs-fork branch, built by
       # libcurljs-build.yml and committed there (never committed here).
