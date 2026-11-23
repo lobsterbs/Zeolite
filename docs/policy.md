@@ -134,8 +134,9 @@ left. A breakout rule is inert at the behavior and transport views;
 it changes no transit decision. On a matching navigation the
 engine stamps the match into the netlog (verdict "engine:
 breakout required: <rule id>", transport "policy"), the tracing
-ring (result "breakout") and the diagnostics stream, and serves
-the response normally. Opening the real top-level tab is the
+ring (result "breakout") and the diagnostics stream, pushes the mark
+to the shell host pages (message "zl:breakout" with the destination
+and the rule id), and serves the response normally. Opening the real top-level tab is the
 embedder's move (#416 lane): the mark exists so the embedder's
 capture and sheet can act on exactly the navigation the operator
 meant.

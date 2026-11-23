@@ -24,6 +24,7 @@
    engine and control plane use; the DOM lib also declares self). */
 declare const self: ServiceWorkerGlobalScope;
 
+import { senderIsHostPage } from "./cpgate";
 import { DIAG } from "./diag";
 import { ZEOLITE_VERSION } from "./swstate";
 
@@ -63,6 +64,23 @@ export async function broadcastEngineUpdate(): Promise<void> {
   const cs = await self.clients.matchAll({ type: "window" });
   for (const c of cs) {
     c.postMessage({ type: "zl:engineUpdate", sha, version: ZEOLITE_VERSION });
+  }
+}
+
+/** #706: a breakout-required mark is also pushed to the shell host
+    pages so the embedder can open a real top-level window. Host pages
+    only (senderIsHostPage, the control-plane gate): a proxied page in
+    another tab must not learn a different tab destination. */
+export async function broadcastBreakout(dest: string, rule: string): Promise<void> {
+  let cs: Awaited<ReturnType<ServiceWorkerGlobalScope["clients"]["matchAll"]>> = [];
+  try {
+    cs = await self.clients.matchAll({ type: "window" });
+  } catch {
+    return; /* best-effort push: no client list, nothing to notify */
+  }
+  const origin = self.location.origin;
+  for (const c of cs) {
+    if (senderIsHostPage(c.url, origin)) c.postMessage({ type: "zl:breakout", dest, rule });
   }
 }
 

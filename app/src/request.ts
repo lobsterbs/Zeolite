@@ -31,6 +31,7 @@ import { classifyFailure, errorPage, type ErrorCategory } from "./errorpage";
 import { rewriteModuleWorkerImports } from "./worker-imports";
 import { decideTransport, isCdnCgiUrl, planJsServeOutcome, planResponseTransit, reasonOf, sniffsAsHtml, transitRecord, relayRecord, wispRecord, DOC_DESTS, JS_TRANSFORM_DESTS, isChallengeMitigated, relabelChallengeZone, spliceChallengeFirewall, CHALLENGE_ZONE_PATCH_CAP, type TransitDecision } from "./transit";
 import { loadPolicy, behaviorMatch, breakoutMatch, transportMatch, type CompiledPolicy } from "./policy";
+import { broadcastBreakout } from "./updates";
 import { relayAvailable, relayFetch, requestRelayReRegister } from "./relayfetch";
 import { boundedBody, cssRewriteStream, isCss, isHtml, isJs, originPinningRelaxed, passthroughStream, rawFrom, recaptchaReleaseScript, rewriteJsBody, rewriteStream, scriptPinsOrigins, workerPrelude } from "./transform";
 import { ruleFor, siteRules } from "./siteconfig";
@@ -4925,7 +4926,7 @@ export function handleFetch(e: FetchEvent): void {
            convictions). The engine cannot break the navigation out
            itself - a real top-level tab is the embedder's move
            (#416 lane) - so the match is stamped loudly: a netlog
-           row and a policy decision the embedder's capture and
+           row, a host-page push, and a policy decision the embedder's capture and
            sheet act on. Behavior and transit stay untouched (the
            breakout view is excluded from both). */
         const breakoutRule = e.request.mode === "navigate" ? breakoutMatch(policy, target, rtype) : null;
@@ -4952,6 +4953,8 @@ export function handleFetch(e: FetchEvent): void {
             transport: "policy",
             detail: { internalUrl, ttfb: 0 },
           });
+          /* #706: push the mark so the shell can open the real tab. */
+          void broadcastBreakout(target, breakoutRule.id);
         }
         const policyRule = behaviorMatch(policy, target, rtype);
         if (policyRule && policyRule.route === "rewrite" && decision.mode === "NativeTransit") {
