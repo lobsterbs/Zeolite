@@ -734,6 +734,10 @@ export function buildApi(
      properties (parent checks included), and clicks carry Firefox's
      checkbox/radio state transitions. */
   const contextMenusNs = {
+    /* #519: Firefox platform constant - the maximum number of
+       top-level menu items an extension may add before the browser
+       refuses further top-level additions. */
+    ACTION_MENU_TOP_LEVEL_LIMIT: 6,
     create: (props: Record<string, unknown> = {}) => MENUS.create(ext, props),
     update: async (id: string | number, props: Record<string, unknown> = {}) => {
       MENUS.update(ext.id, String(id), props);

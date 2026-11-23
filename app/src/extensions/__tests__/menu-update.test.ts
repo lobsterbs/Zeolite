@@ -2,6 +2,9 @@ import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
 import { extensions } from "../manager";
 import { MENUS, type MenuClickInfo } from "../contextmenus";
+import { buildApi } from "../runtime";
+import { ExtensionMessenger } from "../messaging";
+import { ExtensionStorageArea } from "../storage";
 
 const enc = new TextEncoder();
 
@@ -148,5 +151,29 @@ describe("OnClickData enrichment (#519)", () => {
     /* No checked/wasChecked/parentId keys for a plain item click. */
     expect("checked" in info).toBe(false);
     expect("parentId" in info).toBe(false);
+  });
+});
+
+describe("menus.ACTION_MENU_TOP_LEVEL_LIMIT mount (#519)", () => {
+  it("reports the Firefox platform constant on both aliases", async () => {
+    await extensions.startup();
+    const { id } = await extensions.installFiles(
+      pkg("MenuLimit" + Math.random().toString(36).slice(2, 7)),
+    );
+    const rec = extensions.get(id)!;
+    const storage = {
+      local: new ExtensionStorageArea(id, "local", "local"),
+      sync: new ExtensionStorageArea(id, "sync", "sync"),
+      session: new ExtensionStorageArea(id, "session", "session"),
+    };
+    const api = buildApi(
+      rec,
+      { extensionId: id, context: "background", url: null } as never,
+      { messenger: new ExtensionMessenger(), storage, manager: extensions },
+    );
+    const cm = (api.browser as Record<string, unknown>).contextMenus as Record<string, unknown>;
+    const vn = (api.browser as Record<string, unknown>).menus as Record<string, unknown>;
+    expect(cm.ACTION_MENU_TOP_LEVEL_LIMIT).toBe(6);
+    expect(vn.ACTION_MENU_TOP_LEVEL_LIMIT).toBe(6);
   });
 });

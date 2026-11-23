@@ -12,7 +12,7 @@ ZL_UPDATE_GAPS_DOC=1 npx vitest run src/extensions/__tests__/gaps-doc.test.ts   
 
 ## Summary
 
-- Mounted namespaces: **25** (222 members), the union of the action-family fixtures
+- Mounted namespaces: **25** (224 members), the union of the action-family fixtures
 - Firefox namespaces not mounted: **38**, each with its honest reason
 - Mounted namespaces with member-level gaps: **17**
 - Engine extras (mounted members Firefox does not have): **4**, each justified in COMPAT
@@ -128,13 +128,11 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `webNavigation` | `onHistoryStateUpdated` | same-document session-history updates happen in the page realm; the worker cannot see them |
 | `webNavigation` | `onReferenceFragmentUpdated` | hash-only navigation happens in the page realm; the worker cannot see it |
 | `webNavigation` | `onTabReplaced` | instant/prerender swaps do not exist; the tab model is UI-owned |
-| `contextMenus` | `ACTION_MENU_TOP_LEVEL_LIMIT` | the top-level action limit bounds a menu host surface the engine does not have (#519) |
 | `contextMenus` | `getTargetElement` | menu targets live in the page realm; unreachable without content-script worlds (#517) |
 | `contextMenus` | `onHidden` | menu visibility is host-UI state; no menu host reports it |
 | `contextMenus` | `onShown` | menu visibility is host-UI state; no menu host reports it |
 | `contextMenus` | `overrideContext` | privileged Firefox UI override; no menu host exists |
 | `contextMenus` | `refresh` | no host menu surface to refresh |
-| `menus` | `ACTION_MENU_TOP_LEVEL_LIMIT` | the top-level action limit bounds a menu host surface the engine does not have (#519) |
 | `menus` | `getTargetElement` | menu targets live in the page realm; unreachable without content-script worlds (#517) |
 | `menus` | `onHidden` | menu visibility is host-UI state; no menu host reports it |
 | `menus` | `onShown` | menu visibility is host-UI state; no menu host reports it |
@@ -188,7 +186,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `bookmarks` | `create` (method), `get` (method), `getChildren` (method), `getRecent` (method), `getSubTree` (method), `getTree` (method), `move` (method), `onChanged` (event), `onCreated` (event), `onMoved` (event), `onRemoved` (event), `remove` (method), `removeTree` (method), `search` (method), `update` (method) |
 | `browserAction` | `disable` (method), `enable` (method), `getBadgeBackgroundColor` (method), `getBadgeText` (method), `getBadgeTextColor` (method), `getPopup` (method), `getTitle` (method), `isEnabled` (method), `onClicked` (event), `setBadgeBackgroundColor` (method), `setBadgeText` (method), `setBadgeTextColor` (method), `setIcon` (method), `setPopup` (method), `setTitle` (method) |
 | `browsingData` | `remove` (method), `removeAppcache` (method), `removeCache` (method), `removeCookies` (method), `removeDownloads` (method), `removeFileSystems` (method), `removeFormData` (method), `removeHistory` (method), `removeIndexedDB` (method), `removeLocalStorage` (method), `removePasswords` (method), `removePluginData` (method), `removeServiceWorkers` (method), `removeWebSQL` (method), `settings` (method) |
-| `contextMenus` | `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
+| `contextMenus` | `ACTION_MENU_TOP_LEVEL_LIMIT` (constant), `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
 | `cookies` | `get` (method), `getAll` (method), `getAllCookieStores` (method), `onChanged` (event), `remove` (method), `set` (method) |
 | `declarativeNetRequest` | `DYNAMIC_RULESET_ID` (constant), `GUARANTEED_MINIMUM_STATIC_RULES` (constant), `MAX_NUMBER_OF_DISABLED_STATIC_RULES` (constant), `MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES` (constant), `MAX_NUMBER_OF_DYNAMIC_RULES` (constant), `MAX_NUMBER_OF_ENABLED_STATIC_RULESETS` (constant), `MAX_NUMBER_OF_REGEX_RULES` (constant), `MAX_NUMBER_OF_SESSION_RULES` (constant), `MAX_NUMBER_OF_STATIC_RULESETS` (constant), `SESSION_RULESET_ID` (constant), `getAvailableStaticRuleCount` (method), `getDisabledRuleIds` (method), `getDynamicRules` (method), `getEnabledRulesets` (method), `getSessionRules` (method), `isRegexSupported` (method), `testMatchOutcome` (method), `updateDynamicRules` (method), `updateEnabledRulesets` (method), `updateSessionRules` (method), `updateStaticRules` (method) |
 | `downloads` | `download` (method), `onChanged` (event), `search` (method) |
@@ -196,7 +194,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `history` | `addUrl` (method), `deleteAll` (method), `deleteRange` (method), `deleteUrl` (method), `getVisits` (method), `onVisitRemoved` (event), `onVisited` (event), `search` (method) |
 | `i18n` | `getAcceptLanguages` (method), `getMessage` (method), `getPreferredSystemLanguages` (method), `getUILanguage` (method) |
 | `management` | `get` (method), `getAll` (method), `getSelf` (method), `onDisabled` (event), `onEnabled` (event), `onInstalled` (event), `onUninstalled` (event), `setEnabled` (method), `uninstall` (method), `uninstallSelf` (method) |
-| `menus` | `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
+| `menus` | `ACTION_MENU_TOP_LEVEL_LIMIT` (constant), `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
 | `notifications` | `clear` (method), `create` (method), `getAll` (method), `getPermissionLevel` (method), `onButtonClicked` (event), `onClicked` (event), `onClosed` (event), `update` (method) |
 | `pageAction` | `getPopup` (method), `getTitle` (method), `hide` (method), `isShown` (method), `onClicked` (event), `setIcon` (method), `setPopup` (method), `setTitle` (method), `show` (method) |
 | `permissions` | `contains` (method), `getAll` (method), `onAdded` (event), `onRemoved` (event), `remove` (method), `request` (method) |
