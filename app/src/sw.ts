@@ -50,6 +50,7 @@ import { initSeamWasm } from "./seam";
    dispatcher wiring live in ./lifecycle; this entrypoint is the
    composition root only. */
 import { bootExtensionSubsystem, installLifecycle, raceBoot, wireDispatchers } from "./lifecycle";
+import { bindInstalledModules } from "./modules/bind";
 /* The shared service-worker runtime state (degraded flag, route
    key, fingerprint scripts, per-site profile cache) lives in
    ./swstate. */
@@ -219,6 +220,10 @@ const initReady = (async () => {
     wireAlarm: () => ALARMS.setWake(wakeExtension),
     wireMgmt: () => MGMT.wire(extensions),
   });
+  /* First-party signed modules (#542): claim their names after the
+     extension boot so both registries are live. Fail-soft: a module
+     bind error never blocks the engine boot. */
+  try { await bindInstalledModules(); } catch {}
   /* Tab/download/notify ops reach host clients only; a
      tabs.sendMessage or scripting payload reaches only the client
      whose decoded destination matches the target (an unmatched

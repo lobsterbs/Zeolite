@@ -68,6 +68,23 @@ real destination URL, not the engine-local encoded path. It cannot
 cancel a request (use the `block` rule for that) and cannot inject
 scripts (use the `inject` rule for that).
 
+## First-party signed modules (#542, experimental)
+
+Beyond the static registry, the engine carries a signed-module runtime
+slice designed in docs/plugin-modules-design.md: a host can install a
+first-party module bundle through the zl:modulesInstall control verb,
+backed by the modules idb store. Every bundle carries a manifest (id,
+version, engine range, typed permissions, entry and file hashes) and an
+Ed25519 signature that must verify against a compiled-in signer key, and
+the verbs ride the same host-only gate as the extension control verbs.
+At boot the engine re-verifies every installed record and binds its hook
+set under its granted permissions; a module-claimed name that is not
+installed and verified fails closed (null hooks, ONE bounded diagnostic)
+and never falls back to the static registry. zl:modulesRevoke unbinds one
+module or quarantines a whole signer key (keyId), and zl:modulesList
+reports recorded summaries. Stream hooks, the host management UI and
+the storage:site and spoof:configure grants are still designed-only.
+
 ## Deployment
 
 Plugins ship inside `sw.js` through the vite build: adding a plugin

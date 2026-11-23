@@ -1,0 +1,1 @@
+{ "id": "im.zeolite.sample-observer", "version": "1.0.0", "engine": ">=3.4.5", "keyId": "sample-1", "permissions": ["observe:requests"], "entry": "./sample-observer.ts", "files": { "./sample-observer.ts": "45036f1929597360829889702ca1b717b52d04257c3053ee26076b8f39c21c15" } }

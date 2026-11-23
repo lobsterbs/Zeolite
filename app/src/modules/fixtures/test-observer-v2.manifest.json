@@ -1,0 +1,1 @@
+{ "id": "im.zeolite.test-observer", "version": "2.0.0", "engine": ">=3.4.5", "keyId": "sample-1", "permissions": ["observe:requests", "modify:requests"], "entry": "./fixtures/test-observer.ts", "files": { "./fixtures/test-observer.ts": "afa9ac29177b26ba20dec9712ac4d7b69bb2b26f3d01087317eab965efbe0c24" } }

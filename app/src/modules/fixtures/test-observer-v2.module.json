@@ -1,0 +1,21 @@
+{
+  "manifest": {
+    "id": "im.zeolite.test-observer",
+    "version": "2.0.0",
+    "engine": ">=3.4.5",
+    "keyId": "sample-1",
+    "permissions": [
+      "observe:requests",
+      "modify:requests"
+    ],
+    "entry": "./fixtures/test-observer.ts",
+    "files": {
+      "./fixtures/test-observer.ts": "afa9ac29177b26ba20dec9712ac4d7b69bb2b26f3d01087317eab965efbe0c24"
+    }
+  },
+  "sig": "8091179fb3b30423f5ca96639a7334c07601c852a08cf753750d43c03a20a11677d08795df2fa60b14d8ad9d010b9bbcb56f9509bbf5183216d55de562b19403",
+  "signerKey": {
+    "id": "sample-1",
+    "publicHex": "2d3d29b13c777507626bc238e7a38a77c2b243b67ff88f94c91e33f15aa12ded"
+  }
+}

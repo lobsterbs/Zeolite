@@ -14,11 +14,12 @@ const DB_NAME = "zl-extensions";
    record per extension id: the stored node list of the extension's
    bookmark tree). #520 wave: v8 adds the history table (the
    engine-owned browsing history ring, one record per visited URL).
+   #542: v9 adds the modules table (one record per signed module).
    The upgrade path below only CREATES missing stores, so every older
    store (meta/files/storage/cookies/downloads/download-partials/
    download-handoffs/alarms/dnr-rules/bookmarks) and its data
    survives untouched. */
-const DB_VERSION = 8;
+const DB_VERSION = 9;
 export const STORE_META = "meta";
 export const STORE_FILES = "files";
 export const STORE_STORAGE = "storage";
@@ -46,6 +47,10 @@ export const STORE_HISTORY = "history";
    scripts (contentScripts.register, scripting.registerContentScripts,
    userScripts.register), one record per extension id. */
 export const STORE_CSREG = "cs-registrations";
+/* #542: signed first-party modules: one record per module id (the
+   verified manifest plus install state) and a "signer-key:<id>"
+   quarantine marker once a signer key is revoked. */
+export const STORE_MODULES = "modules";
 let dbp: Promise<IDBDatabase> | null = null;
 
 export function openDb(): Promise<IDBDatabase> {
@@ -66,6 +71,7 @@ export function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_BOOKMARKS)) db.createObjectStore(STORE_BOOKMARKS);
       if (!db.objectStoreNames.contains(STORE_HISTORY)) db.createObjectStore(STORE_HISTORY);
       if (!db.objectStoreNames.contains(STORE_CSREG)) db.createObjectStore(STORE_CSREG);
+      if (!db.objectStoreNames.contains(STORE_MODULES)) db.createObjectStore(STORE_MODULES);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => {

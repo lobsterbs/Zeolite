@@ -8,6 +8,7 @@
 
 import { DIAG } from "./diag";
 import { REGISTRY } from "./plugins/registry";
+import { boundModuleHooks } from "./modules/bind";
 
 /* A plugin module exports a register(hooks) function:
 
@@ -53,6 +54,11 @@ const warnedUnknown = new Set<string>();
     request path. */
 export function loadPlugin(name: string): Promise<PluginHooks | null> {
   if (!pluginNameOk(name)) return Promise.resolve(null);
+  /* First-party signed modules (#542) claim names ahead of the registry:
+     boundModuleHooks returns undefined for unclaimed names (legacy path),
+     an object when bound, or null when claimed but not installed. */
+  const moduleHooks = boundModuleHooks(name);
+  if (moduleHooks !== undefined) return Promise.resolve(moduleHooks);
   if (hooksByName.has(name)) return Promise.resolve(hooksByName.get(name) ?? null);
   let hooks: PluginHooks | null = null;
   const register = REGISTRY[name];

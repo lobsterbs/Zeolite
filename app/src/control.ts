@@ -32,6 +32,7 @@ import { buildCompatibilityReport, compatibilityKdl } from "./compat-debugger";
    control plane lists and cancels entries through the subsystem. */
 import { DL } from "./downloads";
 import { EXT_CONTROL_TYPES, dispatchExtControl } from "./extensions/control";
+import { MODULE_CONTROL_TYPES, dispatchModuleControl } from "./modules/control";
 import { ALARMS } from "./extensions/alarms";
 import { BOOKMARKS } from "./extensions/bookmarks";
 import { HISTORY } from "./extensions/history";
@@ -180,6 +181,9 @@ export interface ControlMessage {
     | "zl:clearJar"
     | "zl:transport"
   | "zl:domInspect"
+  | "zl:modulesInstall"
+  | "zl:modulesRevoke"
+  | "zl:modulesList"
   | "zl:privacy"
   | "zl:loadState";
   /** Experimental selections are preferences only, not security bypasses. */
@@ -193,6 +197,11 @@ export interface ControlMessage {
   format?: "kdl";
   extId?: string;
   msg?: unknown;
+  /** #542 signed modules: bundle for zl:modulesInstall. */
+  module?: unknown;
+  /** #542 signed modules: module id, or signer key id for zl:modulesRevokeKey. */
+  moduleId?: string;
+  keyId?: string;
   /** zl:config: rotate the route prefix. Absent keeps the live
       scheme (#633), like every other knob; the ack echoes it. */
   prefix?: string;
@@ -1815,6 +1824,8 @@ export async function handleControlEvent(
 
     if (msg && EXT_CONTROL_TYPES.has(msg.type)) {
     await dispatchExtControl(msg, { e, reply });
+  } else if (msg && MODULE_CONTROL_TYPES.has(msg.type)) {
+    await dispatchModuleControl(msg, { e, reply });
   } else {
     await dispatchCore(msg, { e, reply, port, persistRoute: deps.persistRoute });
   }

@@ -26,12 +26,26 @@ describe("plugin name validation (#97)", () => {
 });
 
 describe("static registry loader (#256)", () => {
-  it("resolves a shipped plugin to memoized hooks", async () => {
-    const h1 = await loadPlugin("sample-observer");
-    const h2 = await loadPlugin("sample-observer");
-    expect(h1).not.toBeNull();
-    expect(h1).toBe(h2);
-    expect(typeof h1?.onResponse).toBe("function");
+  it("resolves a registry plugin to memoized hooks", async () => {
+    REGISTRY["memo-for-test"] = (hooks) => {
+      hooks.onResponse = () => {};
+    };
+    try {
+      const h1 = await loadPlugin("memo-for-test");
+      const h2 = await loadPlugin("memo-for-test");
+      expect(h1).not.toBeNull();
+      expect(h1).toBe(h2);
+      expect(typeof h1?.onResponse).toBe("function");
+    } finally {
+      delete REGISTRY["memo-for-test"];
+    }
+  });
+
+  it("a module-claimed name that is not installed fails closed (#542)", async () => {
+    /* sample-observer belongs to the signed module system now: without an
+       installed, verified record the legacy registry is never consulted. */
+    expect(await loadPlugin("sample-observer")).toBeNull();
+    expect(await loadPlugin("sample-observer")).toBeNull();
   });
 
   it("unknown names fail safely to null with ONE bounded warning", async () => {
@@ -88,20 +102,24 @@ describe("hook application (#256)", () => {
     }
   });
 
-  it("onResponse hooks are best-effort observers: throws isolated, sample-observer emits once", async () => {
+  it("onResponse hooks are best-effort observers: throws isolated, observer emits once", async () => {
     REGISTRY["throw-res-for-test"] = (hooks) => {
       hooks.onResponse = () => {
         throw new Error("boom");
       };
     };
+    REGISTRY["emit-res-for-test"] = () => {
+      DIAG.emit({ category: "RUNTIME", severity: "info", message: "for-test plugin loaded and saw a response" });
+    };
     try {
-      const marker = "sample-observer plugin loaded and saw a response";
+      const marker = "for-test plugin loaded and saw a response";
       const before = diagCount(marker);
-      await applyOnResponse(["throw-res-for-test", "sample-observer"], "https://plugin.test/", 200, new Headers({ a: "b" }));
-      await applyOnResponse(["sample-observer"], "https://plugin.test/second", 200, new Headers());
+      await applyOnResponse(["throw-res-for-test", "emit-res-for-test"], "https://plugin.test/", 200, new Headers({ a: "b" }));
+      await applyOnResponse(["emit-res-for-test"], "https://plugin.test/second", 200, new Headers());
       expect(diagCount(marker) - before).toBe(1);
     } finally {
       delete REGISTRY["throw-res-for-test"];
+      delete REGISTRY["emit-res-for-test"];
     }
   });
 });

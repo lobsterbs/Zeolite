@@ -1,11 +1,18 @@
 # First-party engine module system — design (signed modules, typed permissions, stream hooks)
 
-**Status: Design — not implemented.** This document is the dedicated design the
+ **Status: Partial (experimental runtime slice, #542).** This document is the dedicated design the
 7.0 Erionite roadmap row calls for ("the first-party engine module/plugin surface
 formalized from docs/plugins.md (origin-local signed ES modules, typed
-permissions, stream hooks)"). Nothing in here ships today; the shipped capability
-remains the static build-time registry documented in `docs/plugins.md`. Per the
-project's status vocabulary this is **Planned**, not Partial.
+permissions, stream hooks)"). The first runtime slice is implemented and
+tested: the manifest schema with engine range checks, Ed25519 signature
+verification against compiled-in signer keys, the modules idb store with
+install/revoke/revokeKey/list, the boot binding seam with typed permission
+gating, the sample-observer first signed bundle and the zl:modulesInstall,
+zl:modulesRevoke and zl:modulesList control verbs. Still designed-only:
+stream hooks (onStream), the host management UI, and the storage:site and
+spoof:configure grants. Per the project's status vocabulary this is
+**Partial**, and the surface stays experimental: modules install only
+from an explicit host verb and only signed by a compiled-in key.
 
 Related: #542 (this design), #256 (closed, static registry loader), #551
 (consumer of a future stream-capable filter module), `docs/power-features.md` §1
