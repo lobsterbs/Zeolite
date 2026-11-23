@@ -40,6 +40,7 @@ import { ghosteryLoadInProgress } from "./ghostery";
 import { ghosteryCosmeticsForDocument } from "./cosmetics";
 import { runRequestInterception, runResponseInterception, BODY_LIMIT, type InterceptKind } from "./intercept";
 import { DIAG, classifyStageFailure, captureErrorBodyPrefix, redactSecrets, type DiagStage } from "./diag";
+import { formatWrbRefusals, isBatchexecuteUrl, parseWrbRefusals } from "./rpcsniff";
 /* #451: per-attempt CAPTCHA tracing rides the existing CHALLENGE emit
    points below; no new interception logic. */
 import { CAPTCHA_TRACE, outcomeOf, type CaptchaProvider } from "./captcha-trace";
@@ -5897,6 +5898,50 @@ export function handleFetch(e: FetchEvent): void {
              it. Deliberately narrow classifier (jserror / gen_204?err=);
              the diagnostic ring's own bound keeps repeated beacons
              from flooding an export. */
+          /* #708: an innertube rpc refusal rides HTTP 200 - the
+             wrb.fr item in the batched frame carries a null payload
+             and a numeric status, so no status gate or beacon
+             classifier above ever fires. Sniff a bounded prefix on
+             that narrow URL class only; the sniffer row appears in
+             addition to the normal served row, and nothing is
+             emitted when the batch carried no refusal. */
+          if (resp.status < 400 && resp.body && isBatchexecuteUrl(hopUrl)) {
+            try {
+              const sniffStatus = resp.status;
+              const [pageBranch, diagBranch] = resp.body.tee();
+              resp = new Response(pageBranch, { status: sniffStatus, statusText: resp.statusText, headers: resp.headers });
+              void captureErrorBodyPrefix(diagBranch).then((prefix) => {
+                const refusals = parseWrbRefusals(prefix);
+                if (!refusals.length) return;
+                const names = formatWrbRefusals(refusals);
+                DIAG.emit({
+                  traceId,
+                  requestId: traceId,
+                  category: "SERVICE_WORKER",
+                  severity: "warning",
+                  stage: "UPSTREAM_RESPONSE",
+                  message: "batchexecute rpc refusal over HTTP 200 (#708): " + names,
+                  url: hopUrl,
+                });
+                const sniffMs = Date.now() - t0;
+                netLogPush({
+                  method: e.request.method,
+                  traceId,
+                  path: internalUrl,
+                  dest: target,
+                  status: sniffStatus,
+                  ms: sniffMs,
+                  bytes: -1,
+                  rtype,
+                  verdict: "engine: batchexecute rpc refused: " + names,
+                  transport: "engine",
+                  detail: { internalUrl, ttfb: sniffMs },
+                });
+              });
+            } catch {
+              /* tee refused: the 200 body ships untouched */
+            }
+          }
           if (isErrorBeaconUrl(hopUrl)) {
             DIAG.emit({
               traceId,
