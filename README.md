@@ -10,97 +10,63 @@
 
 **A standalone web interception and proxy engine for browser-based hosts.**
 
-> **Experimental software.** Zeolite is not production-ready. Compatibility and public APIs can change.
+> Experimental software. Not production-ready. APIs can change.
 
 ## What is Zeolite?
 
-Zeolite gives browser-based hosts (web apps, proxy frontends, kiosk shells) a reusable engine for routing web traffic through a Wisp relay, isolating site state, and rewriting content where native browser behavior is not enough.
+A reusable engine for browser-based hosts (web apps, proxy frontends, kiosk shells). It routes traffic through a Wisp relay, isolates site state, and rewrites content where native browser behavior is not enough.
 
-Its guiding principle is simple: **preserve the website's native behavior wherever possible; rewrite only when necessary.**
+One rule drives the design: preserve the site's native behavior wherever possible, rewrite only when necessary.
 
-Zeolite is a standalone project. It does not depend on LobsterBrowse.
+## Real today
 
-## What is real today
+Gated by the repo's own tests. Run them yourself, commands below.
 
-Every claim below is gated by the repository's own tests; run them yourself with the commands in this README.
+- Wisp v2.1 transport: handshake, TCP CONNECT, byte-exact bidirectional relay, upstream statuses preserved, Set-Cookie relay, media and download bytes intact (`suite/capabilities.mjs`, 14 rows).
+- Rust-to-WASM rewriters driven by the service worker: streaming HTML/CSS, JS URL and module transforms, hybrid pre-execution location rewrite, per-origin gated, size capped, fail-open ([details](docs/hybrid-location-rewrite.md)).
+- Delivery certainty: every transport failure is `definitely-not-delivered`, `delivered-response`, or `delivery-unknown`; POST/PATCH with unknown delivery is never auto-retried ([policy](docs/transport-lifecycle.md)).
+- Site isolation: virtual origins, per-site cookie jars, separated storage, guest-realm service workers (#538).
+- Transport engines: libcurl (WASM) and epoxy (rustls + hyper), different TLS fingerprints. SSRF and auth enforced server-side: loopback CONNECT refused, keyless clients rejected.
+- WebExtension APIs, tracked member-by-member against Firefox, every gap with a written reason ([gaps](docs/firefox-api-gaps.md)). Downloads, WebSockets, session import/export.
+- Diagnostics: scoped logs with secret redaction, debugger, record/replay, two scoreboards.
 
-- **Wisp v2.1 transport** - handshake, TCP CONNECT, byte-exact relay of requests and responses in both directions, upstream status preservation (301, 302, 307, 404, 500), Set-Cookie relay, and intact media and download bytes. Gated deterministically by `suite/capabilities.mjs` (14 rows).
-- **Rewriting (Rust compiled to WASM, driven by the service worker)** - streaming HTML and CSS rewriting, JavaScript URL and module transformations, anchor and URL-literal seams for script data islands, and a hybrid pre-execution location rewrite that is per-origin gated, size capped, and fail-open.
-- **Explicit delivery certainty** - every transport failure carries one of three states (`definitely-not-delivered`, `delivered-response`, `delivery-unknown`) plus the transport identity. Non-idempotent requests (POST, PATCH) with unknown delivery are never retried automatically. See [docs/transport-lifecycle.md](docs/transport-lifecycle.md).
-- **Site isolation** - virtual origins, per-site cookie jars, separated storage namespaces, and virtual service-worker contexts (register dispatch, capture and forward semantics, postMessage bridging). A registered site's worker script executes in an isolated guest realm (#538), never as a real service worker on the engine scope.
-- **Transport engines** - libcurl (WASM) and epoxy (rustls + hyper) with different TLS fingerprints, plus a relay fetch path and Wisp routes. SSRF and authentication are enforced server-side: loopback CONNECT is refused by default and keyless clients are rejected.
-- **Compatibility APIs** - a growing subset of WebExtension APIs, downloads, WebSockets, session import and export.
-- **Diagnostics** - bounded scoped logs with secret redaction, a compatibility debugger, recording and replay, and two scoreboards (deterministic capabilities; report-only live probes).
-
-## What is partial or not real
+## Partial or not real
 
 Read this before deploying. The engine surfaces real errors rather than masking them.
 
-- **CAPTCHA** - rendering and interaction are verified for Google reCAPTCHA and Anubis proof-of-work. Zeolite is not a universal CAPTCHA solver, does not promise challenge completion, and does not bypass Cloudflare interstitials. Per-stage challenge tracing is open work.
-- **Service workers** - partial: register() spawns the site's worker script in an isolated guest realm (a page-created DedicatedWorker with a harness prelude) with install/activate/fetch events, bounded waitUntil, a bridged fetch() through the engine pipeline, quota-bounded caches, and update()/unregister() lifecycle; accepted in real Chromium (suite/e2e/guest-sw.mjs). Honest limits: cache-hit-speed answers only (250 ms dispatch budget), session-scoped caches, no client enumeration, no controller/controllerchange, no push, no messaging into virtual pages (docs/virtual-service-worker-phase2.md).
-- **location** - `window.location` is LegacyUnforgeable: page-level reads of `location.pathname`, `search` and `origin` cannot be intercepted by a shim. The hybrid rewrite fixes script-source reads on gated origins only; everything else keeps route-shaped workarounds with known seams.
-- **Egress reality** - sites that bot-wall datacenter IP ranges fail from datacenter deployments regardless of the engine. The probe scoreboard classifies such rows as `egress-gate`; that is an environment fact, not an engine defect.
-- **Rewriting limits** - some page scripts and navigation patterns cannot be rewritten or virtualized reliably. When the literal rewriter cannot rewrite a script safely, it falls back conservatively and logs the fallback.
-- **WebExtension APIs** - a subset. Isolated extension worlds are partial or unsupported.
+- CAPTCHA: rendering and interaction are verified for Google reCAPTCHA and Anubis proof-of-work. It is not a universal CAPTCHA solver, and it does not promise challenge completion or bypass Cloudflare interstitials. Per-stage challenge tracing is open work.
+- Service workers: partial. register() spawns the site's worker script in an isolated guest realm (a page-created DedicatedWorker with a harness prelude) with install/activate/fetch events, bounded waitUntil, a bridged fetch() through the engine pipeline, quota-bounded caches, and update()/unregister() lifecycle; accepted in real Chromium (suite/e2e/guest-sw.mjs). Honest limits: cache-hit-speed answers only (250 ms dispatch budget), session-scoped caches, no client enumeration, no controller/controllerchange, no push, no messaging into virtual pages ([details](docs/virtual-service-worker-phase2.md)).
+- location: `window.location` is LegacyUnforgeable: page-level reads of `location.pathname`, `search` and `origin` cannot be intercepted by a shim. The hybrid rewrite fixes script-source reads on gated origins only; everything else keeps route-shaped workarounds with known seams.
+- Egress: sites that bot-wall datacenter IP ranges fail from datacenter deployments regardless of the engine. The probe scoreboard classifies such rows as `egress-gate`. That is an environment fact, not an engine defect.
+- Rewriting: some page scripts and navigation patterns cannot be rewritten or virtualized reliably. When the literal rewriter cannot rewrite a script safely, it falls back conservatively and logs the fallback.
+- WebExtension APIs: a subset. Isolated extension worlds are partial or unsupported.
 
-See the [support matrix](docs/matrix.md) and [limitations](docs/limitations.md) for feature-by-feature status.
-
-## Architecture
-
-- **Rust workspace**: `zeolite-rewriter` (HTML, CSS and JS rewriters), `zeolite-wisp` (WASM bindings for the service-worker runtime), `wisp-core` and `wisp-extensions` (the Wisp v2.1 protocol), `zeolite-server` (relay and static server).
-- **app/**: the TypeScript service-worker runtime. It loads the WASM rewriters and drives interception, isolation and diagnostics. The bootstrap stays JavaScript because it runs before WASM is available.
-- **CI** runs five jobs (rust, wasm, app, compat, browser). The browser job includes torture, differential, reload-count and WebSocket e2e suites. Distribution artifacts are published to the `dist` branch; consumers pin a dist commit.
+Feature-by-feature: [support matrix](docs/matrix.md), [limitations](docs/limitations.md).
 
 ## Quick start
 
-Requirements: Rust with the `wasm32-unknown-unknown` target, Node.js with npm, and a Chromium-based browser for the e2e suites.
+Needs Rust with the `wasm32-unknown-unknown` target, Node.js/npm, and a Chromium browser for e2e.
 
 ```bash
-# type-check the WASM crates
 cargo check -p zeolite-rewriter -p zeolite-wisp --target wasm32-unknown-unknown
-
-# app: types, unit suite, build
-cd app
-npm install
-npm run check
-npm test
-npm run build
-
-# run the standalone server on loopback
-cd ..
-cargo run -p zeolite-server -- --port 6002 --static app/dist
+cd app && npm install && npm run check && npm test && npm run build
+cd .. && cargo run -p zeolite-server -- --port 6002 --static app/dist
 ```
 
-The server binds to loopback by default and parses `--port`, `--static`, `--bind` and `--config`. **Do not expose it to a network unless you have deliberately configured authentication and allowed origins.** See the [security review](docs/security.md) first.
-
-## Testing and scoreboards
+Loopback by default; parses `--port`, `--static`, `--bind`, `--config`. **Do not expose it to a network without auth and allowed origins configured** ([security review](docs/security.md)).
 
 ```bash
-# deterministic transport gate: 14 rows, fails the run on any miss
-node suite/capabilities.mjs --base http://localhost:6002
-
-# live-site probe: report-only, classifies egress-gated failures honestly
-node suite/probe.mjs --base http://localhost:6002
+node suite/capabilities.mjs --base http://localhost:6002  # deterministic gate
+node suite/probe.mjs --base http://localhost:6002         # live probes, report-only
 ```
 
-The capabilities scoreboard requires the base server to run with `ZL_TEST_ALLOW_PRIVATE_DESTS=1` and `ZL_TEST_EGRESS=1` so it may reach its loopback fixture. The harness spawns additional servers to verify the production-default SSRF and auth refusals.
+The capabilities suite needs `ZL_TEST_ALLOW_PRIVATE_DESTS=1` and `ZL_TEST_EGRESS=1` on the base server.
 
-## Documentation
-
-- [Support matrix](docs/matrix.md) and [limitations](docs/limitations.md)
-- [Transport lifecycle and delivery policy](docs/transport-lifecycle.md)
-- [Hybrid location rewrite](docs/hybrid-location-rewrite.md)
-- [Virtual service worker](docs/virtual-service-worker-phase2.md)
-- [Security review](docs/security.md)
-- [Engine adapter](docs/engine-adapter.md) and [integration guide](docs/integration-guide.md)
-- [Plugin API](docs/plugins.md) and [policy](docs/policy.md)
-- [Performance notes](docs/performance.md), [roadmap](docs/roadmap.md), [versioning](docs/versioning.md)
-
-The `docs/` directory holds more: cookies, session, storage, websocket, workers, recording, tracing, fingerprint, downloads, error pages, network inspector, and more.
+More in `docs/`: engine adapter and integration guide, plugin API, policy, cookies, session, storage, websocket, workers, recording, tracing, fingerprint, downloads, error pages, network inspector, performance, roadmap, versioning.
 
 ## Contributing
 
-Bug reports, compatibility findings, and pull requests are welcome. Include the affected site or feature, browser and runtime, reproduction steps, and relevant diagnostics. Remove cookies, tokens, and other secrets before sharing logs.
+Issues and PRs welcome. Include the site or feature, browser and runtime, repro steps, diagnostics. Strip cookies, tokens, and secrets from logs.
 
 ## License
 
