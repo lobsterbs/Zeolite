@@ -4,7 +4,7 @@
    everything else (including the empty un-armed default) to the native
    stock-rustls hello. */
 import { describe, expect, it } from "vitest";
-import { epoxyIdentityForUa } from "../libcurl-transport-vendored";
+import { epoxyIdentityForUa, epoxyIdentityVoiceOf } from "../libcurl-transport-vendored";
 
 const X11_CHROME =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
@@ -43,5 +43,19 @@ describe("epoxyIdentityForUa (UA-synced TLS hello)", () => {
        hello; the real family strings carry Firefox/<version>. */
     expect(epoxyIdentityForUa("Mozilla/5.0 (compatible; FirefoxBot/0.1)")).toBe(0);
     expect(epoxyIdentityForUa("Mozilla/5.0 (compatible; Chromebot)")).toBe(0);
+  });
+});
+
+describe("epoxyIdentityVoiceOf (explicit TLS voice pin)", () => {
+  it("maps the settings voices to the wire identities", () => {
+    expect(epoxyIdentityVoiceOf("chromium")).toBe(1);
+    expect(epoxyIdentityVoiceOf("firefox")).toBe(2);
+    expect(epoxyIdentityVoiceOf("native")).toBe(0);
+  });
+
+  it("maps absent, junk, and wrong types to null (UA-synced)", () => {
+    for (const v of [undefined, null, "ua", "chrome", "Firefox", 1, "", {}]) {
+      expect(epoxyIdentityVoiceOf(v)).toBeNull();
+    }
   });
 });

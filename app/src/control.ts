@@ -92,7 +92,7 @@ import { locationTargetSnapshot, recordSpa404Report } from "./location-targeting
 import { setTracing, tracingSnapshot } from "./tracing";
 import { transitStats } from "./transit";
 import { relayAvailable, relayRegister } from "./relayfetch";
-import { altConfigured, altRegister, currentEngine, engineReady, setPrimaryWisp, setEpoxyUserAgent, wispTransport } from "./transport";
+import { altConfigured, altRegister, currentEngine, engineReady, setPrimaryWisp, setEpoxyUserAgent, setEpoxyIdentityVoice, epoxyIdentityVoiceOf, wispTransport } from "./transport";
 import { loadInflight } from "./loadstate";
 import { activeStreams } from "./streams-alive";
 import { contextOf } from "./vctx";
@@ -1286,6 +1286,14 @@ case "zl:tracing":
            built-in X11 Linux identity under the spoofed browser);
            per-request site-rule UAs still win at the header seam. */
         if (r.ok) setEpoxyUserAgent(r.profile ? r.profile.userAgent : "");
+        /* 2026-11-23 (epoxy identity lane): the same profile may pin
+           the TLS voice explicitly (tlsVoice: "chromium" | "firefox"
+           | "native"); absent or junk = UA-synced. Applied with the
+           accepted profile, like the UA default above. */
+        if (r.ok)
+          setEpoxyIdentityVoice(
+            epoxyIdentityVoiceOf((msg.profile as { tlsVoice?: unknown } | null | undefined)?.tlsVoice),
+          );
         reply(r);
       }
       break;

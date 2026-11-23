@@ -31,13 +31,15 @@ import {
   altEndpoint,
   altReset as zlAltReset,
   setEpoxyUserAgent,
+  setEpoxyIdentityVoice,
+  epoxyIdentityVoiceOf,
   type TransportEngine,
 } from "./libcurl-transport-vendored";
 import { relayAvailable, relayFetch, relayHeaderDeadlineMs, RelayDeliveryUnknownError } from "./relayfetch";
 import { materializeBlobBody } from "./transport-body";
 import { uploadStreamingSupported } from "./libcurl-transport-vendored";
 
-export { currentEngine, openWebSocket, altRegister, altConfigured, altEndpoint, setEpoxyUserAgent, type TransportEngine };
+export { currentEngine, openWebSocket, altRegister, altConfigured, altEndpoint, setEpoxyUserAgent, setEpoxyIdentityVoice, epoxyIdentityVoiceOf, type TransportEngine };
 
 /** Internal upstream transport contract (issue #84). */
 export interface Transport {

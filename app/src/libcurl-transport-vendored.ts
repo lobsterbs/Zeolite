@@ -396,6 +396,35 @@ export function epoxyIdentityForUa(ua: string): number {
   return 0;
 }
 
+/* 2026-11-23 (epoxy TLS voice knob): the zl:fingerprint profile may
+   pin the voice explicitly (tlsVoice: "chromium" | "firefox" |
+   "native") instead of leaving it UA-synced - the LB transit setting.
+   null keeps the UA-synced derivation above. */
+
+/** Parse a settings-side TLS voice string into the wire identity;
+    null = UA-synced (also for junk). Pure; unit-gated
+    (__tests__/epoxy-identity.test.ts). */
+export function epoxyIdentityVoiceOf(v: unknown): number | null {
+  if (v === "chromium") return 1;
+  if (v === "firefox") return 2;
+  if (v === "native") return 0;
+  return null;
+}
+
+/* The pinned voice; null = UA-synced (the default). */
+let epoxyIdentityVoice: number | null = null;
+
+/** Pin or unpin the TLS voice. A real change drops the epoxy
+    singletons (same shape as setEpoxyUserAgent) so the next init
+    rebuilds on the new hello. */
+export function setEpoxyIdentityVoice(v: number | null): void {
+  const next = v === 0 || v === 1 || v === 2 ? v : null;
+  if (next === epoxyIdentityVoice) return;
+  epoxyIdentityVoice = next;
+  epoxyClient = null;
+  epoxyInitPromise = null;
+}
+
 /** Set the epoxy wire-default UA. A real change drops the epoxy
     singletons (same shape as reset(), without tearing the libcurl
     client) so the next fetch/init rebuilds on the new default. */
@@ -430,10 +459,12 @@ async function getEpoxy(cfg: { websocket: string }): Promise<EpoxyFetchClient> {
       options.wisp_v2 = true;
       if (epoxyUserAgent) options.user_agent = epoxyUserAgent;
       /* UA-synced TLS voice: the armed profile's UA picks the hello
-         (see the epoxy identity lane comment above); the derivation
-         is re-read on every rebuild because setEpoxyUserAgent drops
-         both singletons on a real change. */
-      options.identity = epoxyIdentityForUa(epoxyUserAgent);
+         (see the epoxy identity lane comment above); an explicitly
+         pinned voice (setEpoxyIdentityVoice, from the profile's
+         tlsVoice field) wins over the derivation. The effective value
+         is re-read on every rebuild because both setters drop the
+         singletons on a real change. */
+      options.identity = epoxyIdentityVoice ?? epoxyIdentityForUa(epoxyUserAgent);
       epoxyClient = new mod.EpoxyClient(cfg.websocket, options);
       epoxyHandlers = mod.EpoxyHandlers ?? null;
     })();
