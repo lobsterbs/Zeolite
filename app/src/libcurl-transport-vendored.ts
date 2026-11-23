@@ -213,6 +213,10 @@ interface EpoxyFetchClient {
 interface EpoxyClientOptionsLike {
   wisp_v2: boolean;
   user_agent: string;
+  /* 0 native, 1 chromium/brave hello, 2 firefox hello (see
+     epoxyIdentityForUa below). Optional so a stock epoxy bundle
+     without the seam loads unshaped (native). */
+  identity?: number;
 }
 
 interface EpoxyHandlersCtor {
@@ -367,6 +371,31 @@ export function epoxyUserAgentValue(): string {
   return epoxyUserAgent;
 }
 
+/* 2026-11-23 (epoxy identity lane): the epoxy transport is vendored
+   from the lobsterbs/epoxy-tls fork, whose EpoxyClientOptions.identity
+   selects the TLS hello: 0 native (stock rustls), 1 the Chromium /
+   Brave wire shape, 2 the Firefox wire shape - ClientHello profiles
+   built into the lyrebird-patched rustls the fork vendors. The
+   identity is UA-synced: it derives from the same wire-default UA
+   the zl:fingerprint profile arms, so the hello can never contradict
+   the claimed UA (the #708 UA-default class, carried to the TLS
+   layer). Only the armed default wires a shaped hello; an un-armed
+   engine keeps the native one, and a stock epoxy bundle without the
+   seam ignores the numeric field entirely.
+   Honest limits of the wasm artifact, by design: the profile pins
+   degrade to the ring provider's offerable subset (9 of the real
+   browsers' 15 cipher suites, no X25519MLKEM768 key share), and the
+   h2 SETTINGS shape stays hyper's - only the ClientHello is shaped. */
+
+/** Wire-default TLS identity for the epoxy client: 0 native, 1 the
+    chromium-family hello, 2 the firefox hello. Pure; unit-gated
+    (__tests__/epoxy-identity.test.ts). */
+export function epoxyIdentityForUa(ua: string): number {
+  if (/Firefox\//.test(ua)) return 2;
+  if (/(?:Chrome|Chromium)\//.test(ua)) return 1;
+  return 0;
+}
+
 /** Set the epoxy wire-default UA. A real change drops the epoxy
     singletons (same shape as reset(), without tearing the libcurl
     client) so the next fetch/init rebuilds on the new default. */
@@ -400,6 +429,11 @@ async function getEpoxy(cfg: { websocket: string }): Promise<EpoxyFetchClient> {
       const options = new mod.EpoxyClientOptions();
       options.wisp_v2 = true;
       if (epoxyUserAgent) options.user_agent = epoxyUserAgent;
+      /* UA-synced TLS voice: the armed profile's UA picks the hello
+         (see the epoxy identity lane comment above); the derivation
+         is re-read on every rebuild because setEpoxyUserAgent drops
+         both singletons on a real change. */
+      options.identity = epoxyIdentityForUa(epoxyUserAgent);
       epoxyClient = new mod.EpoxyClient(cfg.websocket, options);
       epoxyHandlers = mod.EpoxyHandlers ?? null;
     })();

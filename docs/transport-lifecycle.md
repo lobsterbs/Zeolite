@@ -88,3 +88,22 @@ double-re-issue defect was found: the intermittent probe failure
 remains diagnosed, not explained - the per-hop diagnostic and the full
 error suffix exist so the next red run names its cause instead of
 eating it.
+
+## Epoxy TLS voice (identity lane)
+
+The epoxy engine's bytes are vendored from the lobsterbs/epoxy-tls fork
+plus the lyrebird-patched rustls it carries, so `EpoxyClientOptions`
+gains an `identity` field: 0 native (stock rustls hello), 1 the
+Chromium-family wire shape, 2 the Firefox wire shape. The engine
+derives it from the transport's wire-default UA
+(`epoxyIdentityForUa`, unit-gated): the accepted `zl:fingerprint`
+profile owns that UA, so the TLS hello follows the claimed browser
+voice instead of contradicting it. An un-armed engine keeps the native
+hello, and a stock epoxy bundle without the seam ignores the field and
+also stays native.
+
+Honest limits of the wasm artifact: the captured-browser profile pins
+degrade to the ring provider's offerable subset (9 of the real
+browsers' 15 cipher suites; no X25519MLKEM768 key share on this arm),
+and the h2 SETTINGS shape stays hyper's - only the ClientHello is
+shaped, and the sha-pinned vendor step in CI gates the exact bytes.
