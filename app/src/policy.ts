@@ -46,11 +46,8 @@ export interface PolicyRule {
       stack for TLS-fingerprint-blocked hosts.
       #168: "wisp" rides the engine's own wisp transport through
       the PUBLIC wisp endpoint the embedder announces
-      (zl:wispRegister) for hosts that refuse the relay class.
-      #706: "breakout" marks an interactive-auth host whose top-level
-      navigations the embedder must open outside the shell; the
-      engine records the match and changes nothing else. */
-  route: "rewrite" | "native" | "relay" | "wisp" | "breakout";
+      (zl:wispRegister) for hosts that refuse the relay class. */
+  route: "rewrite" | "native" | "relay" | "wisp";
 }
 
 export interface CompiledPolicy {
@@ -141,8 +138,8 @@ export function compilePolicy(source: string): CompiledPolicy {
       if (types.size === 0) types = null;
     }
     const rv = child(node, "route")?.args[0];
-    if (rv !== "rewrite" && rv !== "native" && rv !== "relay" && rv !== "wisp" && rv !== "breakout") {
-      throw new Error('policy: rule "' + id + '": route must be "rewrite", "native", "relay", "wisp" or "breakout"');
+    if (rv !== "rewrite" && rv !== "native" && rv !== "relay" && rv !== "wisp") {
+      throw new Error('policy: rule "' + id + '": route must be "rewrite", "native", "relay" or "wisp"');
     }
     let reason: string | null = null;
     const rsn = child(node, "reason");
@@ -224,17 +221,6 @@ export function transportMatch(p: CompiledPolicy, url: string, rtype: ResourceTy
   return transports.length === 0 ? null : policyMatch({ rules: transports }, url, rtype);
 }
 
-/* #706: the navigation-side view. A "breakout" rule is inert at the
-   behavior and transport views above; it marks an interactive-auth
-   host whose top-level navigations risk the in-shell
-   virtualization (the ESTS blank-page and Google rpc-13
-   convictions). The engine stamps the match into the netlog and
-   tracing rings; opening the real top-level tab is the embedder's
-   move (#416 lane). */
-export function breakoutMatch(p: CompiledPolicy, url: string, rtype: ResourceType): PolicyRule | null {
-  const marks = p.rules.filter((r) => r.route === "breakout");
-  return marks.length === 0 ? null : policyMatch({ rules: marks }, url, rtype);
-}
 /* Load /policy.kdl once per worker lifetime, like /rules.kdl. A
    missing file means "no policy" (the default); a malformed file
    is rejected loudly and the defaults stay active. */

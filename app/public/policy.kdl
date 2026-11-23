@@ -131,32 +131,3 @@ rule "delta-relay" {
 // wisp own credentials keep the zl:wispAuth lane instead
 // (docs/wisp-auth-client.md).
 
-// #706 (2026-11-23): interactive-auth breakout marks. ESTS answers the
-// in-shell ssoReload loop with AADSTS9000411 and Google's sign-in
-// risk gate refuses the identifier rpc from datacenter egress
-// (#708 pin-192 conviction); no engine defect remains on either
-// flow, and the only working remedy is the embedder's: open these
-// top-level navigations outside the shell (#416 lane). The rules are
-// markers - transit and behavior stay untouched - and a matching
-// navigation stamps a netlog row ("engine: breakout required: <id>",
-// transport "policy") plus a policy decision the embedder's capture
-// and sheet act on. Subresources are deliberately not marked: only
-// the top-level interactive navigation needs the breakout.
-rule "ests-breakout" {
-  match host="login.microsoftonline.com"
-  types "document"
-  route "breakout"
-  reason "#706: ESTS interactive auth refuses in-shell virtualization"
-}
-rule "msa-breakout" {
-  match host="login.live.com"
-  types "document"
-  route "breakout"
-  reason "#706: MSA interactive auth, same ESTS breakout class"
-}
-rule "google-signin-breakout" {
-  match host="accounts.google.com"
-  types "document"
-  route "breakout"
-  reason "#706/#708: sign-in rpc risk gate refuses engine egress"
-}
