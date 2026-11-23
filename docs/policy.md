@@ -122,9 +122,23 @@ fetch resets the secondary client, retries once, then falls back
 to the default path).
 
 Documents, stylesheets and transformed scripts REQUIRE rewriting,
-so no route demotes those passes; a route value outside the four
-above is rejected with a clear error and the engine keeps the
+so no route demotes those passes; a route value outside the vocabulary above is rejected with a clear error and the engine keeps the
 defaults.
+
+route "breakout" (#706) marks an interactive-auth host whose
+top-level navigations must not be virtualized in-shell: the ESTS
+authorize serves AADSTS9000411 to an in-frame ssoReload loop and
+Google's sign-in risk gate refuses the identifier rpc from
+datacenter egress, both on flows where the engine has no defect
+left. A breakout rule is inert at the behavior and transport views;
+it changes no transit decision. On a matching navigation the
+engine stamps the match into the netlog (verdict "engine:
+breakout required: <rule id>", transport "policy"), the tracing
+ring (result "breakout") and the diagnostics stream, and serves
+the response normally. Opening the real top-level tab is the
+embedder's move (#416 lane): the mark exists so the embedder's
+capture and sheet can act on exactly the navigation the operator
+meant.
 
 ## Validation and failure behavior
 

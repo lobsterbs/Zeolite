@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { compilePolicy, policyMatch, transportMatch, loadPolicy, policyResetForTests } from "../policy";
+import { compilePolicy, policyMatch, behaviorMatch, breakoutMatch, transportMatch, loadPolicy, policyResetForTests } from "../policy";
 import shippedPolicy from "../../public/policy.kdl?raw";
 
 /* KDL nodes terminate at newlines, so every rule child sits on its
@@ -267,5 +267,41 @@ describe("shipped policy.kdl", () => {
       expect(policyMatch(p, "https://" + host + "/", "document"), host).toBeNull();
     }
     expect(transportMatch(p, "https://example.com/x.js", "script")).toBeNull();
+  });
+});
+/* #706: route "breakout" marks an interactive-auth host. The mark is
+   inert at the behavior and transport views; only the navigation-side
+   breakout view sees it. */
+describe("route breakout (#706)", () => {
+  it("parses route breakout", () => {
+    const c = compilePolicy('rule "r" priority=2 {\n  route "breakout"\n}');
+    expect(c.rules[0]).toMatchObject({ id: "r", priority: 2, route: "breakout" });
+  });
+
+  it("matches only the breakout view, never behavior or transport", () => {
+    const p = compilePolicy('rule "b1" {\n  match host="login.example.com"\n  types "document"\n  route "breakout"\n}\nrule "nw" {\n  route "wisp"\n}');
+    const url = "https://login.example.com/oauth2/authorize";
+    expect(breakoutMatch(p, url, "document")?.id).toBe("b1");
+    expect(breakoutMatch(p, url, "script")).toBeNull();
+    expect(breakoutMatch(p, "https://other.example/", "document")).toBeNull();
+    expect(behaviorMatch(p, url, "document")).toBeNull();
+    expect(transportMatch(p, url, "document")?.id).toBe("nw");
+  });
+
+  it("the shipped file marks the interactive-auth hosts document-narrow (#706)", () => {
+    const sp = compilePolicy(shippedPolicy);
+    const hosts: Array<[string, string]> = [
+      ["login.microsoftonline.com", "ests-breakout"],
+      ["login.live.com", "msa-breakout"],
+      ["accounts.google.com", "google-signin-breakout"],
+    ];
+    for (const [host, id] of hosts) {
+      const nav = "https://" + host + "/oauth2/v2.0/authorize";
+      expect(breakoutMatch(sp, nav, "document")?.id, host).toBe(id);
+      /* Subresources must not inherit the mark. */
+      expect(breakoutMatch(sp, "https://" + host + "/telemetry", "fetch")).toBeNull();
+      expect(behaviorMatch(sp, nav, "document")).toBeNull();
+      expect(transportMatch(sp, nav, "document")).toBeNull();
+    }
   });
 });
