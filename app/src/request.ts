@@ -2357,6 +2357,37 @@ const errDetail = (err: unknown): string => {
 const passthroughFetch = (req: Request): Promise<Response> =>
   fetch(req).catch(() => Response.error());
 
+/** #708: every error response the worker answers before any transport
+    dispatch leaves a ring row with the failing stage and a trace id
+    the DIAG failure joins on - the pin-191 dead-POST class (net::ERR_FAILED
+    page-side, no upstream row, no err row) was invisible in the KDL
+    network export because this seam only reported to DIAG. Record only;
+    it never changes request behavior. */
+function rowPreDispatchFail(
+  e: FetchEvent,
+  url: URL,
+  stage: string,
+  status: number,
+  err: unknown,
+): string {
+  const traceId = DIAG.trace(e.resultingClientId || e.clientId);
+  netLogPush({
+    method: e.request.method,
+    traceId,
+    path: url.pathname + url.search,
+    dest: url.href,
+    status,
+    rtype: classifyRtype(reqDest(e.request), ""),
+    ms: 0,
+    bytes: -1,
+    err: errDetail(err),
+    verdict: "engine: pre-dispatch failure: " + stage,
+    transport: "engine",
+    detail: { internalUrl: url.pathname + url.search, ttfb: 0 },
+  });
+  return traceId;
+}
+
 function navOutcome(
   e: FetchEvent,
   url: URL,
@@ -2674,14 +2705,16 @@ export function handleFetch(e: FetchEvent): void {
           headers: { "content-type": utf8ContentType(ct) },
         });
       })().catch(
-        (err: unknown) =>
+        (err: unknown) => {
           /* the prelude/asset seam must answer honestly like the
              extension branches: a rejected respondWith is a hard
              network error for the worker script */
-          new Response("zeolite: worker prelude failed: " + String(err), {
+          rowPreDispatchFail(e, url, "worker prelude", 502, err);
+          return new Response("zeolite: worker prelude failed: " + String(err), {
             status: 502,
             headers: { "content-type": "text/plain" },
-          }),
+          });
+        },
       ),
     );
     return;
@@ -2707,6 +2740,7 @@ export function handleFetch(e: FetchEvent): void {
     if (url.pathname === "/zl-bw/") {
       const tok = zlBwTokenParse(url.search);
       if (!tok) {
+        rowPreDispatchFail(e, url, "blob-worker token", 404, "bad blob-worker token");
         e.respondWith(new Response("zeolite: bad blob-worker token", { status: 404, headers: { "content-type": "text/plain" } }));
         return;
       }
@@ -2732,14 +2766,16 @@ export function handleFetch(e: FetchEvent): void {
             { status: 200, headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" } },
           );
         })().catch(
-          (err: unknown) =>
+          (err: unknown) => {
             /* same honesty as the opaque-worker branch above: a failed
                prelude asset answers the worker script with an error
                response, never a rejected respondWith */
-            new Response("zeolite: blob-worker prelude failed: " + String(err), {
+            rowPreDispatchFail(e, url, "blob-worker prelude", 502, err);
+            return new Response("zeolite: blob-worker prelude failed: " + String(err), {
               status: 502,
               headers: { "content-type": "text/plain" },
-            }),
+            });
+          },
         ),
       );
       return;
@@ -2795,11 +2831,13 @@ export function handleFetch(e: FetchEvent): void {
             },
           );
         })().catch(
-          (err) =>
-            new Response("zeolite: extension asset failed: " + String(err), {
+          (err) => {
+            rowPreDispatchFail(e, url, "extension asset", 500, err);
+            return new Response("zeolite: extension asset failed: " + String(err), {
               status: 500,
               headers: { "content-type": "text/plain" },
-            }),
+            });
+          },
         ),
       );
       return;
@@ -2820,11 +2858,13 @@ export function handleFetch(e: FetchEvent): void {
             if (engineReady) await raceBoot(engineReady, "extension subsystem boot");
             return serveRootedExtPage(rooted, e.resultingClientId || undefined);
           })().catch(
-            (err) =>
-              new Response("zeolite: rooted extension page failed: " + String(err), {
+            (err) => {
+              rowPreDispatchFail(e, url, "rooted extension page", 500, err);
+              return new Response("zeolite: rooted extension page failed: " + String(err), {
                 status: 500,
                 headers: { "content-type": "text/plain" },
-              }),
+              });
+            },
           ),
         );
         return;
@@ -6767,7 +6807,12 @@ export function handleFetch(e: FetchEvent): void {
      failure is recorded rather than swallowed. */
   e.respondWith(
     responsePromise.catch((err: unknown) => {
+      /* #708: the ring row makes the pre-dispatch failure visible in
+         the KDL network export (failing-stage verdict plus stack head);
+         the DIAG failure joins on the row's trace id. */
+      const traceId = rowPreDispatchFail(e, url, "orchestration", 502, err);
       DIAG.failure({
+        traceId,
         category: "SERVICE_WORKER",
         cause: "failure",
         message: "request orchestration failed before the engine pipeline",
