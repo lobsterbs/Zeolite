@@ -23,6 +23,7 @@ import { MENUS } from "./contextmenus";
 import { ACTION } from "./action";
 import type { ActionKind, ActionClickedListener } from "./action";
 import { DOWNLOADS } from "./downloads";
+import type { DownloadCreatedListener, DownloadErasedListener } from "./downloads";
 import { NOTIFY } from "./notifications";
 import type {
   NotificationClickedListener,
@@ -757,7 +758,16 @@ export function buildApi(
       DOWNLOADS.download(ext, opts as unknown as { url: string; filename?: string; saveAs?: boolean }),
     search: (query: Record<string, unknown> = {}) =>
       Promise.resolve(DOWNLOADS.search(ext, query as { id?: number })),
+    /* Member slice: erase removes matching TERMINAL handoff records
+       (memory + the durable store row) and resolves with the erased
+       ids; active handoffs stay tracked because the host owns the
+       live transfer (compat.ts). onCreated/onErased fire to the
+       owning extension only. */
+    erase: (query: Record<string, unknown> = {}) =>
+      DOWNLOADS.erase(ext, query as { id?: number; limit?: number }),
     onChanged: makeDownloadsEvent(ext.id),
+    onCreated: bridged<DownloadCreatedListener>((l) => DOWNLOADS.onCreated(ext.id, l)),
+    onErased: bridged<DownloadErasedListener>((l) => DOWNLOADS.onErased(ext.id, l)),
   };
   /* #43: notifications hand off to the host UI (zl:notifyOp) and
      events come back through zl:notifyEvent. Mounted only with the

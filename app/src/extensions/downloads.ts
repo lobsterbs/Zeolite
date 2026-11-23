@@ -70,6 +70,10 @@ export interface DownloadChange {
 
 export type DownloadsChangedListener = (delta: DownloadChange) => void;
 
+export type DownloadCreatedListener = (item: DownloadState) => void;
+
+export type DownloadErasedListener = (downloadId: number) => void;
+
 const TERMINAL: Record<string, boolean> = { done: true, error: true, cancelled: true };
 
 /** #541: handoff records older than this are dropped on load (and
@@ -95,6 +99,8 @@ export class DownloadsHost {
   private dispatch: ((op: DownloadOp) => void) | null = null;
   private readonly states = new Map<number, DownloadState>();
   private readonly changed = new Map<string, Set<DownloadsChangedListener>>();
+  private readonly created = new Map<string, Set<DownloadCreatedListener>>();
+  private readonly erased = new Map<string, Set<DownloadErasedListener>>();
   /* #541: at most ONE terminal-re-report diagnostic per id; the diag
      ring bounds the total. */
   private readonly terminalWarned = new Set<number>();
@@ -153,6 +159,9 @@ export class DownloadsHost {
     /* #541: the record is durable before the id resolves, so a
        restart right after the call cannot lose the handoff. */
     await this.persistState(st);
+    /* Member slice: downloads.onCreated - the record is registered,
+       the owning extension hears the DownloadItem view. */
+    this.fireCreated(st.extId, { ...st });
     return id;
   }
 
@@ -266,6 +275,8 @@ export class DownloadsHost {
   resetForTests(): void {
     this.states.clear();
     this.changed.clear();
+    this.created.clear();
+    this.erased.clear();
     this.seq = 0;
     this.dispatch = null;
   }
@@ -303,6 +314,82 @@ export class DownloadsHost {
       }
     }
   }
+
+  /** Member slice: downloads.erase. Firefox erases matching
+      download history records (the saved files are untouched) and
+      resolves with the array of erased ids. Only TERMINAL handoff
+      records are erasable here - the host owns the live transfer,
+      and an active record cannot be orphaned mid-flight (the
+      removeDownloads precedent). Query filters: id, and limit
+      capping how many records erase (ascending order). The persisted
+      store row goes with the memory record, so erase survives a
+      restart. */
+  async erase(ext: ExtensionRecord, query: { id?: number; limit?: number } = {}): Promise<number[]> {
+    if (!ext.permissions.includes("downloads")) {
+      throw new Error("zeolite: permission 'downloads' not granted to this extension");
+    }
+    let rows = [...this.states.values()].filter((s) => s.extId === ext.id && TERMINAL[s.status]);
+    if (typeof query.id === "number") rows = rows.filter((s) => s.id === query.id);
+    rows.sort((a, b) => a.id - b.id);
+    if (typeof query.limit === "number" && query.limit >= 0) rows = rows.slice(0, query.limit);
+    if (rows.length === 0) return [];
+    for (const st of rows) {
+      this.states.delete(st.id);
+      this.fireErased(st.extId, st.id);
+    }
+    try {
+      const db = await openDb();
+      for (const st of rows) void idbDelete(db, STORE_HANDOFFS, String(st.id));
+    } catch {
+      /* storage unavailable: in-memory registry only */
+    }
+    return rows.map((s) => s.id);
+  }
+
+  onCreated(extId: string, l: DownloadCreatedListener): () => void {
+    let set = this.created.get(extId);
+    if (!set) {
+      set = new Set();
+      this.created.set(extId, set);
+    }
+    set.add(l);
+    return () => set?.delete(l);
+  }
+
+  onErased(extId: string, l: DownloadErasedListener): () => void {
+    let set = this.erased.get(extId);
+    if (!set) {
+      set = new Set();
+      this.erased.set(extId, set);
+    }
+    set.add(l);
+    return () => set?.delete(l);
+  }
+
+  private fireCreated(extId: string, item: DownloadState): void {
+    const set = this.created.get(extId);
+    if (!set) return;
+    for (const l of [...set]) {
+      try {
+        l(item);
+      } catch {
+        /* a broken listener is the extension's own problem */
+      }
+    }
+  }
+
+  private fireErased(extId: string, downloadId: number): void {
+    const set = this.erased.get(extId);
+    if (!set) return;
+    for (const l of [...set]) {
+      try {
+        l(downloadId);
+      } catch {
+        /* a broken listener is the extension's own problem */
+      }
+    }
+  }
+
 }
 
 export const DOWNLOADS = new DownloadsHost();

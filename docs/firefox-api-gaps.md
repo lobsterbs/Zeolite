@@ -12,7 +12,7 @@ ZL_UPDATE_GAPS_DOC=1 npx vitest run src/extensions/__tests__/gaps-doc.test.ts   
 
 ## Summary
 
-- Mounted namespaces: **25** (224 members), the union of the action-family fixtures
+- Mounted namespaces: **25** (227 members), the union of the action-family fixtures
 - Firefox namespaces not mounted: **38**, each with its honest reason
 - Mounted namespaces with member-level gaps: **17**
 - Engine extras (mounted members Firefox does not have): **4**, each justified in COMPAT
@@ -141,10 +141,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `downloads` | `acceptDanger` | no OS download manager or danger-prompt surface exists |
 | `downloads` | `cancel` | the engine hands downloads to the host; it holds no live transfer to cancel |
 | `downloads` | `drag` | drag-on-demand is a host-UI gesture with no download surface |
-| `downloads` | `erase` | the download record store exposes no erase surface |
 | `downloads` | `getFileIcon` | no OS file-icon surface exists |
-| `downloads` | `onCreated` | download lifecycle events beyond onChanged are not surfaced from the store (#522) |
-| `downloads` | `onErased` | no erase verb exists, so an erased event has no source (#522) |
 | `downloads` | `open` | no OS opener surface inside the engine |
 | `downloads` | `pause` | the engine hands downloads to the host; it holds no live transfer to pause |
 | `downloads` | `removeFile` | no OS file-system surface exists |
@@ -189,7 +186,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `contextMenus` | `ACTION_MENU_TOP_LEVEL_LIMIT` (constant), `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
 | `cookies` | `get` (method), `getAll` (method), `getAllCookieStores` (method), `onChanged` (event), `remove` (method), `set` (method) |
 | `declarativeNetRequest` | `DYNAMIC_RULESET_ID` (constant), `GUARANTEED_MINIMUM_STATIC_RULES` (constant), `MAX_NUMBER_OF_DISABLED_STATIC_RULES` (constant), `MAX_NUMBER_OF_DYNAMIC_AND_SESSION_RULES` (constant), `MAX_NUMBER_OF_DYNAMIC_RULES` (constant), `MAX_NUMBER_OF_ENABLED_STATIC_RULESETS` (constant), `MAX_NUMBER_OF_REGEX_RULES` (constant), `MAX_NUMBER_OF_SESSION_RULES` (constant), `MAX_NUMBER_OF_STATIC_RULESETS` (constant), `SESSION_RULESET_ID` (constant), `getAvailableStaticRuleCount` (method), `getDisabledRuleIds` (method), `getDynamicRules` (method), `getEnabledRulesets` (method), `getSessionRules` (method), `isRegexSupported` (method), `testMatchOutcome` (method), `updateDynamicRules` (method), `updateEnabledRulesets` (method), `updateSessionRules` (method), `updateStaticRules` (method) |
-| `downloads` | `download` (method), `onChanged` (event), `search` (method) |
+| `downloads` | `download` (method), `erase` (method), `onChanged` (event), `onCreated` (event), `onErased` (event), `search` (method) |
 | `extension` | `getBackgroundPage` (method), `getURL` (method), `getViews` (method), `inIncognitoContext` (constant), `isAllowedFileSchemeAccess` (method), `isAllowedIncognitoAccess` (method), `lastError` (constant) |
 | `history` | `addUrl` (method), `deleteAll` (method), `deleteRange` (method), `deleteUrl` (method), `getVisits` (method), `onVisitRemoved` (event), `onVisited` (event), `search` (method) |
 | `i18n` | `getAcceptLanguages` (method), `getMessage` (method), `getPreferredSystemLanguages` (method), `getUILanguage` (method) |

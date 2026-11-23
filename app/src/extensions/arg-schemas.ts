@@ -294,6 +294,7 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   /* ---- downloads ------------------------------------------------------------ */
   "downloads.download": { min: 1, max: 1, types: [["object"]] },
   "downloads.search": { min: 0, max: 1, types: [["object"]], ff: [1, 1], note: "the engine also mounts the no-arg form (every handoff of this extension)" },
+  "downloads.erase": { min: 0, max: 1, types: [["object"]], ff: [0, 1], note: "erases this extension own TERMINAL handoff records (ascending ids, memory + store row); active handoffs stay tracked; query filters: id, limit" },
 
   /* ---- i18n ------------------------------------------------------------------ */
   "i18n.getAcceptLanguages": { min: 0, max: 0 },
