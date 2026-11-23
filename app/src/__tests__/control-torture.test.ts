@@ -31,6 +31,11 @@ vi.mock("../transport", () => ({
      wire-default UA set arm; the torture harness keeps no real
      transport singletons, so the arm is a plain no-op here. */
   setEpoxyUserAgent: () => {},
+  /* Same no-op for the explicit TLS voice arm: the harness keeps no
+     transport singletons, and the null voice leaves the harness
+     moored to the UA-synced default. */
+  setEpoxyIdentityVoice: () => {},
+  epoxyIdentityVoiceOf: (v: unknown) => null,
   wispTransport: {
     ready: () => transportState.readyImpl(),
     switchEngine: (e: string) => {
