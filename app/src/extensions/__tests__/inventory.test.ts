@@ -19,7 +19,7 @@ const ALL_NS_PERMISSIONS = [
   "storage", "tabs", "notifications", "contextMenus", "downloads", "cookies",
   "webRequest", "webRequestBlocking", "webNavigation", "alarms", "management",
   "browsingData", "declarativeNetRequest", "bookmarks",
-  "history", "topSites",
+  "history", "topSites", "identity",
 ];
 
 function pkg(name: string, permissions: string[], extra: Record<string, unknown> = {}): Map<string, Uint8Array> {
@@ -109,7 +109,7 @@ describe("mounted-surface conformance (#516 seed)", () => {
     await m.startup();
     const { api } = await apiFor(m, []);
     const b = api.browser as Record<string, unknown>;
-    for (const ns of ["cookies", "webRequest", "notifications", "browsingData"]) {
+    for (const ns of ["cookies", "webRequest", "notifications", "browsingData", "identity"]) {
       expect(b[ns], `${ns} mounted without its permission`).toBeUndefined();
     }
     /* The always-on namespaces still mount. */
@@ -221,6 +221,7 @@ describe("Firefox API inventory conformance (#516 slice 2)", () => {
     expect(absent.has("bookmarks"), "bookmarks mounted by the #520 slice").toBe(false);
     expect(absent.has("history"), "history mounted by the #520 slice").toBe(false);
     expect(absent.has("topSites"), "topSites mounted by the #520 slice").toBe(false);
+    expect(absent.has("identity"), "identity mounted by the #522 slice").toBe(false);
     /* member-level gaps the compat matrix documents; storage.managed
        left the list when the #520 slice mounted the read-only
        enterprise-policy area. */

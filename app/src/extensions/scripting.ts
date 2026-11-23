@@ -230,6 +230,57 @@ export class ScriptingHost {
     this.dispatch?.({ type: "zl:scripting", extId: ext.id, dest, js: [], css: css.map((c) => substituteCss(c, res)), wantResult: false }, null);
   }
 
+  /* #519: the MV2 tabs.executeScript/insertCSS leg. Same page channel
+     as the scripting namespace, but Firefox permissioned the legacy
+     forms on the tab's host grant alone: no "scripting" permission,
+     and no activeTab concept exists in the engine, so this check
+     stops at the host boundary. */
+  private checkLegacy(ext: ExtensionRecord, tabId: number): string {
+    const tab = TABS.get(tabId);
+    if (!tab) throw new Error("Invalid tab ID: " + tabId);
+    if (!hostPatternsMatch(ext.hostPermissions, tab.url)) {
+      throw new Error("zeolite: host permission for '" + tab.url + "' not granted to this extension");
+    }
+    return tab.url;
+  }
+
+  /** Legacy details: {code?, file?}, already validated by the mount
+      (runtime.ts). The raw per-unit results come back; the map to
+      Firefox's results array and the error rejection happen at the
+      mount, because only the mount knows which MDN shape applies. */
+  async legacyExecute(ext: ExtensionRecord, tabId: number, opts: { code?: string; file?: string }): Promise<InjectionResult[]> {
+    const dest = this.checkLegacy(ext, tabId);
+    /* Firefox's ext-tabs-base.js pushes code before file; the page
+       listener emits one result per injected unit. */
+    const js: string[] = [];
+    if (opts.code !== undefined) js.push(opts.code);
+    if (opts.file !== undefined) js.push(...(await this.readFiles(ext.id, [opts.file])));
+    const msg: ScriptingMessage = { type: "zl:scripting", extId: ext.id, dest, js, css: [], wantResult: true };
+    return this.runWithResults(msg);
+  }
+
+  /** Legacy details: {code?, file?}, validated by the mount; the
+      delivery follows the channel exactly like scripting.insertCSS
+      (fire and forget, no result handshake, locale-substituted CSS). */
+  async legacyInsertCss(ext: ExtensionRecord, tabId: number, opts: { code?: string; file?: string }): Promise<void> {
+    const dest = this.checkLegacy(ext, tabId);
+    const css: string[] = [];
+    if (opts.code !== undefined) css.push(opts.code);
+    if (opts.file !== undefined) css.push(...(await this.readFiles(ext.id, [opts.file])));
+    const res = await recordI18n(ext, (pa) => extensions.getResource(ext.id, pa, { fromWeb: false }));
+    this.dispatch?.(
+      {
+        type: "zl:scripting",
+        extId: ext.id,
+        dest,
+        js: [],
+        css: css.map((c) => substituteCss(c, res)),
+        wantResult: false,
+      },
+      null,
+    );
+  }
+
   /* #523: devtools.inspectedWindow.eval rides the same channel and the
      SAME checks as executeScript: the scripting permission plus a host
      permission for the inspected tab (stricter than Firefox, which

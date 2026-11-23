@@ -21,6 +21,7 @@ export const OPTIONAL_API_MODULES = [
   "declarativeNetRequest",
   "downloads",
   "history",
+  "identity",
   "management",
   "menus",
   "notifications",

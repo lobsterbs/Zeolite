@@ -26,7 +26,7 @@ const ALL_NS_PERMISSIONS = [
   "storage", "tabs", "notifications", "contextMenus", "downloads", "cookies",
   "webRequest", "webRequestBlocking", "webNavigation", "alarms", "management",
   "browsingData", "declarativeNetRequest", "declarativeNetRequestFeedback",
-  "bookmarks", "history", "topSites",
+  "bookmarks", "history", "topSites", "identity",
 ];
 
 /* #516 slice 5: the namespaces the argument contract covers.
@@ -37,7 +37,8 @@ const ALL_NS_PERMISSIONS = [
 const COVERED_NAMESPACES = new Set([
   "alarms", "action", "bookmarks", "browserAction", "browsingData",
   "contextMenus", "menus", "cookies", "declarativeNetRequest", "downloads",
-  "extension", "history", "i18n", "management", "notifications", "pageAction",
+  "extension", "history", "i18n", "identity", "management", "notifications",
+  "pageAction",
   "permissions", "runtime", "scripting", "storage", "tabs", "topSites",
   "windows",
 ]);

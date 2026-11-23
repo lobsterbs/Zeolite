@@ -12,9 +12,9 @@ ZL_UPDATE_GAPS_DOC=1 npx vitest run src/extensions/__tests__/gaps-doc.test.ts   
 
 ## Summary
 
-- Mounted namespaces: **25** (227 members), the union of the action-family fixtures
-- Firefox namespaces not mounted: **38**, each with its honest reason
-- Mounted namespaces with member-level gaps: **17**
+- Mounted namespaces: **26** (230 members), the union of the action-family fixtures
+- Firefox namespaces not mounted: **37**, each with its honest reason
+- Mounted namespaces with member-level gaps: **18**
 - Engine extras (mounted members Firefox does not have): **4**, each justified in COMPAT
 
 The wave issues #517-#524 diff against this baseline; a namespace that gains an implementation removes its reason from `FIREFOX_UNMOUNTED_REASONS` and this document regenerates with it gone.
@@ -41,7 +41,6 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `extensionTypes` | schema enum types (RunAt, CSSOrigin); no runtime object in Firefox either |
 | `find` | the engine finder is a page feature, not an extension API surface (#520/#523) |
 | `geckoProfiler` | privileged namespace; no engine surface |
-| `identity` | no OAuth redirect host surface (#522) |
 | `idle` | no OS idle source; reporting 'active' unconditionally would fake a signal, so the namespace stays unmounted (#522: 'where platform capability exists') |
 | `networkStatus` | no host network-status source (#521/#522) |
 | `normandyAddonStudy` | privileged namespace (Firefox study machinery); no engine surface |
@@ -68,7 +67,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | --- | --- | --- |
 | `runtime` | `connectNative` | native-messaging hosts are host-OS processes; the sandboxed worker has no process bridge |
 | `runtime` | `getBackgroundPage` | MV2 background pages have no DOM window in a service-worker engine |
-| `runtime` | `getFrameId` | frame identity exists only for content-script contexts (#517); the background context owns no frame |
+| `runtime` | `getFrameId` | Firefox's runtime schema allows it in content and devtools contexts only (allowedContexts), never the background; the isolated-world lane owns it (#517) |
 | `runtime` | `getPackageDirectoryEntry` | the legacy DirectoryEntry API is not available inside a service worker |
 | `runtime` | `onBrowserUpdateAvailable` | deprecated alias of onUpdateAvailable; host update lifecycle is not observable in-engine |
 | `runtime` | `onPerformanceWarning` | no performance-warning emitter exists for extension contexts |
@@ -84,14 +83,12 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `tabs` | `connect` | per-tab channel messaging needs content-script contexts (#517) |
 | `tabs` | `detectLanguage` | no language-detection model ships with the engine; a guess would fake the detection |
 | `tabs` | `discard` | tab lifecycle (memory pressure, discard) belongs to the host UI; the tab registry is synchronized, not driven |
-| `tabs` | `executeScript` | tab-legacy injection routes through the scripting engine; not mounted yet (#519 lane) |
 | `tabs` | `getZoom` | zoom is host-UI state; the virtualized page has no zoom surface |
 | `tabs` | `getZoomSettings` | zoom is host-UI state; the virtualized page has no zoom surface |
 | `tabs` | `goBack` | session-history control is a host-UI verb; the tab bridge carries no history verb |
 | `tabs` | `goForward` | session-history control is a host-UI verb; the tab bridge carries no history verb |
 | `tabs` | `group` | the UI tab model has no group concept |
 | `tabs` | `hide` | tab visibility is host-UI state; the tab bridge carries no visibility verb |
-| `tabs` | `insertCSS` | tab-legacy style injection routes through the scripting engine; not mounted yet (#519 lane) |
 | `tabs` | `move` | tab placement belongs to the host UI; the bridge has no move verb |
 | `tabs` | `moveInSuccession` | tab placement belongs to the host UI; the bridge has no move verb |
 | `tabs` | `onAttached` | window/tab attachment events need host-UI reporting; the bridge does not report them |
@@ -159,6 +156,12 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `notifications` | `onShowSettings` | no OS notification-settings surface exists |
 | `notifications` | `onShown` | the notification host reports click and close only; no shown event exists |
 | `history` | `onTitleChanged` | titles never reach the worker; the visit store records URLs only |
+| `identity` | `getAccounts` | Chrome account surface; Firefox's own schema does not implement it, and no account host exists (#522) |
+| `identity` | `getAuthToken` | Chrome account surface; Firefox's own schema does not implement it, and no account host exists (#522) |
+| `identity` | `getProfileUserInfo` | Chrome account surface; Firefox's own schema does not implement it, and no account host exists (#522) |
+| `identity` | `launchWebAuthFlow` | no OAuth redirect host or host auth window exists in the engine; getRedirectURL's URL is inert outside a real browser (#522) |
+| `identity` | `onSignInChanged` | Firefox's own identity schema marks it unsupported; no sign-in account host exists (#522) |
+| `identity` | `removeCachedAuthToken` | Chrome account surface; Firefox's own schema does not implement it, and no account host exists (#522) |
 | `extension` | `setUpdateUrlData` | update-URL state belongs to a host updater; the engine ships no updater |
 | `browserAction` | `getUserSettings` | toolbar placement and user toggles are host-UI state the engine cannot see |
 | `browserAction` | `onUserSettingsChanged` | user action settings are host-UI state with no change reporting |
@@ -190,6 +193,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `extension` | `getBackgroundPage` (method), `getURL` (method), `getViews` (method), `inIncognitoContext` (constant), `isAllowedFileSchemeAccess` (method), `isAllowedIncognitoAccess` (method), `lastError` (constant) |
 | `history` | `addUrl` (method), `deleteAll` (method), `deleteRange` (method), `deleteUrl` (method), `getVisits` (method), `onVisitRemoved` (event), `onVisited` (event), `search` (method) |
 | `i18n` | `getAcceptLanguages` (method), `getMessage` (method), `getPreferredSystemLanguages` (method), `getUILanguage` (method) |
+| `identity` | `getRedirectURL` (method) |
 | `management` | `get` (method), `getAll` (method), `getSelf` (method), `onDisabled` (event), `onEnabled` (event), `onInstalled` (event), `onUninstalled` (event), `setEnabled` (method), `uninstall` (method), `uninstallSelf` (method) |
 | `menus` | `ACTION_MENU_TOP_LEVEL_LIMIT` (constant), `create` (method), `onClicked` (event), `remove` (method), `removeAll` (method), `update` (method) |
 | `notifications` | `clear` (method), `create` (method), `getAll` (method), `getPermissionLevel` (method), `onButtonClicked` (event), `onClicked` (event), `onClosed` (event), `update` (method) |
@@ -198,7 +202,7 @@ The wave issues #517-#524 diff against this baseline; a namespace that gains an 
 | `runtime` | `connect` (method), `getBrowserInfo` (method), `getContexts` (method), `getManifest` (method), `getPlatformInfo` (method), `getURL` (method), `id` (constant), `lastError` (constant), `onConnect` (event), `onConnectExternal` (event), `onInstalled` (event), `onMessage` (event), `onMessageExternal` (event), `onStartup` (event), `onSuspend` (event), `onUpdateAvailable` (event), `openOptionsPage` (method), `reload` (method), `requestUpdateCheck` (method), `sendMessage` (method), `setUninstallURL` (method) |
 | `scripting` | `executeScript` (method), `insertCSS` (method) |
 | `storage` | `local` (constant), `managed` (constant), `onChanged` (event), `session` (constant), `sync` (constant) |
-| `tabs` | `TAB_ID_NONE` (constant), `create` (method), `duplicate` (method), `get` (method), `getCurrent` (method), `highlight` (method), `onActivated` (event), `onCreated` (event), `onRemoved` (event), `onUpdated` (event), `query` (method), `remove` (method), `sendMessage` (method), `update` (method) |
+| `tabs` | `TAB_ID_NONE` (constant), `create` (method), `duplicate` (method), `executeScript` (method), `get` (method), `getCurrent` (method), `highlight` (method), `insertCSS` (method), `onActivated` (event), `onCreated` (event), `onRemoved` (event), `onUpdated` (event), `query` (method), `remove` (method), `sendMessage` (method), `update` (method) |
 | `topSites` | `get` (method) |
 | `webNavigation` | `onBeforeNavigate` (event), `onCommitted` (event), `onCompleted` (event), `onDOMContentLoaded` (event) |
 | `webRequest` | `MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES` (constant), `handlerBehaviorChanged` (method), `onBeforeRedirect` (event), `onBeforeRequest` (event), `onBeforeSendHeaders` (event), `onCompleted` (event), `onErrorOccurred` (event), `onHeadersReceived` (event), `onResponseStarted` (event), `onSendHeaders` (event) |

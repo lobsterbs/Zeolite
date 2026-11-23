@@ -6,7 +6,8 @@
    ARG_SCHEMAS is a machine-readable table: per mounted method of the
    covered namespaces (alarms, action, bookmarks, browserAction,
    browsingData, contextMenus + menus, cookies, declarativeNetRequest,
-   downloads, extension, history, i18n, management, notifications,
+   downloads, extension, history, i18n, identity, management,
+   notifications,
    permissions, pageAction, runtime, scripting, storage, tabs,
    topSites, windows), the
    accepted argument count and the JS kind every position may carry.
@@ -155,6 +156,18 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
      highlightInfo object. */
   "tabs.duplicate": { min: 1, max: 2, types: [["number"], ["object"]] },
   "tabs.highlight": { min: 1, max: 1, types: [["object"]] },
+  /* #519: Firefox's MV2 legacy leg over the scripting engine
+     (schema max_manifest_version 2 - the members stay absent on MV3
+     records). Both overloads are positionally ambiguous - the first
+     slot carries the optional tabId, the second the details, and the
+     (details, callback) form takes its callback in-slot - so the kind
+     table stays unchecked here on the runtime.sendMessage precedent and
+     the implementation owns the details-shape and host-grant checks
+     (rejected honestly, never lied about); the (tabId, details,
+     callback) form still resolves its trailing function through the
+     generic slice. */
+  "tabs.executeScript": { min: 1, max: 2, ff: [1, 3], note: "MV2-only (#519): resolves with the per-frame results array, injected-unit errors reject the promise per MDN; the omitted tabId defaults to the active tab; kinds unchecked (runtime.sendMessage precedent), shape + host-grant checked by the implementation" },
+  "tabs.insertCSS": { min: 1, max: 2, ff: [1, 3], note: "MV2-only (#519): resolves void per MDN; code before file; frame targeting, allFrames and user cssOrigin reject (page world, main frame, author styles); kinds unchecked (runtime.sendMessage precedent), shape + host-grant checked by the implementation" },
   /* ---- action family -----------------------------------------------------
      The toolbar action family mounts for MV3 `action`, MV2
      `browserAction` and MV2 `pageAction` (pageAction without badge /
@@ -301,6 +314,12 @@ export const ARG_SCHEMAS: Record<string, ArgSchema> = {
   "i18n.getMessage": { min: 1, max: 2, types: [["string"], ["any"]] },
   "i18n.getPreferredSystemLanguages": { min: 0, max: 0 },
   "i18n.getUILanguage": { min: 0, max: 0 },
+
+  /* ---- identity ---------------------------------------------------------- */
+  /* #522: mounts only with the identity permission; getRedirectURL
+     is Firefox's own sync computation (ext-identity.js: sha1 hex of
+     the extension id + the allizom redirect domain), path optional. */
+  "identity.getRedirectURL": { min: 0, max: 1, types: [["string"]] },
 
   /* ---- management --------------------------------------------------------------- */
   "management.getSelf": { min: 0, max: 0 },

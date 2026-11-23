@@ -78,6 +78,7 @@ export const NAMESPACE_COMPAT: Record<string, string[]> = {
   extension: ["chrome.extension (MV2)"],
   history: ["history.*"],
   i18n: ["chrome.i18n"],
+  identity: ["identity.*"],
   management: ["management.*"],
   menus: ["contextMenus.*"],
   notifications: ["notifications.*"],

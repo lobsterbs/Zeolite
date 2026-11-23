@@ -76,6 +76,7 @@ import type { ExtensionManager } from "./manager";
 import { bootEnabled, bootExtension, idleTerminate, backgroundIsServiceWorker, registerSuspendEvent } from "./background";
 import { browsingDataRemoveCache, browsingDataRemoveCookies, browsingDataRemoveDownloads, browsingDataRemoveIndexedDB, browsingDataRemoveServiceWorkers, browsingDataSettings, browsingDataUnreachable, keptOrigins, type BrowsingDataOptions } from "./browsingdata";
 import { chromeApi } from "./chrome";
+import { identityNs } from "./identity";
 import { extPageOpenUrl, pageClientsOf } from "./serve";
 import { makeI18nNs, substituteManifestStrings } from "./i18n";
 import type { I18nResolved } from "./i18n";
@@ -352,6 +353,87 @@ function hostBrowserInfo(): { name: string; version: string } {
   return { name: brand, version: m ? m[1] : "" };
 }
 
+/* #519: parse + validate a legacy tabs inject call: (details) |
+   (details, callback) | (tabId, details) - the validation layer
+   has already sliced the (tabId, details, callback) form's
+   callback, so only the (details, callback) form's function
+   reaches the second slot. Firefox's InjectDetails members that
+   the engine cannot honor reject here (frame targeting,
+   allFrames, user cssOrigin), the accepted ones (runAt,
+   matchAboutBlank) pass through with honest delivery: injected
+   code runs in the page world, main frame only. */
+function legacyInjectCall(
+  kind: "js" | "css",
+  a: unknown,
+  b?: unknown,
+): { tabId?: number; details: { code?: string; file?: string }; callback?: (value?: unknown) => void } {
+  let tabId: number | undefined;
+  let rawDetails: unknown;
+  let callback: ((value?: unknown) => void) | undefined;
+  if (typeof a === "number") {
+    tabId = a;
+    rawDetails = b;
+    if (typeof b === "function" || (b !== undefined && typeof b !== "object")) {
+      throw new TypeError("zeolite: tabs script injection requires a details object");
+    }
+  } else {
+    rawDetails = a;
+    if (typeof b === "function") callback = b as (value?: unknown) => void;
+    else if (b !== undefined) {
+      throw new TypeError("zeolite: tabs script injection: the second argument must be the details object or a callback");
+    }
+  }
+  if (rawDetails === null || typeof rawDetails !== "object" || Array.isArray(rawDetails)) {
+    throw new TypeError("zeolite: tabs script injection requires a details object");
+  }
+  const d = rawDetails as Record<string, unknown>;
+  const out: { code?: string; file?: string } = {};
+  if (d.code !== undefined) {
+    if (typeof d.code !== "string") throw new TypeError("zeolite: tabs script injection: code must be a string");
+    out.code = d.code;
+  }
+  if (d.file !== undefined) {
+    if (typeof d.file !== "string") throw new TypeError("zeolite: tabs script injection: file must be a string");
+    out.file = d.file;
+  }
+  if (out.code === undefined && out.file === undefined) {
+    throw new Error("zeolite: tabs." + (kind === "js" ? "executeScript" : "insertCSS") + " requires code or file");
+  }
+  if (d.frameId !== undefined && d.frameId !== 0) {
+    throw new Error("zeolite: frame targeting is not supported (injected code runs in the page world, main frame only)");
+  }
+  if (d.allFrames === true) {
+    throw new Error("zeolite: allFrames is not supported (injected code runs in the page world, main frame only)");
+  }
+  if (d.runAt !== undefined && d.runAt !== "document_start" && d.runAt !== "document_end" && d.runAt !== "document_idle") {
+    throw new Error("zeolite: tabs script injection: runAt must be document_start, document_end or document_idle");
+  }
+  if (kind === "css" && d.cssOrigin !== undefined && d.cssOrigin !== "author") {
+    throw new Error("zeolite: cssOrigin '" + String(d.cssOrigin) + "' is not available (the page listener injects author styles only)");
+  }
+  /* matchAboutBlank: accepted; an about:-class page carries no
+     scripting listener, so executeScript rejects after the 30s
+     answer window instead of pretending the script ran. */
+  return { tabId, details: out, callback };
+}
+
+/* The (details, callback) overload's delivery: same one-shot
+   contract as the sliced response callback (arg-schemas.ts) -
+   invoked once with the fulfillment value, no arguments when the
+   value is undefined, no arguments on rejection - while the
+   returned promise keeps carrying the failure. */
+function finishLegacyInject<T>(p: Promise<T>, callback?: (value?: unknown) => void): Promise<T> {
+  if (callback) {
+    Promise.resolve(p).then(
+      (v) => queueMicrotask(() => {
+        if (v === undefined) callback();
+        else callback(v);
+      }),
+      () => queueMicrotask(() => callback()),
+    );
+  }
+  return p;
+}
 export function buildApi(
   ext: ExtensionRecord,
   sender: MessageSender,
@@ -622,6 +704,53 @@ export function buildApi(
         };
       })()
     : undefined;
+  /* #519: the MV2 legacy members above; the helpers reject the
+     engine-impossible parts of Firefox's InjectDetails honestly. */
+  const tabsLegacyNs =
+    ext.manifest.manifest_version === 2
+      ? {
+          executeScript: (a: unknown, b?: unknown): Promise<unknown[]> => {
+            try {
+              const call = legacyInjectCall("js", a, b);
+              const tabId = call.tabId ?? TABS.activeTab()?.id;
+              if (tabId === undefined) {
+                return Promise.reject(new Error("zeolite: tabs.executeScript requires a tabId (no active tab)"));
+              }
+              /* Firefox defaults the omitted tabId to the active tab
+                 of the current window; the engine's single window has
+                 exactly one. */
+              return finishLegacyInject(
+                SCRIPTING.legacyExecute(ext, tabId, call.details).then((results) => {
+                  /* MDN: the promise resolves with the script results
+                     per injected frame; an injected-unit error REJECTS
+                     the promise instead of riding as an entry. */
+                  const failed = results.find((r) => typeof r.error === "string");
+                  if (failed) throw new Error(failed.error);
+                  return results.map((r) => r.result);
+                }),
+                call.callback,
+              );
+            } catch (e) {
+              /* In-contract calls never reject synchronously: the
+                 semantic errors above arrive as rejections. */
+              return Promise.reject(e instanceof Error ? e : new Error(String(e)));
+            }
+          },
+          insertCSS: (a: unknown, b?: unknown): Promise<void> => {
+            try {
+              const call = legacyInjectCall("css", a, b);
+              const tabId = call.tabId ?? TABS.activeTab()?.id;
+              if (tabId === undefined) {
+                return Promise.reject(new Error("zeolite: tabs.insertCSS requires a tabId (no active tab)"));
+              }
+              return finishLegacyInject(SCRIPTING.legacyInsertCss(ext, tabId, call.details), call.callback);
+            } catch (e) {
+              return Promise.reject(e instanceof Error ? e : new Error(String(e)));
+            }
+          },
+        }
+      : undefined;
+
   /* tabs: the engine-side mirror of the UI tab model (see ./tabs).
      The tabs permission (or a matching host permission) gates url and
      title visibility exactly as Firefox does; getCurrent has no tab
@@ -685,6 +814,10 @@ export function buildApi(
       }
       await TABS.update(ids[ids.length - 1] as number, { active: true });
     },
+    /* #519: Firefox's MV2 legacy leg of the scripting engine
+       (schema max_manifest_version 2, so MV3 records never see
+       the members), host-grant permissioned, results per MDN. */
+    ...(tabsLegacyNs ?? {}),
     onCreated: makeTabsEvent(ext, "created"),
     onUpdated: makeTabsEvent(ext, "updated"),
     onActivated: makeTabsEvent(ext, "activated"),
@@ -1306,6 +1439,9 @@ export function buildApi(
       })()
     : undefined;
 
+  /* #522: identity mounts only with the permission, exactly as
+     Firefox's identity.json schema gates the namespace. */
+  const identityExtNs = ext.permissions.includes("identity") ? identityNs(ext) : undefined;
   const browser: Record<string, unknown> = {
     runtime,
     ...(extensionNs ? { extension: extensionNs } : {}),
@@ -1331,6 +1467,7 @@ export function buildApi(
     ...(historyNs && !isApiDetached("history") ? { history: historyNs } : {}),
     ...(topSitesNs && !isApiDetached("topSites") ? { topSites: topSitesNs } : {}),
     ...(bookmarksNs && !isApiDetached("bookmarks") ? { bookmarks: bookmarksNs } : {}),
+    ...(identityExtNs && !isApiDetached("identity") ? { identity: identityExtNs } : {}),
   };
   /* #516 slice 3: the mounted surface validates its argument contract
      (arg-schemas.ts) before any engine work runs. chromeApi wraps the

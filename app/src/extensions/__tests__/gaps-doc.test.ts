@@ -21,7 +21,7 @@ const ALL_NS_PERMISSIONS = [
   "storage", "tabs", "notifications", "contextMenus", "downloads", "cookies",
   "webRequest", "webRequestBlocking", "webNavigation", "alarms", "management",
   "browsingData", "declarativeNetRequest", "bookmarks",
-  "history", "topSites",
+  "history", "topSites", "identity",
 ];
 
 /** The full mountable surface: the action family mounts one namespace

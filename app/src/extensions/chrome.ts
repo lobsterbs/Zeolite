@@ -7,6 +7,8 @@ const CALLBACK_METHODS = new Set([
   "tabs.get", "tabs.getCurrent", "tabs.query", "tabs.create", "tabs.update", "tabs.remove", "tabs.sendMessage",
   "windows.get", "windows.getCurrent", "windows.getLastFocused", "windows.getAll",
   "scripting.executeScript", "scripting.insertCSS",
+  /* #519: the MV2 legacy members take a movable callback too. */
+  "tabs.executeScript", "tabs.insertCSS",
   "contextMenus.remove", "contextMenus.removeAll", "menus.remove", "menus.removeAll",
   "action.isEnabled", "action.getTitle", "action.getBadgeText", "action.getBadgeBackgroundColor", "action.getBadgeTextColor", "action.getPopup",
   "browserAction.isEnabled", "browserAction.getTitle", "browserAction.getBadgeText", "browserAction.getBadgeBackgroundColor", "browserAction.getBadgeTextColor", "browserAction.getPopup",
