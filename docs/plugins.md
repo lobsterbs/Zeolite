@@ -11,10 +11,13 @@ and emits ONE `UNSUPPORTED` diagnostic per name per worker lifetime
 (a `register()` that throws degrades the same way, with a RUNTIME
 warning).
 
-A design for the 7.0 first-party signed module system (origin-local signed
-bundles, typed permissions, stream hooks) lives in
-`docs/plugin-modules-design.md`. It is design-only — nothing described there
-is implemented; the static registry remains the shipped capability.
+The 7.0 first-party signed module system (origin-local signed modules,
+typed permissions, stream hooks) lives in `docs/plugin-modules-design.md`.
+Its first experimental runtime slice is implemented (#542): see the
+First-party signed modules section below and the design doc's status
+header. Designed-only, still open on #542: stream hooks (onResponseStream),
+the host management UI, and the storage:site and spoof:configure grants.
+The static registry above remains the shipped baseline and migration path.
 
 A plugin is a TypeScript module in `app/src/plugins/` that exports
 `register(hooks)`, listed in a site's `plugins` child node in
