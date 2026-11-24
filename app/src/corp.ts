@@ -14,17 +14,30 @@
    built the response - rewrite stream, redirect, honest error
    page, cache hit - the embedder sees an embeddable response.
 
+   COI parity (the coi zl:config arm, ./swstate): when armed, the
+   same rebuild also stamps COEP: credentialless, so proxied frame
+   documents join the isolated deployment's agent cluster and pages
+   can reach SharedArrayBuffer. credentialless (not require-corp)
+   on purpose: no-cors passthroughs (opaque responses keep their
+   native object below) then load without CORP, and browsers that
+   ignore the value degrade to today's non-isolated behavior.
+
    Honest limits: opaque, opaqueredirect and error responses keep
    their native object (headers are immutable and the body of an
    opaque response is unreadable); those are no-cors passthroughs
    for cross-origin subresources, which a COEP embedder's pages
    already load through the engine. */
 
+import { coiEnabled } from "./swstate";
+
 export function withCorp(r: Response): Response {
   if (!r || (r.type !== "default" && r.type !== "cors")) return r;
   try {
     const h = new Headers(r.headers);
     h.set("cross-origin-resource-policy", "cross-origin");
+    if (coiEnabled()) {
+      h.set("cross-origin-embedder-policy", "credentialless");
+    }
     return new Response(r.body, {
       status: r.status,
       statusText: r.statusText,

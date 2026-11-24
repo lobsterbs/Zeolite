@@ -224,6 +224,27 @@ export function setQueryRoutes(on: boolean): void {
   queryRoutes = on;
 }
 
+/* COI stamp arm: a host deployment that runs cross-origin isolation
+   (COOP/COEP on its top documents, e.g. a split-origin proxy shell)
+   needs the engine's own frame documents to carry COEP as well, or
+   proxied pages never join the isolated cluster and the
+   SharedArrayBuffer class stays unavailable under the engine. When
+   armed, withCorp stamps COEP: credentialless alongside the CORP
+   stamp. Off by default; a host zl:config push arms it. Ephemeral
+   like navHandles: a worker restart reverts it, the host re-sends
+   its choice on boot. COOP is deliberately NOT stamped here: a
+   non-top-level document ignores it, and the top document's COOP
+   must come from its origin server. */
+let coiArmed = false;
+
+export function coiEnabled(): boolean {
+  return coiArmed;
+}
+
+export function setCoi(on: boolean): void {
+  coiArmed = on;
+}
+
 /* #609: strict opaque custody. Off (the default): a keyless worker
    still answers mints with browser-decodable legacy routes - the
    documented compat mode. On: a keyless worker refuses a mint

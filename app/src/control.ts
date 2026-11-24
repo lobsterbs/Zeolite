@@ -87,7 +87,7 @@ import { beginRecording, finishRecording } from "./recording";
 import { ghosteryListFetch, pageCacheClear, virtualHcaptchaFrameFragment } from "./request";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
-import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, locationTargetingEnabled, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setLocationTargeting, setNavHandles, setQueryRoutes, setReloadBypass, setSiteEnabled, setReplayCapMb, replayCapMbValue, setSpoolUploads, spoolUploadsEnabled, setStrictOpacity, strictOpacityEnabled } from "./swstate";
+import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, locationTargetingEnabled, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setLocationTargeting, setNavHandles, setQueryRoutes, setCoi, setReloadBypass, setSiteEnabled, setReplayCapMb, replayCapMbValue, setSpoolUploads, spoolUploadsEnabled, setStrictOpacity, strictOpacityEnabled } from "./swstate";
 import { adaptiveEvidenceReset, adaptiveEvidenceSnapshot } from "./adaptive-evidence";
 import { locationTargetSnapshot, recordSpa404Report } from "./location-targeting";
 import { setTracing, tracingSnapshot } from "./tracing";
@@ -239,6 +239,13 @@ export interface ControlMessage {
       token rides ?zlNavh=). Ephemeral like navHandles: a worker
       restart reverts it, the host re-pushes on boot. */
   queryRoutes?: boolean;
+  /** zl:config: opt-in COI parity stamp. On: engine-served responses
+      carry COEP: credentialless so proxied frame documents join a
+      cross-origin-isolated deployment's cluster (the shell's own
+      COOP/COEP come from the origin server). Ephemeral like
+      navHandles: a worker restart reverts it, the host re-pushes on
+      boot. */
+  coi?: boolean;
   /** zl:config: opt-in strict opaque custody (#609). On: a keyless
       worker refuses zl:mint with a named reason instead of
       answering a browser-decodable legacy route, and every
@@ -773,6 +780,8 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       if (typeof msg.navHandles === "boolean") setNavHandles(msg.navHandles);
       /* Injector phase 2: same rule for the query-shape routes. */
       if (typeof msg.queryRoutes === "boolean") setQueryRoutes(msg.queryRoutes);
+      /* COI parity: same rule for the credentialless stamp arm. */
+      if (typeof msg.coi === "boolean") setCoi(msg.coi);
       /* #609: same rule for the strict-opacity custody policy. */
       if (typeof msg.strictOpacity === "boolean") setStrictOpacity(msg.strictOpacity);
       /* #633: absent keeps the live scheme, the rule every other

@@ -365,6 +365,17 @@ substitute: it exempts no-cors subresources, not iframes, and the
 `credentialless` iframe attribute is an ephemeral empty context that
 breaks the boot page's registration.
 
+When the host wants proxied documents themselves to join the
+isolated cluster (frame documents must carry COEP, not just CORP,
+for their pages to reach SharedArrayBuffer), the host arms the
+`coi` knob: sending `zl:config` with `coi: true` stamps
+`Cross-Origin-Embedder-Policy: credentialless` on every
+engine-served response (the same rebuild as the CORP stamp,
+`app/src/corp.ts`). The choice is ephemeral worker state; the
+host re-pushes it on boot like `navHandles`. Browsers without
+`credentialless` support ignore the header and keep the
+non-isolated behavior, so the arm never blocks rendering.
+
 ## 8. Pin the bytes and verify them
 
 Pin by dist commit. The reference host Dockerfile carries:
