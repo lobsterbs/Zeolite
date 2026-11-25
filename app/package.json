@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "devDependencies": {
+    "@types/node": "26.6.10",
     "@types/whatwg-url": "^13.0.0",
     "esbuild": "^0.21.3",
     "fake-indexeddb": "^6.0.0",

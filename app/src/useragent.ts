@@ -97,8 +97,8 @@ export function userAgentDataScript(userAgent: string, navigatorPrototype: strin
     for (var zlUaKey of ["brands", "mobile", "platform"]) {
       (function (key) { prop(zlUaData, key, function () { return zlUaCopy(zlUaIdentity[key]); }); })(zlUaKey);
     }
-    Object.defineProperty(zlUaData, "toJSON", { configurable: true, value: function () { return zlUaLow(); } });
-    Object.defineProperty(zlUaData, "getHighEntropyValues", { configurable: true, value: function (hints) {
+    Object.defineProperty(zlUaData, "toJSON", { configurable: true, value: zlNat(function () { return zlUaLow(); }, "toJSON") });
+    Object.defineProperty(zlUaData, "getHighEntropyValues", { configurable: true, value: zlNat(function (hints) {
       return Promise.resolve().then(function () {
         if (hints === null || (typeof hints !== "object" && typeof hints !== "function")) throw new TypeError("hints must be a sequence");
         var result = zlUaLow();
@@ -107,7 +107,7 @@ export function userAgentDataScript(userAgent: string, navigatorPrototype: strin
         }
         return result;
       });
-    } });
+    }, "getHighEntropyValues") });
   }
 } catch (e) {}`;
 }

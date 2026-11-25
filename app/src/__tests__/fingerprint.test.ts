@@ -247,7 +247,7 @@ describe("bug-scout 2026-10-16 (#223, #224, #225)", () => {
 
   it("worker transferToImageBitmap clears the source canvas like the native method (#225)", () => {
     const w = workerFingerprintScript(DEFAULT_PROFILE);
-    expect(w).toMatch(/transferToImageBitmap = function \(\) \{[\s\S]{0,220}this\.width = this\.width/);
+    expect(w).toMatch(/transferToImageBitmap = zlNat\(function \(\) \{[\s\S]{0,260}this\.width = this\.width/);
   });
 });
 
