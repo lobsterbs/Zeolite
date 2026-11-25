@@ -181,8 +181,8 @@ jobs:
       # new artifact.
       - name: Vendor epoxy transport (fork artifact, sha-pinned)
         env:
-          EPOXY_JS_SHA256: 5a7075451f460aa2c969334c1e924885c6bdda36001418057b267aa13a36db52
-          EPOXY_WASM_SHA256: 9fcab511a1550617a54ac97ac662b3e34d27ed59d8206865dfcb69699f8b15db
+          EPOXY_JS_SHA256: 0a6327072ff85693a80eb51746da4cca64419329b4512abd066d25388b60251c
+          EPOXY_WASM_SHA256: 1f5588aa40843d68ed643785674e0f42a785a9716c9815d154f9401bbdb99d3e
         run: |
           {
             mkdir -p app/public/epoxy &&
@@ -603,8 +603,8 @@ jobs:
           mkdir -p app/public/epoxy
           curl -fsSL "https://github.com/lobsterbs/epoxy-tls/releases/download/zeolite/epoxy.js" -o app/public/epoxy/epoxy.js
           curl -fsSL "https://github.com/lobsterbs/epoxy-tls/releases/download/zeolite/epoxy.wasm" -o app/public/epoxy/epoxy.wasm
-          echo "5a7075451f460aa2c969334c1e924885c6bdda36001418057b267aa13a36db52  app/public/epoxy/epoxy.js" | sha256sum -c -
-          echo "9fcab511a1550617a54ac97ac662b3e34d27ed59d8206865dfcb69699f8b15db  app/public/epoxy/epoxy.wasm" | sha256sum -c -
+          echo "0a6327072ff85693a80eb51746da4cca64419329b4512abd066d25388b60251c  app/public/epoxy/epoxy.js" | sha256sum -c -
+          echo "1f5588aa40843d68ed643785674e0f42a785a9716c9815d154f9401bbdb99d3e  app/public/epoxy/epoxy.wasm" | sha256sum -c -
       # #556: serve the forked libcurl.js build (streaming upload seam).
       # The fork dist lives on the libcurljs-fork branch, built by
       # libcurljs-build.yml and committed there (never committed here).
