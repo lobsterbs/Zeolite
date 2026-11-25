@@ -1687,7 +1687,8 @@ struct Attr {
 /// Returns None when the remaining text is not an attribute (tag end).
 fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
     let trimmed = s.trim_start();
-    let lead_ws = s[..s.len() - trimmed.len()].to_string();
+    let mut lead_ws = s[..s.len() - trimmed.len()].to_string();
+    let src_ws = lead_ws.len();
     if trimmed.is_empty() || trimmed.starts_with('>') || trimmed.starts_with("/>") {
         return None;
     }
@@ -1699,10 +1700,21 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
     // fold_slash = false for close tags.
     let sep = usize::from(fold_slash && trimmed.starts_with('/'));
     let trimmed = &trimmed[sep..];
+    // The dropped '/' was the only separator: emit a space so the
+    // tag name and attribute do not fuse (`<imgsrc=`).
+    if sep == 1 && lead_ws.is_empty() {
+        lead_ws.push(' ');
+    }
     // Name runs to '=', whitespace, or '>'.
+    // A '/' past the first byte also ends the name (HTML5 parity:
+    // '<a/b/href=x>' has attributes b and href). At index 0 it is
+    // close-tag syntax; splitting there would consume nothing.
     let name_end = trimmed
-        .find(|c: char| c == '=' || c.is_ascii_whitespace() || c == '>')
-        .unwrap_or(trimmed.len());
+        .char_indices()
+        .find(|&(i, c)| {
+            c == '=' || c.is_ascii_whitespace() || c == '>' || (c == '/' && i > 0)
+        })
+        .map_or(trimmed.len(), |(i, _)| i);
     let name = trimmed[..name_end].to_string();
     let rest = &trimmed[name_end..];
     let after_ws = rest.trim_start();
@@ -1722,7 +1734,7 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
                 .unwrap_or(vstart.len());
             (vstart[..end].to_string(), ws + end, None)
         };
-        let consumed = lead_ws.len() + sep + eq + consumed_v;
+        let consumed = src_ws + sep + eq + consumed_v;
         return Some(Attr {
             consumed,
             lead_ws,
@@ -1732,7 +1744,7 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
         });
     }
     // Boolean attribute (no value).
-    let consumed = lead_ws.len() + sep + name_end;
+    let consumed = src_ws + sep + name_end;
     Some(Attr {
         consumed,
         lead_ws,
@@ -4282,6 +4294,18 @@ document.write('<script src=x></script>');
         assert!(
             out.contains(&cfg().encode_url("https://t.example/p")),
             "a href rewritten: {}",
+            out
+        );
+        // The folded '/' still separates: no `<imgsrc=` / `<ahref=`.
+        assert!(out.contains("<img src="), "img tag name intact: {}", out);
+        assert!(out.contains("<a href="), "a tag name intact: {}", out);
+        // A second '/' separator must not fuse into the name either.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = r.process("<a/b/href=\"https://t.example/p\">x</a>");
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/p")),
+            "href after a second slash rewritten: {}",
             out
         );
     }
