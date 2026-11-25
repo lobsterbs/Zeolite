@@ -107,3 +107,12 @@ degrade to the ring provider's offerable subset (9 of the real
 browsers' 15 cipher suites; no X25519MLKEM768 key share on this arm),
 and the h2 SETTINGS shape stays hyper's - only the ClientHello is
 shaped, and the sha-pinned vendor step in CI gates the exact bytes.
+
+Auto-fallback: a derived (UA-synced) voice is a guess, not a user decision -
+when the shaped hello is refused at the TLS layer (a peer alert or a handshake
+parse failure), the engine falls back to the native hello for the rest of the
+worker's life and retries the request once. A refused handshake precedes any
+application data, so the retry cannot double-deliver. The refusal lands in the
+diagnostics ring as a TRANSPORT warning. An explicitly pinned voice keeps its
+honest failure instead: pinning is for observing the shaped wire, not for
+availability. A real voice or UA change re-arms the fallback for another chance.

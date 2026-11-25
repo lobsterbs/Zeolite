@@ -1,4 +1,5 @@
 import { installWispAuthSocket } from "./wisp-auth";
+import { DIAG } from "./diag";
 import { blobUploadController, type UploadController } from "./upload-stream";
 
 /* libcurl-transport adapter (vendored seam).
@@ -414,6 +415,40 @@ export function epoxyIdentityVoiceOf(v: unknown): number | null {
 /* The pinned voice; null = UA-synced (the default). */
 let epoxyIdentityVoice: number | null = null;
 
+/* 2026-11-25 (TLS-voice fallback lane): when the hello on the wire
+   was UA-derived, not explicitly pinned, and the peer or the local
+   stack refuses it at the TLS layer, the engine falls back to the
+   native hello for the rest of this worker's life instead of failing
+   every navigation: the derived voice is a guess, and the guess loses
+   to working traffic. An explicitly pinned voice (tlsVoice
+   chromium/firefox/native) is a deliberate fidelity choice and keeps
+   its honest failure. Sticky by design: one refusal disarms the
+   shaped hello until a real voice/UA change re-arms it.
+   ponytail: the ceiling is per worker, not per destination - the
+   epoxy client multiplexes every host over one profile, so one picky
+   server disarms shaping everywhere; per-destination pools are the
+   upgrade path. */
+let epoxyVoiceFallbackArmed = false;
+
+/** True after the auto-fallback fired (sticky until a voice or UA
+    change resets it). */
+export function epoxyVoiceFallbackActive(): boolean {
+  return epoxyVoiceFallbackArmed;
+}
+
+/** True when a rejected epoxy fetch carries a TLS-layer refusal: a
+    peer alert (AlertReceived(..)) or a handshake parse failure on
+    either side (InvalidMessage / CorruptMessage / PeerMisbehaved -
+    the rustls error vocabulary). Connect-class and transport errors
+    stay out so the retry cannot burn on unrelated failures. Pure;
+    unit-gated (__tests__/tls-voice-fallback.test.ts). */
+export function epoxyTlsRefusalError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    /AlertReceived|(Invalid|Corrupt)Message|PeerMisbehaved/i.test(err.message)
+  );
+}
+
 /** Pin or unpin the TLS voice. A real change drops the epoxy
     singletons (same shape as setEpoxyUserAgent) so the next init
     rebuilds on the new hello. */
@@ -421,6 +456,7 @@ export function setEpoxyIdentityVoice(v: number | null): void {
   const next = v === 0 || v === 1 || v === 2 ? v : null;
   if (next === epoxyIdentityVoice) return;
   epoxyIdentityVoice = next;
+  epoxyVoiceFallbackArmed = false;
   epoxyClient = null;
   epoxyInitPromise = null;
 }
@@ -432,6 +468,7 @@ export function setEpoxyUserAgent(ua: unknown): void {
   const next = typeof ua === "string" ? ua : "";
   if (next === epoxyUserAgent) return;
   epoxyUserAgent = next;
+  epoxyVoiceFallbackArmed = false;
   epoxyClient = null;
   epoxyInitPromise = null;
 }
@@ -464,7 +501,9 @@ async function getEpoxy(cfg: { websocket: string }): Promise<EpoxyFetchClient> {
          tlsVoice field) wins over the derivation. The effective value
          is re-read on every rebuild because both setters drop the
          singletons on a real change. */
-      options.identity = epoxyIdentityVoice ?? epoxyIdentityForUa(epoxyUserAgent);
+      options.identity = epoxyVoiceFallbackArmed
+        ? 0
+        : epoxyIdentityVoice ?? epoxyIdentityForUa(epoxyUserAgent);
       epoxyClient = new mod.EpoxyClient(cfg.websocket, options);
       epoxyHandlers = mod.EpoxyHandlers ?? null;
     })();
@@ -1501,7 +1540,40 @@ export async function fetch(url: string, init?: RequestInit): Promise<Response> 
        takes for this engine. */
     if (!epoxyClient && lastCfg) await getEpoxy(lastCfg);
     if (!epoxyClient) throw new Error("zeolite: transport not initialized (call init first)");
-    const res = await epoxyClient.fetch(url, epoxyFetchOptions(init));
+    const clientFetch = async (): Promise<Response & { rawHeaders?: unknown }> => {
+      if (!epoxyClient && lastCfg) await getEpoxy(lastCfg);
+      if (!epoxyClient) throw new Error("zeolite: transport not initialized (call init first)");
+      return (await epoxyClient.fetch(
+        url,
+        epoxyFetchOptions(init),
+      )) as Response & { rawHeaders?: unknown };
+    };
+    /* A TLS-layer refusal of a derived voice falls back to the native
+       hello for this worker and retries once (see the fallback lane
+       comment at the voice setters); a pinned voice keeps its honest
+       failure. A refused handshake precedes any application data, so
+       the request was never delivered and the retry cannot resend it. */
+    let res: Response & { rawHeaders?: unknown };
+    try {
+      res = await clientFetch();
+    } catch (err) {
+      if (epoxyIdentityVoice !== null || epoxyVoiceFallbackArmed || !epoxyTlsRefusalError(err)) throw err;
+      if (epoxyIdentityForUa(epoxyUserAgent) === 0) throw err;
+      epoxyVoiceFallbackArmed = true;
+      epoxyClient = null;
+      epoxyInitPromise = null;
+      DIAG.emit({
+        category: "TRANSPORT",
+        severity: "warning",
+        stage: "UPSTREAM_REQUEST",
+        deliveryState: "definitely-not-delivered",
+        deliveryTransport: "wisp",
+        message:
+          "TLS voice refused; auto-fallback to native: " +
+          (err instanceof Error ? err.message.slice(0, 160) : String(err).slice(0, 80)),
+      });
+      res = await clientFetch();
+    }
     /* Rebuild so rawHeaders is the Zeolite pair shape (epoxy's own
        rawHeaders object maps name -> value | values; set-cookie pairs
        survive past the forbidden-header filter) and resp.headers
