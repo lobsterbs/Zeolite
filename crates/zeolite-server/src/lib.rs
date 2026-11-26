@@ -1661,6 +1661,18 @@ async fn wisp_session(
                 .is_err()
                 {
                     tracing::warn!(stream_id, "protocol failure: invalid CONNECT");
+                    // Silence leaves the client waiting out its connect
+                    // timeout. Stream 0 is reserved, nothing to close.
+                    if stream_id != 0 {
+                        let _ = send_packet(
+                            &ws_tx,
+                            &Packet::Close {
+                                stream_id,
+                                reason: CloseReason::InvalidInfo,
+                            },
+                        )
+                        .await;
+                    }
                     continue;
                 }
                 if let AuthState::Reject(reason) = auth_ok(&shared, auth_verified) {
@@ -3725,6 +3737,51 @@ mod tests {
                 );
             }
             other => panic!("expected CLOSE(1, Blocked|Refused), got {other:?}"),
+        }
+    }
+
+    /// Open a v2 session on an auth-free server and finish the handshake.
+    async fn open_v2(addr: &SocketAddr) -> tokio::net::TcpStream {
+        let (head, mut sock) = http_upgrade(addr, None, true).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "upgrade failed: {head}");
+        assert!(matches!(recv_pkt(&mut sock).await, Packet::Info { .. }));
+        ws_send(
+            &mut sock,
+            &encode_pkt(&Packet::Info {
+                stream_id: 0,
+                major: 2,
+                minor: 1,
+                extensions: vec![],
+            }),
+        )
+        .await;
+        assert!(matches!(recv_pkt(&mut sock).await, Packet::Continue { .. }));
+        sock
+    }
+
+    #[tokio::test]
+    async fn invalid_connect_is_answered_with_a_close() {
+        let addr = serve_app(Config::default()).await;
+        let mut sock = open_v2(&addr).await;
+        ws_send(
+            &mut sock,
+            &encode_pkt(&Packet::Connect {
+                stream_id: 7,
+                kind: StreamKind::Tcp,
+                port: 0,
+                hostname: "example.com".into(),
+            }),
+        )
+        .await;
+        match tokio::time::timeout(Duration::from_secs(2), ws_recv(&mut sock)).await {
+            Ok(Some(p)) => match decode_pkt(&p) {
+                Packet::Close { stream_id, reason } => {
+                    assert_eq!(stream_id, 7);
+                    assert_eq!(reason, CloseReason::InvalidInfo);
+                }
+                other => panic!("expected CLOSE(7, InvalidInfo), got {other:?}"),
+            },
+            other => panic!("the client heard nothing about a refused CONNECT: {other:?}"),
         }
     }
 
