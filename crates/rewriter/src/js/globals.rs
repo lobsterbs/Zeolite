@@ -16,9 +16,11 @@
 //!   local is never renamed) -> __zl
 //! - <window|self|globalThis|document|top|parent>.location reads
 //!   -> __zl; the bracket form with a string literal key
-//!   (window['location']) renames too (#331); a computed
-//!   non-literal (window[x]) is unknowable at rewrite time and
-//!   stays native
+//!   (window['location']) renames too (#331), and so do
+//!   constant-foldable keys (window['loc'+'ation'], #715): the
+//!   fold has no runtime parts and no side effects. A computed
+//!   key with any runtime value (window[x]) is unknowable at
+//!   rewrite time and stays native
 //! - document.URL / document.documentURI reads (receiver
 //!   'document' only; window.URL is the URL constructor) ->
 //!   __zl.href (#238): SvelteKit's start() compares document.URL
@@ -288,13 +290,16 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
             // #331: a computed property read with a STRING LITERAL
             // key carries the same meaning as the static form;
             // minified and obfuscated bundles reach for brackets.
-            // Only literal keys rename. A computed non-literal
-            // (window[x]) is unknowable at rewrite time and stays
-            // native. AST target spans exclude writes and deletes
-            // while retaining reads nested inside computed targets.
+            // #715: a key built entirely from string literals folds
+            // to the same read ('loc'+'ation', (`location`), a
+            // parenthesized literal), so it renames too. A computed
+            // key with any runtime value (window[x]) is unknowable
+            // at rewrite time and stays native. AST target spans
+            // exclude writes and deletes while retaining reads
+            // nested inside computed targets.
             AstKind::ComputedMemberExpression(m) => {
-                if let Expression::StringLiteral(lit) = &m.expression {
-                    match lit.value.as_str() {
+                if let Some(key) = fold_computed_key(&m.expression) {
+                    match key.as_str() {
                         "location" => {
                             if let Expression::Identifier(obj) = &m.object {
                                 if RECEIVERS.contains(&obj.name.as_str())
@@ -349,6 +354,28 @@ impl<'a, 's> Visit<'a> for Walker<'a, 's> {
             }
             _ => {}
         }
+    }
+}
+
+/// #715: fold a computed key built entirely from string literals.
+/// Concatenation ('loc'+'ation'), parenthesized literals and
+/// no-substitution template literals (`location`) are constant at
+/// rewrite time, so the bracket read renames exactly like the #331
+/// literal form. Any runtime part (identifier, call, substitution)
+/// makes the key unknowable and the read keeps its native receiver.
+fn fold_computed_key(e: &Expression) -> Option<String> {
+    match e {
+        Expression::StringLiteral(lit) => Some(lit.value.as_str().to_string()),
+        Expression::ParenthesizedExpression(p) => fold_computed_key(&p.expression),
+        Expression::BinaryExpression(b) if b.operator.as_str() == "+" => {
+            let l = fold_computed_key(&b.left)?;
+            let r = fold_computed_key(&b.right)?;
+            Some(l + &r)
+        }
+        Expression::TemplateLiteral(t) if t.expressions.is_empty() && t.quasis.len() == 1 => {
+            t.quasis[0].value.cooked.as_ref().map(|c| c.as_str().to_string())
+        }
+        _ => None,
     }
 }
 
@@ -564,6 +591,83 @@ mod tests {
         );
         // a shadowed local document is not the global.
         let js = "function f(document) { return document['URL']; }";
+        assert_eq!(rw(js), js);
+    }
+
+    #[test]
+    fn computed_folded_keys_rename() {
+        // #715: an obfuscated bracket read ('loc'+'ation') folds to
+        // the literal key at rewrite time and renames like #331. The
+        // bodies carry a plain candidate token too, the way real
+        // bundles mix plain and split reads (the token fast path
+        // skips a body with no location-family token at all).
+        assert_eq!(
+            rw("var p = location.href; var q = window['loc'+'ation'];"),
+            "var p = __zl.href; var q = __zl;"
+        );
+        assert_eq!(
+            rw("var p = location.href; var q = window['loca'+'tion'].hostname;"),
+            "var p = __zl.href; var q = __zl.hostname;"
+        );
+        assert_eq!(
+            rw("var p = location.href; var q = globalThis[\"loca\"+\"tion\"];"),
+            "var p = __zl.href; var q = __zl;"
+        );
+        // A three-way concat folds through the left-leaning tree.
+        assert_eq!(
+            rw("var p = location.href; var q = window['lo'+'ca'+'tion'];"),
+            "var p = __zl.href; var q = __zl;"
+        );
+        // A parenthesized literal folds too.
+        assert_eq!(
+            rw("var p = location.href; var q = window[('location')];"),
+            "var p = __zl.href; var q = __zl;"
+        );
+        // A no-substitution template literal key folds.
+        let tick = char::from_u32(0x60).unwrap();
+        let js = format!("var p = location.href; var q = window[{tick}location{tick}];");
+        assert_eq!(rw(&js), "var p = __zl.href; var q = __zl;");
+        // The document reflections fold on the same key set.
+        assert_eq!(
+            rw("var p = document.URL; var u = document['doc'+'umentURI'];"),
+            "var p = __zl.href; var u = __zl.href;"
+        );
+        assert_eq!(
+            rw("var p = document.URL; var b = document['base'+'URI'];"),
+            "var p = __zl.href; var b = __zl.baseURI;"
+        );
+        // Writes and deletes keep the native receiver, fold or not.
+        assert_eq!(
+            rw("var p = location.href; window['loc'+'ation'] = '/x';"),
+            "var p = __zl.href; window['loc'+'ation'] = '/x';"
+        );
+    }
+
+    #[test]
+    fn computed_keys_with_runtime_parts_stay_native() {
+        // #715: a key with any runtime value is unknowable at
+        // rewrite time and keeps the native receiver.
+        assert_eq!(
+            rw("var p = location.href; var q = window[x+'ation'];"),
+            "var p = __zl.href; var q = window[x+'ation'];"
+        );
+        assert_eq!(
+            rw("var p = location.href; var q = window['loc'+k];"),
+            "var p = __zl.href; var q = window['loc'+k];"
+        );
+        // A substituted template literal is not constant.
+        let tick = char::from_u32(0x60).unwrap();
+        let js = format!("var p = location.href; var q = window[{tick}loc{k}{tick}];");
+        assert_eq!(rw(&js), js.replace("location.href", "__zl.href"));
+    }
+
+    #[test]
+    fn fully_split_only_body_stays_behind_the_token_fast_path() {
+        // The token fast path skips a body whose only location read
+        // is fully split (no location-family token anywhere): the
+        // parse only pays for bodies that carry a candidate. A
+        // split-only probe body keeps that documented residual.
+        let js = "var q = window['loc'+'ation'].hostname;";
         assert_eq!(rw(js), js);
     }
 

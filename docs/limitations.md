@@ -281,7 +281,13 @@ surfaces ARE virtualized (#238, #532): `document.URL` and
 `documentURI` reads rename to the virtual location view
 (`__zl.href`) and `document.baseURI` reads to `__zl.baseURI`
 (#532), alongside the rewriter AST pass over free `location`
-reads. The virtual base keeps the same identity model: the real
+reads. Computed bracket reads with a key built entirely from string
+literals (`window['loc'+'ation']`, ``window[`location`]``) fold to
+the literal key and rename too (#715); a computed key with any
+runtime part (`window[x]`, ``window[`loc${k}`]``) is unknowable at
+rewrite time and stays native, as does a body whose only location
+read is fully split (the token fast path never parses it).
+The virtual base keeps the same identity model: the real
 base path is visible (the #144 relaxation) and the destination
 host stays opaque - the worker delivers the folded first
 `<base href>` target as a hostless `zl:vbase` control message,
