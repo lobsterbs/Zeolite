@@ -270,6 +270,49 @@ fn slashes_before_query(s: &str) -> String {
 /// caller keeps them client-side (issue #12) instead of encoding a
 /// route for the base document.
 pub fn resolve(url: &str, base: &str) -> String {
+    normalize_http_path(resolve_parts(url, base))
+}
+
+/// Remove dot segments (also as %2e spellings) from the path of an
+/// http(s) URL and give an empty path its "/", as WHATWG does for
+/// every special-scheme URL. Query and fragment are left alone.
+fn normalize_http_path(u: String) -> String {
+    let Some(scheme_len) = ["http://", "https://"]
+        .iter()
+        .find(|p| u.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p)))
+        .map(|p| p.len())
+    else {
+        return u;
+    };
+    let rest = &u[scheme_len..];
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (auth, tail) = rest.split_at(auth_end);
+    let path_end = tail.find(['?', '#']).unwrap_or(tail.len());
+    let (path, suffix) = tail.split_at(path_end);
+    let mut segs: Vec<&str> = Vec::new();
+    let parts: Vec<&str> = path.strip_prefix('/').unwrap_or("").split('/').collect();
+    for (i, seg) in parts.iter().enumerate() {
+        let last = i + 1 == parts.len();
+        let lower = seg.to_ascii_lowercase();
+        match lower.as_str() {
+            "." | "%2e" => {
+                if last {
+                    segs.push("");
+                }
+            }
+            ".." | ".%2e" | "%2e." | "%2e%2e" => {
+                segs.pop();
+                if last {
+                    segs.push("");
+                }
+            }
+            _ => segs.push(seg),
+        }
+    }
+    format!("{}{}/{}{}", &u[..scheme_len], auth, segs.join("/"), suffix)
+}
+
+fn resolve_parts(url: &str, base: &str) -> String {
     // WHATWG normalization (#205): remove all ASCII tabs and
     // newlines, then trim C0 controls and spaces from both ends.
     // The browser's URL parser does this before anything else;
@@ -298,7 +341,7 @@ pub fn resolve(url: &str, base: &str) -> String {
                 && url[ci..].starts_with("://")
             {
                 let (userinfo, hostport, tail) =
-                    split_authority(&slashes_before_query(&url[ci + 3..]));
+                    split_authority(slashes_before_query(&url[ci + 3..]).trim_start_matches('/'));
                 return format!(
                     "{}://{}{}{}",
                     sch.to_ascii_lowercase(),
@@ -340,7 +383,7 @@ pub fn resolve(url: &str, base: &str) -> String {
     };
     if let Some(p) = rel.strip_prefix("//") {
         // Protocol-relative, with the same host normalization.
-        let (userinfo, hostport, tail) = split_authority(p);
+        let (userinfo, hostport, tail) = split_authority(p.trim_start_matches('/'));
         return format!("{}{}{}{}", scheme, userinfo, hostport, tail);
     }
     if rel.starts_with('/') {
@@ -421,6 +464,31 @@ pub fn url_host(url: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_http_result_gets_dot_segments_removed_and_a_root_path() {
+        // WHATWG removes dot segments (including %2e spellings) from
+        // the path of any special-scheme URL, not just path-relative
+        // ones, and an empty path becomes "/". Without that the same
+        // resource gets several routes and upstream sees "/../".
+        let b = "https://b.example/d/e/f.html?q=1#h";
+        for (u, want) in [
+            ("/a/./b/../c", "https://b.example/a/c"),
+            ("/../x", "https://b.example/x"),
+            ("/..", "https://b.example/"),
+            ("https://x.com/a/../b", "https://x.com/b"),
+            ("//x.com/%2e%2E/b/.%2e/c", "https://x.com/c"),
+            ("/a/%2e", "https://b.example/a/"),
+            ("https://E.com", "https://e.com/"),
+            ("//e.com?x=1", "https://e.com/?x=1"),
+            ("///X.com/p", "https://x.com/p"),
+            ("https:///x.com/p", "https://x.com/p"),
+            ("/a/../b?x=/../c#/./d", "https://b.example/b?x=/../c#/./d"),
+        ] {
+            assert_eq!(resolve(u, b), want, "resolve({:?})", u);
+        }
+    }
+
 
     #[test]
     fn backslash_is_a_slash_before_the_query_only() {
