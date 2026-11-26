@@ -279,7 +279,8 @@ fn is_bare_specifier(spec: &str) -> bool {
 /// missed literal rewrite (the runtime bootstrap catches those at
 /// request time). False negatives corrupt the script.
 pub(crate) fn regex_allowed(last_sig: u8, last_word: &[u8], word_member: bool) -> bool {
-    const KEYWORDS: [&[u8]; 13] = [
+    const KEYWORDS: [&[u8]; 14] = [
+        b"await",
         b"return",
         b"typeof",
         b"instanceof",
@@ -685,6 +686,15 @@ mod tests {
     #[test]
     fn regex_after_punct_and_keywords() {
         let js = "a = (/x/.test(s)); b = typeof /y/;";
+        let out = rewrite_script(js, &|u| format!("[{}]", u));
+        assert_eq!(out, js);
+    }
+
+    #[test]
+    fn regex_after_await_keeps_its_quotes() {
+        // A quoted URL inside a regex after `await` was rewritten as a
+        // string, which breaks the pattern.
+        let js = "x = async () => await /'http:\\/\\/a.com'/.test(a);";
         let out = rewrite_script(js, &|u| format!("[{}]", u));
         assert_eq!(out, js);
     }
