@@ -660,7 +660,7 @@ mod tests {
         );
         // A substituted template literal is not constant.
         let tick = char::from_u32(0x60).unwrap();
-        let js = format!("var p = location.href; var q = window[{tick}loc{k}{tick}];");
+        let js = format!("var p = location.href; var q = window[{tick}loc${{k}}{tick}];");
         assert_eq!(rw(&js), js.replace("location.href", "__zl.href"));
     }
 
