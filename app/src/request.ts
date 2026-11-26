@@ -4242,6 +4242,27 @@ export function handleFetch(e: FetchEvent): void {
         target = twFixed;
       }
 
+      /* #721: YouTube live-chat loaders build embed_domain= from
+         window.location.hostname (LegacyUnforgeable, the #112 co=
+         class): a virtualized page names the engine hostname,
+         YouTube validates embed_domain against the embedding
+         page's domain and the chat iframe never opens.
+         Virtualize an embed_domain= that names this deployment
+         at the seam the engine owns. */
+      const ytFixed = virtualYouTubeEmbedDomain(target, e.request.referrer, self.location.origin, initiator);
+      if (ytFixed !== target) {
+        const tid = DIAG.trace(e.resultingClientId || e.clientId);
+        DIAG.emit({
+          traceId: tid,
+          requestId: tid,
+          category: "REWRITE",
+          severity: "info",
+          stage: "REQUEST_INTERCEPTED",
+          message: "youtube embed_domain= virtualized to the page origin",
+          url: target,
+        });
+        target = ytFixed;
+      }
 
       /* #431: MSAL computes redirect_uri from
          window.location.origin (LegacyUnforgeable, the #112 co=
@@ -7483,6 +7504,62 @@ export function virtualTwitchParent(target: string, referrer: string, engineOrig
       return full;
     }
     return sep + "parent=" + encodeURIComponent(vu.hostname);
+  });
+  return fixed === u.search ? target : u.href.replace(u.search, fixed);
+}
+
+/** #721: YouTube live-chat loaders build embed_domain= from
+    window.location.hostname (LegacyUnforgeable, the #112 co=
+    class): a virtualized page names the engine hostname,
+    YouTube validates embed_domain against the domain actually
+    serving the embedding page, and the chat iframe is refused.
+    Virtualize an embed_domain= that names this deployment at
+    the seam the engine owns. Rendering fidelity only. */
+export function virtualYouTubeEmbedDomain(target: string, referrer: string, engineOrigin: string, initiator?: string): string {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return target;
+  }
+  if (!/^https?:$/.test(u.protocol)) return target;
+  if (!(u.host === "www.youtube.com" && u.pathname === "/live_chat")) return target;
+  let engineHost = "";
+  let engineHostname = "";
+  try {
+    const eo = new URL(engineOrigin);
+    engineHost = eo.host;
+    engineHostname = eo.hostname;
+  } catch {
+    return target;
+  }
+  let home: string | null | undefined;
+  const fixed = u.search.replace(/([?&])embed_domain=([^&]*)/g, (full, sep: string, raw: string) => {
+    let value: string;
+    try {
+      value = decodeURIComponent(raw);
+    } catch {
+      return full;
+    }
+    if (
+      value !== engineHostname &&
+      value !== engineHost &&
+      value !== engineOrigin &&
+      value !== engineOrigin + ":443" &&
+      value !== engineOrigin + ":80" &&
+      value !== engineHost + ":443" &&
+      value !== engineHost + ":80"
+    )
+      return full;
+    if (home === undefined) home = referrerOrigin(referrer, initiator);
+    if (!home) return full;
+    let vu: URL;
+    try {
+      vu = new URL(home);
+    } catch {
+      return full;
+    }
+    return sep + "embed_domain=" + encodeURIComponent(vu.hostname);
   });
   return fixed === u.search ? target : u.href.replace(u.search, fixed);
 }
