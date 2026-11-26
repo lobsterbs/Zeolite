@@ -372,9 +372,12 @@ fn fold_computed_key(e: &Expression) -> Option<String> {
             let r = fold_computed_key(&b.right)?;
             Some(l + &r)
         }
-        Expression::TemplateLiteral(t) if t.expressions.is_empty() && t.quasis.len() == 1 => {
-            t.quasis[0].value.cooked.as_ref().map(|c| c.as_str().to_string())
-        }
+        Expression::TemplateLiteral(t) if t.expressions.is_empty() && t.quasis.len() == 1 => t
+            .quasis[0]
+            .value
+            .cooked
+            .as_ref()
+            .map(|c| c.as_str().to_string()),
         _ => None,
     }
 }
