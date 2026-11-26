@@ -476,7 +476,12 @@ impl Rewriter {
         // target page genuinely using the prefix as a plain path still
         // rewrites normally.
         if let Some(innermost) = self.cfg.unwrap_engine_route(url) {
-            if innermost.starts_with("http://") || innermost.starts_with("https://") {
+            // unwrap_engine_route hands back a plain URL unchanged;
+            // that one still needs resolve() below (host case, tabs,
+            // newlines, backslashes), so only a peeled layer counts.
+            if innermost != url
+                && (innermost.starts_with("http://") || innermost.starts_with("https://"))
+            {
                 self.trace_rec(pass, "already-routed");
                 let (bare, frag) = match innermost.split_once('#') {
                     Some((b, f)) => (b.to_string(), format!("#{}", f)),
@@ -2308,12 +2313,19 @@ mod tests {
             "https://engine.example/j/{}",
             crate::encode::b64u_encode(b"https://example.com/routed")
         );
+        // A route bound to the target host is the real "already-routed"
+        // case: a plain absolute URL must not take that branch.
+        let bound = format!(
+            "https://example.com/j/{}",
+            crate::encode::b64u_encode(b"https://example.com/routed")
+        );
         let doc = format!(
             "<a href=\"https://example.com/a\">1</a>\
              <a href=\"data:text/html,x\">2</a>\
              <a href=\"#frag\">3</a>\
              <a href=\"{route}\">4</a>\
              <a href=\"https://engine.example/path\">5</a>\
+             <a href=\"{bound}\">6</a>\
              <script>var u = \"https://example.com/s.js\"; if (window.top != self) top.location = u;</script>\
              <style>body {{ background: url(https://example.com/i.png) }}</style>\
              <script type=\"importmap\">{{\"imports\":{{\"x\":\"https://example.com/m.js\"}}}}</script>"
@@ -4308,6 +4320,36 @@ document.write('<script src=x></script>');
             "href after a second slash rewritten: {}",
             out
         );
+    }
+
+    #[test]
+    fn absolute_urls_get_the_same_normalization_as_relative_ones() {
+        // Every plain absolute http(s) URL used to take the
+        // already-routed branch (unwrap_engine_route never returns
+        // None) and skip resolve(): capitals in the host, tabs and
+        // newlines and backslashes reached the route verbatim while
+        // the browser would have fetched a different URL.
+        let enc = |s: &str| {
+            let mut r = Rewriter::new(cfg());
+            r.set_base("https://example.com/");
+            let out = format!("{}{}", r.process(s), r.finish());
+            out
+        };
+        for (src, want) in [
+            ("<img src=\"https://EXAMPLE.com/P\">", "https://example.com/P"),
+            ("<img src=\"https://ex\tample.com/p\">", "https://example.com/p"),
+            ("<a href=\"https://ex.com/a\nb\">", "https://ex.com/ab"),
+            ("<a href=\"https://ex.com\\a\\b\">", "https://ex.com/a/b"),
+        ] {
+            let out = enc(src);
+            assert!(
+                out.contains(&cfg().encode_url(want)),
+                "{:?} should route {:?}: {}",
+                src,
+                want,
+                out
+            );
+        }
     }
 
     #[test]

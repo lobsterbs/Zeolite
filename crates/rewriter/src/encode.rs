@@ -238,14 +238,23 @@ pub(crate) fn is_scheme(s: &str) -> bool {
 /// into userinfo, lowercased host:port and tail. WHATWG special schemes
 /// normalize the host to lowercase; userinfo and path keep their case
 /// (issue #19).
-fn split_authority(s: &str) -> (String, String, &str) {
+fn split_authority(s: &str) -> (String, String, String) {
     let auth_end = s.find(['/', '?', '#']).unwrap_or(s.len());
     let (auth, tail) = s.split_at(auth_end);
     let (userinfo, hostport) = match auth.rfind('@') {
         Some(i) => (&auth[..i + 1], &auth[i + 1..]),
         None => ("", auth),
     };
-    (userinfo.to_string(), hostport.to_ascii_lowercase(), tail)
+    (userinfo.to_string(), hostport.to_ascii_lowercase(), tail.to_string())
+}
+
+/// WHATWG special schemes read "\" as "/" in the authority and path,
+/// but a backslash in the query or fragment is just a character.
+fn slashes_before_query(s: &str) -> String {
+    let cut = s.find(['?', '#']).unwrap_or(s.len());
+    let mut out = s[..cut].replace('\\', "/");
+    out.push_str(&s[cut..]);
+    out
 }
 
 /// Resolve `url` against `base` (the current page's real destination URL).
@@ -288,7 +297,8 @@ pub fn resolve(url: &str, base: &str) -> String {
             if (sch.eq_ignore_ascii_case("http") || sch.eq_ignore_ascii_case("https"))
                 && url[ci..].starts_with("://")
             {
-                let (userinfo, hostport, tail) = split_authority(&url[ci + 3..]);
+                let (userinfo, hostport, tail) =
+                    split_authority(&slashes_before_query(&url[ci + 3..]));
                 return format!(
                     "{}://{}{}{}",
                     sch.to_ascii_lowercase(),
@@ -324,7 +334,7 @@ pub fn resolve(url: &str, base: &str) -> String {
     // exactly like "/" everywhere a browser would.
     let special = scheme.eq_ignore_ascii_case("https://") || scheme.eq_ignore_ascii_case("http://");
     let rel = if special {
-        url.replace('\\', "/")
+        slashes_before_query(url)
     } else {
         url.to_string()
     };
@@ -411,6 +421,17 @@ pub fn url_host(url: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backslash_is_a_slash_before_the_query_only() {
+        // WHATWG: special schemes read "\\" as "/" in the authority and
+        // path; in the query and fragment it is an ordinary character.
+        let b = "https://b.example/d/";
+        assert_eq!(resolve("/p\\q?x=a\\b#f\\g", b), "https://b.example/p/q?x=a\\b#f\\g");
+        assert_eq!(resolve("https://Ex.com\\a\\b?k=\\", b), "https://ex.com/a/b?k=\\");
+        assert_eq!(resolve("//Ex.com\\a", b), "https://ex.com/a");
+    }
+
 
     #[test]
     fn hosts() {
