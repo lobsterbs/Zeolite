@@ -136,6 +136,9 @@ fn scan(
     let bytes = data.as_bytes();
     let mut out = String::with_capacity(data.len() + 64);
     let mut i = 0;
+    let mut no_comment_close = false;
+    // A url( or image-set( cannot close without a ')' after it.
+    let last_close = bytes.iter().rposition(|&c| c == b')');
     while i < bytes.len() {
         let b = bytes[i];
         // #507: at the start of a streamed buffer the previous byte
@@ -162,12 +165,19 @@ fn scan(
                 if rest.len() >= prefix.len()
                     && rest.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
                 {
-                    if let Some(end) = image_set_end(rest, prefix.len()) {
+                    let no_close = last_close.is_none_or(|p| p < i);
+                    let end = if no_close {
+                        None
+                    } else {
+                        image_set_end(window(rest), prefix.len())
+                    };
+                    if let Some(end) = end {
                         push_image_set(&mut out, &rest[..end], prefix.len(), enc);
                         consumed = Some(end);
                         break;
                     }
-                    if !final_scan {
+                    // Past MAX_TOKEN there is nothing to wait for.
+                    if !final_scan && rest.len() < MAX_TOKEN {
                         return (out, Some(i));
                     }
                 }
@@ -190,14 +200,19 @@ fn scan(
             // #178: compare BYTES - slicing &str at a fixed offset
             // panics when a multibyte char straddles the cut.
             if rest.len() >= 4 && rest.as_bytes()[..4].eq_ignore_ascii_case(b"url(") {
-                match scan_url(rest) {
+                let tok = if last_close.is_none_or(|p| p < i) {
+                    UrlTok::Open
+                } else {
+                    scan_url(window(rest))
+                };
+                match tok {
                     UrlTok::Complete { inner, end } => {
                         push_url(&mut out, &data[i..i + end], inner, enc);
                         i += end;
                         continue;
                     }
                     UrlTok::Open => {
-                        if !final_scan {
+                        if !final_scan && rest.len() < MAX_TOKEN {
                             return (out, Some(i));
                         }
                     }
@@ -255,7 +270,7 @@ fn scan(
             if !final_scan && i + 1 >= bytes.len() {
                 return (out, Some(i));
             }
-            if i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'*' && !no_comment_close {
                 // Top-level comment: copy verbatim (a url( inside a
                 // comment is text, not a fetch).
                 match data[i + 2..].find("*/") {
@@ -269,6 +284,9 @@ fn scan(
                         if !final_scan {
                             return (out, Some(i));
                         }
+                        // No "*/" after here means none after any
+                        // later "/*" either; stop searching.
+                        no_comment_close = true;
                     }
                 }
             }
@@ -279,6 +297,26 @@ fn scan(
         i += ch_len;
     }
     (out, None)
+}
+
+/// shortcut: an unclosed `url(` or `image-set(` made every later one
+/// rescan to the end of the input (N tokens x input size, seconds for
+/// a few hundred KB). A token that does not close within this many
+/// bytes is plain text. Real URLs are far shorter; a longer data: URI
+/// is opaque and comes out verbatim either way. Upgrade if a real
+/// stylesheet ever needs a longer rewritten URL.
+const MAX_TOKEN: usize = 16 * 1024;
+
+/// The first MAX_TOKEN bytes of `s`, cut on a char boundary.
+fn window(s: &str) -> &str {
+    if s.len() <= MAX_TOKEN {
+        return s;
+    }
+    let mut end = MAX_TOKEN;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Scan a `url(...)` token. `s` starts with `url(` (case-insensitive).
@@ -657,6 +695,53 @@ fn utf8_len(b: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A token that never closes within MAX_TOKEN is text, the same in
+    /// one-shot and streaming, and a real url() after it still works.
+    #[test]
+    fn overlong_unclosed_tokens_are_text_and_chunk_invariant() {
+        let long = "x".repeat(MAX_TOKEN + 100);
+        for open in ["url(", "image-set(", "-webkit-image-set(", "URL("] {
+            let css = format!("a{{b:{open}{long}c{{d:url(e.png)}}e{{f:url('g.png')}}");
+            let out = rewrite_stylesheet(&css, &enc);
+            assert!(
+                out.contains("url('[e.png]')"),
+                "{open}: {}",
+                &out[out.len() - 60..]
+            );
+            assert!(out.contains("url('[g.png]')"), "{open}");
+            assert!(out.starts_with(&format!("a{{b:{open}xxx")), "{open}");
+            let mut splits: Vec<usize> = (1..css.len()).step_by(997).collect();
+            let at = css.find("c{d:").unwrap();
+            splits.extend([at - 1, at, at + 1, 5, 10, MAX_TOKEN, MAX_TOKEN + 5]);
+            chunked_eq(&css, &splits);
+        }
+    }
+
+    #[test]
+    fn big_data_uri_stays_verbatim_and_chunk_invariant() {
+        let data = format!(
+            "a{{b:url(data:image/png;base64,{})}}c{{d:url(e.png)}}",
+            "A".repeat(20_000)
+        );
+        let out = rewrite_stylesheet(&data, &enc);
+        assert_eq!(out, data.replace("url(e.png)", "url('[e.png]')"));
+        let splits: Vec<usize> = (1..data.len()).step_by(1999).collect();
+        chunked_eq(&data, &splits);
+    }
+
+    #[test]
+    fn many_unterminated_comment_openers_pass_through() {
+        let css = "/*a ".repeat(5000);
+        assert_eq!(rewrite_stylesheet(&css, &enc), css);
+        // Unchanged by the memo: an unterminated comment is plain text
+        // here, so a url() after it is still rewritten.
+        let mixed = format!("{css}url(x.png)");
+        assert_eq!(
+            rewrite_stylesheet(&mixed, &enc),
+            format!("{css}url('[x.png]')")
+        );
+    }
 
     fn enc(u: &str) -> String {
         format!("[{}]", u)
