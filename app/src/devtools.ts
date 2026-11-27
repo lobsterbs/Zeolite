@@ -12,6 +12,7 @@ interface NetDetail {
   initiatorType?: string;
   reqHeaders?: Record<string, string>;
   wireHeaders?: Record<string, string>;
+  requestBody?: string;
   stages?: Record<string, number>;
   respHeaders?: Record<string, string>;
   cookies?: string[];
@@ -117,6 +118,10 @@ function showDetail(e: NetEntry): void {
   if (d?.wireHeaders) {
     lines.push("wire headers (upstream, post-surgery):");
     for (const [k, v] of Object.entries(d.wireHeaders)) lines.push("  " + k + ": " + v);
+  }
+  if (d?.requestBody !== undefined) {
+    lines.push("request body (first 16KB, upstream, redacted):");
+    lines.push(d.requestBody);
   }
   if (d?.stages && typeof d.stages.pre === "number")
     lines.push("stages: engine pre-dispatch " + d.stages.pre + " ms, upstream to first byte " +
@@ -567,6 +572,8 @@ function buildExportAllKdl(): string {
     if (e.detail?.wireHeaders)
       for (const [k, v] of Object.entries(e.detail.wireHeaders))
         lines.push("      wire_header " + kdlStr(k) + " " + kdlStr(v));
+    if (e.detail?.requestBody !== undefined)
+      lines.push("      request_body " + kdlStr(e.detail.requestBody));
     if (e.detail?.stages)
       for (const [k, v] of Object.entries(e.detail.stages))
         lines.push("      stage " + kdlStr(k) + "=" + kdlNum(v));

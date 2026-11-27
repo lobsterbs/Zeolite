@@ -74,6 +74,14 @@ export interface NetDetail {
       request never dispatched upstream (cache hit, pre-dispatch failure,
       engine-internal answer): no upstream request, no wire record. */
   wireHeaders?: Record<string, string>;
+  /** First 16KB of the outgoing upstream request body, post-surgery
+      (debugger wave slice 3, the #717 discriminator). UTF-8 decoded
+      non-fatally; binary prefixes survive as replacement chars.
+      Absent when body capture is off (the default), when the request
+      has no body, or when the body is a one-shot ReadableStream
+      (reading it would consume it). Redacted by redactSecrets at
+      netLogPush time. */
+  requestBody?: string;
   /** Stage offsets from interception, ms (#713): pre = engine time before
       the upstream dispatch. Together ttfb and the entry ms decompose the
       request timeline (engine vs upstream). */
@@ -104,6 +112,7 @@ export function netLogPush(entry: Omit<NetEntry, "seq" | "ts">): void {
       ...(d.initiator ? { initiator: redactSecrets(d.initiator) } : {}),
       reqHeaders: headers(d.reqHeaders), respHeaders: headers(d.respHeaders),
       wireHeaders: headers(d.wireHeaders),
+      ...(d.requestBody !== undefined ? { requestBody: redactSecrets(d.requestBody) } : {}),
     } } : {}),
     clientId: traceClient(entry.traceId), seq: ++netSeq, ts: Date.now(),
   });

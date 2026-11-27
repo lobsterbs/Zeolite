@@ -87,7 +87,7 @@ import { beginRecording, finishRecording } from "./recording";
 import { ghosteryListFetch, pageCacheClear, virtualHcaptchaFrameFragment } from "./request";
 import { setRulesEnabled, setSiteOverrides } from "./rules";
 import { decryptSession, encryptSession } from "./session";
-import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, locationTargetingEnabled, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setLocationTargeting, setNavHandles, setQueryRoutes, setCoi, setReloadBypass, setSiteEnabled, setReplayCapMb, replayCapMbValue, setSpoolUploads, spoolUploadsEnabled, setStrictOpacity, strictOpacityEnabled } from "./swstate";
+import { VCTX, ZEOLITE_VERSION, adaptiveTransitEnabled, getEngineDegraded, getFpProfile, isHttpsUpgrade, isImageLazy, locationTargetingEnabled, navHandlesEnabled, queryRoutesEnabled, registerDocCookiePort, setAdaptiveTransit, setFingerprint, setHttpsUpgrade, setImageLazy, setLocationTargeting, setNavHandles, setQueryRoutes, setBodyCapture, bodyCaptureEnabled, setCoi, setReloadBypass, setSiteEnabled, setReplayCapMb, replayCapMbValue, setSpoolUploads, spoolUploadsEnabled, setStrictOpacity, strictOpacityEnabled } from "./swstate";
 import { adaptiveEvidenceReset, adaptiveEvidenceSnapshot } from "./adaptive-evidence";
 import { locationTargetSnapshot, recordSpa404Report } from "./location-targeting";
 import { setTracing, tracingSnapshot } from "./tracing";
@@ -246,6 +246,15 @@ export interface ControlMessage {
       navHandles: a worker restart reverts it, the host re-pushes on
       boot. */
   coi?: boolean;
+  /** zl:config: opt-in upstream request-body prefix capture
+      (debugger wave slice 3, the #717 discriminator). On: the netlog
+      row for each intercepted request records the first 16KB of the
+      outgoing upstream body, post-surgery, redacted by redactSecrets
+      at netLogPush time. Ephemeral like coi: a worker restart reverts
+      it, the host re-pushes on boot. Default off; the request body
+      may carry credentials, so a host arms this only for an
+      investigation. */
+  bodyCapture?: boolean;
   /** zl:config: opt-in strict opaque custody (#609). On: a keyless
       worker refuses zl:mint with a named reason instead of
       answering a browser-decodable legacy route, and every
@@ -702,6 +711,10 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
         navHandles: navHandlesEnabled(),
         /* Injector phase 2: the live query-shape opt-in. */
         queryRoutes: queryRoutesEnabled(),
+        /* Debugger wave slice 3: the live body-capture choice, so a
+           host detects a revert to defaults and re-pushes its
+           config. */
+        bodyCapture: bodyCaptureEnabled(),
         /* #609: the live strict-opacity choice plus the custody the
            worker can actually mint with, so an embedder tells a
            policy refusal from a compat-mode downgrade apart. */
@@ -782,6 +795,7 @@ export async function dispatchCore(msg: ControlMessage, ctx: CoreCtx): Promise<v
       if (typeof msg.queryRoutes === "boolean") setQueryRoutes(msg.queryRoutes);
       /* COI parity: same rule for the credentialless stamp arm. */
       if (typeof msg.coi === "boolean") setCoi(msg.coi);
+      if (typeof msg.bodyCapture === "boolean") setBodyCapture(msg.bodyCapture);
       /* #609: same rule for the strict-opacity custody policy. */
       if (typeof msg.strictOpacity === "boolean") setStrictOpacity(msg.strictOpacity);
       /* #633: absent keeps the live scheme, the rule every other

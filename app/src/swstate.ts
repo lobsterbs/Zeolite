@@ -43,7 +43,7 @@ export function withBuildId(base: string, buildId: string | null | undefined): s
 }
 export const ZEOLITE_BUILD_ID =
   ((import.meta.env.VITE_ZEOLITE_BUILD_ID as string | undefined) || "").trim();
-export const ZEOLITE_VERSION = withBuildId("3.4.7 Ferrierite", ZEOLITE_BUILD_ID);
+export const ZEOLITE_VERSION = withBuildId("3.4.8 Ferrierite", ZEOLITE_BUILD_ID);
 
 /* ---- Per-client virtual contexts (issue #33) ------------------------ */
 
@@ -243,6 +243,24 @@ export function coiEnabled(): boolean {
 
 export function setCoi(on: boolean): void {
   coiArmed = on;
+}
+
+/* Debugger wave, slice 3 (#717 discriminator): opt-in upstream
+   request-body prefix capture. Off by default; a host zl:config push
+   arms it. Ephemeral like coi: a worker restart reverts it, the host
+   re-sends its choice on boot. When armed, request.ts records the
+   first 16KB of the outgoing body (post-surgery, the bytes actually
+   sent upstream) onto the netlog row, redacted at netLogPush time by
+   redactSecrets. One-shot ReadableStream bodies are skipped: reading
+   them would consume the stream. */
+let bodyCaptureArmed = false;
+
+export function bodyCaptureEnabled(): boolean {
+  return bodyCaptureArmed;
+}
+
+export function setBodyCapture(on: boolean): void {
+  bodyCaptureArmed = on;
 }
 
 /* #609: strict opaque custody. Off (the default): a keyless worker

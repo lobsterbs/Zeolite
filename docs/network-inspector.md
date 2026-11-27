@@ -28,8 +28,17 @@ so it talks to the engine through the SW control plane.
 - The log is in-memory only: it resets when the SW is reclaimed. It is
   a debugging surface, not telemetry.
 - Timing is time-to-response-headers, not full body download.
-- Bodies are not captured (the rewriter streams them; buffering them
-  for the inspector would cost first paint).
+- Response bodies are not captured (the rewriter streams them;
+  buffering them for the inspector would cost first paint). Outgoing
+  request bodies are captured only when a host arms the opt-in
+  `zl:config` toggle `bodyCapture` (default off; debugger wave slice
+  3): each dispatched request's row then records the first 16KB of the
+  post-surgery upstream body, UTF-8 decoded non-fatally, redacted by
+  the diagnostics redaction chain before it enters the ring, and the
+  KDL export emits it as `request_body`. A one-shot stream upload
+  (over the replay cap with the spool opted out) is skipped: reading
+  it would consume the dispatch body. The toggle is ephemeral like
+  `coi`: a worker restart reverts it, the host re-pushes on boot.
 - A DOM/CSS inspector (postMessage bridge into proxied pages,
   CDP-style subset) is complete (#550): bounded tree snapshot,
   computed styles for a snapshot node, a bounded redacted console

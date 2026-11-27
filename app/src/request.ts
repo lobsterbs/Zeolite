@@ -79,7 +79,7 @@ import { anySessionProfileActive, applySetCookie, cookieHeaderFor, flushJarPersi
    contexts, route-shape toggles, route key, fingerprint profile +
    per-site profile cache) lives in ./swstate; the engine and the
    control plane are call sites. */
-import { destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setAdaptiveTransit, setHttpsUpgrade, setNavHandles, setQueryRoutes, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, setStrictOpacity, strictOpacityEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
+import { bodyCaptureEnabled, destUpgraded, getFpProfile, getFpWorkerScript, httpExemptAdd, httpExemptHas, isHttpsUpgrade, navHandlesEnabled, adaptiveTransitEnabled, pushDocCookieView, queryRoutesEnabled, reloadBypassArmed, setAdaptiveTransit, setHttpsUpgrade, setNavHandles, setQueryRoutes, setReloadBypass, setRouteKey, siteDisabled, replayBodyCapBytes, siteProfileFor, spoolUploadsEnabled, setStrictOpacity, strictOpacityEnabled, VCTX, ZEOLITE_VERSION } from "./swstate";
 import { newSriRegistry, SRI_VERIFY_BYTE_CAP, sriBlockedResponse, sriClearClient, sriExpectation, sriNote, sriVerifyBytes } from "./sri";
 import { newImportmapRegistry, importmapNote, importmapReset, resolveBareImportFor, pageKeyOf } from "./importmaps";
 
@@ -4773,6 +4773,10 @@ export function handleFetch(e: FetchEvent): void {
            request, no wire record, which is the honest shape. */
         let wireShot: Record<string, string> | undefined;
         let tSend = 0;
+        /* Debugger wave slice 3 (#717): with body capture armed, the
+           first 16KB of the outgoing upstream body, recorded after
+           surgery at the dispatch seam. */
+        let bodyShot: string | undefined;
         const traceId = DIAG.trace(e.resultingClientId || e.clientId);
         DIAG.stage(traceId, "REQUEST_INTERCEPTED", { url: target });
         /* Issue #34: a foreign-origin request has no engine-local path;
@@ -4791,6 +4795,7 @@ export function handleFetch(e: FetchEvent): void {
              when this request actually dispatched upstream. */
           if (wireShot) d.wireHeaders = wireShot;
           if (tSend) d.stages = { pre: tSend - t0 };
+          if (bodyShot !== undefined) d.requestBody = bodyShot;
           if (foreign) d.crossOrigin = true;
           if (resp) {
             d.respHeaders = flatRed(resp.headers);
@@ -5577,6 +5582,31 @@ export function handleFetch(e: FetchEvent): void {
                  chain entry. */
               hopBody = buffered.spool.file;
               hopSpool = buffered.spool;
+            }
+          }
+          /* Debugger wave slice 3 (#717): with capture armed, snapshot
+             the first 16KB of the body actually handed upstream -
+             post-surgery, the same bytes the wire carries. A one-shot
+             ReadableStream (over-cap upload without a spool) is
+             skipped on purpose: reading it would consume the dispatch
+             body. Redaction happens at netLogPush. */
+          if (hopBody != null && bodyCaptureEnabled()) {
+            try {
+              const cap = 16384;
+              if (typeof hopBody === "string") bodyShot = hopBody.slice(0, cap);
+              else if (hopBody instanceof ArrayBuffer)
+                bodyShot = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(hopBody).subarray(0, cap));
+              else if (ArrayBuffer.isView(hopBody))
+                bodyShot = new TextDecoder("utf-8", { fatal: false }).decode(
+                  new Uint8Array(hopBody.buffer, hopBody.byteOffset, Math.min(hopBody.byteLength, cap)),
+                );
+              else if (hopBody instanceof URLSearchParams) bodyShot = hopBody.toString().slice(0, cap);
+              else if (typeof (hopBody as Blob).slice === "function")
+                bodyShot = new TextDecoder("utf-8", { fatal: false }).decode(
+                  new Uint8Array(await (hopBody as Blob).slice(0, cap).arrayBuffer()),
+                );
+            } catch {
+              bodyShot = undefined;
             }
           }
           /* The navigation TTFB deadline must abort the upstream fetch,
