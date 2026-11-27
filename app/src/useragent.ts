@@ -130,22 +130,28 @@ export function formatUaBrands(brands: UaBrand[]): string {
   return brands.map((b) => JSON.stringify(b.brand) + ";v=" + JSON.stringify(b.version)).join(", ");
 }
 
-/** Patch only an existing NavigatorUAData object, preserving its native
-    prototype. Unknown high-entropy values stay absent, never physical. */
+/** Patch the NavigatorUAData prototype. Chromium hands out a fresh
+    instance on every navigator.userAgentData read, so an instance
+    patch never reaches later reads; the shared prototype covers every
+    instance the page will ever see. Unknown high-entropy values stay
+    absent, never physical. */
 export function userAgentDataScript(userAgent: string, navigatorPrototype: string, fullVersionHint?: string | null): string {
   const data = clientHintsForUa(userAgent, fullVersionHint);
   if (!data) return `if ("userAgentData" in globalThis.navigator) prop(${navigatorPrototype}, "userAgentData", function () { return undefined; });`;
   return `try {
   var zlUaData = globalThis.navigator.userAgentData;
-  if (zlUaData) {
+  /* #540: the captured instance is a throwaway in modern Chromium; the
+     prototype is the only surface every later read inherits. */
+  var zlUaProto = zlUaData ? Object.getPrototypeOf(zlUaData) : null;
+  if (zlUaProto) {
     var zlUaIdentity = ${JSON.stringify(data)};
     var zlUaCopy = function (v) { return Array.isArray(v) ? v.map(function (b) { return { brand: b.brand, version: b.version }; }) : v; };
     var zlUaLow = function () { return { brands: zlUaCopy(zlUaIdentity.brands), mobile: zlUaIdentity.mobile, platform: zlUaIdentity.platform }; };
     for (var zlUaKey of ["brands", "mobile", "platform"]) {
-      (function (key) { prop(zlUaData, key, function () { return zlUaCopy(zlUaIdentity[key]); }); })(zlUaKey);
+      (function (key) { prop(zlUaProto, key, function () { return zlUaCopy(zlUaIdentity[key]); }); })(zlUaKey);
     }
-    Object.defineProperty(zlUaData, "toJSON", { configurable: true, value: zlNat(function () { return zlUaLow(); }, "toJSON") });
-    Object.defineProperty(zlUaData, "getHighEntropyValues", { configurable: true, value: zlNat(function (hints) {
+    Object.defineProperty(zlUaProto, "toJSON", { configurable: true, value: zlNat(function () { return zlUaLow(); }, "toJSON") });
+    Object.defineProperty(zlUaProto, "getHighEntropyValues", { configurable: true, value: zlNat(function (hints) {
       return Promise.resolve().then(function () {
         if (hints === null || (typeof hints !== "object" && typeof hints !== "function")) throw new TypeError("hints must be a sequence");
         var result = zlUaLow();

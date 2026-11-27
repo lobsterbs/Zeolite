@@ -6,24 +6,32 @@ const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const NATIVE = "Mozilla/5.0 (X11; CrOS x86_64 16123.0.0) AppleWebKit/537.36 Chrome/154.0.0.0 Safari/537.36";
 const entropy = ["fullVersionList", "uaFullVersion", "platformVersion", "architecture", "bitness", "model", "wow64"];
 function realm(worker: boolean, matchUserAgent = true, ua = UA) {
+  /* #540: Chromium hands out a NEW NavigatorUAData on every read of
+     navigator.userAgentData; only its prototype is shared, so the
+     realm models per-read fresh instances like the live browser. */
+  class NavigatorUAData {
+    get brands() { return [{ brand: "Physical Chrome", version: "154" }]; }
+    get mobile() { return false; }
+    get platform() { return "Chrome OS"; }
+    toJSON() { return { brands: this.brands, mobile: this.mobile, platform: this.platform }; }
+    async getHighEntropyValues(_hints?: unknown) { return { physical: true }; }
+  }
   class Navigator {
     get userAgent() { return NATIVE; } get appVersion() { return "native version"; }
     get platform() { return "Linux x86_64"; } get language() { return "nb-NO"; }
-    get languages() { return ["nb-NO"]; } get userAgentData() { return nativeData; }
+    get languages() { return ["nb-NO"]; } get userAgentData() { return new NavigatorUAData(); }
   }
-  const nativeData = { brands: [{ brand: "Physical Chrome", version: "154" }], mobile: false, platform: "Chrome OS",
-    toJSON() { return { brands: this.brands, mobile: this.mobile, platform: this.platform }; },
-    async getHighEntropyValues(_hints?: unknown) { return { physical: true }; } };
   const global = { navigator: new Navigator() };
   const p = resolveProfile({ userAgent: ua, matchUserAgent, canvasSeed: "unit" });
   new Function("Navigator", "globalThis", worker ? workerFingerprintScript(p) : fingerprintScript(p))(Navigator, global);
-  return { nav: global.navigator, nativeData };
+  return { nav: global.navigator };
 }
 describe("shared UA identity (#429/#437)", () => {
   it("keeps window, worker and low/high entropy wire identity in agreement", async () => {
     for (const worker of [false, true]) {
-      const { nav, nativeData } = realm(worker);
-      expect(nav.userAgent).toBe(UA); expect(nav.platform).toBe("Win32"); expect(nav.userAgentData).toBe(nativeData);
+      const { nav } = realm(worker);
+      expect(nav.userAgent).toBe(UA); expect(nav.platform).toBe("Win32");
+      const firstRead = nav.userAgentData; expect(firstRead).not.toBe(nav.userAgentData);
       const data: any = await nav.userAgentData.getHighEntropyValues(entropy);
       const wire = new Headers({ "sec-ch-ua-full-version-list": "physical", "sec-ch-ua-full-version": "physical",
         "sec-ch-ua-platform-version": "physical", "sec-ch-ua-arch": "physical", "sec-ch-ua-bitness": "physical",
@@ -133,6 +141,24 @@ describe("client-hints completion (#540)", () => {
     /* A bare-major UA stays absent without a hint, full with one. */
     expect(clientHintsForUa(ANDROID)).not.toHaveProperty("uaFullVersion");
     expect(clientHintsForUa(ANDROID, "149.0.7827.12")!.uaFullVersion).toBe("149.0.7827.12");
+  });
+
+  it("reports the persona through the shared prototype on per-read fresh instances (#540)", async () => {
+    /* Live conviction 2026-11-27: Chromium no longer caches the
+       NavigatorUAData object (navigator.userAgentData !==
+       navigator.userAgentData on 154+), so patching the captured
+       instance never reaches later reads; the compiled script must
+       patch the prototype every fresh instance inherits. */
+    const { nav } = realm(false, true, REDUCED);
+    const fresh = nav.userAgentData;
+    expect(fresh).not.toBe(nav.userAgentData);
+    const data: any = await fresh.getHighEntropyValues(["platformVersion", "model", "wow64"]);
+    expect(data.platform).toBe("Windows");
+    expect(data.platformVersion).toBe("10.0.0");
+    expect(data.model).toBe("");
+    expect(data.wow64).toBe(false);
+    expect(fresh.toJSON().platform).toBe("Windows");
+    expect(fresh.brands.some((b: { brand: string }) => b.brand === "Google Chrome")).toBe(true);
   });
 
   it("keeps the wire and the page in agreement under a same-major runtime (#540)", async () => {
