@@ -17,7 +17,7 @@
 //!  2. query secrets: [?&#]key=... for the oauth/captcha key set
 //!  3. authorization + bearer/basic + token -> [redacted]
 //!  4. authorization + any word -> [redacted]
-//!  5. cookie + value -> [redacted]
+//!  5. cookie + value (+ further name=value pairs) -> [redacted]
 //!  6. bare bearer/basic + token -> [redacted]
 //!  7. token/password/secret/api[_-]?key + value -> [redacted]
 
@@ -70,7 +70,7 @@ pub fn redact_secrets(input: &str) -> String {
     let s = redact_query_secrets(&s);
     let s = redact_authorization(&s);
     let s = keyword_value_pass(&s, &["authorization"], |ch| !js_ws(ch));
-    let s = keyword_value_pass(&s, &["cookie"], |ch| ch != ';' && !js_ws(ch));
+    let s = redact_cookie(&s);
     let s = redact_bearer_token(&s);
     keyword_value_pass(
         &s,
@@ -184,7 +184,24 @@ fn redact_query_secrets(s: &str) -> String {
     out
 }
 
-/// Pass 3: (authorization[sep]+)(bearer|basic)\s+\S+ -> $1[redacted]
+/// Authorization schemes whose credential follows after whitespace. A
+/// scheme outside this set used to redact only the scheme word and
+/// leave the credential ("Token abc123" -> "[redacted] abc123").
+const AUTH_SCHEMES: [&str; 11] = [
+    "bearer",
+    "basic",
+    "digest",
+    "token",
+    "negotiate",
+    "ntlm",
+    "apikey",
+    "api-key",
+    "aws4-hmac-sha256",
+    "dpop",
+    "vapid",
+];
+
+/// Pass 3: (authorization[sep]+)(scheme)\s+\S+ -> $1[redacted]
 /// (the whole authorization value: redacting only the scheme word
 /// would leave the credential in diagnostic text).
 fn redact_authorization(s: &str) -> String {
@@ -204,13 +221,10 @@ fn redact_authorization(s: &str) -> String {
                 j += l;
             }
             if j > i + 13 {
-                let scheme_len = if lbytes[j..].starts_with(b"bearer") {
-                    Some(6)
-                } else if lbytes[j..].starts_with(b"basic") {
-                    Some(5)
-                } else {
-                    None
-                };
+                let scheme_len = AUTH_SCHEMES
+                    .iter()
+                    .find(|sc| lbytes[j..].starts_with(sc.as_bytes()))
+                    .map(|sc| sc.len());
                 if let Some(sl) = scheme_len {
                     let mut k = j + sl;
                     while k < bytes.len() {
@@ -246,7 +260,115 @@ fn redact_authorization(s: &str) -> String {
     out
 }
 
-/// Passes 4, 5 and 7: (keyword[sep]+)(value-class)+ -> $1[redacted]
+/// Set-Cookie attribute names: a `; name=value` that starts with one
+/// of these ends the cookie pairs (the attribute is not a secret).
+const COOKIE_ATTRS: [&str; 9] = [
+    "path",
+    "domain",
+    "expires",
+    "max-age",
+    "samesite",
+    "secure",
+    "httponly",
+    "partitioned",
+    "priority",
+];
+
+/// Byte offset past `; name=value` pairs starting at `j`, stopping at
+/// a Set-Cookie attribute or a segment with no `=`. Mirrors
+/// (?:;\s*(?!attr\b)[^;\s=]+=[^;\s]*)*.
+fn skip_cookie_pairs(s: &str, lower: &str, mut j: usize) -> usize {
+    let bytes = s.as_bytes();
+    loop {
+        if bytes.get(j) != Some(&b';') {
+            return j;
+        }
+        let mut k = j + 1;
+        while k < bytes.len() {
+            let (ch, l) = char_at(s, k);
+            if !js_ws(ch) {
+                break;
+            }
+            k += l;
+        }
+        let is_attr = COOKIE_ATTRS.iter().any(|a| {
+            lower[k..].starts_with(a)
+                && !lower
+                    .as_bytes()
+                    .get(k + a.len())
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        });
+        if is_attr {
+            return j;
+        }
+        let name_start = k;
+        while k < bytes.len() {
+            let (ch, l) = char_at(s, k);
+            if ch == ';' || ch == '=' || js_ws(ch) {
+                break;
+            }
+            k += l;
+        }
+        if k == name_start || bytes.get(k) != Some(&b'=') {
+            return j;
+        }
+        k += 1;
+        while k < bytes.len() {
+            let (ch, l) = char_at(s, k);
+            if ch == ';' || js_ws(ch) {
+                break;
+            }
+            k += l;
+        }
+        j = k;
+    }
+}
+
+/// Pass 5: (cookie[sep]+)[^;\s]+ then any further `; name=value`
+/// pairs -> $1[redacted]. A Cookie request header carries many pairs;
+/// redacting only the first leaked the rest.
+fn redact_cookie(s: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    let lbytes = lower.as_bytes();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut i = 0;
+    while i < bytes.len() {
+        if lbytes[i..].starts_with(b"cookie") {
+            let mut j = i + 6;
+            while j < bytes.len() {
+                let (ch, l) = char_at(s, j);
+                if !is_sep(ch) {
+                    break;
+                }
+                j += l;
+            }
+            if j > i + 6 {
+                let vstart = j;
+                while j < bytes.len() {
+                    let (ch, l) = char_at(s, j);
+                    if ch == ';' || js_ws(ch) {
+                        break;
+                    }
+                    j += l;
+                }
+                if j > vstart {
+                    let end = skip_cookie_pairs(s, &lower, j);
+                    out.push_str(&s[i..vstart]);
+                    out.push_str("[redacted]");
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        let l = char_len(bytes[i]);
+        out.push_str(&s[i..i + l]);
+        i += l;
+    }
+    out
+}
+
+/// Passes 4 and 7: (keyword[sep]+)(value-class)+ -> $1[redacted]
 /// One shared scanner: keyword, one-or-more separator chars, then
 /// one-or-more value chars; on any failure the JS regex advances a
 /// single position, which copying one char reproduces.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DIAG, classifyStageFailure } from "../diag";
+import { DIAG, classifyStageFailure, redactSecrets } from "../diag";
 
 /* #95: failure events name the stage the request broke at, and the
    stage maps to an honest category/cause - a rewrite failure was
@@ -65,5 +65,18 @@ describe("diag ring bounds (#95)", () => {
     const ev = snap.events.find((x) => x.stage === "TRANSPORT_FALLBACK" && x.traceId === "zl-t-bound-1");
     expect(ev).toBeDefined();
     expect(ev!.message).toBe("DOCUMENT_REWRITE_REQUIRED");
+  });
+});
+
+describe("redactSecrets header credentials", () => {
+  it("redacts every pair of a Cookie request header, keeps Set-Cookie attributes", () => {
+    expect(redactSecrets("Cookie: sid=abc123; csrf=LEAK2; theme=dark")).toBe("Cookie: [redacted]");
+    expect(redactSecrets("Set-Cookie: sid=abc; Path=/; HttpOnly")).toBe("Set-Cookie: [redacted]; Path=/; HttpOnly");
+    expect(redactSecrets("cookie jar; retried")).toBe("cookie [redacted]; retried");
+  });
+
+  it("redacts the credential of any Authorization scheme, not just the scheme word", () => {
+    expect(redactSecrets("authorization: Token LEAK7")).toBe("authorization: [redacted]");
+    expect(redactSecrets("Authorization: Negotiate LEAK8 next")).toBe("Authorization: [redacted] next");
   });
 });

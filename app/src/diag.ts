@@ -167,9 +167,11 @@ export function redactSecrets(s: string): string {
     .replace(/([?&#](?:code|state|nonce|code_verifier|id_token|access_token|refresh_token|session_token|credential|g-recaptcha-response|h-captcha-response|cf-turnstile-response)=)[^&#\s]*/gi, "$1[redacted]")
     // Match the whole authorization value: redacting only the word
     // "Bearer" would leave its actual credential in diagnostic text.
-    .replace(/(authorization["'\s:=]+)(?:bearer|basic)\s+\S+/gi, "$1[redacted]")
+    .replace(/(authorization["'\s:=]+)(?:bearer|basic|digest|token|negotiate|ntlm|apikey|api-key|aws4-hmac-sha256|dpop|vapid)\s+\S+/gi, "$1[redacted]")
     .replace(/(authorization["'\s:=]+)(\S+)/gi, "$1[redacted]")
-    .replace(/(cookie["'\s:=]+)([^;\s]+)/gi, "$1[redacted]")
+    /* A Cookie request header carries many pairs: redact every name=value
+       after the first too, and stop at a Set-Cookie attribute (Path=...). */
+    .replace(/(cookie["'\s:=]+)[^;\s]+(?:;\s*(?!(?:path|domain|expires|max-age|samesite|secure|httponly|partitioned|priority)\b)[^;\s=]+=[^;\s]*)*/gi, "$1[redacted]")
     .replace(/((?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[redacted]")
     .replace(/((?:token|password|secret|api[_-]?key)["'\s:=]+)([^&\s;]+)/gi, "$1[redacted]");
 }
