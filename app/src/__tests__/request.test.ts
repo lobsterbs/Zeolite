@@ -609,7 +609,7 @@ describe("redirect hop gates and cross-origin header scoping (#186, #194)", () =
         expect(sent.get("user-agent")).toBe(matchUserAgent ? profileUa : nativeUa);
         expect(sent.get("sec-ch-ua-platform")).toBe(matchUserAgent ? '"Windows"' : '"Chrome OS"');
         expect(sent.get("sec-ch-ua-full-version")).toBe(matchUserAgent ? '"149.0.7827.12"' : '"154.0.1234.2"');
-        expect(sent.get("sec-ch-ua-model")).toBe(matchUserAgent ? null : '"physical-device"');
+        expect(sent.get("sec-ch-ua-model")).toBe(matchUserAgent ? '""' : '"physical-device"');
       }
     } finally { setFingerprint(null); }
   });

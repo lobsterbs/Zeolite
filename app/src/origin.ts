@@ -15,7 +15,7 @@
    Pure code: no self.location, no fetch, trivially testable. */
 
 import { decodeClientUrl, recoverPath, unwrapDest } from "./codec";
-import { clientHintsForUa, formatUaBrands } from "./useragent";
+import { chromeFullVersionOf, clientHintsForUa, formatUaBrands } from "./useragent";
 
 export interface VirtualOriginHeaders {
   /** Origin value to send; absent = send none. */
@@ -234,6 +234,18 @@ export const PROXY_INJECTED_HEADERS = [
   "x-real-ip",
 ];
 
+/* #540: the engine runtime IS the physical Chromium, so its own
+   full version is the honest same-major hint for the full-version
+   wire hints. Fails closed to null (tests, non-browser runtimes). */
+function runtimeFullVersionHint(): string | null {
+  try {
+    const ua = (globalThis as { navigator?: { userAgent?: string } }).navigator?.userAgent;
+    return ua ? chromeFullVersionOf(ua) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function applyChUa(headers: Headers, userAgent: string, preserveNativeHighEntropy = false): void {
   const requested = new Set<string>();
   const lowEntropy = new Set(["sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"]);
@@ -242,7 +254,7 @@ export function applyChUa(headers: Headers, userAgent: string, preserveNativeHig
       requested.add(key); headers.delete(key);
     }
   }
-  const data = clientHintsForUa(userAgent);
+  const data = clientHintsForUa(userAgent, runtimeFullVersionHint());
   if (!data) return;
   headers.set("sec-ch-ua", formatUaBrands(data.brands));
   headers.set("sec-ch-ua-mobile", data.mobile ? "?1" : "?0");
@@ -253,6 +265,9 @@ export function applyChUa(headers: Headers, userAgent: string, preserveNativeHig
     "sec-ch-ua-full-version-list": data.fullVersionList ? formatUaBrands(data.fullVersionList) : undefined,
     "sec-ch-ua-arch": data.architecture === undefined ? undefined : JSON.stringify(data.architecture),
     "sec-ch-ua-bitness": data.bitness === undefined ? undefined : JSON.stringify(data.bitness),
+    "sec-ch-ua-platform-version": data.platformVersion === undefined ? undefined : JSON.stringify(data.platformVersion),
+    "sec-ch-ua-model": data.model === undefined ? undefined : JSON.stringify(data.model),
+    "sec-ch-ua-wow64": data.wow64 === undefined ? undefined : data.wow64 ? "?1" : "?0",
   };
   for (const [key, value] of Object.entries(values)) if (requested.has(key) && value !== undefined) headers.set(key, value);
 }

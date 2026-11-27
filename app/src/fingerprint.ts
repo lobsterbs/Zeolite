@@ -27,7 +27,20 @@
    surface agree. Workers get the worker prelude, not this script:
    fingerprint spoofing applies to documents only (documented). */
 
-import { userAgentDataScript } from "./useragent";
+import { chromeFullVersionOf, userAgentDataScript } from "./useragent";
+
+/* #540: the SW runtime's own full version, reused as the same-major
+   hint so the spoofed fullVersionList carries a build a real
+   Chromium of the claimed major reports, not the implausible
+   reduced major.0.0.0. Null outside a browser runtime. */
+function physicalFullVersionHint(): string | null {
+  try {
+    const ua = (globalThis as { navigator?: { userAgent?: string } }).navigator?.userAgent;
+    return ua ? chromeFullVersionOf(ua) : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface ScreenShape {
   width: number;
@@ -432,7 +445,7 @@ function prop(obj, name, get) {
 ${p.matchUserAgent === false ? "" : `prop(Navigator.prototype, "userAgent", function () { return ${JSON.stringify(p.userAgent)}; });
 prop(Navigator.prototype, "appVersion", function () { return ${JSON.stringify(p.userAgent.slice("Mozilla/".length))}; });
 prop(Navigator.prototype, "platform", function () { return ${JSON.stringify(p.platform)}; });
-${userAgentDataScript(p.userAgent, "Navigator.prototype")}`}
+${userAgentDataScript(p.userAgent, "Navigator.prototype", physicalFullVersionHint())}`}
 prop(Navigator.prototype, "language", function () { return ${JSON.stringify(p.languages[0])}; });
 prop(Navigator.prototype, "languages", function () { return ${JSON.stringify(p.languages)}; });`);
 
@@ -595,7 +608,7 @@ var zlNav = Object.getPrototypeOf(globalThis.navigator);
 ${p.matchUserAgent === false ? "" : `prop(zlNav, "userAgent", function () { return ${JSON.stringify(p.userAgent)}; });
 prop(zlNav, "appVersion", function () { return ${JSON.stringify(p.userAgent.slice("Mozilla/".length))}; });
 prop(zlNav, "platform", function () { return ${JSON.stringify(p.platform)}; });
-${userAgentDataScript(p.userAgent, "zlNav")}`}
+${userAgentDataScript(p.userAgent, "zlNav", physicalFullVersionHint())}`}
 prop(zlNav, "language", function () { return ${JSON.stringify(p.languages[0])}; });
 prop(zlNav, "languages", function () { return ${JSON.stringify(p.languages)}; });`);
 
