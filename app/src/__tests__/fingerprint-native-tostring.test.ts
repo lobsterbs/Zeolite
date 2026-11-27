@@ -5,15 +5,27 @@ import { DEFAULT_PROFILE, fingerprintScript, workerFingerprintScript } from "../
 /* #716: every function the fingerprint scripts patch on a prototype
    must stringify as native code, and unpatched functions must keep
    their real source. The scripts run inside a vm page stub. */
+/* #540: Chromium hands out a fresh NavigatorUAData per read, so the
+   compiled script patches the prototype. The stubs model the class
+   shapes; a plain-object stub would land the patch on the host
+   Object.prototype inside this vm and hijack JSON.stringify runner-wide. */
+class UADataStub {
+  get brands() { return []; }
+  get mobile() { return false; }
+  get platform() { return "Windows"; }
+  toJSON() { return { brands: this.brands, mobile: this.mobile, platform: this.platform }; }
+  getHighEntropyValues(_hints?: unknown) { return Promise.resolve({}); }
+}
+class PageNavigatorStub {
+  get userAgent() { return DEFAULT_PROFILE.userAgent; }
+  get userAgentData() { return new UADataStub(); }
+}
 
 function pageCtx() {
   return vm.createContext({
     Navigator: { prototype: {} },
     Screen: { prototype: {} },
-    navigator: {
-      userAgent: DEFAULT_PROFILE.userAgent,
-      userAgentData: { brands: [], mobile: false, platform: "Windows" },
-    },
+    navigator: new PageNavigatorStub(),
     HTMLCanvasElement: { prototype: { toDataURL() { return ""; }, toBlob() {} } },
     CanvasRenderingContext2D: { prototype: { getImageData() { return { data: [] }; } } },
     WebGLRenderingContext: { prototype: { getParameter() { return ""; } } },

@@ -143,7 +143,10 @@ export function userAgentDataScript(userAgent: string, navigatorPrototype: strin
   /* #540: the captured instance is a throwaway in modern Chromium; the
      prototype is the only surface every later read inherits. */
   var zlUaProto = zlUaData ? Object.getPrototypeOf(zlUaData) : null;
-  if (zlUaProto) {
+  /* A base-Object prototype means the value is not a real
+     NavigatorUAData (a page shim or a stub); patching it would put
+     getters on every object in the realm, so stay native. */
+  if (zlUaProto && zlUaProto !== Object.prototype) {
     var zlUaIdentity = ${JSON.stringify(data)};
     var zlUaCopy = function (v) { return Array.isArray(v) ? v.map(function (b) { return { brand: b.brand, version: b.version }; }) : v; };
     var zlUaLow = function () { return { brands: zlUaCopy(zlUaIdentity.brands), mobile: zlUaIdentity.mobile, platform: zlUaIdentity.platform }; };
