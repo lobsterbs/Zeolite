@@ -245,7 +245,11 @@ fn split_authority(s: &str) -> (String, String, String) {
         Some(i) => (&auth[..i + 1], &auth[i + 1..]),
         None => ("", auth),
     };
-    (userinfo.to_string(), hostport.to_ascii_lowercase(), tail.to_string())
+    (
+        userinfo.to_string(),
+        hostport.to_ascii_lowercase(),
+        tail.to_string(),
+    )
 }
 
 /// WHATWG special schemes read "\" as "/" in the authority and path,
@@ -489,17 +493,21 @@ mod tests {
         }
     }
 
-
     #[test]
     fn backslash_is_a_slash_before_the_query_only() {
         // WHATWG: special schemes read "\\" as "/" in the authority and
         // path; in the query and fragment it is an ordinary character.
         let b = "https://b.example/d/";
-        assert_eq!(resolve("/p\\q?x=a\\b#f\\g", b), "https://b.example/p/q?x=a\\b#f\\g");
-        assert_eq!(resolve("https://Ex.com\\a\\b?k=\\", b), "https://ex.com/a/b?k=\\");
+        assert_eq!(
+            resolve("/p\\q?x=a\\b#f\\g", b),
+            "https://b.example/p/q?x=a\\b#f\\g"
+        );
+        assert_eq!(
+            resolve("https://Ex.com\\a\\b?k=\\", b),
+            "https://ex.com/a/b?k=\\"
+        );
         assert_eq!(resolve("//Ex.com\\a", b), "https://ex.com/a");
     }
-
 
     #[test]
     fn hosts() {

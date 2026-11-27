@@ -1716,9 +1716,7 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
     // close-tag syntax; splitting there would consume nothing.
     let name_end = trimmed
         .char_indices()
-        .find(|&(i, c)| {
-            c == '=' || c.is_ascii_whitespace() || c == '>' || (c == '/' && i > 0)
-        })
+        .find(|&(i, c)| c == '=' || c.is_ascii_whitespace() || c == '>' || (c == '/' && i > 0))
         .map_or(trimmed.len(), |(i, _)| i);
     let name = trimmed[..name_end].to_string();
     let rest = &trimmed[name_end..];
@@ -4336,8 +4334,14 @@ document.write('<script src=x></script>');
             out
         };
         for (src, want) in [
-            ("<img src=\"https://EXAMPLE.com/P\">", "https://example.com/P"),
-            ("<img src=\"https://ex\tample.com/p\">", "https://example.com/p"),
+            (
+                "<img src=\"https://EXAMPLE.com/P\">",
+                "https://example.com/P",
+            ),
+            (
+                "<img src=\"https://ex\tample.com/p\">",
+                "https://example.com/p",
+            ),
             ("<a href=\"https://ex.com/a\nb\">", "https://ex.com/ab"),
             ("<a href=\"https://ex.com\\a\\b\">", "https://ex.com/a/b"),
         ] {
