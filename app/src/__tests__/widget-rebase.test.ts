@@ -133,12 +133,24 @@ describe("apps widget fetch rebase (#703)", () => {
   });
 
   it("does not touch other bare engine paths", async () => {
+    /* #708 (the referrer's committed query handle): a context-less
+       bare engine path whose referrer is a committed query page now
+       resolves through the ordinary referrer recovery to the page's
+       virtual home instead of escaping to the origin passthrough.
+       The #703 contract this test pins is unchanged: the widget
+       rebase must not hijack the path - the upstream destination is
+       the page's own site, never ogs.google.com/widget/app/so. */
     const h = buildQueryHandleUrl(PAGE);
     const { ev, armed } = mkEvent("/some/other/path.png", ORIGIN + h);
     handleFetch(ev);
-    await armed[0]!;
-    expect(transportMock.calls).toBe(0);
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const served = await armed[0]!;
+    expect(transportMock.calls).toBe(1);
+    const up = new URL(transportMock.urls[0]);
+    expect(up.origin).toBe("https://www.google.com");
+    expect(up.pathname).toBe("/some/other/path.png");
+    const passthroughs = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(passthroughs.some((u) => u.includes("/some/other/path.png"))).toBe(false);
+    expect(served.status).toBe(200);
   });
 
   /* #703 wild reopen (night capture, pin 189): the launcher nav has no
