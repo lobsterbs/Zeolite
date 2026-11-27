@@ -1346,6 +1346,23 @@ export function referrerDest(referrer: string, path: string): string | null {
       }
     }
   }
+  /* #708 reopened (the bare-src bscframe class, live on pin 211): a
+     query-shape committed page (real path + zlNavh in the search)
+     names its home here too. A subframe navigation whose src escaped
+     unrewritten (Google's botguard <iframe src="/_/bscframe">) arrives
+     context-less: parser-initiated navigations carry no context-bearing
+     client id, and the referrer's pathname is the bare committed path,
+     not an engine route - the only engine fact left is the referrer
+     itself, the parent's committed query handle. decodeQueryHandle is
+     MAC-verified and live-token-only, refuses engine-shaped pathnames
+     (the path arms above own those), peels any prel tail on the
+     referrer's own path, and strips the token from the resolved home;
+     impostors and wrong-key tokens decode to nothing, so the arm
+     grants no reach the marker arm does not (#425 trust). */
+  if (!pageDest) {
+    const q = decodeQueryHandle(ref);
+    if (q !== null) pageDest = q.destination;
+  }
   if (!pageDest) return null;
   let home: URL;
   try {
