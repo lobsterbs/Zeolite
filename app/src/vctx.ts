@@ -29,6 +29,8 @@
    Pure code: the map is a parameter, so restart, replacement,
    isolation and missing-referrer behavior are all unit-tested. */
 
+import { isEngineAsset } from "./codec";
+
 export interface VirtualContext {
   /** Map key: the SW-assigned client id. */
   id: string;
@@ -187,3 +189,48 @@ export function establishFromClientUrl(
      a restarted worker restores it from the same shape oracle. */
   return establishContext(map, clientId, target, "window", mainSurface);
 }
+/** #708 (run 8): a context-less same-origin SUBFRAME navigation - a
+    parser- or script-created iframe whose src no rewriter arm minted
+    (Google botguard /_/bscframe on the committed query-handle
+    sign-in page) - arrives with neither a bearing clientId nor a
+    referrer any codec arm decodes, so the #101 escape answered it
+    with the origin SPA catch-all and the host shell rendered inside
+    the botguard frame. The page that created the frame is still
+    live in this worker: its window context is the only honest home
+    left, under the same #687 unambiguity rule the cdn-cgi arm
+    uses - every live window context on ONE upstream origin, else
+    the frame cannot be attributed and the request keeps the
+    honest escape.
+
+    Narrower than the #101 cdn-cgi arm on purpose:
+    - GET iframe navigations only. A top-level document navigation
+      to a bare path may be an address-bar load of the host app and
+      must keep the passthrough (the #511 location-write class
+      already recovers through its own client context).
+    - the host-owned origin-root surfaces (the boot page guest-host
+      iframe, the engine asset vocabulary) answer from the origin
+      server, never from the proxied site.
+    Pure, total, map-parameterized like the rest of this module. */
+export function navRealmDest(
+  map: Map<string, VirtualContext>,
+  method: string,
+  mode: string,
+  destination: string,
+  pathname: string,
+  search: string,
+): string | null {
+  if (method !== "GET") return null;
+  if (mode !== "navigate") return null;
+  if (destination !== "iframe") return null;
+  if (isEngineAsset(pathname) || pathname === "/guest-host.html") return null;
+  const ctx = unambiguousWindowContext(map);
+  if (!ctx || !ctx.currentUrl) return null;
+  try {
+    const dest = new URL(pathname + search, ctx.currentUrl).href;
+    if (!/^https?:$/.test(new URL(dest).protocol)) return null;
+    return dest;
+  } catch {
+    return null;
+  }
+}
+

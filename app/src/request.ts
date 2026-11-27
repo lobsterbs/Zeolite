@@ -68,6 +68,7 @@ import {
   contextOf,
   establishContext,
   establishFromClientUrl,
+  navRealmDest,
   resolveRelative,
   unambiguousWindowContext,
   VCTX_CAP,
@@ -3894,7 +3895,16 @@ export function handleFetch(e: FetchEvent): void {
                  serve from dist. Fail closed: unknown client, no open
                  proxied window, ambiguous windows, or any error keeps the
                  old passthrough. */
-              const realmDest = await fallbackRealmDest(e.clientId, url, e.request.method);
+              const realmDest =
+                (await fallbackRealmDest(e.clientId, url, e.request.method)) ??
+                navRealmDest(
+                  VCTX,
+                  e.request.method,
+                  e.request.mode,
+                  e.request.destination,
+                  url.pathname,
+                  url.search,
+                );
               if (realmDest) {
                 dest0 = realmDest;
               } else {
