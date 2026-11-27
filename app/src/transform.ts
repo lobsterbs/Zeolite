@@ -1,1 +1,872 @@
-[object Object]
+/// <reference lib="webworker" />
+/* Response transformation + wasm rewriting orchestration, extracted
+   from sw.ts (issue #86). This module owns: the wasm rewriter module
+   lifecycle, the worker prelude cache, content-type classification,
+   and the streaming HTML/CSS rewrite pipelines. sw.ts injects the
+   SW-side state (route readiness, route key, fingerprint script,
+   site profile script, degraded flag) through initTransform; the
+   getters are lazy and resolved at request time, never at module
+   eval, so the call may precede the declarations it closes over. */
+import { siteRules, ruleFor, type SiteRule, type LocationPolicy } from "./siteconfig";
+import { recordDocumentLocationReads, resolveLocationPolicy } from "./location-targeting";
+import { DIAG } from "./diag";
+import { streamAlive, streamDone } from "./streams-alive";
+import { charsetFromHeader, makeDecoder, resolveCharset } from "./headers";
+import { docKind, jsBody } from "./transit";
+import { traceDecision, tracingEnabled } from "./tracing";
+import { initScript, initSplicePoint, vPath } from "./pageload";
+import { buildQueryHandleUrl, currentPrefix, NAVH_TTL_MS } from "./codec";
+import * as rewriterWasm from "./rewriter_wasm/rewriter_wasm.js";
+import { sriScanner } from "./sri";
+import { importmapScanner } from "./importmaps";
+
+/* #705: a document base outlives the navigation hop that fetched it,
+   so the emitted base handle rides a longer-lived origin token than a
+   nav handle; a reload always re-mints. ponytail ceiling: 30 minutes -
+   revisit only if a live SPA outlives it and strands late assets. */
+const BASE_HANDLE_TTL_MS = 15 * NAVH_TTL_MS;
+
+/** SW-side state seam (issue #86). */
+export interface TransformDeps {
+  /** Resolves once the route key is settled (token mint gate). */
+  routeReady: () => Promise<void>;
+  /** Route key (b64u), null when not settled / not keyed. */
+  routeKey: () => string | null;
+  /** Active fingerprint profile script, null when none. */
+  fpScript: () => string | null;
+  /** Per-site profile script for the given base, null when none. */
+  siteScript: (base: string) => Promise<string | null>;
+  /** Records a transport-level degradation reason (engineDegraded). */
+  setDegraded: (reason: string) => void;
+  /** Lazy-images host toggle: inject loading=lazy on <img> tags. */
+  lazyImages: () => boolean;
+}
+
+let deps: TransformDeps | null = null;
+
+/** Wire the SW state seam. Called once by sw.ts at module eval. */
+export function initTransform(d: TransformDeps): void {
+  deps = d;
+}
+
+/* ---- #682: event-loop yields in the rewrite pumps --------------------
+   A pump loops on `await reader.read()`; when the upstream body is
+   already buffered (transport spool, page cache, a whole-body Response)
+   every read resolves in a MICROtask, so the entire document rewrite
+   runs inside ONE macrotask. Queued fetch events - same-origin
+   passthrough /build, /zlrelay renewals - cannot dispatch until the
+   storm drains (netlog rows pinned at status 0, ms -1 for tens of
+   seconds). Yielding to the macrotask queue between chunks lets those
+   events answer mid-storm. Count-based backstop so even instant chunks
+   cannot starve the loop; time-based arm so a few huge slow chunks
+   yield too. */
+export const PUMP_YIELD_CHUNKS = 256;
+export const PUMP_YIELD_MS = 8;
+
+/** One macrotask turn: prefer scheduler.yield() where exposed, else a
+    zero-delay timer. FIFO enough that fetch events already queued run
+    before the pump continuation. */
+export function yieldToEventLoop(): Promise<void> {
+  const sched = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
+  if (sched && typeof sched.yield === "function") return sched.yield();
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Per-pump yield tracker: call once per pumped chunk. */
+export function makePumpYield(): () => Promise<void> {
+  let chunks = 0;
+  let last = performance.now();
+  return async () => {
+    chunks++;
+    const now = performance.now();
+    if (chunks >= PUMP_YIELD_CHUNKS || now - last >= PUMP_YIELD_MS) {
+      chunks = 0;
+      await yieldToEventLoop();
+      last = performance.now();
+    }
+  };
+}
+
+/* ---- Streaming rewriter wiring ------------------------------------- */
+
+interface JsRewriter {
+  set_location_policy?(mode: string, maxBytes: number): void;
+  rewrite_script?(source: string): string;
+  take_location_events?(): string;
+  free?(): void;
+  process(chunk: string): string;
+  finish(): string;
+  add_injection(path: string): void;
+  set_blocked_hosts(hosts: string[]): void;
+  set_lazy_images(): void;
+  /* #529: opt-in token-level decision tracing (see tracing.ts). */
+  set_trace?(on: boolean): void;
+  take_trace?(): string;
+  /* #618: opt out of the #449 origin-pinning literal skip for this
+     instance (owner-page decision; see originPinningRelaxed). */
+  set_origin_pinning_skip?(on: boolean): void;
+}
+interface JsCssRewriter {
+  process(chunk: string): string;
+  finish(): string;
+}
+interface RewriterMod {
+  JsRewriter: new (origin: string, base: string, prefix: string, scheme: string, key?: string) => JsRewriter;
+  JsCssRewriter: new (origin: string, base: string, prefix: string, scheme: string, key?: string) => JsCssRewriter;
+  rewriteCss(css: string, origin: string, base: string, prefix: string, scheme: string, key?: string): string;
+  /* #46: one-shot external script body pass (URL literals +
+     frame-buster neutralization), used by the script-destination
+     serve seam. */
+  rewriteJsBody(js: string, origin: string, base: string, prefix: string, scheme: string, key?: string): string;
+  /* #449: does this script body pin its generated URLs with an
+     anchored ^https?: regex? Pinned bodies skip the URL-literal pass
+     inside rewriteJsBody (the loader validates the literals it
+     builds); the caller uses this to record the skip. Optional:
+     older dist wasm exports nothing. */
+  hasOriginPinningRegex?(js: string): boolean;
+  /* #235: cumulative globals-pass counters ("parsed,failed,renamed").
+     Optional: older dist wasm exports nothing. */
+  globalsStats?(): string;
+  /* wasm-pack --target web output: `default` is the async init that
+     fetches and instantiates the .wasm binary. Without it every
+     JsRewriter call dies on an unbound wasm table. */
+  default(path?: unknown): Promise<unknown>;
+}
+let rewriterMod: Promise<RewriterMod> | null = null;
+export function rewriter(): Promise<RewriterMod> {
+  if (!rewriterMod) {
+    rewriterMod = (async () => {
+      const mod = rewriterWasm as unknown as RewriterMod;
+      // Vite freezes the wasm-pack default URL to the origin root, which 404s
+      // when the bundle is aliased under a subpath (LobsterBrowse /zlsw/).
+      // Resolve the wasm URL against the SW script URL instead.
+      if (typeof mod.default === "function") {
+        await mod.default(new URL("rewriter_wasm_bg.wasm", self.location.href));
+      }
+      return mod;
+    })().catch((err) => {
+      deps!.setDegraded("rewriter wasm: " + String(err));
+      rewriterMod = null; // allow retry on next response
+      DIAG.emit({
+        category: "REWRITE",
+        severity: "error",
+        message: "rewriter wasm init failed",
+        technicalReason: String(err),
+      });
+      throw err;
+    });
+  }
+  return rewriterMod;
+}
+
+/* 1.6 Hydride: the worker prelude asset is fetched once and cached in
+   memory; the live route prefix and the upstream worker URL are baked
+   into the injected first line at serve time. */
+let preludeCache: string | null = null;
+export async function workerPrelude(): Promise<string> {
+  if (preludeCache === null) {
+    const r = await fetch(new URL("worker-prelude.js", self.location.href).href);
+    /* Only a real body may become THE prelude: a non-2xx asset (a
+       stale deploy's 404 page) used to be cached for the whole worker
+       lifetime and prepended to every worker script. A failed fetch
+       stays uncached, so the next request retries and a later success
+       heals the worker lifetime. */
+    if (!r.ok) throw new Error("worker prelude asset unavailable: HTTP " + r.status);
+    preludeCache = await r.text();
+  }
+  return preludeCache;
+}
+
+export function isHtml(resp: Response): boolean {
+  /* One classification (transit.docKind) for the rewrite branches and
+     the transit refinement; XHTML documents are HTML to the rewriter
+     (issue C). */
+  return docKind(resp.headers.get("content-type") ?? "") === "html";
+}
+export function isCss(resp: Response): boolean {
+  return docKind(resp.headers.get("content-type") ?? "") === "css";
+}
+export function isJs(resp: Response): boolean {
+  return jsBody(resp.headers.get("content-type") ?? "");
+}
+
+/** Concatenate held byte chunks (stream-head sniffing). */
+function cat(chunks: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
+  let o = 0;
+  for (const c of chunks) {
+    out.set(c, o);
+    o += c.length;
+  }
+  return out;
+}
+
+/** Raw passthrough of an already-started body: one held chunk plus
+    the rest of the reader, bytes untouched. */
+export function rawFrom(
+  head: Uint8Array | undefined,
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  base = "",
+): ReadableStream<Uint8Array> {
+  /* #201: a cancelled consumer must reach the upstream reader;
+     without a cancel() the vendored transport keeps buffering into
+     a stream nobody reads. */
+  let cancelled = false;
+  return new ReadableStream<Uint8Array>({
+    async start(c) {
+      streamAlive(base); // #99: the pump below dispatches no events; keep the worker alive
+      try {
+        if (head) c.enqueue(head);
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) c.enqueue(value);
+        }
+        c.close();
+      } catch (e) {
+        /* #201: enqueue/close on a cancelled controller is teardown,
+           not failure; a genuine upstream error still errors the
+           stream. */
+        if (!cancelled) throw e;
+      } finally {
+        streamDone(base);
+      }
+    },
+    async cancel() {
+      cancelled = true;
+      try {
+        await reader.cancel();
+      } catch {
+        /* already gone */
+      }
+    },
+  });
+}
+
+/** HTML bodies: pipe response chunks through the wasm rewriter. The
+    bootstrap needs a per-site identity on window.__ZL (an opaque
+    token since #32; the real destination never enters the page), so
+    a tiny inline script is spliced into the stream head AFTER the
+    doctype (quirks fix: it used to ride the very first chunk, before
+    the doctype, which forced quirks mode on every proxied document
+    that declared one; a doctype-less page keeps the stream-start
+    placement and its quirks mode). SiteConfig per-site rules are
+    applied to this rewriter instance: injections (Phase 3 hooks) and
+    blocked hosts (ad stripping). Issue B: the body decodes with the
+    upstream charset (header, BOM, meta prescan, spec default), never
+    assumed UTF-8 in; the served copy is re-encoded UTF-8 and the
+    caller rewrites the served content-type to charset=utf-8. */
+export function rewriteStream(
+  body: ReadableStream<Uint8Array> | ReadableStreamDefaultReader<Uint8Array>,
+  base: string,
+  rule: SiteRule,
+  csInject: string[],
+  contentType: string,
+  onDone?: () => void,
+  /* #414: false keeps the URL pass but skips the init splice - a
+     fetch/XHR HTML body is a programmatic read, never a document. */
+  injectInit = true,
+  /* #531: optional collector for the document SRI metadata; fed
+     the decoded upstream text before the rewriter drops the
+     integrity attributes (see sri.ts). */
+  onSri?: (abs: string, integrity: string) => void,
+  /* #554: optional collector for the document import maps; fed
+     the raw import-map script bodies of the decoded upstream
+     text (see importmaps.ts). */
+  onImportmap?: (body: string) => void,
+  /* #532: optional sink for the effective document base once the
+     first <base href> folded; receives the HOSTLESS form (the
+     same #144 relaxation as vpath) so the virtual location view
+     can serve document.baseURI reads. Fired once per distinct
+     folded base, at most a couple of times per document. */
+  onVbase?: (vbase: string) => void,
+  /* #529: optional diagnostics trace id; the rewriter's aggregated
+     decisions join the request's trace at stream end. */
+  traceId?: string,
+  /* #551: precomputed <style data-zl-cosmetic> markup (cosmetics.ts)
+     spliced with the init script after the doctype. Document
+     call sites only: injectInit=false (fetch/XHR HTML) never
+     receives cosmetics - a programmatic read is not a document. */
+  cosmeticStyle = "",
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const modP = rewriter();
+  /* Issue #32: the injected contract is { site: <opaque token> },
+    computed SW-side from the destination; an active fingerprint
+    profile rides the same splice (1.8 Telluride). #55
+    follow-up: with a route key the token is a keyed MAC of the
+    origin, so the mint waits for routeReady - a token minted before
+    the key settled would split one site's storage across both the
+    keyed and the legacy prefix. */
+  /* #201: the upstream reader is hoisted so cancel() can reach it
+     even while the pre-pump awaits still run. */
+  let upstream: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let cancelled = false;
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      streamAlive(base); // #99: the pump below dispatches no events; keep the worker alive
+      try {
+        /* #201: inside the try - a routeReady or siteScript rejection
+           must settle the heartbeat instead of escaping with it
+           armed. */
+        await deps!.routeReady();
+        /* #414: injectInit=false serves fetch/XHR HTML with the URL
+           rewrite but no bootstrap splice, so a plain-text API answer
+           behind an HTML content-type survives byte intact. */
+        /* #551: cosmetic styles ride the same after-doctype splice as
+           the init script. The wasm rewriter's add_injection only
+           emits <script src> tags (crates/rewriter html::emit_injections),
+           so a style element goes through this splice instead - the
+           smallest seam that keeps the rewriter untouched. */
+        const init = injectInit ? initScript(base, deps!.fpScript() ?? (await deps!.siteScript(base)), rule.locationOrigin) + cosmeticStyle : "";
+        /* #531: scan only document-shaped rewrites; a fetch/XHR HTML
+           body (injectInit=false) is programmatic data, never a
+           document with subresource integrity metadata. */
+        const sriScan = onSri && injectInit && /html/i.test(contentType) ? sriScanner(base, onSri) : null;
+        /* #554: same document shape as the SRI scan - a served
+           document import maps are recorded for module-worker
+           bare-specifier resolution (see importmaps.ts). */
+        const mapScan = onImportmap && injectInit && /html/i.test(contentType) ? importmapScanner(onImportmap) : null;
+        const emit = (out: string) => {
+          if (out) controller.enqueue(encoder.encode(out));
+        };
+        const reader = body instanceof ReadableStream ? body.getReader() : body;
+        upstream = reader;
+        // Rewriter init and construction live inside the try: an init failure
+        // (e.g. a wasm 404) used to reject outside the try and kill every fresh
+        // HTML response with no diag event and no console error.
+        const mod = await modP;
+        const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
+        configureLocation(rw, resolveLocationPolicy(base, rule));
+        /* #618: the document's own host relaxes the #449 literal
+           skip for this rewriter instance (inline scripts included). */
+        if (originPinningRelaxed(base)) rw.set_origin_pinning_skip?.(false);
+        /* #529: opt-in token-level decision tracing; off by default
+           the wasm instance records and allocates nothing. */
+        if (tracingEnabled()) rw.set_trace?.(true);
+        for (const path of rule.inject ?? []) rw.add_injection(path);
+        /* #532: drain the folded base per chunk (first base wins,
+           the rewriter tracks it); one post per distinct value.
+           #705: the drain also returns the fresh folded absolute
+           base so the emit path can re-anchor it (emitOut). */
+        let lastVbase: string | null = null;
+        const drainBase = (): string | null => {
+          const b = (rw as unknown as { take_base?: () => string | undefined }).take_base?.();
+          if (!b || b === lastVbase) return null;
+          lastVbase = b;
+          const vb = vPath(b);
+          if (vb && onVbase) onVbase(vb);
+          return b;
+        };
+        /* #705: the wasm folds the first base href for rewrite-time
+           URL resolution, then emits the tag pointing at the opaque
+           one-segment route - a shape every LATE runtime resolution
+           (a src attribute set by page script at runtime, a fetch
+           with a relative URL) strips, landing engine-root 404s
+           (icloud hero assets). Re-anchor the emitted tag on the
+           committed query-shape route: the real upstream path plus
+           the origin-only MAC handle, so browser-side relative
+           resolution keeps the path and the decode side composes
+           the true destination. First base only; a mint refusal or
+           an engine-shaped base falls back to the opaque route,
+           exactly the behavior of today. The fold and its tag leave
+           the same wasm pump, but the tag can also land at finish;
+           the mint stays pending until it matches an emitted chunk. */
+        let pendingBaseHandle: string | null = null;
+        const emitOut = (out: string): string => {
+          const fresh = drainBase();
+          if (fresh !== null) {
+            const handle = buildQueryHandleUrl(fresh, BASE_HANDLE_TTL_MS);
+            if (handle !== null) pendingBaseHandle = handle;
+          }
+          if (pendingBaseHandle === null) return out;
+          const tagAt = out.search(/<base[\s>\/]/i);
+          if (tagAt < 0) return out;
+          const tagEnd = out.indexOf(">", tagAt);
+          if (tagEnd < 0 || tagEnd - tagAt > 4096) return out;
+          const tag = out.slice(tagAt, tagEnd + 1);
+          const href = tag.match(/[\s"']href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+          if (href === null || href.index === undefined) return out;
+          const eq = href[0].indexOf("=");
+          const esc = pendingBaseHandle.replace(/&/g, "&amp;");
+          const tagNew =
+            tag.slice(0, href.index) +
+            href[0].slice(0, eq + 1) + '"' + esc + '"' +
+            tag.slice(href.index + href[0].length);
+          pendingBaseHandle = null;
+          return out.slice(0, tagAt) + tagNew + out.slice(tagEnd + 1);
+        };
+        if (rule.block?.length) rw.set_blocked_hosts(rule.block);
+        if (deps!.lazyImages()) rw.set_lazy_images();
+        for (const u of csInject) rw.add_injection(u);
+        /* Stream-head hold (quirks splice + charset): raw bytes
+           accumulate until the charset resolves (BOM, header label,
+           then meta prescan over the first 1024 bytes), decoded text
+           until the doctype splice point resolves (initSplicePoint).
+           Bounded: 2KB of still-undecided head falls back to
+           stream-start injection, the old placement - never an
+           unbounded hold. */
+        const headerLabel = charsetFromHeader(contentType);
+        let decoder: TextDecoder | null = null;
+        let held: Uint8Array[] = [];
+        let heldLen = 0;
+        let head = "";
+        let injected = false;
+        /* #682: hand the event loop back between chunks so passthrough
+           fetch events dispatch mid-storm. */
+        const pumpYield = makePumpYield();
+        const splice = (at: number) => {
+          emit(emitOut(rw.process(head.slice(0, at))));
+          controller.enqueue(encoder.encode(init));
+          emit(emitOut(rw.process(head.slice(at))));
+          head = "";
+          injected = true;
+        };
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            /* Flush the decoder's incomplete tail: a multi-byte
+               sequence truncated at end-of-stream used to be dropped
+               silently (issue B). */
+            let rest = decoder === null ? "" : decoder.decode();
+            if (rest) sriScan?.feed(rest); mapScan?.feed(rest);
+            if (!injected) {
+              if (decoder === null) {
+                decoder = makeDecoder(resolveCharset(contentType, cat(held), true));
+                head = decoder.decode(cat(held), { stream: true });
+                /* #531: a single-chunk document held entirely before the
+                   decoder resolved builds its head here - the one head
+                   build that never passed a feed site. */
+                sriScan?.feed(head); mapScan?.feed(head);
+                held = [];
+                rest = decoder.decode();
+              } else {
+                head += rest;
+                rest = "";
+              }
+              splice(initSplicePoint(head, true) ?? 0);
+            }
+            if (rest) emit(emitOut(rw.process(rest)));
+            const tail = emitOut(rw.finish());
+            reportLocation(rw, base);
+            drainBase();
+            /* #529: drain the aggregated rewriter decisions into the
+               trace ring; the JSON vocabulary is engine-compiled, so
+               no page data can ride it. A malformed drain never
+               breaks the served stream. */
+            if (tracingEnabled()) {
+              const decisions = rw.take_trace?.();
+              if (decisions && decisions !== "[]") {
+                try {
+                  for (const d of JSON.parse(decisions) as Array<{ pass: string; decision: string; n: number }>) {
+                    traceDecision({ subsystem: "rewriter", rule: d.pass, original: d.decision, result: "count=" + d.n, traceId });
+                  }
+                } catch { /* never break the stream over a trace */ }
+              }
+            }
+            if (tail) controller.enqueue(encoder.encode(tail));
+            controller.close();
+            onDone?.();
+            return;
+          }
+          /* #682: yield before the per-chunk wasm pass when the budget
+             trips; a buffered body otherwise rewrites whole in one task. */
+          await pumpYield();
+          if (injected) {
+            const t = decoder!.decode(value, { stream: true });
+            sriScan?.feed(t); mapScan?.feed(t);
+            emit(emitOut(rw.process(t)));
+            reportLocation(rw, base);
+            drainBase();
+            continue;
+          }
+          if (decoder !== null) {
+            { const t = decoder.decode(value, { stream: true }); sriScan?.feed(t); mapScan?.feed(t); head += t; }
+          } else {
+            held.push(value);
+            heldLen += value.length;
+            /* Even a valid header must wait for a possibly split BOM.
+               Three bytes suffice to decide every supported BOM. */
+            if (heldLen < (headerLabel ? 3 : 1024)) continue;
+            decoder = makeDecoder(resolveCharset(contentType, cat(held), true));
+            { const t = decoder.decode(cat(held), { stream: true }); sriScan?.feed(t); mapScan?.feed(t); head += t; }
+            held = [];
+          }
+          const at = initSplicePoint(head);
+          if (at !== null) splice(at);
+          else if (head.length > 2048) splice(0);
+        }
+      } catch (e) {
+        /* #201: a cancel race lands here through enqueue/close on the
+           cancelled controller; that is teardown, not failure. */
+        if (!cancelled) {
+          DIAG.emit({
+            category: "REWRITE",
+            severity: "error",
+            message: "html rewrite stream failed",
+            technicalReason: String(e),
+            url: base,
+          });
+          controller.error(e);
+        }
+      } finally {
+        streamDone(base); // #99: every exit path settles the stream
+      }
+    },
+    async cancel() {
+      /* #201: the page went away mid-document: stop the upstream
+         read and free the transport buffer. The reader may not exist
+         yet (the pre-pump awaits are still running); an unlocked body
+         cancels directly, a locked one through its reader. */
+      cancelled = true;
+      try {
+        await (upstream ?? body).cancel();
+      } catch {
+        /* already gone */
+      }
+    },
+  });
+}
+
+/* 2.4 Bromide: standalone stylesheet bodies stream chunk by chunk
+   through the wasm CSS rewriter (2.3 buffered the whole body for a
+   one-shot pass, so large CSS delayed first paint). No window.__ZL
+   init is injected here: CSS is not a document, the bootstrap never
+   runs in a stylesheet context. The rewriter retains only the
+   incomplete url( tail between chunks. Issue B: the body decodes
+   with the upstream charset (header, BOM or a leading @charset, all
+   within the first bytes, so the head is held only until the
+   charset resolves); the served copy is UTF-8 and the caller
+   declares it on the served content-type. */
+export function cssRewriteStream(
+  body: ReadableStream<Uint8Array>,
+  base: string,
+  contentType: string,
+  onDone?: () => void,
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const modP = rewriter();
+  /* #201: hoisted so cancel() can reach the locked body. */
+  let upstream: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let cancelled = false;
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      streamAlive(base); // #99: the pump below dispatches no events; keep the worker alive
+      try {
+        const mod = await modP;
+        const rw = new mod.JsCssRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined); // scheme fixed since #32 (mirror removed)
+        const reader = body.getReader();
+        upstream = reader;
+        const emit = (out: string) => {
+          if (out) controller.enqueue(encoder.encode(out));
+        };
+        const headerLabel = charsetFromHeader(contentType);
+        let decoder: TextDecoder | null = headerLabel ? makeDecoder(headerLabel) : null;
+        let held: Uint8Array[] = [];
+        let heldLen = 0;
+        /* #682: event-loop yield tracker for the pump below. */
+        const pumpYield = makePumpYield();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            let text = "";
+            if (decoder === null) {
+              decoder = makeDecoder(resolveCharset(contentType, cat(held), false));
+              text = decoder.decode(cat(held), { stream: true });
+              held = [];
+            }
+            /* Flush the decoder's incomplete tail: a multi-byte
+               sequence truncated at end-of-stream used to be dropped
+               silently (issue B). */
+            text += decoder.decode();
+            if (text) emit(rw.process(text));
+            const tail = rw.finish();
+            if (tail) controller.enqueue(encoder.encode(tail));
+            controller.close();
+            onDone?.();
+            return;
+          }
+          /* #682: yield between chunks (see rewriteStream). */
+          await pumpYield();
+          if (decoder !== null) {
+            emit(rw.process(decoder.decode(value, { stream: true })));
+            continue;
+          }
+          held.push(value);
+          heldLen += value.length;
+          if (heldLen < 64) continue; /* @charset must sit at the very start */
+          decoder = makeDecoder(resolveCharset(contentType, cat(held), false));
+          emit(rw.process(decoder.decode(cat(held), { stream: true })));
+          held = [];
+        }
+      } catch (e) {
+        /* #201: a cancel race is teardown, not failure. */
+        if (!cancelled) {
+          DIAG.emit({
+            category: "REWRITE",
+            severity: "error",
+            message: "css rewrite stream failed",
+            technicalReason: String(e),
+            url: base,
+          });
+          controller.error(e);
+        }
+      } finally {
+        streamDone(base); // #99: every exit path settles the stream
+      }
+    },
+    async cancel() {
+      /* #201: stop the upstream read when the consumer goes away. */
+      cancelled = true;
+      try {
+        await (upstream ?? body).cancel();
+      } catch {
+        /* already gone */
+      }
+    },
+  });
+}
+
+/** Prewarm the wasm module during SW install: instantiation is the
+    slowest cold-path step, so the first HTML response should not pay
+    it. sw.ts calls this seam, not the wasm loader (issue #86). */
+export function prewarmRewriter(): Promise<void> {
+  /* #244: a settled promise so the install seam can hold it in
+     waitUntil; a failure degrades honestly (setDegraded inside
+     rewriter()) and maps to undefined here. */
+  return rewriter().then(() => undefined, () => undefined);
+}
+
+/** #46 one-shot external script body pass (URL literals + frame-buster
+    neutralization), used by the script-destination serve seam. sw.ts
+    depends on this transformer seam rather than the wasm module surface
+    (issue #86). Rejects on a wasm load failure; the caller decides
+    whether the untransformed body still serves. */
+/* #235: parse failures fall back to the unrenamed body, so the
+   honest signal is a diagnostic, not a broken script. Diffed per
+   call: one diag per new failure, never one per script. */
+let lastGlobalsFailed = 0;
+function reportGlobals(mod: RewriterMod): void {
+  if (typeof mod.globalsStats !== "function") return;
+  let failed = -1;
+  try {
+    failed = Number(mod.globalsStats().split(",")[1]);
+  } catch {
+    return;
+  }
+  if (!Number.isFinite(failed) || failed <= lastGlobalsFailed) return;
+  lastGlobalsFailed = failed;
+  DIAG.emit({
+    category: "REWRITE",
+    severity: "warning",
+    message: "js globals pass parse failures: " + String(failed),
+  });
+}
+
+/** Additive WASM methods allow older deployed bundles to stay usable. An
+    explicit policy must never silently run the old, always-on location pass. */
+function configureLocation(rw: JsRewriter, policy: LocationPolicy): boolean {
+  if (!rw.set_location_policy) {
+    if (policy.mode !== "legacy") DIAG.emit({ category: "REWRITE", severity: "warning", message: "location policy unsupported by loaded rewriter" });
+    return false;
+  }
+  rw.set_location_policy(policy.mode, policy.maxBytes);
+  return true;
+}
+
+function reportLocation(rw: JsRewriter, owner?: string): void {
+  const events = rw.take_location_events?.();
+  if (!events) return;
+  // Fixed vocabulary only: no source, destinations or tokens in diagnostics.
+  const counts = new Map<string, number>();
+  for (const reason of events.split(",").slice(0, 32)) {
+    if (["disabled", "size-cap", "no-candidate", "no-reads", "parse-failure", "rewritten"].includes(reason))
+      counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  if (counts.size) DIAG.emit({ category: "REWRITE", severity: "info", message: "location pass: " + [...counts].map(([k, n]) => k + "=" + n).join(", ") });
+  /* #456 gate 4: the pathname-reading half of the auto-targeting
+     evidence (observe-only; the mark lives in location-targeting). */
+  if (owner && (counts.get("rewritten") ?? 0) > 0) recordDocumentLocationReads(owner);
+}
+
+/* #618: the #449 needle (^https?:) also fires on generic
+   scheme-sanity regexes (the accounts.google.com module chunk), and a
+   skipped literal pass leaves endpoint literals verbatim; the runtime
+   seams then pass those cross-origin fetches native and their
+   responses are unreadable, which breaks the page. The owner page
+   decides (the same principle as the location policy): pages on these
+   hosts run the literal pass even on pinned bodies. Operator
+   decision 2026-11-03. */
+const ORIGIN_PINNING_RELAX_HOSTS = new Set(["accounts.google.com"]);
+export function originPinningRelaxed(pageBase: string | undefined | null): boolean {
+  if (!pageBase) return false;
+  try {
+    return ORIGIN_PINNING_RELAX_HOSTS.has(new URL(pageBase).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/* #451: reCAPTCHA widget release scripts are exempt from the #449
+   literal skip even when their body pins origins (the gstatic release
+   self-check regex). Their single RPC-base literal
+   ("https://www.google.com/recaptcha/api2/") must stay engine-mediated:
+   skipped, the widget mints real google.com iframe URLs, the anchor
+   loads as a genuine cross-origin document, the #112 co= seam never
+   fires, and every press carries the deployment origin into the
+   site-key domain check ("Invalid API parameter(s). Try reloading the
+   page."). The gapi-class protection stays for every other pinned
+   body; the anchored regex literal itself is never rewritten (#122),
+   so the release self-check is untouched. */
+const RECAPTCHA_RELEASE_SCRIPT_RE =
+  /^https:\/\/www\.(?:gstatic\.com|google\.com|recaptcha\.net)\/recaptcha\/releases\/[\w-]+\/recaptcha__[\w-]+\.js$/;
+export function recaptchaReleaseScript(url: string | undefined | null): boolean {
+  if (!url) return false;
+  try {
+    return RECAPTCHA_RELEASE_SCRIPT_RE.test(new URL(url).href);
+  } catch {
+    return false;
+  }
+}
+
+export async function rewriteJsBody(js: string, base: string, pageBase?: string, relaxPinnedLiteral = false): Promise<string> {
+  const mod = await rewriter();
+  // The owner page chooses policy; a third-party CDN's hostname must not.
+  // #456 gate 4: the learned mark rides the same owner-page rule.
+  const policy = resolveLocationPolicy(pageBase, pageBase ? ruleFor(await siteRules(), pageBase) : {});
+  const rw = new mod.JsRewriter(self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined);
+  /* #618: the owner page's host relaxes the #449 literal skip for
+     this one-shot pass. #451: the caller may pass the same relaxation
+     out-of-band for a reCAPTCHA release script (the arms key it on the
+     script URL, not the resolution base). Older WASM without the
+     setter keeps the skip: fail-safe to the current behavior. */
+  if (originPinningRelaxed(pageBase) || relaxPinnedLiteral) rw.set_origin_pinning_skip?.(false);
+  try {
+    if (configureLocation(rw, policy) && rw.rewrite_script) {
+      const out = rw.rewrite_script(js);
+      reportLocation(rw, pageBase);
+      return out;
+    }
+    // Older WASM cannot honor off/hybrid. Preserve source instead of applying
+    // a policy the host explicitly disabled. Modern bundles keep other passes.
+    if (policy.mode !== "legacy") return js;
+    const out = mod.rewriteJsBody(js, self.location.origin, base, currentPrefix(), "b64u", deps!.routeKey() ?? undefined);
+    reportGlobals(mod);
+    return out;
+  } finally { rw.free?.(); }
+}
+
+/* #456: total candidate buffering bound for the serve seams. A JS or
+   worker body above the cap streams through byte-identical: the
+   specifier, URL-literal and location passes skip it, fail-open with
+   the same contract as the wasm raw pass's element cap.
+   Raised 2 MiB -> 8 MiB (beta report 2026-11-14, icloud.com): modern
+   SPA entry bundles (icloud main.js, the duck.ai entry script #663)
+   sit between 2 and 8 MiB, so at 2 MiB their specifier/URL-literal
+   passes never ran and the apps booted against unrewritten literals.
+   8 MiB stays a small fraction of the worker's per-request budget
+   (256 MiB) and only buffers while the body streams in. */
+export const JS_BODY_CAP = 8 * 1024 * 1024;
+
+export type BoundedBody =
+  | { over: false; bytes: Uint8Array }
+  | { over: true; head: Uint8Array[]; rest: ReadableStream<Uint8Array> };
+
+/** Read a body up to JS_BODY_CAP. Over the cap the accumulated head
+    and the remainder stream on verbatim (never buffered whole);
+    cancel reaches the upstream reader through both wrappers. */
+export async function boundedBody(body: ReadableStream<Uint8Array> | null): Promise<BoundedBody> {
+  if (!body) return { over: false, bytes: new Uint8Array(0) };
+  const reader = body.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  /* #682: a buffered body drains in microtasks only; yield so passthrough
+     fetch events dispatch while a large JS/worker body buffers. */
+  const pumpYield = makePumpYield();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      const bytes = new Uint8Array(total);
+      let at = 0;
+      for (const p of parts) {
+        bytes.set(p, at);
+        at += p.byteLength;
+      }
+      return { over: false, bytes };
+    }
+    if (value) {
+      parts.push(value);
+      total += value.byteLength;
+    }
+    await pumpYield();
+    if (total > JS_BODY_CAP) {
+      const rest = new ReadableStream<Uint8Array>({
+        async pull(c) {
+          const r = await reader.read();
+          if (r.done) c.close();
+          else c.enqueue(r.value);
+        },
+        cancel: (reason) => {
+          void reader.cancel(reason);
+        },
+      });
+      return { over: true, head: parts, rest };
+    }
+  }
+}
+
+/** The passthrough response body: an optional first chunk (the
+    worker prelude) ahead of the bounded head and the remainder. */
+export function passthroughStream(
+  first: Uint8Array | null,
+  head: Uint8Array[],
+  rest: ReadableStream<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  const rd = rest.getReader();
+  const queue = first ? [first, ...head] : head.slice();
+  /* #644/#99: an over-cap body serves the buffered head then pumps
+     the remainder byte-identical; a slow page consumer leaves the
+     worker dispatching no events for the whole drain, so arm the
+     heartbeat the same way the rewrite seams do, and settle it on
+     every exit path (close, error, cancel). */
+  streamAlive();
+  return new ReadableStream<Uint8Array>({
+    async pull(c) {
+      if (queue.length) {
+        c.enqueue(queue.shift()!);
+        return;
+      }
+      try {
+        const { done, value } = await rd.read();
+        if (done) {
+          streamDone();
+          c.close();
+        } else c.enqueue(value);
+      } catch (err) {
+        streamDone();
+        throw err;
+      }
+    },
+    async cancel(reason) {
+      try { await rd.cancel(reason); }
+      finally { streamDone(); }
+    },
+  });
+}
+
+/* #449: origin-pinning detection for the script-serve seams. A body
+   whose generated URLs are validated against an anchored ^https?:
+   regex keeps its literals verbatim; the caller records the
+   machine-readable skip reason. Never throws: a wasm without the
+   export (older dist) or a failing detector reports false and the
+   literal pass runs. */
+export async function scriptPinsOrigins(js: string): Promise<boolean> {
+  const mod = await rewriter();
+  if (typeof mod.hasOriginPinningRegex !== "function") return false;
+  try {
+    return !!mod.hasOriginPinningRegex(js);
+  } catch {
+    return false;
+  }
+}
+

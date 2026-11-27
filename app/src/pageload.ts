@@ -1,1 +1,197 @@
-[object Object]
+/* Page-init script builder (issue #32).
+
+   The rewriter used to inject the page's real destination as
+   window.__ZL = { dest: "https://real.site/page" } so the bootstrap
+   could derive its per-site identity (storage prefix, cookie / ws /
+   relay shims). That global was a direct leak of the target to any
+   page script (#32's leak 1).
+
+   The bootstrap does not need the URL: every consumer only needs a
+   stable per-site identity, and the service worker can compute the
+   same identity itself, from the destination it already holds
+   privately. With a #55 route key active the token is a SipHash MAC
+   of the target origin under that SW-realm key (keyedSiteToken):
+   stable per site and not reversible by an origin dictionary. The
+   keyless degraded mode keeps the fnv1a(origin) token, the exact
+   value bootstrap storage scoping used to derive page-side. The
+   injected contract becomes window.__ZL = { site: "<token>" }: an
+   opaque, per-site stable id. Same site across reloads -> same
+   storage; two sites -> different tokens; the real URL never enters
+   the page realm.
+
+   Pure code so the leak property is unit-tested: initScript() output
+   must not contain the destination or any straightforward encoding
+   of it. */
+
+import { keyedSiteToken } from "./codec";
+import { fnv1a, pageOrigin } from "./bootstrap/siteid";
+
+/** Opaque per-site identity: the keyed MAC of the target origin when
+    a #55 route key is active, the fnv1a hash otherwise. */
+export function siteToken(dest: string): string {
+  const origin = pageOrigin(dest) || "unknown";
+  return keyedSiteToken(origin) ?? fnv1a(origin);
+}
+
+/** #236: the destination's hostless path (pathname + search +
+    hash) seeding the virtual location. The #144 decision already
+    made the real path visible by design (NAVH handle URLs carry
+    it), so the page realm seeing its OWN path is the same
+    relaxation: the host stays opaque. Empty for opaque
+    destinations. #532 exports it: the effective-base delivery
+    seam sends the folded <base href> target through the same
+    hostless form. */
+export function vPath(dest: string): string {
+  try {
+    const u = new URL(dest);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    return u.pathname + u.search + u.hash;
+  } catch {
+    return "";
+  }
+}
+
+/** #456 gate 4: the post-load own-404 watcher. Pathname-reading SPAs
+    answer a correct URL with their own not-found view (the
+    LegacyUnforgeable limit); the SW cannot see the DOM, so this
+    bounded page-side check reports the shape to the worker. It
+    fires only on a strong marker (the document title or the first
+    h1/h2 reads "404" / "not found"), carries no data, and the
+    worker-side handler recovers the origin from the sender's own
+    route, never from this message. Corroboration across distinct
+    loads lives in location-targeting.ts. */
+export const SPA404_WATCHER =
+  "(function(){function q(){try{var m=/\\b404\\b|\\bnot found\\b/i;" +
+  'var t=document.title||"";var h=document.querySelector("h1,h2");' +
+  'if(m.test(t)||(h&&m.test(h.textContent||"")))' +
+  'navigator.serviceWorker.controller.postMessage({type:"zl:spa404"})}catch(e){}}' +
+  "function s(){setTimeout(q,800);setTimeout(q,2500)}" +
+  'if(document.readyState==="complete")s();else addEventListener("load",s)})();';
+
+/** #643: the deliberate-block console marker watcher. A rules,
+    intercept or CSP block answers the page a bare network error, and
+    a retrying site produces a console storm that reads as a dead
+    worker. The engine posts zl:blockedNotice to the requesting
+    client on the first block per (client, destination); this
+    watcher logs one console.warn per destination per page. Static
+    source only: the destination arrives at runtime from the engine,
+    never in the injected script (the #32 leak property holds). */
+export const BLOCKED_NOTICE_WATCHER =
+  "(function(){try{" +
+  "var seen=new Set();" +
+  "var ns=navigator.serviceWorker;if(ns&&ns.addEventListener)ns.addEventListener(\"message\",function(e){" +
+  "var d=e&&e.data?e.data:null;if(!d||d.type!==\"zl:blockedNotice\")return;" +
+  "var u=String(d.dest||\"\");if(!u||seen.has(u))return;" +
+  "if(seen.size>=64){var f=seen.values().next().value;if(f!==undefined)seen.delete(f)}" +
+  "seen.add(u);" +
+  "var by=String(d.by||\"engine\");" +
+  "console.warn(\"[zeolite] blocked by \"+by+\": \"+u+\" (retry storms expected)\");" +
+  "});}catch(e){}})();";
+
+/** #541: the a[download] anchor intent watcher. The download
+    attribute is invisible to the SW fetch event: the browser never
+    tells the interceptor why it navigates. This capture-phase
+    listener reports the intent to the controller (zl:dlIntent)
+    BEFORE the navigation runs, and only for anchors the browser
+    itself would honor - the same-origin filter mirrors the
+    attribute's documented semantics, so cross-origin clicks stay
+    ordinary navigations (today's behavior). Static source: the URL
+    rides the message at runtime, never in the injected script (the
+    #32 leak property holds). */
+export const ANCHOR_DL_WATCHER =
+  '(function(){function h(ev){try{var t=(ev.composedPath?ev.composedPath()[0]:ev.target);' +
+  'while(t&&t.nodeName!=="A"&&t.nodeName!=="AREA")t=t.parentElement;if(!t)return;' +
+  'var d=t.getAttribute("download");if(d===null)return;' +
+  'var u=new URL(t.getAttribute("href")||"",document.baseURI);' +
+  'if(u.origin!==location.origin)return;' +
+  'navigator.serviceWorker.controller.postMessage({type:"zl:dlIntent",url:u.href,filename:String(d).slice(0,512)})' +
+  '}catch(e){}}' +
+  'document.addEventListener("click",h,true)})();';
+
+/** The inline init script spliced into the rewritten stream head
+    AFTER the doctype (quirks fix; it used to ride the very first
+    chunk, before the doctype, which forced quirks mode on every
+    proxied document). An active fingerprint profile rides the same
+    splice (1.8). #236 adds the hostless vpath the virtual location
+    seeds from. #456 gate 4 adds the own-404 watcher. #643 adds the deliberate-block console marker watcher. #541 adds the a[download] anchor intent watcher. #725 adds the location-origin mode flag for gated sites. */
+export function initScript(dest: string, fpScript: string | null, locationOrigin: "native" | "virtual" = "native"): string {
+  const virtualPath = vPath(dest);
+  let hash = "";
+  try {
+    hash = new URL(dest).hash;
+  } catch {
+    /* opaque destinations have no page fragment */
+  }
+  /* #543: redirects followed inside the SW can change the virtual
+     document fragment without changing the browser's committed
+     engine-route URL. Restore only the fragment with replaceState:
+     same-document, no second fetch, no target host in page-visible
+     data. The parser scroll runs after the target elements exist. */
+  const fragmentFix = hash
+    ? `<script>(function(h){try{if(location.hash!==h){history.replaceState(history.state,"",location.pathname+location.search+h);var scroll=function(){var id=h.slice(1);try{id=decodeURIComponent(id)}catch(e){}var target=document.getElementById(id);if(!target){var named=document.getElementsByName(id);target=named&&named[0]}if(target&&typeof target.scrollIntoView==="function")target.scrollIntoView()};if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",scroll,{once:true});else scroll()}}catch(e){}})(${JSON.stringify(hash)});</script>`
+    : "";
+  /* #725: the origin-reporting mode rides the init only when the
+     site opted in; a mode string carries no destination data, so
+     the #32 leak property is unchanged. */
+  const init: { site: string; vpath: string; locationOrigin?: "virtual" } = {
+    site: siteToken(dest),
+    vpath: virtualPath,
+  };
+  if (locationOrigin === "virtual") init.locationOrigin = "virtual";
+  return (
+    `<script>window.__ZL=${JSON.stringify(init)};</script>` +
+    fragmentFix +
+    `<script>${SPA404_WATCHER}</script>` +
+    `<script>${BLOCKED_NOTICE_WATCHER}</script>` +
+    `<script>${ANCHOR_DL_WATCHER}</script>` +
+    (fpScript ? `<script>${fpScript}</script>` : "")
+  );
+}
+
+/** Where initScript splices into the stream head (quirks fix): AFTER
+    the doctype's closing ">" when the document opens with one, else
+    at index 0. A script start tag seen before the doctype puts the
+    parser in quirks mode and the real doctype is then ignored as a
+    parse error, so the hunt may only skip leading BOM, whitespace
+    and comments. Returns null while the head is too short to decide
+    (a doctype split across stream chunks); eos=true (end of stream)
+    forces a decision. Index 0 for doctype-less documents keeps them
+    in quirks mode instead of accidentally upgrading them.
+    ponytail: a ">" inside a legacy doctype's internal subset would
+    end the hunt early; pre-HTML5 archaeology, upgrade to a real
+    tokenizer only if a page ever needs it. */
+export function initSplicePoint(head: string, eos = false): number | null {
+  let i = head.startsWith("\uFEFF") ? 1 : 0;
+  for (;;) {
+    while (i < head.length && /\s/.test(head[i])) i++;
+    if (head.startsWith("<!--", i)) {
+      const end = head.indexOf("-->", i + 4);
+      if (end === -1) return eos ? 0 : null;
+      i = end + 3;
+      continue;
+    }
+    if (head.startsWith("<?", i)) {
+      /* "<?xml ...?>" is a bogus comment in HTML parsing: it ends at
+         the first ">" and a doctype after it is still honored. Skip it
+         like a comment so XHTML served as text/html keeps the splice
+         after the doctype instead of regressing to quirks mode. */
+      const gt = head.indexOf(">", i + 2);
+      if (gt === -1) return eos ? 0 : null;
+      i = gt + 1;
+      continue;
+    }
+
+    if (/^<!doctype/i.test(head.slice(i))) {
+      const gt = head.indexOf(">", i);
+      if (gt === -1) return eos ? 0 : null;
+      return gt + 1;
+    }
+    /* A "<" that could still grow into "<!doctype" is undecided
+       (wait for more stream); anything else - an element, text -
+       means no usable doctype can follow: index 0. */
+    const m = /^<![a-z]*/i.exec(head.slice(i));
+    if (m && "<!doctype".startsWith(m[0].toLowerCase())) return eos ? 0 : null;
+    if (i >= head.length) return eos ? 0 : null;
+    return 0;
+  }
+}
