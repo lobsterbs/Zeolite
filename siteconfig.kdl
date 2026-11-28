@@ -1,0 +1,24 @@
+// Per-site compatibility rules (grammar: app/src/siteconfig.ts).
+// Compat-suite failures become rules here, never hardcoded branches.
+
+// #456 Wave 2 / #432: the play2048.co SPA router reads
+// location.pathname, route-matches against the engine query shape and
+// serves its own 404 on the correct URL (LegacyUnforgeable-location
+// class). Hybrid pre-execution location rewrite enabled for this
+// origin only (reads-only shim, bounded, fail-open); every other
+// origin keeps the legacy mode. Scoreboard nightly validation of this
+// rule is pending; remove or extend per that evidence.
+site "play2048.co" {
+  location-rewrite "hybrid"
+}
+
+// #725: Google sign-in binds the page origin into its BotGuard
+// attestation and batchexecute RPC bodies; the engine-origin
+// location view is the convicted MI613e(13) lane (evidence:
+// #714). Virtual-origin location reporting for this origin only:
+// the __zl origin members report accounts.google.com
+// (worker-delivered, fail-closed), every other origin keeps the
+// native view.
+site "accounts.google.com" {
+  location-origin "virtual"
+}
