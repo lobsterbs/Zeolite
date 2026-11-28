@@ -162,6 +162,11 @@ export function redactSecrets(s: string): string {
          seam contract promises a failed module never regresses. */
     }
   }
+  /* shortcut: the userinfo scan below is quadratic on a long scheme-like
+     run, and a page can put an 80 KB URL into a diag event (5.6 s).
+     Fallback path only (the seam is linear); cut at 4 KiB, the tail is
+     dropped rather than kept unredacted. Lift with a linear scanner. */
+  if (s.length > 4096) s = s.slice(0, 4096) + "[truncated]";
   return s
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, "$1[redacted]@")
     .replace(/([?&#](?:code|state|nonce|code_verifier|id_token|access_token|refresh_token|session_token|credential|g-recaptcha-response|h-captcha-response|cf-turnstile-response)=)[^&#\s]*/gi, "$1[redacted]")

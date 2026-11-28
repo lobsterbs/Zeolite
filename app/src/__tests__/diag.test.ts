@@ -80,3 +80,13 @@ describe("redactSecrets header credentials", () => {
     expect(redactSecrets("Authorization: Negotiate LEAK8 next")).toBe("Authorization: [redacted] next");
   });
 });
+
+describe("redactSecrets on hostile length", () => {
+  it("stays fast on an 80 KB scheme-like run and still redacts inside the cap", () => {
+    const t = performance.now();
+    const out = redactSecrets("a".repeat(80_000));
+    expect(performance.now() - t).toBeLessThan(500);
+    expect(out.endsWith("[truncated]")).toBe(true);
+    expect(redactSecrets("https://u:LEAK@h/ " + "a".repeat(80_000))).toContain("https://[redacted]@h/");
+  });
+});
