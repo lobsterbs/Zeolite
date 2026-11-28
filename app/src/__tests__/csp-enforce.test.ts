@@ -272,3 +272,38 @@ describe("engineCspMarker (#527)", () => {
     );
   });
 });
+
+/* CSP3 scheme-part matching: a source scheme admits its secure
+   upgrades and ws/wss sources reach plain fetches. The gate used to
+   match the scheme exactly and drop ws/wss tokens, a false block. */
+describe("CSP3 scheme upgrades", () => {
+  const blocked = (policy: string, dest: string, url: string, doc = DOC) => {
+    const reg = newCspRegistry();
+    cspSetClient(reg, "c1", planned(policy, doc));
+    return cspGate(reg, "c1", dest, url).blocked;
+  };
+
+  it("http sources admit https urls, never the reverse", () => {
+    expect(blocked("img-src http://cdn.example.com", "image", "https://cdn.example.com/a.png")).toBe(false);
+    expect(blocked("img-src http:", "image", "https://x.example/a.png")).toBe(false);
+    expect(blocked("img-src https://cdn.example.com", "image", "http://cdn.example.com/a.png")).toBe(true);
+    expect(blocked("img-src http://cdn.example.com:8080", "image", "https://cdn.example.com/a.png")).toBe(true);
+    expect(blocked("img-src http://cdn.example.com:8080", "image", "https://cdn.example.com:8080/a.png")).toBe(false);
+  });
+
+  it("ws/wss sources reach plain fetches", () => {
+    expect(blocked("connect-src 'self' wss://rt.example.com", "empty", "https://rt.example.com/poll")).toBe(false);
+    expect(blocked("connect-src ws://rt.example.com", "empty", "http://rt.example.com/poll")).toBe(false);
+    expect(blocked("connect-src wss:", "empty", "https://any.example/x")).toBe(false);
+    expect(blocked("connect-src wss://rt.example.com", "empty", "http://rt.example.com/poll")).toBe(true);
+    expect(blocked("connect-src wss://rt.example.com", "empty", "https://other.example/poll")).toBe(true);
+  });
+
+  it("an http document's scheme-less sources and 'self' admit https", () => {
+    const doc = "http://page.example/";
+    expect(blocked("img-src cdn.example.com", "image", "https://cdn.example.com/a.png", doc)).toBe(false);
+    expect(blocked("img-src 'self'", "image", "https://page.example/a.png", doc)).toBe(false);
+    expect(blocked("img-src 'self'", "image", "https://evil.example/a.png", doc)).toBe(true);
+    expect(blocked("img-src cdn.example.com", "image", "http://cdn.example.com/a.png")).toBe(true);
+  });
+});

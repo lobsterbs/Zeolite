@@ -497,3 +497,30 @@ describe("#694: the challenge storage firewall denies engine-own names in the do
     expect(await c.match("https://x/")).toBe("hit");
   });
 });
+
+describe("spliceChallengeFirewall tag matching", () => {
+  const TAG = "<script>" + CHALLENGE_FIREWALL_SCRIPT + "</script>";
+
+  it("splices after the head open tag, then html, then doctype, else the front", () => {
+    expect(spliceChallengeFirewall('<html><head lang="en"><title>x</title></head>'))
+      .toBe('<html><head lang="en">' + TAG + "<title>x</title></head>");
+    expect(spliceChallengeFirewall("<HTML><body>x</body>")).toBe("<HTML>" + TAG + "<body>x</body>");
+    expect(spliceChallengeFirewall("<!doctype html>x")).toBe("<!doctype html>" + TAG + "x");
+    expect(spliceChallengeFirewall("plain")).toBe(TAG + "plain");
+  });
+
+  it("does not mistake <header> for <head> or <htmlx> for <html>", () => {
+    expect(spliceChallengeFirewall("<html><header>h</header><head>")).toBe(
+      "<html><header>h</header><head>" + TAG,
+    );
+    expect(spliceChallengeFirewall("<htmlx><b>")).toBe(TAG + "<htmlx><b>");
+  });
+
+  it("a hostile body of unclosed <head tags is linear, not quadratic", () => {
+    const hostile = "<head ".repeat(170_000);
+    const t = performance.now();
+    expect(spliceChallengeFirewall(hostile)).toBe(TAG + hostile);
+    // 11 s per 400 KB pass before the fix
+    expect(performance.now() - t).toBeLessThan(1000);
+  });
+});

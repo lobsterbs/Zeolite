@@ -72,7 +72,7 @@ pub fn parse_token(tok: &str) -> TokenVerdict {
     /* Scheme-only source. */
     if is_scheme_source(tok) {
         let scheme = tok[..tok.len() - 1].to_ascii_lowercase();
-        return if scheme == "http" || scheme == "https" {
+        return if is_network_scheme(&scheme) {
             TokenVerdict::Parsed(SourceExpression::Scheme { scheme })
         } else {
             TokenVerdict::Ignore
@@ -83,7 +83,7 @@ pub fn parse_token(tok: &str) -> TokenVerdict {
         None => TokenVerdict::Unverifiable,
         Some(p) => {
             if let Some(s) = p.scheme {
-                if s != "http" && s != "https" {
+                if !is_network_scheme(&s.to_ascii_lowercase()) {
                     return TokenVerdict::Ignore;
                 }
             }
@@ -116,6 +116,11 @@ pub fn parse_token(tok: &str) -> TokenVerdict {
             })
         }
     }
+}
+
+/* ws/wss are network sources: CSP3 lets them match http(s) URLs. */
+fn is_network_scheme(s: &str) -> bool {
+    matches!(s, "http" | "https" | "ws" | "wss")
 }
 
 pub fn parse_source_list(tokens: &[&str]) -> Option<Vec<SourceExpression>> {

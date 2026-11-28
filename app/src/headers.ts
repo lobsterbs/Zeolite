@@ -76,8 +76,8 @@ export function mapRefreshHeader(headers: Headers, dest: string): void {
   let v = refresh.slice(m.index + m[0].length).trim();
   /* #291: a quoted url ends at its closing quote - later header
      params are not part of it; an unquoted url ends at ';'. */
-  if (v.startsWith('"')) {
-    const end = v.indexOf('"', 1);
+  if (v.startsWith('"') || v.startsWith("'")) {
+    const end = v.indexOf(v[0]!, 1);
     v = end === -1 ? v.slice(1) : v.slice(1, end);
   } else {
     const semi = v.indexOf(";");

@@ -618,3 +618,115 @@ fn marker_carries_whitelisted_names_only() {
         Some("engine script-src,default-src")
     );
 }
+
+/* CSP3 scheme-part matching: a source scheme admits its secure
+upgrades, and ws/wss sources reach plain fetches. The engine used to
+match the scheme exactly and drop ws/wss tokens, a false block. */
+fn blocked_by(policy: &str, doc: &str, dest: &str, url: &str) -> bool {
+    let plan = plan_engine(policy, doc);
+    gate_decision(Some(&plan), dest, url).blocked
+}
+
+#[test]
+fn http_sources_admit_https_urls() {
+    let doc = "https://page.example/";
+    assert!(!blocked_by(
+        "img-src http://cdn.example.com",
+        doc,
+        "image",
+        "https://cdn.example.com/a.png"
+    ));
+    assert!(!blocked_by(
+        "img-src http:",
+        doc,
+        "image",
+        "https://x.example/a.png"
+    ));
+    // https never admits http
+    assert!(blocked_by(
+        "img-src https://cdn.example.com",
+        doc,
+        "image",
+        "http://cdn.example.com/a.png"
+    ));
+    // an explicit port still has to line up
+    assert!(blocked_by(
+        "img-src http://cdn.example.com:8080",
+        doc,
+        "image",
+        "https://cdn.example.com/a.png"
+    ));
+    assert!(!blocked_by(
+        "img-src http://cdn.example.com:8080",
+        doc,
+        "image",
+        "https://cdn.example.com:8080/a.png"
+    ));
+}
+
+#[test]
+fn ws_and_wss_sources_reach_http_fetches() {
+    let doc = "https://page.example/";
+    assert!(!blocked_by(
+        "connect-src 'self' wss://rt.example.com",
+        doc,
+        "empty",
+        "https://rt.example.com/poll"
+    ));
+    assert!(!blocked_by(
+        "connect-src ws://rt.example.com",
+        doc,
+        "empty",
+        "http://rt.example.com/poll"
+    ));
+    assert!(!blocked_by(
+        "connect-src wss:",
+        doc,
+        "empty",
+        "https://any.example/x"
+    ));
+    // wss never admits plain http
+    assert!(blocked_by(
+        "connect-src wss://rt.example.com",
+        doc,
+        "empty",
+        "http://rt.example.com/poll"
+    ));
+    // other hosts stay blocked
+    assert!(blocked_by(
+        "connect-src wss://rt.example.com",
+        doc,
+        "empty",
+        "https://other.example/poll"
+    ));
+}
+
+#[test]
+fn http_document_scheme_less_sources_and_self_admit_https() {
+    let doc = "http://page.example/";
+    assert!(!blocked_by(
+        "img-src cdn.example.com",
+        doc,
+        "image",
+        "https://cdn.example.com/a.png"
+    ));
+    assert!(!blocked_by(
+        "img-src 'self'",
+        doc,
+        "image",
+        "https://page.example/a.png"
+    ));
+    assert!(blocked_by(
+        "img-src 'self'",
+        doc,
+        "image",
+        "https://evil.example/a.png"
+    ));
+    // an https document is not downgraded
+    assert!(blocked_by(
+        "img-src cdn.example.com",
+        "https://page.example/",
+        "image",
+        "http://cdn.example.com/a.png"
+    ));
+}

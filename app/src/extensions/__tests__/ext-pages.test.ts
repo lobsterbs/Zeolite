@@ -470,3 +470,30 @@ describe("extension page workers (#700)", () => {
     expect(pageClientOf("wother700b")).toBeNull();
   });
 });
+
+describe("page bridge head injection", () => {
+  async function serveHtml(html: string): Promise<{ body: string; ms: number; id: string }> {
+    const rec = await install("HeadInject", [], { "p.html": html });
+    const tok = mintPageToken(rec.id, "/p.html");
+    const u = new URL("https://sw.example" + EXT_ROUTE + rec.id + "/p.html?zlPageTok=" + tok);
+    const t = performance.now();
+    const res = await serveExtensionAsset(new Request(u), u, { nav: true, resultingClientId: "hi" + seq });
+    const body = await res.text();
+    return { body, ms: performance.now() - t, id: rec.id };
+  }
+
+  it("injects after a head tag with attributes, never after <header>", async () => {
+    const a = await serveHtml('<html><header>x</header><HEAD lang="en"><title>t</title></head></html>');
+    const tag = '<script src="/zl-ext/' + a.id + '/__page.js"></script>';
+    expect(a.body).toContain('<HEAD lang="en"><base');
+    expect(a.body.indexOf(tag)).toBeGreaterThan(a.body.indexOf("<HEAD"));
+    const b = await serveHtml("<header>only</header>");
+    expect(b.body.startsWith("<base")).toBe(true);
+  });
+
+  it("stays linear on a page full of unterminated <head openers", async () => {
+    const { body, ms, id } = await serveHtml("<head ".repeat(170_000));
+    expect(body.startsWith('<base href="/zl-ext/' + id + '/">')).toBe(true);
+    expect(ms).toBeLessThan(2000);
+  });
+});

@@ -109,6 +109,12 @@ pub struct Rewriter {
     /// A terminated close marker was held; the buffer waits for its
     /// closing '>'.
     raw_pass_closing: bool,
+    /// Where the next close-tag search of the retained raw body can
+    /// resume (byte offset, script escaped flags). Set only when a
+    /// search found nothing and the buffer was left untouched, taken on
+    /// the next chunk: without it every chunk rescanned the whole body,
+    /// so a 2 MB inline script in 16 KB chunks cost ~128 MB of scanning.
+    raw_hint: Option<(usize, bool, bool)>,
     /// #529: opt-in token-level decision tracing. None = tracing off
     /// (the default): record() checks this first and allocates
     /// nothing. RefCell because the encode helpers take &self.
@@ -140,6 +146,7 @@ impl Rewriter {
             raw_pass_escaped: false,
             raw_pass_double: false,
             raw_pass_closing: false,
+            raw_hint: None,
             trace: std::cell::RefCell::new(None),
             origin_pinning_skip: true,
         }
@@ -476,7 +483,12 @@ impl Rewriter {
         // target page genuinely using the prefix as a plain path still
         // rewrites normally.
         if let Some(innermost) = self.cfg.unwrap_engine_route(url) {
-            if innermost.starts_with("http://") || innermost.starts_with("https://") {
+            // unwrap_engine_route hands back a plain URL unchanged;
+            // that one still needs resolve() below (host case, tabs,
+            // newlines, backslashes), so only a peeled layer counts.
+            if innermost != url
+                && (innermost.starts_with("http://") || innermost.starts_with("https://"))
+            {
                 self.trace_rec(pass, "already-routed");
                 let (bare, frag) = match innermost.split_once('#') {
                     Some((b, f)) => (b.to_string(), format!("#{}", f)),
@@ -812,6 +824,26 @@ impl Rewriter {
     }
 
     pub fn process(&mut self, chunk: &str) -> String {
+        // shortcut: every token drains the buffer front (O(len)), so a huge single chunk
+        // is quadratic; slicing bounds the buffer. Output is chunk-invariant by test.
+        const SLICE: usize = 32 * 1024;
+        if chunk.len() <= SLICE {
+            return self.process_slice(chunk);
+        }
+        let mut out = String::with_capacity(chunk.len());
+        let mut rest = chunk;
+        while !rest.is_empty() {
+            let mut n = SLICE.min(rest.len());
+            while !rest.is_char_boundary(n) {
+                n += 1;
+            }
+            out.push_str(&self.process_slice(&rest[..n]));
+            rest = &rest[n..];
+        }
+        out
+    }
+
+    fn process_slice(&mut self, chunk: &str) -> String {
         self.buf.push_str(chunk);
         let mut out = String::with_capacity(self.buf.len());
         loop {
@@ -835,12 +867,15 @@ impl Rewriter {
                                     }
                                 }
                                 None => {
-                                    if self.buf.len() < 10 {
+                                    // Literal '<' that start no markup,
+                                    // taken as one run: a drain per '<'
+                                    // moved the whole buffer each time.
+                                    let n = literal_lt_run(&self.buf);
+                                    if n == 0 {
                                         break; // '<' near the end: wait for more input
                                     }
-                                    // A literal '<' that starts no markup (rare).
-                                    out.push('<');
-                                    self.buf.remove(0);
+                                    out.push_str(&self.buf[..n]);
+                                    self.buf.drain(..n);
                                 }
                             }
                         }
@@ -971,11 +1006,37 @@ impl Rewriter {
                     // inner </script> of a double-escaped block,
                     // leaving the tail parsed as markup: literal URLs
                     // unrewritten, antiframe skipped.
+                    let hint = self.raw_hint.take();
+                    let mut next_hint = None;
                     let found = if self.cur_tag == "script" {
-                        find_script_close(&self.buf)
+                        let from = hint.map_or(ScriptScan::default(), |(i, escaped, double)| {
+                            ScriptScan { i, escaped, double }
+                        });
+                        let (f, st) = scan_script_close(&self.buf, from);
+                        next_hint = Some((st.i, st.escaped, st.double));
+                        f
                     } else {
-                        find_ci_terminated(&self.buf, &close)
-                            .and_then(|ci| self.buf[ci..].find('>').map(|k| (ci, ci + k + 1)))
+                        let from = hint.map_or(0, |h| h.0);
+                        match find_ci_terminated_from(&self.buf, &close, from) {
+                            Some(ci) => match self.buf[ci..].find('>') {
+                                Some(k) => Some((ci, ci + k + 1)),
+                                None => {
+                                    // Close seen, its '>' not yet: resume here.
+                                    next_hint = Some((ci, false, false));
+                                    None
+                                }
+                            },
+                            None => {
+                                // Starts before this could still match
+                                // once more bytes arrive.
+                                next_hint = Some((
+                                    self.buf.len().saturating_sub(close.len()),
+                                    false,
+                                    false,
+                                ));
+                                None
+                            }
+                        }
                     };
                     let Some((ci, end)) = found else {
                         if !self.drop_raw && self.buf.len() > RAW_PASS_CAP {
@@ -991,6 +1052,11 @@ impl Rewriter {
                             self.raw_pass_scan(&mut out);
                         } else {
                             self.trim_drop_raw();
+                            // A blocked element's buffer is trimmed from
+                            // the front, which would shift the offset.
+                            if !self.drop_raw {
+                                self.raw_hint = next_hint;
+                            }
                         }
                         break;
                     };
@@ -1109,6 +1175,7 @@ impl Rewriter {
         let mut out = std::mem::take(&mut self.buf);
         out.push_str(&self.emit_injections());
         self.st = St::Text;
+        self.raw_hint = None;
         out
     }
 
@@ -1569,31 +1636,60 @@ fn starts_ci(b: &[u8], needle: &[u8]) -> bool {
     b.len() >= needle.len() && b[..needle.len()].eq_ignore_ascii_case(needle)
 }
 
+/// Length of the leading text of `buf` (which starts with '<') made of
+/// '<' that open no markup, up to the next '<' that might. 0 when the
+/// first '<' is too close to the end to classify yet.
+fn literal_lt_run(buf: &str) -> usize {
+    let mut pos = 0;
+    while pos < buf.len() && classify_open(&buf[pos..]).is_none() && buf.len() - pos >= 10 {
+        pos = buf[pos + 1..].find('<').map_or(buf.len(), |p| pos + 1 + p);
+    }
+    pos
+}
+
+/// Resumable state of the script close search: every byte before `i`
+/// is decided, `escaped`/`double` are the tokenizer flags at `i`.
+#[derive(Default, Clone, Copy)]
+struct ScriptScan {
+    i: usize,
+    escaped: bool,
+    double: bool,
+}
+
+#[cfg(test)]
 fn find_script_close(buf: &str) -> Option<(usize, usize)> {
+    scan_script_close(buf, ScriptScan::default()).0
+}
+
+/// find_script_close, resumable. Stops (returning the state to resume
+/// from) where fewer than 9 bytes remain, the longest lookahead any
+/// decision needs, or at a `</script` whose '>' has not arrived.
+fn scan_script_close(buf: &str, mut st: ScriptScan) -> (Option<(usize, usize)>, ScriptScan) {
     let b = buf.as_bytes();
-    let mut i = 0usize;
-    let mut escaped = false;
-    let mut double_escaped = false;
-    while i < b.len() {
-        if !escaped && starts_ci(&b[i..], b"<!--") {
-            escaped = true;
-            i += 4;
+    while st.i < b.len() {
+        if b.len() - st.i < 9 {
+            break;
+        }
+        let i = st.i;
+        if !st.escaped && starts_ci(&b[i..], b"<!--") {
+            st.escaped = true;
+            st.i += 4;
             continue;
         }
-        if escaped
-            && !double_escaped
+        if st.escaped
+            && !st.double
             && starts_ci(&b[i..], b"<script")
             && b.get(i + 7)
                 .is_some_and(|c| matches!(c, b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>'))
         {
-            double_escaped = true;
-            i += 7;
+            st.double = true;
+            st.i += 7;
             continue;
         }
-        if escaped && starts_ci(&b[i..], b"-->") {
-            double_escaped = false;
-            escaped = false;
-            i += 3;
+        if st.escaped && starts_ci(&b[i..], b"-->") {
+            st.double = false;
+            st.escaped = false;
+            st.i += 3;
             continue;
         }
         if starts_ci(&b[i..], b"</script") {
@@ -1601,27 +1697,32 @@ fn find_script_close(buf: &str) -> Option<(usize, usize)> {
             if after < b.len()
                 && matches!(b[after], b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>')
             {
-                if double_escaped {
-                    double_escaped = false;
-                    i = after;
+                if st.double {
+                    st.double = false;
+                    st.i = after;
                     continue;
                 }
-                let end = buf[after..].find('>').map(|k| after + k + 1)?;
-                return Some((i, end));
+                return match buf[after..].find('>') {
+                    Some(k) => (Some((i, after + k + 1)), st),
+                    // '>' not here yet: resume at this tag.
+                    None => (None, st),
+                };
             }
         }
-        i += 1;
+        st.i += 1;
     }
-    None
+    (None, st)
 }
 
-fn find_ci_terminated(hay: &str, needle: &str) -> Option<usize> {
+/// First terminated `needle` (case-insensitive) starting at or after
+/// byte `from`.
+fn find_ci_terminated_from(hay: &str, needle: &str, from: usize) -> Option<usize> {
     let h = hay.as_bytes();
     let n = needle.as_bytes();
-    if n.is_empty() || h.len() < n.len() {
+    if n.is_empty() || h.len() < n.len() || from > h.len() - n.len() {
         return None;
     }
-    (0..=h.len() - n.len()).find(|&i| {
+    (from..=h.len() - n.len()).find(|&i| {
         h[i..i + n.len()].eq_ignore_ascii_case(n)
             && match h.get(i + n.len()) {
                 Some(&b) => matches!(b, b' ' | b'\t' | b'\n' | b'\x0c' | b'\r' | b'/' | b'>'),
@@ -1687,7 +1788,8 @@ struct Attr {
 /// Returns None when the remaining text is not an attribute (tag end).
 fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
     let trimmed = s.trim_start();
-    let lead_ws = s[..s.len() - trimmed.len()].to_string();
+    let mut lead_ws = s[..s.len() - trimmed.len()].to_string();
+    let src_ws = lead_ws.len();
     if trimmed.is_empty() || trimmed.starts_with('>') || trimmed.starts_with("/>") {
         return None;
     }
@@ -1699,10 +1801,19 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
     // fold_slash = false for close tags.
     let sep = usize::from(fold_slash && trimmed.starts_with('/'));
     let trimmed = &trimmed[sep..];
+    // The dropped '/' was the only separator: emit a space so the
+    // tag name and attribute do not fuse (`<imgsrc=`).
+    if sep == 1 && lead_ws.is_empty() {
+        lead_ws.push(' ');
+    }
     // Name runs to '=', whitespace, or '>'.
+    // A '/' past the first byte also ends the name (HTML5 parity:
+    // '<a/b/href=x>' has attributes b and href). At index 0 it is
+    // close-tag syntax; splitting there would consume nothing.
     let name_end = trimmed
-        .find(|c: char| c == '=' || c.is_ascii_whitespace() || c == '>')
-        .unwrap_or(trimmed.len());
+        .char_indices()
+        .find(|&(i, c)| c == '=' || c.is_ascii_whitespace() || c == '>' || (c == '/' && i > 0))
+        .map_or(trimmed.len(), |(i, _)| i);
     let name = trimmed[..name_end].to_string();
     let rest = &trimmed[name_end..];
     let after_ws = rest.trim_start();
@@ -1722,7 +1833,7 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
                 .unwrap_or(vstart.len());
             (vstart[..end].to_string(), ws + end, None)
         };
-        let consumed = lead_ws.len() + sep + eq + consumed_v;
+        let consumed = src_ws + sep + eq + consumed_v;
         return Some(Attr {
             consumed,
             lead_ws,
@@ -1732,7 +1843,7 @@ fn next_attr(s: &str, fold_slash: bool) -> Option<Attr> {
         });
     }
     // Boolean attribute (no value).
-    let consumed = lead_ws.len() + sep + name_end;
+    let consumed = src_ws + sep + name_end;
     Some(Attr {
         consumed,
         lead_ws,
@@ -2265,6 +2376,141 @@ fn format_attr(name: &str, value: &str, quote: Option<char>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_huge_chunk_matches_small_chunks_and_is_not_quadratic() {
+        // multi-byte text so slice cuts must land on char boundaries
+        let unit = "<div class=\"c\"><a href=\"/p/1\">h\u{e9}llo \u{4e16}\u{754c}</a><img src=\"/i.png\"></div>\n";
+        let doc = unit.repeat(40_000);
+        let run = |chunk: usize| {
+            let mut r = Rewriter::new(cfg());
+            r.set_base("https://example.com/");
+            let mut out = String::new();
+            let mut i = 0;
+            while i < doc.len() {
+                let mut e = (i + chunk).min(doc.len());
+                while !doc.is_char_boundary(e) {
+                    e += 1;
+                }
+                out.push_str(&r.process(&doc[i..e]));
+                i = e;
+            }
+            out.push_str(&r.finish());
+            out
+        };
+        let t = std::time::Instant::now();
+        let whole = run(usize::MAX / 2);
+        // 21 s before the fix on a 4 MB doc in release; debug is slower, so the bound is loose
+        assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
+        assert_eq!(whole, run(7919));
+    }
+
+    #[test]
+    fn runs_of_literal_lt_pass_through_and_stay_chunk_invariant() {
+        let doc = format!(
+            "{}<a href=\"/x\">y</a>{}tail <",
+            "a < b << c <<< d <3 ".repeat(40),
+            "1 < 2 ".repeat(30)
+        );
+        let run = |chunk: usize| {
+            let mut r = Rewriter::new(cfg());
+            r.set_base("https://example.com/");
+            let mut out = String::new();
+            let mut i = 0;
+            while i < doc.len() {
+                let e = (i + chunk).min(doc.len());
+                out.push_str(&r.process(&doc[i..e]));
+                i = e;
+            }
+            out.push_str(&r.finish());
+            out
+        };
+        let whole = run(1 << 20);
+        assert!(whole.starts_with("a < b << c <<< d <3 a < b"), "{whole}");
+        assert!(whole.ends_with("1 < 2 tail <"), "{whole}");
+        assert!(
+            whole.contains(&cfg().encode_url("https://example.com/x")),
+            "{whole}"
+        );
+        for chunk in [1, 2, 3, 7, 9, 10, 11, 64] {
+            assert_eq!(run(chunk), whole, "chunk {chunk}");
+        }
+    }
+
+    /// The raw-body close search resumes where the last chunk left
+    /// off. Random bodies full of escape-state and partial-close
+    /// fragments must come out the same at every chunk size.
+    #[test]
+    fn raw_element_close_search_is_chunk_invariant() {
+        const V: &[&str] = &[
+            "<!--",
+            "-->",
+            "<script>",
+            "<script ",
+            "</script",
+            "</script>",
+            "</script ",
+            "</SCRIPT\n>",
+            "</scripts>",
+            "</style",
+            "</style>",
+            "</STYLE >",
+            "</textarea",
+            "</textarea>",
+            "</",
+            "<",
+            ">",
+            "/",
+            "-",
+            "!",
+            "a",
+            "b b",
+            "var u='http://x.example/a';",
+            " ",
+            "\n",
+            "\u{e9}",
+            "url(/i.png)",
+            "<a href=/x>",
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let run = |doc: &str, chunk: usize| -> String {
+            let mut r = Rewriter::new(cfg());
+            r.set_base("https://example.com/");
+            let mut out = String::new();
+            let mut i = 0;
+            while i < doc.len() {
+                let mut e = (i + chunk).min(doc.len());
+                while !doc.is_char_boundary(e) {
+                    e += 1;
+                }
+                out.push_str(&r.process(&doc[i..e]));
+                i = e;
+            }
+            out.push_str(&r.finish());
+            out
+        };
+        for case in 0..1500 {
+            let tag = ["script", "style", "textarea", "title"][(next() % 4) as usize];
+            let n = (next() % 14) as usize;
+            let body: String = (0..n).map(|_| V[(next() as usize) % V.len()]).collect();
+            let doc = format!("<{tag}>{body}</{tag}><p>tail <a href=\"/z\">z</a>");
+            let whole = run(&doc, 1 << 20);
+            for chunk in [1, 2, 3, 5, 8, 13] {
+                assert_eq!(
+                    run(&doc, chunk),
+                    whole,
+                    "case {case} chunk {chunk}: {doc:?}"
+                );
+            }
+        }
+    }
+
     use crate::config::RewriteConfig;
     use crate::encode::Codec;
 
@@ -2296,12 +2542,19 @@ mod tests {
             "https://engine.example/j/{}",
             crate::encode::b64u_encode(b"https://example.com/routed")
         );
+        // A route bound to the target host is the real "already-routed"
+        // case: a plain absolute URL must not take that branch.
+        let bound = format!(
+            "https://example.com/j/{}",
+            crate::encode::b64u_encode(b"https://example.com/routed")
+        );
         let doc = format!(
             "<a href=\"https://example.com/a\">1</a>\
              <a href=\"data:text/html,x\">2</a>\
              <a href=\"#frag\">3</a>\
              <a href=\"{route}\">4</a>\
              <a href=\"https://engine.example/path\">5</a>\
+             <a href=\"{bound}\">6</a>\
              <script>var u = \"https://example.com/s.js\"; if (window.top != self) top.location = u;</script>\
              <style>body {{ background: url(https://example.com/i.png) }}</style>\
              <script type=\"importmap\">{{\"imports\":{{\"x\":\"https://example.com/m.js\"}}}}</script>"
@@ -4284,6 +4537,54 @@ document.write('<script src=x></script>');
             "a href rewritten: {}",
             out
         );
+        // The folded '/' still separates: no `<imgsrc=` / `<ahref=`.
+        assert!(out.contains("<img src="), "img tag name intact: {}", out);
+        assert!(out.contains("<a href="), "a tag name intact: {}", out);
+        // A second '/' separator must not fuse into the name either.
+        let mut r = Rewriter::new(cfg());
+        r.set_base("https://example.com/");
+        let out = r.process("<a/b/href=\"https://t.example/p\">x</a>");
+        assert!(
+            out.contains(&cfg().encode_url("https://t.example/p")),
+            "href after a second slash rewritten: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn absolute_urls_get_the_same_normalization_as_relative_ones() {
+        // Every plain absolute http(s) URL used to take the
+        // already-routed branch (unwrap_engine_route never returns
+        // None) and skip resolve(): capitals in the host, tabs and
+        // newlines and backslashes reached the route verbatim while
+        // the browser would have fetched a different URL.
+        let enc = |s: &str| {
+            let mut r = Rewriter::new(cfg());
+            r.set_base("https://example.com/");
+            let out = format!("{}{}", r.process(s), r.finish());
+            out
+        };
+        for (src, want) in [
+            (
+                "<img src=\"https://EXAMPLE.com/P\">",
+                "https://example.com/P",
+            ),
+            (
+                "<img src=\"https://ex\tample.com/p\">",
+                "https://example.com/p",
+            ),
+            ("<a href=\"https://ex.com/a\nb\">", "https://ex.com/ab"),
+            ("<a href=\"https://ex.com\\a\\b\">", "https://ex.com/a/b"),
+        ] {
+            let out = enc(src);
+            assert!(
+                out.contains(&cfg().encode_url(want)),
+                "{:?} should route {:?}: {}",
+                src,
+                want,
+                out
+            );
+        }
     }
 
     #[test]
@@ -4501,7 +4802,7 @@ document.write('<script src=x></script>');
         let mut out = r.process("<script src=\"https://cdn.ads.example.net/x.js\">");
         out.push_str(&r.process(&"x".repeat(DROP_RAW_CAP * 4)));
         assert!(
-            r.buf.len() <= 4096,
+            r.buf.len() <= DROP_RAW_CAP,
             "swallow buffer bounded without a close tag: {}",
             r.buf.len()
         );

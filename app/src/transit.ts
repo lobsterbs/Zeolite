@@ -263,12 +263,27 @@ export const CHALLENGE_FIREWALL_SCRIPT = [
   "})();",
 ].join("");
 
+/* End offset of the first <name ...> open tag, or -1. The tag name has a
+   boundary (so <header> is not <head>), and the close is one indexOf:
+   `<head[^>]*>` rescanned to the end of the body from every "<head" with
+   no ">" after it, quadratic on a hostile upstream body (400 KB took
+   11 s per pass, and the verbatim gate is origin-spoofable). If the first
+   candidate has no ">" after it, no later one has either. */
+function openTagEnd(html: string, name: string): number {
+  const m = new RegExp("<" + name + "(?=[\\s/>])", "i").exec(html);
+  if (!m) return -1;
+  const gt = html.indexOf(">", m.index);
+  return gt < 0 ? -1 : gt + 1;
+}
+
 /* Spliced into every verbatim challenge serve; the tag prefers the head
    open tag so the firewall runs before the doc's own scripts. */
 export function spliceChallengeFirewall(html: string): string {
   const tag = "<script>" + CHALLENGE_FIREWALL_SCRIPT + "</script>";
-  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => m + tag);
-  if (/<html[^>]*>/i.test(html)) return html.replace(/<html[^>]*>/i, (m) => m + tag);
+  for (const name of ["head", "html"]) {
+    const end = openTagEnd(html, name);
+    if (end >= 0) return html.slice(0, end) + tag + html.slice(end);
+  }
   const dt = html.match(/^\s*<!doctype[^>]*>/i);
   return dt ? dt[0] + tag + html.slice(dt[0].length) : tag + html;
 }

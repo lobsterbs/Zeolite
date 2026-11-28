@@ -117,7 +117,23 @@ pub fn plan_engine(raw: &str, doc_url: &str) -> EnginePlan {
     plan
 }
 
-const SCHEME_DEFAULT_PORTS: [(&str, &str); 2] = [("http", "80"), ("https", "443")];
+const SCHEME_DEFAULT_PORTS: [(&str, &str); 4] = [
+    ("http", "80"),
+    ("https", "443"),
+    ("ws", "80"),
+    ("wss", "443"),
+];
+
+/* CSP3 scheme-part matching: a source scheme also admits its secure
+upgrades (http covers https; ws covers wss, http and https; wss
+covers https). */
+fn scheme_ok(src: &str, url: &str) -> bool {
+    src == url
+        || matches!(
+            (src, url),
+            ("http", "https") | ("ws", "wss" | "http" | "https") | ("wss", "https")
+        )
+}
 
 fn default_port(scheme: &str) -> Option<&str> {
     SCHEME_DEFAULT_PORTS
@@ -129,9 +145,16 @@ fn default_port(scheme: &str) -> Option<&str> {
 /* CSP3 host-source matching against the decoded upstream URL. */
 pub fn source_matches(s: &SourceExpression, url: &Url, plan: &EnginePlan) -> bool {
     match s {
-        SourceExpression::SelfKeyword => url.origin() == plan.self_origin,
+        /* An http document's 'self' also admits its own https upgrade. */
+        SourceExpression::SelfKeyword => {
+            url.origin() == plan.self_origin
+                || plan
+                    .self_origin
+                    .strip_prefix("http://")
+                    .is_some_and(|rest| url.origin() == format!("https://{rest}"))
+        }
         SourceExpression::Any => url.is_network(),
-        SourceExpression::Scheme { scheme } => url.scheme == *scheme,
+        SourceExpression::Scheme { scheme } => scheme_ok(scheme, &url.scheme),
         SourceExpression::Host {
             scheme,
             host,
@@ -139,10 +162,8 @@ pub fn source_matches(s: &SourceExpression, url: &Url, plan: &EnginePlan) -> boo
             port,
             path,
         } => {
-            match scheme {
-                Some(s) if url.scheme != *s => return false,
-                None if url.scheme != plan.page_scheme => return false,
-                _ => {}
+            if !scheme_ok(scheme.as_deref().unwrap_or(&plan.page_scheme), &url.scheme) {
+                return false;
             }
             let host_ok = if *wildcard {
                 url.host.ends_with(&format!(".{host}"))

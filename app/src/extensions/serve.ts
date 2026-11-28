@@ -131,10 +131,13 @@ function htmlWithPageScript(bytes: Uint8Array, id: string): Response {
   const tag =
     '<base href="' + EXT_ROUTE + id + '/">' +
     '<script src="' + EXT_ROUTE + id + '/__page.js"></script>';
-  const m = /<head[^>]*>/i.exec(html);
-  const body = m
-    ? html.slice(0, m.index + m[0].length) + tag + html.slice(m.index + m[0].length)
-    : tag + html;
+  /* Linear: the old /<head[^>]*>/ rescanned to the end of the page
+     from every "<head" when no ">" followed (quadratic on hostile
+     input). One start match, one indexOf. */
+  const start = html.search(/<head(?=[\s/>])/i);
+  const close = start < 0 ? -1 : html.indexOf(">", start);
+  const body =
+    close < 0 ? tag + html : html.slice(0, close + 1) + tag + html.slice(close + 1);
   return new Response(body, {
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
   });

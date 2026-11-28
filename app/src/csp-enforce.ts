@@ -109,8 +109,22 @@ const IGNORED_KEYWORDS = new Set([
    only decodes http/https destinations): ignoring them is a false
    allow, and they cannot cause a false block. */
 const NON_NETWORK_SCHEMES = new Set([
-  "data", "blob", "filesystem", "mediastream", "ws", "wss",
+  "data", "blob", "filesystem", "mediastream",
 ]);
+
+/* CSP3 scheme-part matching: a source scheme also admits its secure
+   upgrades (http covers https; ws covers wss, http and https; wss
+   covers https). ws/wss sources therefore reach plain fetches, so
+   ignoring them blocked requests the browser allows. */
+const SCHEME_UPGRADES: Record<string, string[]> = {
+  http: ["https"],
+  ws: ["wss", "http", "https"],
+  wss: ["https"],
+};
+function schemeOk(src: string, url: string): boolean {
+  return src === url || (SCHEME_UPGRADES[src]?.includes(url) ?? false);
+}
+const NETWORK_SOURCE_SCHEMES = new Set(["http", "https", "ws", "wss"]);
 
 type TokenVerdict =
   | { ok: true; src?: CspSource }
@@ -131,7 +145,7 @@ function parseToken(tok: string): TokenVerdict {
   /* Scheme-only source. */
   if (/^[a-z][a-z0-9+.-]*:$/i.test(tok)) {
     const scheme = tok.slice(0, -1).toLowerCase();
-    if (scheme === "http" || scheme === "https")
+    if (NETWORK_SOURCE_SCHEMES.has(scheme))
       return { ok: true, src: { k: "scheme", scheme } };
     return { ok: false, ignore: true };
   }
@@ -141,7 +155,7 @@ function parseToken(tok: string): TokenVerdict {
   const [, scheme, host, port, path] = m;
   if (scheme !== undefined) {
     const s = scheme.toLowerCase();
-    if (s !== "http" && s !== "https") return { ok: false, ignore: true };
+    if (!NETWORK_SOURCE_SCHEMES.has(s)) return { ok: false, ignore: true };
   }
   if (host === "*") return { ok: true, src: { k: "any" } };
   let wildcard = false;
@@ -259,18 +273,18 @@ export function planEngineCsp(raw: string, docUrl: string): CspEnginePlan {
 /* #629: CSP3 equates an explicit default port with no port, and the
    WHATWG URL parser drops default ports, so https://host:443 must
    match a https://host URL exactly like an absent port. */
-const SCHEME_DEFAULT_PORTS: Record<string, string> = { "http": "80", "https": "443" };
+const SCHEME_DEFAULT_PORTS: Record<string, string> = { "http": "80", "https": "443", "ws": "80", "wss": "443" };
 
 export function sourceMatches(s: CspSource, u: URL, plan: CspEnginePlan): boolean {
-  if (s.k === "self") return u.origin === plan.selfOrigin;
-  if (s.k === "any") return u.protocol === "http:" || u.protocol === "https:";
-  if (s.k === "scheme") return u.protocol === s.scheme + ":";
-  /* host */
-  if (s.scheme) {
-    if (u.protocol !== s.scheme + ":") return false;
-  } else if (u.protocol !== plan.pageScheme) {
-    return false;
+  if (s.k === "self") {
+    /* An http document's 'self' also admits its own https upgrade. */
+    return u.origin === plan.selfOrigin
+      || (plan.selfOrigin.startsWith("http://") && u.origin === "https://" + plan.selfOrigin.slice(7));
   }
+  if (s.k === "any") return u.protocol === "http:" || u.protocol === "https:";
+  if (s.k === "scheme") return schemeOk(s.scheme!, u.protocol.slice(0, -1));
+  /* host */
+  if (!schemeOk(s.scheme ?? plan.pageScheme.slice(0, -1), u.protocol.slice(0, -1))) return false;
   const uh = u.hostname.toLowerCase();
   const hostOk = s.wildcard
     ? uh.endsWith("." + s.host!)

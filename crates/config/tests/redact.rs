@@ -120,3 +120,33 @@ fn bare_origin_strings_pass_through_without_userinfo() {
         "see https://fonts.gstatic.com"
     );
 }
+
+#[test]
+fn every_pair_of_a_cookie_request_header_is_redacted() {
+    assert_eq!(
+        redact_secrets("Cookie: sid=abc123; csrf=LEAK2; theme=dark"),
+        "Cookie: [redacted]"
+    );
+    // a Set-Cookie attribute ends the pairs and survives
+    assert_eq!(
+        redact_secrets("Set-Cookie: sid=abc; Path=/; HttpOnly"),
+        "Set-Cookie: [redacted]; Path=/; HttpOnly"
+    );
+    // prose after a semicolon with no name=value is left alone
+    assert_eq!(
+        redact_secrets("cookie jar; retried"),
+        "cookie [redacted]; retried"
+    );
+}
+
+#[test]
+fn authorization_schemes_beyond_bearer_and_basic_redact_the_credential() {
+    assert_eq!(
+        redact_secrets("authorization: Token LEAK7"),
+        "authorization: [redacted]"
+    );
+    assert_eq!(
+        redact_secrets("Authorization: Negotiate LEAK8 next"),
+        "Authorization: [redacted] next"
+    );
+}
