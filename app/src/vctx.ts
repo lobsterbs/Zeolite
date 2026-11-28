@@ -49,6 +49,12 @@ export interface VirtualContext {
       navigations are top-level for Sec-Fetch purposes. Absent or
       false means subframe semantics (fail closed). */
   mainSurface?: boolean;
+  /** #708 (run 12): the client is a nested subframe - its context
+      was established from an iframe-destination navigation - so for
+      the tiered nav-realm unambiguity pass it is a child of a
+      proxied surface, not an independent browsing surface. Absent or
+      false keeps top-level semantics (fail closed). */
+  subframe?: boolean;
 }
 
 /** Default cap for the context map. Client ids are never reused, so a
@@ -67,6 +73,7 @@ export function establishContext(
   target: string,
   kind: "window" | "worker" | "sharedworker" = "window",
   mainSurface = false,
+  subframe = false,
 ): VirtualContext | null {
   let u: URL;
   try {
@@ -84,6 +91,8 @@ export function establishContext(
     /* #611: stored only when true, so an absent field always means
        subframe semantics for any reader. */
     ...(mainSurface ? { mainSurface: true } : {}),
+    /* #708 run 12: same stored-only-when-true fail-closed rule. */
+    ...(subframe ? { subframe: true } : {}),
   };
   map.set(clientId, ctx);
   return ctx;
@@ -139,16 +148,26 @@ export function resolveRelative(
     upstream, #687). Worker contexts are skipped as before. Pure, total. */
 export function unambiguousWindowContext(
   map: Map<string, VirtualContext>,
+  ignoreSubframes = false,
 ): VirtualContext | undefined {
-  let last: VirtualContext | undefined;
-  let origin: string | undefined;
-  for (const c of map.values()) {
-    if (c.clientKind === "worker" || c.clientKind === "sharedworker") continue;
-    if (last !== undefined && c.targetOrigin !== origin) return undefined;
-    last = c;
-    origin = c.targetOrigin;
-  }
-  return last;
+  const pass = (skipSubframes: boolean): VirtualContext | undefined => {
+    let last: VirtualContext | undefined;
+    let origin: string | undefined;
+    for (const c of map.values()) {
+      if (c.clientKind === "worker" || c.clientKind === "sharedworker") continue;
+      /* #708 run 12: a context stamped subframe is a child of a live
+         proxied surface, not an independent browsing surface; only
+         the tiered pass (navRealmDest) may skip it. */
+      if (skipSubframes && c.subframe) continue;
+      if (last !== undefined && c.targetOrigin !== origin) return undefined;
+      last = c;
+      origin = c.targetOrigin;
+    }
+    return last;
+  };
+  const strict = pass(false);
+  if (strict !== undefined || !ignoreSubframes) return strict;
+  return pass(true);
 }
 
 /** Keep the context map bounded: past max entries the oldest
@@ -176,6 +195,7 @@ export function establishFromClientUrl(
   clientUrl: string,
   decode: (u: URL) => string | null,
   mainSurface = false,
+  subframe = false,
 ): VirtualContext | null {
   let u: URL;
   try {
@@ -187,7 +207,9 @@ export function establishFromClientUrl(
   if (!target) return null;
   /* #611: surface class flows through the client-URL rehydration so
      a restarted worker restores it from the same shape oracle. */
-  return establishContext(map, clientId, target, "window", mainSurface);
+  /* #708 run 12: the subframe class flows through rehydration the
+     same way, from the client's frameType. */
+  return establishContext(map, clientId, target, "window", mainSurface, subframe);
 }
 /** #708 (run 8): a context-less same-origin SUBFRAME navigation - a
     parser- or script-created iframe whose src no rewriter arm minted
@@ -201,6 +223,18 @@ export function establishFromClientUrl(
     uses - every live window context on ONE upstream origin, else
     the frame cannot be attributed and the request keeps the
     honest escape.
+
+    #708 run 12: the rule above raced. The sign-in page's
+    accounts.youtube.com CheckConnection iframe is itself an
+    iframe-destination navigation whose src decodes, so the
+    establish seam installs a WINDOW context for it; when it lands
+    before the botguard navigation the strict pool turns ambiguous
+    and the frame escapes (runs 10-12; run 9 won on a warm page
+    cache). Tier used here, nowhere else: a context stamped subframe
+    is a child of a proxied surface, not an independent browsing
+    surface, so the tiered pass skips it before failing. Two
+    top-level windows on different origins stay ambiguous, and the
+    cdn-cgi capability arm keeps the strict rule.
 
     Narrower than the #101 cdn-cgi arm on purpose:
     - GET iframe navigations only. A top-level document navigation
@@ -223,7 +257,10 @@ export function navRealmDest(
   if (mode !== "navigate") return null;
   if (destination !== "iframe") return null;
   if (isEngineAsset(pathname) || pathname === "/guest-host.html") return null;
-  const ctx = unambiguousWindowContext(map);
+  /* #708 run 12: the tiered pass - skip subframe contexts (children
+     of a proxied surface) before failing; strict ambiguity between
+     top-level windows still fails closed. */
+  const ctx = unambiguousWindowContext(map, true);
   if (!ctx || !ctx.currentUrl) return null;
   try {
     const dest = new URL(pathname + search, ctx.currentUrl).href;

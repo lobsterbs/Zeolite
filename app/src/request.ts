@@ -2253,7 +2253,12 @@ async function rehydrateClientContext(
   } catch {
     surface = false;
   }
-  const ctx = establishFromClientUrl(VCTX, clientId, client.url, decodeClientUrl, surface);
+  /* #708 run 12: a nested client (frameType "nested" - the
+     CheckConnection iframe class) rehydrates as a subframe so the
+     tiered nav-realm pass can skip it instead of poisoning the
+     pool. Same cast shape as the cdn-cgi arm's frameType read. */
+  const subframe = (client as unknown as { frameType?: string }).frameType === "nested";
+  const ctx = establishFromClientUrl(VCTX, clientId, client.url, decodeClientUrl, surface, subframe);
   if (!ctx) return undefined;
   capContexts(VCTX, VCTX_CAP);
   const rtid = DIAG.trace(clientId);
@@ -4702,7 +4707,11 @@ export function handleFetch(e: FetchEvent): void {
            document. Worker scripts never ride handle routes, and a
            genuine subframe's src is a prefix route, so the flag
            fails closed for both. */
-        if (newClient && establishContext(VCTX, newClient, target, clientKind, reqMintedHandle)) capContexts(VCTX, VCTX_CAP);
+        /* #708 run 12: destination "iframe" means the new context's
+           client is a nested subframe; the tiered nav-realm pass
+           needs to know so one cross-origin subframe cannot make
+           the tab's pool ambiguous. */
+        if (newClient && establishContext(VCTX, newClient, target, clientKind, reqMintedHandle, e.request.destination === "iframe")) capContexts(VCTX, VCTX_CAP);
         /* #531: the stale page's expectations must not gate the next
            document's subresources. */
         if (e.request.mode === "navigate") {
@@ -6096,7 +6105,10 @@ export function handleFetch(e: FetchEvent): void {
               /* #611: the redirect-hop re-establishment must carry the
                  same surface flag or it would replace the context
                  and wipe it mid-navigation. */
-              if (navClient && establishContext(VCTX, navClient, finalDest, navKind, reqMintedHandle))
+              /* #708 run 12: the same subframe stamp on the
+                 redirect-hop re-establishment, or the hop would
+                 wipe it mid-navigation. */
+              if (navClient && establishContext(VCTX, navClient, finalDest, navKind, reqMintedHandle, e.request.destination === "iframe"))
                 capContexts(VCTX, VCTX_CAP);
               if (e.request.mode === "navigate") {
                 sriClearClient(SRI, navClient);

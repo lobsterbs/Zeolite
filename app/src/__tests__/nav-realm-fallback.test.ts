@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { establishContext, navRealmDest, type VirtualContext } from "../vctx";
+import { establishContext, establishFromClientUrl, navRealmDest, unambiguousWindowContext, type VirtualContext } from "../vctx";
 
 /* #708 run 8: the sign-in page's botguard iframe src ("/_/bscframe",
    committed at the content-origin root with a live ?zlNavh handle)
@@ -112,5 +112,90 @@ describe("navigation realm fallback (#708 run-8 class)", () => {
     expect(
       navRealmDest(map, "GET", "navigate", "iframe", "/sw.js", ""),
     ).toBeNull();
+  });
+});
+
+/* #708 run 12: the four-run race conviction. The identifier page's
+   accounts.youtube.com CheckConnection iframe is itself a NAVIGATION
+   (mode navigate, destination iframe) whose src decodes, so the
+   establish seam installs a WINDOW context for it. Once it lands
+   before the botguard /_/bscframe navigation, the strict rule (all
+   live windows on ONE upstream origin) turns ambiguous and the frame
+   escapes to the SPA shell (runs 10, 11, 12; run 9 won only because
+   its warm page cache ordered the race the other way). The tier: a
+   nested subframe is a child of the tab's proxied surface, not an
+   independent browsing surface, so the nav-realm pass may skip it.
+   The strict capability pass must stay strict. */
+
+const checkConnection = (map: Map<string, VirtualContext>, id = "f1") =>
+  establishContext(
+    map,
+    id,
+    "https://accounts.youtube.com/checkconnection",
+    "window",
+    false,
+    true,
+  );
+
+describe("navigation realm fallback, subframe tier (#708 run-12 race)", () => {
+  it("resolves the botguard home when the CheckConnection subframe established first (the runs 10-12 race)", () => {
+    const map = fresh();
+    signIn(map);
+    checkConnection(map);
+    expect(
+      navRealmDest(map, "GET", "navigate", "iframe", "/_/bscframe", ""),
+    ).toBe("https://accounts.google.com/_/bscframe");
+  });
+
+  it("keeps the strict unambiguity pass failing closed on the same map (the cdn-cgi capability arm must not loosen)", () => {
+    const map = fresh();
+    signIn(map);
+    checkConnection(map);
+    expect(unambiguousWindowContext(map)).toBeUndefined();
+    expect(unambiguousWindowContext(map, true)?.targetOrigin).toBe(
+      "https://accounts.google.com",
+    );
+  });
+
+  it("still fails closed when two TOP-LEVEL windows sit on different origins (multi-tab #687 preserved)", () => {
+    const map = fresh();
+    signIn(map);
+    establishContext(map, "w2", "https://example.com/");
+    expect(
+      navRealmDest(map, "GET", "navigate", "iframe", "/_/bscframe", ""),
+    ).toBeNull();
+  });
+
+  it("skips several cross-origin subframes, not just one", () => {
+    const map = fresh();
+    signIn(map);
+    checkConnection(map);
+    establishContext(map, "f3", "https://play.google.com/embed", "window", false, true);
+    expect(
+      navRealmDest(map, "GET", "navigate", "iframe", "/_/bscframe", ""),
+    ).toBe("https://accounts.google.com/_/bscframe");
+  });
+
+  it("keeps a lone subframe context as the honest home (unchanged)", () => {
+    const map = fresh();
+    checkConnection(map);
+    expect(
+      navRealmDest(map, "GET", "navigate", "iframe", "/_/bscframe", ""),
+    ).toBe("https://accounts.youtube.com/_/bscframe");
+  });
+
+  it("stamps the flag at the establish seam and passes it through the client-URL rehydration", () => {
+    const map = fresh();
+    expect(checkConnection(map)?.subframe).toBe(true);
+    expect(signIn(map)?.subframe).toBeUndefined();
+    const rehydrated = establishFromClientUrl(
+      map,
+      "f9",
+      "https://proxy.example/zl-nav/x/https%3A%2F%2Faccounts.youtube.com%2Fc",
+      (u) => decodeURIComponent(u.pathname.split("/").pop() ?? ""),
+      false,
+      true,
+    );
+    expect(rehydrated?.subframe).toBe(true);
   });
 });
