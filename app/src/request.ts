@@ -1940,6 +1940,8 @@ function opacityDowngrade(e: FetchEvent, seam: string, dest: string): void {
   }
   const key = seam + " " + site;
   if (opacityDowngrades.has(key)) return;
+  /* shortcut: clear at the cap, worst case one diag row repeats */
+  if (opacityDowngrades.size >= 1024) opacityDowngrades.clear();
   opacityDowngrades.add(key);
   const tid = DIAG.trace(e.resultingClientId || e.clientId);
   DIAG.emit({

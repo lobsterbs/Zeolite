@@ -424,6 +424,8 @@ export async function siteProfileFor(target: string): Promise<SiteFp> {
   if (siteFpCache.has(host)) return siteFpCache.get(host) ?? null;
   const p = ruleProfile(ruleFor(await siteRules(), target), currentEngine());
   const entry = p ? { p, script: fingerprintScript(p), workerScript: workerFingerprintScript(p) } : null;
+  /* shortcut: wholesale clear at the cap, entries recompute cheaply */
+  if (siteFpCache.size >= 512) siteFpCache.clear();
   siteFpCache.set(host, entry);
   return entry;
 }
