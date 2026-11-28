@@ -86,6 +86,18 @@ describe("response-header surgery never carries the plaintext destination", () =
     expect(decodePath(out.slice("0; url=".length))).toBe("https://leaky.example.org/other");
   });
 
+  it("a single-quoted Refresh url is unquoted like a double-quoted one", () => {
+    /* browsers accept either quote; the quote used to stay in the path
+       and the redirect landed on /private/'/next' */
+    for (const refresh of ["0; url='/next'", "0;URL='/next';x=1", "0; url=  '/next'"]) {
+      const h = new Headers({ refresh });
+      mapRefreshHeader(h, "https://leaky.example.org/private/page");
+      const out = h.get("refresh")!;
+      expect(out).not.toContain("leaky.example.org");
+      expect(decodePath(out.slice(out.indexOf("url=") + 4))).toBe("https://leaky.example.org/next");
+    }
+  });
+
   it("same-page Refresh (no url=) survives untouched", () => {
     const h = new Headers({ refresh: "30" });
     mapRefreshHeader(h, "https://leaky.example.org/private/page");

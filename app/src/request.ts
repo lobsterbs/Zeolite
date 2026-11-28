@@ -123,6 +123,9 @@ export function initEngine(ready: Promise<void>): void {
    surfaces 3xx; the loop follows). Past the cap the 3xx is surfaced to
    the page with a mapped Location instead of looping forever. */
 const MAX_REDIRECT_HOPS = 10;
+/* Fetch spec redirect statuses. 300, 304, 305 and 306 may carry a
+   Location but are not redirects: a browser surfaces them. */
+const isRedirectStatus = (s: number): boolean => s === 301 || s === 302 || s === 303 || s === 307 || s === 308;
 /* #521 slice 2: bounded re-evaluation for declarativeNetRequest
    redirects; past the cap the request proceeds with the last target
    and a warning row, never an unbounded loop. */
@@ -5616,7 +5619,7 @@ export function handleFetch(e: FetchEvent): void {
             releaseHopSpool();
             throw err;
           }
-          for (let hops = 0; resp.status >= 300 && resp.status < 400 && hops < MAX_REDIRECT_HOPS; hops++) {
+          for (let hops = 0; isRedirectStatus(resp.status) && hops < MAX_REDIRECT_HOPS; hops++) {
             /* Capture this hop's Set-Cookie against the URL it came from.
                #35: any admission also pushes the jar view to the
                requesting client's docCookie port (see the main capture
@@ -5650,7 +5653,7 @@ export function handleFetch(e: FetchEvent): void {
             const stillStream = hopBody != null && typeof (hopBody as ReadableStream).getReader === "function";
             if (resp.status === 307 || resp.status === 308) {
               if (stillStream) break; /* announced over the cap: one-shot stream */
-            } else if (resp.status === 303 || hopMethod === "POST") {
+            } else if ((resp.status === 303 && hopMethod !== "GET" && hopMethod !== "HEAD") || hopMethod === "POST") {
               /* The method rewrite drops the body, and the direct
                  browser oracle drops its content-type with it (the
                  #92 redirect check pins this against the direct
