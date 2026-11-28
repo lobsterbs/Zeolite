@@ -1271,6 +1271,7 @@ export function isEngineAsset(path: string): boolean {
   switch (path) {
     case "/sw.js":
     case "/bootstrap.js":
+    case "/evalrw.js":
     case "/prelude.js":
     case "/worker-prelude.js":
     case "/devtools.html":

@@ -271,11 +271,15 @@ outside this verification. The virtual sites remain browser-same-origin.
 On a site gated by siteconfig `location-origin "virtual"` (today
 only accounts.google.com), the renamed location reads report the
 page's true upstream origin through the #130 marker
-(worker-recovered, fail-closed). Residual: bare location reads
-inside runtime-eval'd strings (a VM interpreter in an adopted
-same-origin frame) are not renamed and keep the committed engine
-origin; an origin-coherence gate that reads the location through
-such a channel still sees the engine origin.
+(worker-recovered, fail-closed). Runtime-eval'd strings on a
+gated site (#725 opt-in) now rename through the #726 eval shim:
+the realm's own eval is wrapped by a fail-closed Proxy that pipes
+string sources through the page-side globals renamer (evalrw.js,
+the same wasm pass a served script body gets) before the native
+eval runs them. Residual: new Function and Worker code stay
+native, non-gated sites stay fully native, and a direct eval call
+in the gated page degrades to indirect eval (hoisting lands on
+the realm global).
 
 ## window.location is not virtualized
 

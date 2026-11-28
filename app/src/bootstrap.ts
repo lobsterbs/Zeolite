@@ -45,6 +45,7 @@ import { applyUpdateNotice } from "./bootstrap/update";
 import { applyPostMessage } from "./bootstrap/postmsg";
 import { applyVirtualOrigin } from "./bootstrap/vorigin";
 import { applyVloc } from "./bootstrap/vloc";
+import { applyEvalShim } from "./bootstrap/evalshim";
 import { applyEmbedSync } from "./bootstrap/embedsync";
 import { applyAnchorShim, applyUrlShim } from "./bootstrap/anchorshim";
 
@@ -91,6 +92,9 @@ applyVirtualOrigin(w);
 /* #236: the virtual location the #235 renames read; pathname-
    routed SPAs see their real path without a document reload. */
 applyVloc(w, ZL.vpath, ZL.locationOrigin);
+/* #726: runtime eval virtualization for sites that opted into
+   virtual origin reporting; inert everywhere else. */
+applyEvalShim(w, ZL.locationOrigin);
 /* #107 phase 2: URL/title sync up to a registered embedder (split
    origin); inert without one. */
 applyEmbedSync(w);

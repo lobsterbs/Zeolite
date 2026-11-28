@@ -202,6 +202,19 @@ pub fn has_origin_pinning_regex(js: String) -> bool {
     crate::js::has_origin_pinning_regex(&js)
 }
 
+/// #726 (runtime eval virtualization): the location-read rename
+/// pass alone, exposed for the page-side eval shim. URL literals,
+/// frame-buster passes and every other seam stay untouched - the
+/// eval'd program keeps its exact network shape, only location /
+/// document.URL reads rename to the __zl view, exactly as a served
+/// script body gets them. Fail-closed by construction: the export
+/// carries no context to get wrong, and the shim only calls it on
+/// sites that opted into virtual origin reporting (#725).
+#[wasm_bindgen(js_name = "rewriteGlobals")]
+pub fn rewrite_globals_export(js: String) -> String {
+    crate::js::globals::rewrite_globals(&js)
+}
+
 /// One-shot CSS pass for complete strings (style blocks). Standalone
 /// stylesheets use the streaming JsCssRewriter below instead.
 #[wasm_bindgen(js_name = "rewriteCss")]

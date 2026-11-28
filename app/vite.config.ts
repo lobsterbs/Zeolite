@@ -77,6 +77,7 @@ export default defineConfig({
         devtools: "devtools.html",
         guestHost: "guest-host.html",
         sw: "src/sw.ts",
+        evalrw: "src/evalrw.ts",
       },
       output: {
         entryFileNames: "[name].js",

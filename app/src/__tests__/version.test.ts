@@ -12,30 +12,30 @@ import updatesSource from "../updates.ts?raw";
 
 describe("engine build id (#617)", () => {
   it("composes the build id suffix", () => {
-    expect(withBuildId("3.4.14 Thomsonite", "41706739889")).toBe(
-      "3.4.14 Thomsonite (build 41706739889)"
+    expect(withBuildId("3.4.15 Edingtonite", "41706739889")).toBe(
+      "3.4.15 Edingtonite (build 41706739889)"
     );
   });
 
   it("stays bare when the build id is absent or blank", () => {
-    expect(withBuildId("3.4.14 Thomsonite", undefined)).toBe("3.4.14 Thomsonite");
-    expect(withBuildId("3.4.14 Thomsonite", null)).toBe("3.4.14 Thomsonite");
-    expect(withBuildId("3.4.14 Thomsonite", "")).toBe("3.4.14 Thomsonite");
-    expect(withBuildId("3.4.14 Thomsonite", "   ")).toBe("3.4.14 Thomsonite");
+    expect(withBuildId("3.4.15 Edingtonite", undefined)).toBe("3.4.15 Edingtonite");
+    expect(withBuildId("3.4.15 Edingtonite", null)).toBe("3.4.15 Edingtonite");
+    expect(withBuildId("3.4.15 Edingtonite", "")).toBe("3.4.15 Edingtonite");
+    expect(withBuildId("3.4.15 Edingtonite", "   ")).toBe("3.4.15 Edingtonite");
   });
 
   it("matches the dist commit message format (build <run id>)", () => {
-    expect(withBuildId("3.4.14 Thomsonite", "41706739889")).toMatch(/ \(build \d+\)$/);
+    expect(withBuildId("3.4.15 Edingtonite", "41706739889")).toMatch(/ \(build \d+\)$/);
   });
 
   it("stays bare in the pristine test env (CI stamps the build step only)", () => {
     /* vitest mirrors VITE_* env onto import.meta.env: a shell that
        already exports the stamp is honored and stays internally
        consistent; the pristine CI path is the bare string. */
-    expect(ZEOLITE_VERSION).toBe(withBuildId("3.4.14 Thomsonite", ZEOLITE_BUILD_ID));
+    expect(ZEOLITE_VERSION).toBe(withBuildId("3.4.15 Edingtonite", ZEOLITE_BUILD_ID));
     if (!import.meta.env.VITE_ZEOLITE_BUILD_ID) {
       expect(ZEOLITE_BUILD_ID).toBe("");
-      expect(ZEOLITE_VERSION).toBe("3.4.14 Thomsonite");
+      expect(ZEOLITE_VERSION).toBe("3.4.15 Edingtonite");
     }
   });
 
